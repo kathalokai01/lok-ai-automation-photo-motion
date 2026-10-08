@@ -14,6 +14,9 @@ jobs:
 
     timeout-minutes: 60
 
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
     steps:
 
       # ==========================================================
@@ -167,21 +170,6 @@ jobs:
       # ==========================================================
       # 15. FREE IMAGE GENERATION
       # ==========================================================
-      #
-      # This is the important new step.
-      #
-      # Scene prompt
-      #      ↓
-      # Free Hugging Face Z-Image-Turbo
-      #      ↓
-      # output/visuals/scene_XX.png
-      #
-      # No paid API.
-      # No Gemini image API.
-      # No Wan2GP.
-      # No Colab.
-      #
-      # ==========================================================
 
       - name: Generate free realistic scene images
         run: |
@@ -225,16 +213,6 @@ jobs:
 
       # ==========================================================
       # 17. PHOTO MOTION
-      # ==========================================================
-      #
-      # Static realistic image
-      #        ↓
-      # Zoom In / Zoom Out
-      # Pan Left / Pan Right
-      # Subtle camera movement
-      #        ↓
-      # Scene MP4
-      #
       # ==========================================================
 
       - name: Create Photo Motion scene videos
