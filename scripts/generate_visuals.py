@@ -1,912 +1,832 @@
 #!/usr/bin/env python3
+"""
+KATHA LOK AI — PHOTO MOTION VISUAL PREPARATION
+
+Purpose:
+    Prepare realistic scene-image jobs for the PHOTO MOTION pipeline.
+
+IMPORTANT:
+    This script does NOT call a paid image-generation API.
+    It does NOT use Wan2GP.
+    It does NOT require Colab.
+
+It prepares:
+    output/visuals/visual_jobs.json
+    output/visuals/image_manifest.json
+
+If actual scene images already exist in output/visuals/,
+they are detected automatically.
+
+Expected image names:
+    scene_01.png
+    scene_02.png
+    scene_03.png
+    ...
+
+The next stage:
+    scripts/photo_motion.py
+
+converts those images into MP4 camera-motion clips.
+"""
 
 import json
-import hashlib
-import shutil
+import os
+import re
 import sys
-import zipfile
 from pathlib import Path
 
-from input_config import (
-    load_input_config,
-    normalize_format,
+
+# ============================================================
+# PATHS
+# ============================================================
+
+ROOT = Path(__file__).resolve().parent.parent
+
+INPUT_DIR = ROOT / "Input"
+
+OUTPUT_DIR = ROOT / "output"
+
+SCENES_DIR = OUTPUT_DIR / "scenes"
+VISUALS_DIR = OUTPUT_DIR / "visuals"
+STORY_DIR = OUTPUT_DIR / "story"
+
+SCENES_JSON = SCENES_DIR / "scenes.json"
+CHARACTER_BIBLE_JSON = STORY_DIR / "character_bible.json"
+
+VISUAL_JOBS_JSON = VISUALS_DIR / "visual_jobs.json"
+IMAGE_MANIFEST_JSON = VISUALS_DIR / "image_manifest.json"
+
+VISUALS_DIR.mkdir(
+    parents=True,
+    exist_ok=True
 )
 
 
-BASE = Path("output")
+# ============================================================
+# CONFIG
+# ============================================================
 
-SCENES_FILE = BASE / "scenes" / "scenes.json"
-CHARACTER_BIBLE_FILE = BASE / "story" / "character_bible.json"
+DEFAULT_SHORT_SIZE = "720x1280"
+DEFAULT_FULL_SIZE = "1280x720"
 
-VISUALS_DIR = BASE / "visuals"
-JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
+IMAGE_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp"
+}
 
-WORKER_DIR = BASE / "visual_worker"
-QUEUE_JSON = WORKER_DIR / "visual_generation_queue.json"
-QUEUE_ZIP = BASE / "i2v" / "visual_generation_queue.zip"
 
 # ============================================================
 # HELPERS
 # ============================================================
 
-
-def cfg_text(config, key, default=""):
-    value = config.get(key, default)
-
-    if value is None:
-        return str(default)
-
-    return str(value).strip()
-
-
-def cfg_bool(config, key, default=False):
-    value = config.get(key, default)
-
-    if isinstance(value, bool):
-        return value
-
-    if value is None:
-        return default
-
-    text = str(value).strip().lower()
-
-    if text in {"true", "1", "yes", "y", "on"}:
-        return True
-
-    if text in {"false", "0", "no", "n", "off"}:
-        return False
-
-    return default
-
-
-def cfg_int(config, key, default=0):
-    value = config.get(key, default)
-
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def load_json(path, default=None):
+
+    if default is None:
+        default = {}
+
     if not path.exists():
         return default
 
     try:
-        with path.open("r", encoding="utf-8") as f:
+
+        with open(
+            path,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             return json.load(f)
+
     except Exception as exc:
-        print(f"WARNING: Failed to read {path}: {exc}")
+
+        print(
+            f"WARNING: Could not read {path}: {exc}"
+        )
+
         return default
 
 
 def save_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
 
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-    with tmp.open("w", encoding="utf-8") as f:
+    with open(
+        path,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
         json.dump(
             data,
             f,
             ensure_ascii=False,
-            indent=2,
+            indent=2
         )
 
-    tmp.replace(path)
+
+def first_value(data, keys, default=None):
+
+    if not isinstance(data, dict):
+        return default
+
+    for key in keys:
+
+        value = data.get(key)
+
+        if value is not None:
+            return value
+
+    return default
 
 
-def scene_key(part, scene):
-    return f"part_{part:02d}/scene_{scene:02d}"
+def scene_number(scene, fallback):
 
+    if not isinstance(scene, dict):
+        return fallback
 
-def build_negative_prompt(config):
-    negative = []
-
-    if cfg_bool(config, "AVOID_CARTOON_LOOK", True):
-        negative.extend([
-            "cartoon",
-            "comic",
-            "anime",
-            "manga",
-            "illustration",
-            "drawing",
-            "painting",
-            "2D art",
-        ])
-
-    if cfg_bool(config, "AVOID_NEON", True):
-        negative.append("neon colors")
-
-    if cfg_bool(config, "AVOID_GLITCH_EFFECTS", True):
-        negative.extend([
-            "glitch",
-            "digital distortion",
-            "flicker",
-        ])
-
-    negative.extend([
-        "CGI look",
-        "3D render",
-        "game graphics",
-        "plastic skin",
-        "artificial face",
-        "deformed anatomy",
-        "extra fingers",
-        "extra limbs",
-        "duplicate person",
-        "watermark",
-        "logo",
-        "text",
-        "low quality",
-        "blurry face",
-    ])
-
-    return ", ".join(negative)
-
-
-# ============================================================
-# CHARACTER CONTEXT
-# ============================================================
-
-
-def get_character_context(scene, character_bible):
-    if not isinstance(character_bible, dict):
-        return ""
-
-    characters = scene.get(
-        "characters",
-        scene.get("character_ids", []),
-    )
-
-    if not characters:
-        return ""
-
-    bible_characters = character_bible.get(
-        "characters",
-        [],
-    )
-
-    if not isinstance(bible_characters, list):
-        return ""
-
-    wanted = {str(x) for x in characters}
-
-    selected = []
-
-    for character in bible_characters:
-        if not isinstance(character, dict):
-            continue
-
-        char_id = str(
-            character.get("id", "")
-        )
-
-        if char_id in wanted:
-            selected.append(character)
-
-    if not selected:
-        return ""
-
-    return json.dumps(
-        selected,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-
-
-# ============================================================
-# VISUAL PROMPT
-# ============================================================
-
-
-def build_visual_prompt(
-    config,
-    scene,
-    character_bible,
-):
-    visual_style = cfg_text(
-        config,
-        "VISUAL_STYLE",
-        "cinematic_realistic",
-    )
-
-    realism = cfg_text(
-        config,
-        "REALISM",
-        "high",
-    )
-
-    camera_style = cfg_text(
-        config,
-        "CAMERA_STYLE",
-        "cinematic",
-    )
-
-    lighting = cfg_text(
-        config,
-        "LIGHTING",
-        "cinematic",
-    )
-
-    mood = cfg_text(
-        config,
-        "MOOD",
-        "dramatic",
-    )
-
-    quality = cfg_text(
-        config,
-        "QUALITY",
-        "high",
-    )
-
-    scene_prompt = str(
-        scene.get(
-            "visual_prompt",
-            scene.get(
-                "visual",
-                scene.get(
-                    "description",
-                    "",
-                ),
-            ),
-        )
-    ).strip()
-
-    world_context = str(
-        scene.get(
-            "world_context",
-            scene.get(
-                "world",
-                "",
-            ),
-        )
-    ).strip()
-
-    action = str(
-        scene.get(
-            "action",
-            "",
-        )
-    ).strip()
-
-    character_context = get_character_context(
+    value = first_value(
         scene,
-        character_bible,
+        [
+            "scene",
+            "scene_id",
+            "scene_number",
+            "id",
+            "number"
+        ]
     )
 
-    prompt_parts = [
-        "Photorealistic live-action cinematic scene.",
-        "Real human beings.",
-        "Real-world physical environment.",
-        f"Visual style: {visual_style}.",
-        f"Realism: {realism}.",
-        f"Camera style: {camera_style}.",
-        f"Lighting: {lighting}.",
-        f"Mood: {mood}.",
-        f"Quality: {quality}.",
-        "Natural human anatomy.",
-        "Natural skin texture.",
-        "Physically believable lighting.",
-        "Realistic shadows.",
-        "Maintain identity and clothing continuity.",
-        "Maintain environment and location continuity.",
+    if value is None:
+        return fallback
+
+    digits = re.findall(
+        r"\d+",
+        str(value)
+    )
+
+    if digits:
+        return int(digits[0])
+
+    return fallback
+
+
+def scene_text(scene):
+
+    if not isinstance(scene, dict):
+        return ""
+
+    keys = [
+        "visual_prompt",
+        "image_prompt",
+        "visual_description",
+        "description",
+        "scene_description",
+        "prompt",
+        "action",
+        "text"
     ]
 
-    if cfg_bool(config, "CHARACTER_CONSISTENCY", True):
-        prompt_parts.append(
-            "Preserve the exact appearance of recurring characters."
-        )
+    parts = []
 
-    if cfg_bool(config, "WORLD_CONSISTENCY", True):
-        prompt_parts.append(
-            "Preserve the same world, architecture, "
-            "time period and environmental details."
-        )
+    for key in keys:
 
-    if cfg_bool(config, "SCENE_CONTINUITY", True):
-        prompt_parts.append(
-            "Maintain visual continuity with adjacent scenes."
-        )
+        value = scene.get(key)
 
-    if scene_prompt:
-        prompt_parts.append(
-            f"Scene description: {scene_prompt}"
-        )
+        if isinstance(value, str) and value.strip():
 
-    if action:
-        prompt_parts.append(
-            f"Scene action: {action}"
-        )
+            parts.append(
+                value.strip()
+            )
 
-    if world_context:
-        prompt_parts.append(
-            f"World context: {world_context}"
-        )
+    # Remove duplicates while preserving order
+    result = []
 
-    if character_context:
-        prompt_parts.append(
-            "Character Bible reference: "
-            + character_context
-        )
+    seen = set()
 
-    return " ".join(prompt_parts)
+    for item in parts:
+
+        normalized = item.lower()
+
+        if normalized not in seen:
+
+            seen.add(normalized)
+            result.append(item)
+
+    return " ".join(result)
+
+
+def get_duration(scene):
+
+    if not isinstance(scene, dict):
+        return 5.0
+
+    keys = [
+        "duration",
+        "scene_duration",
+        "duration_seconds",
+        "seconds"
+    ]
+
+    for key in keys:
+
+        value = scene.get(key)
+
+        try:
+
+            value = float(value)
+
+            if value > 0:
+                return value
+
+        except Exception:
+            pass
+
+    return 5.0
+
+
+def detect_format():
+
+    format_value = os.environ.get(
+        "FORMAT",
+        "short"
+    ).strip().lower()
+
+    if format_value == "full":
+        return "full"
+
+    return "short"
+
+
+def image_size_for_format(format_value):
+
+    if format_value == "full":
+        return DEFAULT_FULL_SIZE
+
+    return DEFAULT_SHORT_SIZE
 
 
 # ============================================================
-# IMAGE SIZE
+# CHARACTER BIBLE
 # ============================================================
 
+def load_character_bible():
 
-def get_image_size(format_name):
-    if format_name == "short":
-        return "768x1024"
-
-    return "1024x576"
-
-
-# ============================================================
-# CONFIG SIGNATURE
-# ============================================================
-
-
-def make_config_signature(config, format_name):
-    relevant = {
-        "format": format_name,
-        "visual_style": cfg_text(
-            config,
-            "VISUAL_STYLE",
-            "",
-        ),
-        "realism": cfg_text(
-            config,
-            "REALISM",
-            "",
-        ),
-        "camera_style": cfg_text(
-            config,
-            "CAMERA_STYLE",
-            "",
-        ),
-        "lighting": cfg_text(
-            config,
-            "LIGHTING",
-            "",
-        ),
-        "mood": cfg_text(
-            config,
-            "MOOD",
-            "",
-        ),
-        "quality": cfg_text(
-            config,
-            "QUALITY",
-            "",
-        ),
-        "character_consistency": cfg_bool(
-            config,
-            "CHARACTER_CONSISTENCY",
-            True,
-        ),
-        "world_consistency": cfg_bool(
-            config,
-            "WORLD_CONSISTENCY",
-            True,
-        ),
-        "scene_continuity": cfg_bool(
-            config,
-            "SCENE_CONTINUITY",
-            True,
-        ),
-        "avoid_cartoon": cfg_bool(
-            config,
-            "AVOID_CARTOON_LOOK",
-            True,
-        ),
-        "avoid_neon": cfg_bool(
-            config,
-            "AVOID_NEON",
-            True,
-        ),
-        "avoid_glitch": cfg_bool(
-            config,
-            "AVOID_GLITCH_EFFECTS",
-            True,
-        ),
-    }
-
-    raw = json.dumps(
-        relevant,
-        ensure_ascii=False,
-        sort_keys=True,
+    data = load_json(
+        CHARACTER_BIBLE_JSON,
+        {}
     )
 
-    return hashlib.sha256(
-        raw.encode("utf-8")
-    ).hexdigest()
+    if not data:
+        return ""
 
+    # Try common character-bible structures.
+    if isinstance(data, dict):
 
-# ============================================================
-# BUILD WORKER QUEUE
-# ============================================================
+        for key in [
+            "character_bible",
+            "characters",
+            "main_character",
+            "character"
+        ]:
 
+            value = data.get(key)
 
-def build_worker_queue():
-    print("=" * 70)
-    print("       BUILDING FREE VISUAL WORKER QUEUE")
-    print("=" * 70)
+            if isinstance(value, str):
+                return value
 
-    config = load_input_config()
+            if isinstance(value, list):
 
-    format_name = normalize_format(config)
+                text_parts = []
 
-    parts = cfg_int(
-        config,
-        "PARTS",
-        1,
-    )
+                for item in value:
 
-    scenes_per_part = cfg_int(
-        config,
-        "SCENES",
-        1,
-    )
+                    if isinstance(item, str):
+                        text_parts.append(item)
 
-    image_size = get_image_size(
-        format_name
-    )
+                    elif isinstance(item, dict):
 
-    print(f"FORMAT          : {format_name}")
-    print(f"IMAGE SIZE      : {image_size}")
-    print(f"PARTS           : {parts}")
-    print(f"SCENES/PART     : {scenes_per_part}")
+                        text_parts.append(
+                            json.dumps(
+                                item,
+                                ensure_ascii=False
+                            )
+                        )
 
-    # --------------------------------------------------------
-    # SCENES
-    # --------------------------------------------------------
+                if text_parts:
+                    return " ".join(text_parts)
 
-    if not SCENES_FILE.exists():
-        raise RuntimeError(
-            f"Missing scenes file: {SCENES_FILE}"
+            if isinstance(value, dict):
+
+                return json.dumps(
+                    value,
+                    ensure_ascii=False
+                )
+
+        return json.dumps(
+            data,
+            ensure_ascii=False
         )
+
+    if isinstance(data, list):
+
+        return json.dumps(
+            data,
+            ensure_ascii=False
+        )
+
+    return str(data)
+
+
+# ============================================================
+# REALISTIC IMAGE PROMPT
+# ============================================================
+
+def build_prompt(
+    scene,
+    number,
+    character_bible,
+    format_value
+):
+
+    description = scene_text(
+        scene
+    )
+
+    if not description:
+
+        description = (
+            "A realistic cinematic scene "
+            "from an Indian human story"
+        )
+
+    if format_value == "full":
+
+        framing = (
+            "16:9 cinematic landscape composition"
+        )
+
+    else:
+
+        framing = (
+            "9:16 vertical cinematic composition"
+        )
+
+    prompt_parts = [
+
+        "Photorealistic live-action cinematic still.",
+
+        "Real Indian environment and natural human appearance.",
+
+        "Natural skin texture, realistic clothing, "
+        "realistic lighting and physically believable details.",
+
+        "No cartoon, no illustration, no anime, "
+        "no 3D render, no painting.",
+
+        framing,
+
+        "The same characters must remain visually consistent "
+        "across all scenes.",
+
+        "Natural realistic photography, cinematic depth, "
+        "subtle atmospheric detail.",
+
+        description
+
+    ]
+
+    if character_bible:
+
+        prompt_parts.extend([
+            "",
+            "CHARACTER CONSISTENCY:",
+            character_bible
+        ])
+
+    return "\n".join(
+        prompt_parts
+    )
+
+
+def build_negative_prompt():
+
+    return (
+        "cartoon, anime, illustration, painting, "
+        "3d render, CGI, plastic skin, doll face, "
+        "deformed face, distorted body, extra fingers, "
+        "extra limbs, duplicate person, "
+        "bad anatomy, unrealistic eyes, "
+        "asymmetrical face, warped background, "
+        "text, watermark, logo, blurry face, "
+        "low quality, oversharpened, artificial skin"
+    )
+
+
+# ============================================================
+# FIND EXISTING IMAGES
+# ============================================================
+
+def find_existing_image(number):
+
+    candidates = [
+
+        VISUALS_DIR / f"scene_{number:02d}.png",
+        VISUALS_DIR / f"scene_{number:02d}.jpg",
+        VISUALS_DIR / f"scene_{number:02d}.jpeg",
+        VISUALS_DIR / f"scene_{number:02d}.webp",
+
+        VISUALS_DIR / f"scene_{number}.png",
+        VISUALS_DIR / f"scene_{number}.jpg",
+        VISUALS_DIR / f"scene_{number}.jpeg",
+        VISUALS_DIR / f"scene_{number}.webp",
+
+        VISUALS_DIR / f"{number:02d}.png",
+        VISUALS_DIR / f"{number:02d}.jpg",
+        VISUALS_DIR / f"{number:02d}.jpeg",
+        VISUALS_DIR / f"{number:02d}.webp",
+
+        VISUALS_DIR / f"{number}.png",
+        VISUALS_DIR / f"{number}.jpg",
+        VISUALS_DIR / f"{number}.jpeg",
+        VISUALS_DIR / f"{number}.webp",
+    ]
+
+    for path in candidates:
+
+        if path.exists():
+            return path
+
+    # Recursive fallback
+    for path in VISUALS_DIR.rglob("*"):
+
+        if not path.is_file():
+            continue
+
+        if path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+
+        digits = re.findall(
+            r"\d+",
+            path.stem
+        )
+
+        if not digits:
+            continue
+
+        try:
+
+            if int(digits[-1]) == number:
+                return path
+
+        except Exception:
+            pass
+
+    return None
+
+
+# ============================================================
+# BUILD VISUAL JOBS
+# ============================================================
+
+def main():
+
+    print("=" * 68)
+    print("KATHA LOK AI — PHOTO MOTION VISUAL PREPARATION")
+    print("=" * 68)
+
+    format_value = detect_format()
+
+    image_size = image_size_for_format(
+        format_value
+    )
+
+    print()
+    print("FORMAT      :", format_value)
+    print("IMAGE SIZE  :", image_size)
+    print("SCENES JSON :", SCENES_JSON)
+    print("VISUAL DIR  :", VISUALS_DIR)
 
     scenes_data = load_json(
-        SCENES_FILE,
-        {},
+        SCENES_JSON,
+        []
     )
 
-    if not isinstance(scenes_data, dict):
-        raise RuntimeError(
-            "scenes.json is not a JSON object."
-        )
-
-    scenes = scenes_data.get(
-        "scenes",
-        [],
-    )
-
-    if not isinstance(scenes, list):
-        raise RuntimeError(
-            "scenes.json 'scenes' must be a list."
-        )
-
-    expected = parts * scenes_per_part
-
-    if len(scenes) != expected:
-        raise RuntimeError(
-            f"Scene count mismatch: "
-            f"expected {expected}, got {len(scenes)}"
-        )
-
     # --------------------------------------------------------
-    # CHARACTER BIBLE
+    # Normalize scene list
     # --------------------------------------------------------
 
-    character_bible = {}
+    if isinstance(scenes_data, list):
 
-    if cfg_bool(
-        config,
-        "CHARACTER_BIBLE",
-        True,
-    ):
-        if not CHARACTER_BIBLE_FILE.exists():
-            raise RuntimeError(
-                "Character Bible is enabled but missing: "
-                f"{CHARACTER_BIBLE_FILE}"
-            )
+        scenes = scenes_data
 
-        character_bible = load_json(
-            CHARACTER_BIBLE_FILE,
-            {},
-        )
+    elif isinstance(scenes_data, dict):
 
-        if not isinstance(
-            character_bible,
-            dict,
-        ):
-            raise RuntimeError(
-                "character_bible.json is invalid."
-            )
+        scenes = None
 
-    # --------------------------------------------------------
-    # EXISTING MANIFEST
-    # --------------------------------------------------------
+        for key in [
+            "scenes",
+            "scene_list",
+            "items",
+            "data"
+        ]:
 
-    existing = load_json(
-        JOBS_FILE,
-        {},
-    )
+            if isinstance(
+                scenes_data.get(key),
+                list
+            ):
 
-    existing_jobs = {}
+                scenes = scenes_data[key]
+                break
 
-    if isinstance(existing, dict):
-        old_jobs = existing.get(
-            "jobs",
-            {},
-        )
+        if scenes is None:
+            scenes = []
 
-        if isinstance(old_jobs, dict):
-            existing_jobs = old_jobs
+    else:
 
-    # --------------------------------------------------------
-    # BUILD JOBS
-    # --------------------------------------------------------
+        scenes = []
 
-    negative_prompt = build_negative_prompt(
-        config
-    )
+    print()
+    print("SCENES FOUND:", len(scenes))
 
-    signature = make_config_signature(
-        config,
-        format_name,
-    )
+    character_bible = load_character_bible()
 
     jobs = []
+    manifest = []
 
-    completed = 0
-    pending = 0
+    # --------------------------------------------------------
+    # Build one job per scene
+    # --------------------------------------------------------
 
     for index, scene in enumerate(
         scenes,
-        start=1,
+        start=1
     ):
-        if not isinstance(scene, dict):
-            raise RuntimeError(
-                f"Scene {index} is invalid."
-            )
 
-        part = int(
-            scene.get(
-                "part",
-                ((index - 1) // scenes_per_part) + 1,
-            )
-        )
-
-        scene_number = int(
-            scene.get(
-                "scene",
-                ((index - 1) % scenes_per_part) + 1,
-            )
-        )
-
-        key = scene_key(
-            part,
-            scene_number,
-        )
-
-        output_path = (
-            VISUALS_DIR
-            / f"part_{part:02d}"
-            / f"scene_{scene_number:02d}.png"
-        )
-
-        prompt = build_visual_prompt(
-            config,
+        number = scene_number(
             scene,
-            character_bible,
+            index
         )
 
-        old_job = existing_jobs.get(
-            key,
-            {},
+        duration = get_duration(
+            scene
         )
 
-        physical_exists = (
-            output_path.exists()
-            and output_path.is_file()
-            and output_path.stat().st_size > 1000
+        image_path = find_existing_image(
+            number
         )
 
-        if (
-            cfg_bool(
-                config,
-                "SKIP_COMPLETED_SCENES",
-                True,
+        prompt = build_prompt(
+            scene=scene,
+            number=number,
+            character_bible=character_bible,
+            format_value=format_value
+        )
+
+        negative_prompt = (
+            build_negative_prompt()
+        )
+
+        if image_path:
+
+            status = "ready"
+
+            relative_image = str(
+                image_path.relative_to(ROOT)
             )
-            and physical_exists
-        ):
-            status = "completed"
-            completed += 1
+
         else:
-            status = "pending"
-            pending += 1
 
-        jobs.append(
-            {
-                "id": key,
-                "part": part,
-                "scene": scene_number,
-                "status": status,
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "image_size": image_size,
-                "format": format_name,
-                "output_path": str(
-                    output_path
-                ),
-                "scene_duration": scene.get(
-                    "duration",
-                    None,
-                ),
-                "scene_index": index,
-                "source_scene": scene,
-                "previous_job": old_job,
-            }
-        )
+            status = "image_required"
 
-    # --------------------------------------------------------
-    # QUEUE DOCUMENT
-    # --------------------------------------------------------
-
-    queue = {
-        "queue_version": 1,
-        "status": (
-            "completed"
-            if pending == 0
-            else "pending"
-        ),
-        "worker_type": "free_gpu_visual_worker",
-        "generation_mode": "text_to_image",
-        "format": format_name,
-        "image_size": image_size,
-        "expected_total": expected,
-        "completed": completed,
-        "pending": pending,
-        "config_signature": signature,
-        "character_bible_path": (
-            str(CHARACTER_BIBLE_FILE)
-            if character_bible
-            else None
-        ),
-        "jobs": jobs,
-    }
-
-    save_json(
-        QUEUE_JSON,
-        queue,
-    )
-
-    # --------------------------------------------------------
-    # COPY SOURCE FILES
-    # --------------------------------------------------------
-
-    WORKER_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    worker_scenes = (
-        WORKER_DIR / "scenes.json"
-    )
-
-    shutil.copy2(
-        SCENES_FILE,
-        worker_scenes,
-    )
-
-    if CHARACTER_BIBLE_FILE.exists():
-        shutil.copy2(
-            CHARACTER_BIBLE_FILE,
-            WORKER_DIR / "character_bible.json",
-        )
-
-    worker_config = (
-        WORKER_DIR / "worker_config.json"
-    )
-
-    save_json(
-        worker_config,
-        {
-            "format": format_name,
-            "image_size": image_size,
-            "generation_mode": "text_to_image",
-            "visual_style": cfg_text(
-                config,
-                "VISUAL_STYLE",
-                "cinematic_realistic",
-            ),
-            "realism": cfg_text(
-                config,
-                "REALISM",
-                "high",
-            ),
-            "negative_prompt": negative_prompt,
-        },
-    )
-
-    # --------------------------------------------------------
-    # CREATE ZIP
-    # --------------------------------------------------------
-
-    QUEUE_ZIP.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    with zipfile.ZipFile(
-        QUEUE_ZIP,
-        "w",
-        compression=zipfile.ZIP_DEFLATED,
-    ) as zf:
-
-        zf.write(
-            QUEUE_JSON,
-            "visual_generation_queue.json",
-        )
-
-        zf.write(
-            worker_scenes,
-            "scenes.json",
-        )
-
-        if (
-            WORKER_DIR
-            / "character_bible.json"
-        ).exists():
-            zf.write(
-                WORKER_DIR
-                / "character_bible.json",
-                "character_bible.json",
+            relative_image = (
+                f"output/visuals/"
+                f"scene_{number:02d}.png"
             )
 
-        zf.write(
-            worker_config,
-            "worker_config.json",
-        )
+        job = {
 
-    # --------------------------------------------------------
-    # VALIDATE ZIP
-    # --------------------------------------------------------
+            "scene": number,
 
-    with zipfile.ZipFile(
-        QUEUE_ZIP,
-        "r",
-    ) as zf:
+            "status": status,
 
-        names = set(
-            zf.namelist()
-        )
+            "image_path": relative_image,
 
-        required = {
-            "visual_generation_queue.json",
-            "scenes.json",
-            "worker_config.json",
+            "prompt": prompt,
+
+            "negative_prompt": negative_prompt,
+
+            "image_size": image_size,
+
+            "duration": duration,
+
+            "motion_engine": "photo_motion",
+
+            "output_video":
+                f"output/photo_motion/"
+                f"scene_{number:02d}.mp4"
+
         }
 
-        missing = required - names
+        jobs.append(
+            job
+        )
 
-        if missing:
-            raise RuntimeError(
-                "Worker queue ZIP missing: "
-                + ", ".join(
-                    sorted(missing)
-                )
-            )
+        manifest.append({
 
-        bad = zf.testzip()
+            "scene": number,
 
-        if bad:
-            raise RuntimeError(
-                f"Corrupt ZIP entry: {bad}"
-            )
+            "image": relative_image,
+
+            "image_exists":
+                image_path is not None,
+
+            "duration": duration,
+
+            "status": status
+
+        })
 
     # --------------------------------------------------------
-    # MANIFEST FOR LOCAL PIPELINE
+    # Save jobs
     # --------------------------------------------------------
-
-    visual_manifest = {
-        "status": (
-            "completed"
-            if pending == 0
-            else "pending"
-        ),
-        "format": format_name,
-        "image_size": image_size,
-        "expected_total": expected,
-        "completed": completed,
-        "pending": pending,
-        "generation_mode": "free_gpu_worker",
-        "queue_json": str(QUEUE_JSON),
-        "queue_zip": str(QUEUE_ZIP),
-        "config_signature": signature,
-        "jobs": {
-            job["id"]: {
-                "part": job["part"],
-                "scene": job["scene"],
-                "status": job["status"],
-                "visual_path": job["output_path"],
-            }
-            for job in jobs
-        },
-    }
 
     save_json(
-        JOBS_FILE,
-        visual_manifest,
+        VISUAL_JOBS_JSON,
+        {
+            "version": "photo-motion-1.0",
+            "format": format_value,
+            "image_size": image_size,
+            "motion_engine": "photo_motion",
+            "uses_wan2gp": False,
+            "uses_colab": False,
+            "uses_paid_image_api": False,
+            "jobs": jobs
+        }
+    )
+
+    save_json(
+        IMAGE_MANIFEST_JSON,
+        {
+            "version": "photo-motion-1.0",
+            "format": format_value,
+            "total_scenes": len(manifest),
+            "images_ready": sum(
+                1
+                for item in manifest
+                if item["image_exists"]
+            ),
+            "images_required": sum(
+                1
+                for item in manifest
+                if not item["image_exists"]
+            ),
+            "scenes": manifest
+        }
     )
 
     # --------------------------------------------------------
-    # FINAL REPORT
+    # Summary
     # --------------------------------------------------------
 
-    print()
-    print("=" * 70)
-    print("          FREE VISUAL QUEUE READY")
-    print("=" * 70)
-
-    print(f"Expected visuals : {expected}")
-    print(f"Completed        : {completed}")
-    print(f"Pending          : {pending}")
-
-    print()
-    print(
-        "Cloudflare visual API: DISABLED"
+    ready = sum(
+        1
+        for item in manifest
+        if item["image_exists"]
     )
 
-    print(
-        "Generation mode     : FREE GPU WORKER"
-    )
-
-    print(
-        f"Queue JSON          : {QUEUE_JSON}"
-    )
-
-    print(
-        f"Queue ZIP           : {QUEUE_ZIP}"
+    missing = (
+        len(manifest) - ready
     )
 
     print()
+    print("=" * 68)
+    print("PHOTO MOTION VISUAL JOBS READY")
+    print("=" * 68)
+
     print(
-        "No fake placeholder images were created."
+        "Total scenes       :",
+        len(manifest)
     )
 
     print(
-        "Actual image generation must be performed "
-        "by the free GPU worker."
+        "Images already here:",
+        ready
     )
 
-    print("=" * 70)
+    print(
+        "Images required    :",
+        missing
+    )
 
-    return 0
+    print()
+    print(
+        "Visual jobs:",
+        VISUAL_JOBS_JSON
+    )
 
+    print(
+        "Image manifest:",
+        IMAGE_MANIFEST_JSON
+    )
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
+    # --------------------------------------------------------
+    # IMPORTANT
+    # --------------------------------------------------------
+
+    if missing > 0:
+
+        print()
+        print("=" * 68)
+        print("IMAGE GENERATION IS STILL A SEPARATE STAGE")
+        print("=" * 68)
+
+        print(
+            "Scene prompts/jobs have been prepared."
+        )
+
+        print(
+            "No paid image-generation API was called."
+        )
+
+        print(
+            "No Wan2GP queue was created."
+        )
+
+        print(
+            "No Colab worker is required by this script."
+        )
+
+        print()
+        print(
+            "Once scene images exist in:"
+        )
+
+        print(
+            f"  {VISUALS_DIR}"
+        )
+
+        print()
+        print(
+            "run:"
+        )
+
+        print(
+            "  python scripts/photo_motion.py"
+        )
+
+    else:
+
+        print()
+        print(
+            "ALL SCENE IMAGES ARE AVAILABLE."
+        )
+
+        print(
+            "Photo Motion can now create scene videos."
+        )
+
+        print()
+        print(
+            "Next:"
+        )
+
+        print(
+            "  python scripts/photo_motion.py"
+        )
+
+    print()
+    print("=" * 68)
+    print("DONE")
+    print("=" * 68)
 
 
 if __name__ == "__main__":
+
     try:
-        sys.exit(
-            build_worker_queue()
-        )
+
+        main()
 
     except KeyboardInterrupt:
-        print("Interrupted.")
+
+        print(
+            "\nStopped by user."
+        )
+
         sys.exit(130)
 
     except Exception as exc:
+
         print()
-        print(f"ERROR: {exc}")
+        print("=" * 68)
+        print("FAILED")
+        print("=" * 68)
+
+        print(
+            str(exc)
+        )
+
         sys.exit(1)
