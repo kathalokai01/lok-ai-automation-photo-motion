@@ -1,4 +1,4 @@
-name: Generate Lok AI Video
+name: Generate Katha Lok AI Photo Motion Video
 
 on:
   workflow_dispatch:
@@ -7,441 +7,45 @@ permissions:
   contents: write
   actions: read
 
+env:
+  PYTHONUNBUFFERED: "1"
+  FORMAT: "short"
+
 jobs:
-  prepare:
+
+  generate-photo-motion-video:
+
     runs-on: ubuntu-latest
 
-    env:
-      GH_TOKEN: ${{ github.token }}
-
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
-      CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-      CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
-      CLOUDFLARE_R2_PUBLIC_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_URL }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    timeout-minutes: 60
 
     steps:
 
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
+      # ==========================================================
+      # 1. CHECKOUT
+      # ==========================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ============================================================
-      # VALIDATE REQUIRED SECRETS
-      # ============================================================
-      - name: Validate required secrets
-        shell: bash
-        run: |
-          set -e
 
-          echo "Checking required secrets..."
+      # ==========================================================
+      # 2. PYTHON
+      # ==========================================================
 
-          if [ -z "${GEMINI_API_KEY:-}" ]; then
-            echo "ERROR: GEMINI_API_KEY is not set."
-            exit 1
-          fi
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-          if [ -z "${CLOUDFLARE_R2_BUCKET:-}" ]; then
-            echo "ERROR: CLOUDFLARE_R2_BUCKET is not set."
-            exit 1
-          fi
 
-          if [ -z "${CLOUDFLARE_R2_ACCESS_KEY_ID:-}" ]; then
-            echo "ERROR: CLOUDFLARE_R2_ACCESS_KEY_ID is not set."
-            exit 1
-          fi
+      # ==========================================================
+      # 3. FFMPEG
+      # ==========================================================
 
-          if [ -z "${CLOUDFLARE_R2_SECRET_ACCESS_KEY:-}" ]; then
-            echo "ERROR: CLOUDFLARE_R2_SECRET_ACCESS_KEY is not set."
-            exit 1
-          fi
-
-          if [ -z "${CLOUDFLARE_R2_PUBLIC_URL:-}" ]; then
-            echo "ERROR: CLOUDFLARE_R2_PUBLIC_URL is not set."
-            exit 1
-          fi
-
-          echo "Required secrets are available."
-
-          if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-            echo
-            echo "NOTICE: CLOUDFLARE_ACCOUNT_ID is not set."
-            echo "R2 upload will be skipped."
-            echo "GitHub Artifact will still be created."
-          else
-            echo "CLOUDFLARE_ACCOUNT_ID is available."
-            echo "R2 upload is enabled."
-          fi
-
-      # ============================================================
-      # READ PROJECT CONFIG
-      # ============================================================
-      - name: Read project config
-        shell: bash
-        run: |
-          set -e
-
-          if [ ! -f "Input/topic.txt" ]; then
-            echo "ERROR: Input/topic.txt not found."
-            exit 1
-          fi
-
-          if [ ! -f "scripts/input_config.py" ]; then
-            echo "ERROR: scripts/input_config.py not found."
-            exit 1
-          fi
-
-          echo "=============================================="
-          echo "PROJECT CONFIG"
-          echo "=============================================="
-
-          cat Input/topic.txt
-
-          python3 - <<'PY'
-          import sys
-
-          sys.path.insert(0, "scripts")
-
-          from input_config import (
-              load_input_config,
-              validate_config,
-              normalize_format,
-              get_parts,
-              get_scenes,
-          )
-
-          config = load_input_config()
-
-          validate_config(config)
-
-          fmt = normalize_format(config)
-          parts = get_parts(config)
-          scenes = get_scenes(config)
-
-          if fmt not in ("short", "full"):
-              raise SystemExit(
-                  "ERROR: FORMAT must be short or full."
-              )
-
-          print(f"FORMAT: {fmt}")
-          print(f"PARTS: {parts}")
-          print(f"SCENES: {scenes}")
-          print("Input configuration is valid.")
-          PY
-
-          FORMAT=$(python3 - <<'PY'
-          import sys
-
-          sys.path.insert(0, "scripts")
-
-          from input_config import (
-              load_input_config,
-              normalize_format,
-          )
-
-          print(
-              normalize_format(
-                  load_input_config()
-              )
-          )
-          PY
-          )
-
-          echo "FORMAT=$FORMAT" >> "$GITHUB_ENV"
-
-          echo
-          echo "Selected format: $FORMAT"
-
-      # ============================================================
-      # PREPARE DIRECTORIES
-      # ============================================================
-      - name: Prepare output directories
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p output
-          mkdir -p output/config
-          mkdir -p output/checkpoints
-          mkdir -p output/story
-          mkdir -p output/scenes
-          mkdir -p output/narration
-          mkdir -p output/narration/audio
-          mkdir -p output/audio
-          mkdir -p output/visuals
-          mkdir -p output/visual_worker
-          mkdir -p output/i2v
-          mkdir -p output/parts
-          mkdir -p output/thumbnail
-          mkdir -p output/publish
-          mkdir -p output/videos
-
-      # ============================================================
-      # EXPECTED SCENE COUNT
-      # ============================================================
-      - name: Calculate expected scene count
-        shell: bash
-        run: |
-          set -e
-
-          readarray -t CONFIG_VALUES < <(
-            python3 - <<'PY'
-          import sys
-
-          sys.path.insert(0, "scripts")
-
-          from input_config import (
-              load_input_config,
-              get_parts,
-              get_scenes,
-          )
-
-          config = load_input_config()
-
-          print(get_parts(config))
-          print(get_scenes(config))
-          PY
-          )
-
-          PARTS="${CONFIG_VALUES[0]}"
-          SCENES="${CONFIG_VALUES[1]}"
-
-          if ! [[ "$PARTS" =~ ^[0-9]+$ ]]; then
-            echo "ERROR: Invalid PARTS."
-            exit 1
-          fi
-
-          if ! [[ "$SCENES" =~ ^[0-9]+$ ]]; then
-            echo "ERROR: Invalid SCENES."
-            exit 1
-          fi
-
-          EXPECTED_TOTAL=$((PARTS * SCENES))
-
-          echo "PARTS=$PARTS" >> "$GITHUB_ENV"
-          echo "SCENES_PER_PART=$SCENES" >> "$GITHUB_ENV"
-          echo "EXPECTED_TOTAL=$EXPECTED_TOTAL" >> "$GITHUB_ENV"
-
-          echo "Parts           : $PARTS"
-          echo "Scenes per part : $SCENES"
-          echo "Expected total  : $EXPECTED_TOTAL"
-
-      # ============================================================
-      # RESTORE PREVIOUS SUCCESSFUL CHECKPOINT
-      # ============================================================
-      - name: Restore previous successful checkpoint
-        shell: bash
-        run: |
-          set -e
-
-          CURRENT_RUN="${{ github.run_id }}"
-
-          echo "Looking for previous successful checkpoint..."
-
-          PREVIOUS_RUN_ID=$(gh run list \
-            --workflow generate-video.yml \
-            --limit 30 \
-            --json databaseId,status,conclusion \
-            --jq ".[] | select(.databaseId != ${CURRENT_RUN}) | select(.status == \"completed\") | select(.conclusion == \"success\") | .databaseId" \
-            | head -n 1 || true)
-
-          if [ -z "$PREVIOUS_RUN_ID" ]; then
-            echo "No previous successful run found."
-            exit 0
-          fi
-
-          echo "Previous successful run: $PREVIOUS_RUN_ID"
-
-          rm -rf /tmp/lok-ai-checkpoint
-          mkdir -p /tmp/lok-ai-checkpoint
-
-          if gh run download "$PREVIOUS_RUN_ID" \
-              --name lok-ai-successful-checkpoint \
-              --dir /tmp/lok-ai-checkpoint; then
-
-            if [ -d "/tmp/lok-ai-checkpoint/output" ]; then
-              cp -a \
-                /tmp/lok-ai-checkpoint/output/. \
-                output/ || true
-
-              echo "Checkpoint restored."
-            fi
-
-          else
-            echo "No downloadable checkpoint found."
-          fi
-
-      # ============================================================
-      # VALIDATE RESTORED CHECKPOINT
-      # ============================================================
-      - name: Validate restored checkpoint
-        shell: bash
-        run: |
-          set -e
-
-          if [ ! -f "output/config/topic.txt" ]; then
-            cp Input/topic.txt output/config/topic.txt
-            echo "Fresh project configuration created."
-            exit 0
-          fi
-
-          if cmp -s Input/topic.txt output/config/topic.txt; then
-            echo "Restored checkpoint belongs to current input."
-          else
-            echo "Input changed."
-            echo "Removing stale downstream checkpoint."
-
-            rm -rf \
-              output/story \
-              output/scenes \
-              output/narration \
-              output/visuals \
-              output/visual_worker \
-              output/i2v \
-              output/parts \
-              output/videos \
-              output/thumbnail \
-              output/publish
-
-            mkdir -p \
-              output/story \
-              output/scenes \
-              output/narration \
-              output/narration/audio \
-              output/visuals \
-              output/visual_worker \
-              output/i2v \
-              output/parts \
-              output/videos \
-              output/thumbnail \
-              output/publish
-
-            cp Input/topic.txt output/config/topic.txt
-          fi
-
-      # ============================================================
-      # GENERATE STORY PLAN
-      # ============================================================
-      - name: Generate story plan
-        shell: bash
-        run: |
-          set -e
-          python3 scripts/generate_story_plan.py
-
-      # ============================================================
-      # GENERATE STORY
-      # ============================================================
-      - name: Generate story
-        shell: bash
-        run: |
-          set -e
-          python3 scripts/generate_story.py
-
-      # ============================================================
-      # SELECT GEMINI MODEL
-      # ============================================================
-      - name: Select Gemini model
-        shell: bash
-        run: |
-          set -e
-          python3 scripts/select_gemini_model.py
-
-      # ============================================================
-      # TEST GEMINI
-      # ============================================================
-      - name: Test Gemini
-        shell: bash
-        run: |
-          set -e
-          python3 scripts/test_gemini.py
-
-      # ============================================================
-      # GENERATE AI STORY
-      # ============================================================
-      - name: Generate AI story
-        shell: bash
-        run: |
-          set -e
-          python3 scripts/generate_ai_story.py
-
-      # ============================================================
-      # CHARACTER BIBLE
-      # ============================================================
-      - name: Generate character bible
-        shell: bash
-        run: |
-          set -e
-          python3 scripts/generate_character_bible.py
-
-      # ============================================================
-      # GENERATE SCENES
-      # ============================================================
-      - name: Generate scenes
-        shell: bash
-        run: |
-          set -e
-
-          python3 scripts/generate_scenes.py
-
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          path = "output/scenes/scenes.json"
-          expected = int(os.environ["EXPECTED_TOTAL"])
-
-          if not os.path.exists(path):
-              print("ERROR: scenes.json not found.")
-              sys.exit(1)
-
-          with open(
-              path,
-              "r",
-              encoding="utf-8"
-          ) as f:
-              data = json.load(f)
-
-          scenes = data.get("scenes", [])
-
-          print(
-              f"Scenes generated: "
-              f"{len(scenes)}/{expected}"
-          )
-
-          if data.get("status") != "completed":
-              print(
-                  "ERROR: Scene generation "
-                  "is not completed."
-              )
-              sys.exit(1)
-
-          if len(scenes) != expected:
-              print(
-                  "ERROR: Scene count mismatch."
-              )
-              sys.exit(1)
-          PY
-
-      # ============================================================
-      # GENERATE NARRATION
-      # ============================================================
-      - name: Generate narration
-        shell: bash
-        run: |
-          set -e
-          python3 scripts/generate_narration.py
-
-      # ============================================================
-      # INSTALL RUNTIME DEPENDENCIES
-      # ============================================================
-      - name: Install FFmpeg, TTS and Python dependencies
+      - name: Install FFmpeg
         shell: bash
         run: |
           set -e
@@ -449,389 +53,498 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-          python3 -m pip install --upgrade pip
-
-          python3 -m pip install --upgrade \
-            requests \
-            boto3 \
-            edge-tts \
-            pillow
-
+          echo "FFmpeg:"
           ffmpeg -version | head -n 1
-          ffprobe -version | head -n 1
-          edge-tts --help >/dev/null
 
-          python3 - <<'PY'
-          import boto3
-          import requests
-          from PIL import Image
 
-          print("requests: READY")
-          print("boto3: READY")
-          print("Pillow: READY")
-          PY
+      # ==========================================================
+      # 4. PYTHON DEPENDENCIES
+      # ==========================================================
 
-          echo "All dependencies ready."
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -e
 
-      # ============================================================
-      # GENERATE HINDI TTS
-      # ============================================================
+          python -m pip install --upgrade pip
+
+          pip install \
+            requests \
+            pillow \
+            edge-tts
+
+
+      # ==========================================================
+      # 5. PREPARE DIRECTORIES
+      # ==========================================================
+
+      - name: Prepare output directories
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p output/story
+          mkdir -p output/scenes
+          mkdir -p output/narration
+          mkdir -p output/visuals
+          mkdir -p output/photo_motion
+          mkdir -p output/parts
+          mkdir -p output/videos
+          mkdir -p output/thumbnails
+          mkdir -p output/config
+
+
+      # ==========================================================
+      # 6. READ INPUT
+      # ==========================================================
+
+      - name: Read topic
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f "Input/topic.txt" ]; then
+            echo "=============================="
+            echo "INPUT TOPIC"
+            echo "=============================="
+
+            cat Input/topic.txt
+
+            echo
+          else
+            echo "Input/topic.txt not found."
+            exit 1
+          fi
+
+
+      # ==========================================================
+      # 7. GENERATE STORY PLAN
+      # ==========================================================
+
+      - name: Generate story plan
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/generate_story_plan.py
+
+
+      # ==========================================================
+      # 8. GENERATE STORY
+      # ==========================================================
+
+      - name: Generate story
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/generate_story.py
+
+
+      # ==========================================================
+      # 9. GENERATE AI STORY
+      # ==========================================================
+
+      - name: Generate AI story
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/generate_ai_story.py
+
+
+      # ==========================================================
+      # 10. SELECT GEMINI MODEL
+      # ==========================================================
+
+      - name: Select Gemini model
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/select_gemini_model.py || true
+
+
+      # ==========================================================
+      # 11. GEMINI TEST
+      # ==========================================================
+
+      - name: Test Gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/test_gemini.py || true
+
+
+      # ==========================================================
+      # 12. CHARACTER BIBLE
+      # ==========================================================
+
+      - name: Generate character bible
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/generate_character_bible.py
+
+
+      # ==========================================================
+      # 13. GENERATE SCENES
+      # ==========================================================
+
+      - name: Generate scenes
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/generate_scenes.py
+
+
+      # ==========================================================
+      # 14. GENERATE NARRATION JOBS
+      # ==========================================================
+
+      - name: Generate narration
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/generate_narration.py
+
+
+      # ==========================================================
+      # 15. GENERATE TTS
+      # ==========================================================
+
       - name: Generate Hindi TTS
         shell: bash
         run: |
           set -e
 
-          python3 scripts/generate_tts.py
+          python scripts/generate_tts.py
 
-          AUDIO_COUNT=$(find output/narration/audio \
+
+      # ==========================================================
+      # 16. PREPARE VISUALS
+      # ==========================================================
+
+      - name: Prepare Photo Motion visual jobs
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/generate_visuals.py
+
+
+      # ==========================================================
+      # 17. CHECK SCENE IMAGES
+      # ==========================================================
+
+      - name: Check scene images
+        shell: bash
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "CHECKING PHOTO MOTION INPUT IMAGES"
+          echo "=============================================="
+
+          COUNT=$(find output/visuals \
             -type f \
-            -name "*.mp3" \
-            -size +1000c \
+            \( \
+              -iname "*.png" \
+              -o -iname "*.jpg" \
+              -o -iname "*.jpeg" \
+              -o -iname "*.webp" \
+            \) | wc -l)
+
+          echo "Images found: $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+
+            echo
+            echo "ERROR: No scene images found."
+            echo
+            echo "Photo Motion requires scene images in:"
+            echo "output/visuals/"
+            echo
+            echo "The workflow intentionally does not call"
+            echo "a paid image-generation API."
+            echo
+            echo "No fake video will be produced."
+            exit 1
+          fi
+
+          echo
+          echo "Scene images:"
+          find output/visuals \
+            -type f \
+            \( \
+              -iname "*.png" \
+              -o -iname "*.jpg" \
+              -o -iname "*.jpeg" \
+              -o -iname "*.webp" \
+            \) \
+            | sort
+
+
+      # ==========================================================
+      # 18. PHOTO MOTION
+      # ==========================================================
+
+      - name: Create Photo Motion scene videos
+        shell: bash
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "PHOTO MOTION"
+          echo "=============================================="
+
+          python scripts/photo_motion.py
+
+
+      # ==========================================================
+      # 19. CHECK PHOTO MOTION OUTPUT
+      # ==========================================================
+
+      - name: Check generated scene videos
+        shell: bash
+        run: |
+          set -e
+
+          COUNT=$(find output/photo_motion \
+            -type f \
+            -iname "*.mp4" \
             | wc -l)
 
-          echo "Audio files: $AUDIO_COUNT/$EXPECTED_TOTAL"
+          echo "Scene videos: $COUNT"
 
-          if [ "$AUDIO_COUNT" -ne "$EXPECTED_TOTAL" ]; then
-            echo "ERROR: Audio count mismatch."
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: Photo Motion produced no videos."
             exit 1
           fi
 
-      # ============================================================
-      # PREPARE VISUAL JOBS
-      # ============================================================
-      - name: Prepare visual generation
-        shell: bash
-        run: |
-          set -e
-
-          python3 scripts/prepare_visuals.py
-
-          if [ ! -s "output/visuals/visual_jobs.json" ]; then
-            echo "ERROR: visual_jobs.json was not created."
-            exit 1
-          fi
-
-          echo "Visual preparation completed."
-
-      # ============================================================
-      # BUILD FREE GPU VISUAL QUEUE
-      # ============================================================
-      - name: Build free GPU visual queue
-        shell: bash
-        run: |
-          set -e
-
-          echo "=============================================="
-          echo "      BUILDING FREE GPU VISUAL QUEUE"
-          echo "=============================================="
-
-          python3 scripts/generate_visuals.py
-
-          QUEUE_JSON="output/visual_worker/visual_generation_queue.json"
-          QUEUE_ZIP="output/i2v/visual_generation_queue.zip"
-
-          if [ ! -s "$QUEUE_JSON" ]; then
-            echo "ERROR: Visual worker queue JSON missing."
-            exit 1
-          fi
-
-          if [ ! -s "$QUEUE_ZIP" ]; then
-            echo "ERROR: Visual worker queue ZIP missing."
-            exit 1
-          fi
-
-          python3 - <<'PY'
-          import json
-          import zipfile
-          from pathlib import Path
-
-          json_path = Path(
-              "output/visual_worker/visual_generation_queue.json"
-          )
-
-          zip_path = Path(
-              "output/i2v/visual_generation_queue.zip"
-          )
-
-          with json_path.open(
-              "r",
-              encoding="utf-8"
-          ) as f:
-              data = json.load(f)
-
-          if not isinstance(data, dict):
-              raise SystemExit(
-                  "ERROR: Visual queue is not an object."
-              )
-
-          jobs = data.get("jobs", [])
-
-          if not isinstance(jobs, list):
-              raise SystemExit(
-                  "ERROR: Visual queue jobs are invalid."
-              )
-
-          expected = int(
-              data.get("expected_total", 0)
-          )
-
-          if len(jobs) != expected:
-              raise SystemExit(
-                  f"ERROR: Queue count mismatch: "
-                  f"{len(jobs)}/{expected}"
-              )
-
-          pending = sum(
-              1
-              for job in jobs
-              if job.get("status") == "pending"
-          )
-
-          print(f"Expected jobs : {expected}")
-          print(f"Pending jobs  : {pending}")
-
-          with zipfile.ZipFile(
-              zip_path,
-              "r"
-          ) as zf:
-
-              names = zf.namelist()
-
-              required = {
-                  "visual_generation_queue.json",
-                  "scenes.json",
-                  "worker_config.json",
-              }
-
-              missing = required - set(names)
-
-              if missing:
-                  raise SystemExit(
-                      "ERROR: ZIP missing: "
-                      + ", ".join(sorted(missing))
-                  )
-
-              bad = zf.testzip()
-
-              if bad:
-                  raise SystemExit(
-                      f"ERROR: ZIP integrity failed: {bad}"
-                  )
-
-          print("Visual worker ZIP validation: SUCCESS")
-          PY
-
-          echo
-          echo "FREE GPU VISUAL QUEUE READY"
-          echo "Queue JSON: $QUEUE_JSON"
-          echo "Queue ZIP : $QUEUE_ZIP"
-
-      # ============================================================
-      # UPLOAD VISUAL WORKER PACKAGE AS GITHUB ARTIFACT
-      # ============================================================
-      - name: Upload visual worker package
-        uses: actions/upload-artifact@v4
-        with:
-          name: lok-ai-visual-worker-queue
-          path: |
-            output/i2v/visual_generation_queue.zip
-            output/visual_worker/visual_generation_queue.json
-            output/visual_worker/scenes.json
-            output/visual_worker/character_bible.json
-            output/visual_worker/worker_config.json
-          if-no-files-found: error
-          retention-days: 7
-
-      # ============================================================
-      # OPTIONAL R2 UPLOAD
-      # ============================================================
-      - name: Upload visual worker queue to R2
-        if: ${{ env.CLOUDFLARE_ACCOUNT_ID != '' }}
-        shell: bash
-        run: |
-          set -e
-
-          echo "R2 upload enabled."
-
-          python3 - <<'PY'
-          import os
-          import boto3
-          from pathlib import Path
-          from botocore.config import Config
-
-          bucket = os.environ["CLOUDFLARE_R2_BUCKET"]
-          access_key = os.environ[
-              "CLOUDFLARE_R2_ACCESS_KEY_ID"
-          ]
-          secret_key = os.environ[
-              "CLOUDFLARE_R2_SECRET_ACCESS_KEY"
-          ]
-          public_url = os.environ[
-              "CLOUDFLARE_R2_PUBLIC_URL"
-          ].rstrip("/")
-
-          account_id = os.environ[
-              "CLOUDFLARE_ACCOUNT_ID"
-          ].strip()
-
-          endpoint = (
-              f"https://{account_id}.r2.cloudflarestorage.com"
-          )
-
-          client = boto3.client(
-              "s3",
-              endpoint_url=endpoint,
-              aws_access_key_id=access_key,
-              aws_secret_access_key=secret_key,
-              region_name="auto",
-              config=Config(
-                  signature_version="s3v4"
-              ),
-          )
-
-          queue = Path(
-              "output/i2v/visual_generation_queue.zip"
-          )
-
-          key = (
-              "visual-queues/"
-              f"{os.environ['GITHUB_RUN_ID']}/"
-              "visual_generation_queue.zip"
-          )
-
-          client.upload_file(
-              str(queue),
-              bucket,
-              key,
-              ExtraArgs={
-                  "ContentType": "application/zip"
-              }
-          )
-
-          url = f"{public_url}/{key}"
-
-          Path(
-              "output/visual_worker/queue_url.txt"
-          ).write_text(
-              url + "\n",
-              encoding="utf-8"
-          )
-
-          print("R2 upload successful.")
-          print(f"Queue URL: {url}")
-          PY
-
-      # ============================================================
-      # R2 SKIPPED STATUS
-      # ============================================================
-      - name: R2 upload status
-        if: ${{ env.CLOUDFLARE_ACCOUNT_ID == '' }}
-        shell: bash
-        run: |
-          set -e
-
-          echo "=============================================="
-          echo "R2 UPLOAD SKIPPED"
-          echo "=============================================="
-          echo
-          echo "CLOUDFLARE_ACCOUNT_ID is not configured."
-          echo
-          echo "The queue is already available as:"
-          echo "GitHub Artifact: lok-ai-visual-worker-queue"
-          echo
-          echo "No Cloudflare AI service was used."
-          echo "=============================================="
-
-      # ============================================================
-      # UPLOAD QUEUE URL IF AVAILABLE
-      # ============================================================
-      - name: Upload queue URL artifact
-        if: ${{ env.CLOUDFLARE_ACCOUNT_ID != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: lok-ai-visual-worker-queue-url
-          path: output/visual_worker/queue_url.txt
-          if-no-files-found: error
-          retention-days: 7
-
-      # ============================================================
-      # PREPARE CHECKPOINT
-      # ============================================================
-      - name: Prepare successful checkpoint
-        if: success()
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf /tmp/lok-ai-checkpoint
-          mkdir -p /tmp/lok-ai-checkpoint/output
-
-          for dir in \
-            config \
-            checkpoints \
-            story \
-            scenes \
-            narration \
-            visuals \
-            visual_worker \
-            i2v
-          do
-            if [ -d "output/$dir" ]; then
-              mkdir -p \
-                "/tmp/lok-ai-checkpoint/output/$dir"
-
-              cp -a \
-                "output/$dir/." \
-                "/tmp/lok-ai-checkpoint/output/$dir/"
-            fi
-          done
-
-          echo "Successful checkpoint prepared."
-
-      # ============================================================
-      # UPLOAD CHECKPOINT
-      # ============================================================
-      - name: Upload successful checkpoint
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lok-ai-successful-checkpoint
-          path: /tmp/lok-ai-checkpoint
-          if-no-files-found: error
-          retention-days: 30
-
-      # ============================================================
-      # FINAL STATUS
-      # ============================================================
-      - name: Show queue status
-        if: always()
-        shell: bash
-        run: |
-          echo
-          echo "=============================================="
-          echo "           VISUAL WORKER QUEUE"
-          echo "=============================================="
-
-          if [ -f "output/visual_worker/queue_url.txt" ]; then
-            cat output/visual_worker/queue_url.txt
-          else
-            echo "R2 Queue URL not available."
-            echo "Use GitHub Artifact: lok-ai-visual-worker-queue"
-          fi
-
-          echo
-          echo "Artifacts:"
-          find output/visual_worker \
-            -maxdepth 2 \
+          find output/photo_motion \
             -type f \
-            -print 2>/dev/null || true
+            -iname "*.mp4" \
+            | sort
 
-          echo
+
+      # ==========================================================
+      # 20. RENDER FINAL VIDEO
+      # ==========================================================
+
+      - name: Render final video
+        shell: bash
+        run: |
+          set -e
+
           echo "=============================================="
-          echo "       GITHUB PREPARATION COMPLETE"
+          echo "FINAL VIDEO RENDER"
           echo "=============================================="
 
+          python scripts/render_video.py
+
+
+      # ==========================================================
+      # 21. GENERATE THUMBNAIL
+      # ==========================================================
+
+      - name: Generate thumbnail
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+
+          python scripts/generate_thumbnail.py || true
+
+
+      # ==========================================================
+      # 22. CREATE YOUTUBE METADATA
+      # ==========================================================
+
+      - name: Create YouTube metadata
+        shell: bash
+        run: |
+          set -e
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path(".")
+
+          topic_file = root / "Input" / "topic.txt"
+
+          topic = ""
+
+          if topic_file.exists():
+              topic = topic_file.read_text(
+                  encoding="utf-8"
+              ).strip()
+
+          if not topic:
+              topic = "Katha Lok AI Story"
+
+          output = root / "output"
+
+          metadata = output / "youtube_metadata.txt"
+
+          text = f"""KATHA LOK AI — YOUTUBE METADATA
+
+          TITLE
+          {topic}
+
+          DESCRIPTION
+          {topic}
+
+          A cinematic Hindi story created by Katha Lok AI.
+
+          FORMAT
+          {__import__("os").environ.get("FORMAT", "short")}
+
+          LANGUAGE
+          Hindi
+
+          CATEGORY
+          Entertainment
+
+          HASHTAGS
+          #KathaLokAI #HindiStory #AIStory #HindiKahani
+          """
+
+          metadata.write_text(
+              text.strip() + "\n",
+              encoding="utf-8"
+          )
+
+          print(
+              "Created:",
+              metadata
+          )
+          PY
+
+
+      # ==========================================================
+      # 23. CREATE FINAL ZIP
+      # ==========================================================
+
+      - name: Create final output ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_NAME="katha-lok-ai-photo-motion-${GITHUB_RUN_NUMBER}.zip"
+
+          rm -f "$ZIP_NAME"
+
+          zip -r "$ZIP_NAME" \
+            output/videos \
+            output/parts \
+            output/photo_motion \
+            output/visuals \
+            output/thumbnails \
+            output/story \
+            output/scenes \
+            output/narration \
+            output/youtube_metadata.txt \
+            output/config \
+            2>/dev/null || true
+
+          if [ ! -f "$ZIP_NAME" ]; then
+            echo "ERROR: Final ZIP was not created."
+            exit 1
+          fi
+
+          echo "FINAL ZIP:"
+          ls -lh "$ZIP_NAME"
+
+
+      # ==========================================================
+      # 24. UPLOAD FINAL ARTIFACT
+      # ==========================================================
+
+      - name: Upload final video package
+        uses: actions/upload-artifact@v4
+        with:
+          name: katha-lok-ai-photo-motion-${{ github.run_number }}
+          path: |
+            katha-lok-ai-photo-motion-${{ github.run_number }}.zip
+            output/videos/**
+            output/parts/**
+            output/photo_motion/**
+            output/thumbnails/**
+            output/youtube_metadata.txt
+          if-no-files-found: error
+          retention-days: 7
+
+
+      # ==========================================================
+      # 25. UPLOAD DEBUG / JOB DATA
+      # ==========================================================
+
+      - name: Upload pipeline data
+        uses: actions/upload-artifact@v4
+        with:
+          name: katha-lok-ai-photo-motion-data-${{ github.run_number }}
+          path: |
+            output/story/**
+            output/scenes/**
+            output/visuals/**
+            output/narration/**
+            output/photo_motion/**
+          if-no-files-found: warn
+          retention-days: 7
+
+
+      # ==========================================================
+      # 26. FINAL STATUS
+      # ==========================================================
+
+      - name: Final status
+        shell: bash
+        run: |
           echo
-          echo "Cloudflare AI visual generation: DISABLED"
-          echo "Cloudflare AI I2V: DISABLED"
-          echo "Free GPU visual worker: REQUIRED"
+          echo "============================================================"
+          echo "KATHA LOK AI — PHOTO MOTION COMPLETE"
+          echo "============================================================"
+          echo
+          echo "Repository : PHOTO MOTION"
+          echo "Engine     : FFmpeg Photo Motion"
+          echo "Wan2GP     : DISABLED"
+          echo "Colab      : NOT REQUIRED"
+          echo
+          echo "Motion:"
+          echo "  Zoom In"
+          echo "  Zoom Out"
+          echo "  Pan Left"
+          echo "  Pan Right"
+          echo "  Subtle Camera Motion"
+          echo
+          echo "Final package:"
+          echo "  katha-lok-ai-photo-motion-${GITHUB_RUN_NUMBER}.zip"
+          echo
+          echo "Download from:"
+          echo "  GitHub Actions → Artifacts"
+          echo
+          echo "============================================================"
+
