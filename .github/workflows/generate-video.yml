@@ -5,15 +5,10 @@ on:
 
 permissions:
   contents: write
-  actions: read
-
-env:
-  PYTHONUNBUFFERED: "1"
-  FORMAT: "short"
 
 jobs:
 
-  generate-photo-motion-video:
+  generate-video:
 
     runs-on: ubuntu-latest
 
@@ -27,8 +22,6 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
 
       # ==========================================================
@@ -46,15 +39,9 @@ jobs:
       # ==========================================================
 
       - name: Install FFmpeg
-        shell: bash
         run: |
-          set -e
-
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-
-          echo "FFmpeg:"
-          ffmpeg -version | head -n 1
 
 
       # ==========================================================
@@ -62,489 +49,299 @@ jobs:
       # ==========================================================
 
       - name: Install Python dependencies
-        shell: bash
         run: |
-          set -e
-
           python -m pip install --upgrade pip
 
           pip install \
             requests \
             pillow \
-            edge-tts
+            edge-tts \
+            gradio_client
 
 
       # ==========================================================
-      # 5. PREPARE DIRECTORIES
+      # 5. INPUT CHECK
       # ==========================================================
 
-      - name: Prepare output directories
-        shell: bash
+      - name: Check input
         run: |
-          set -e
-
-          mkdir -p output/story
-          mkdir -p output/scenes
-          mkdir -p output/narration
-          mkdir -p output/visuals
-          mkdir -p output/photo_motion
-          mkdir -p output/parts
-          mkdir -p output/videos
-          mkdir -p output/thumbnails
-          mkdir -p output/config
-
-
-      # ==========================================================
-      # 6. READ INPUT
-      # ==========================================================
-
-      - name: Read topic
-        shell: bash
-        run: |
-          set -e
+          echo "============================================================"
+          echo "INPUT"
+          echo "============================================================"
 
           if [ -f "Input/topic.txt" ]; then
-            echo "=============================="
-            echo "INPUT TOPIC"
-            echo "=============================="
-
-            cat Input/topic.txt
-
-            echo
+            echo "Topic file:"
+            cat "Input/topic.txt"
           else
-            echo "Input/topic.txt not found."
-            exit 1
+            echo "Input/topic.txt not found"
           fi
+
+          echo
 
 
       # ==========================================================
-      # 7. GENERATE STORY PLAN
+      # 6. STORY PLAN
       # ==========================================================
 
       - name: Generate story plan
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
-          set -e
-
           python scripts/generate_story_plan.py
 
 
       # ==========================================================
-      # 8. GENERATE STORY
+      # 7. STORY
       # ==========================================================
 
       - name: Generate story
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
-          set -e
-
           python scripts/generate_story.py
 
 
       # ==========================================================
-      # 9. GENERATE AI STORY
+      # 8. AI STORY
       # ==========================================================
 
       - name: Generate AI story
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
-          set -e
-
           python scripts/generate_ai_story.py
 
 
       # ==========================================================
-      # 10. SELECT GEMINI MODEL
+      # 9. MODEL SELECTION
       # ==========================================================
 
       - name: Select Gemini model
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
-          set -e
-
           python scripts/select_gemini_model.py || true
 
-
-      # ==========================================================
-      # 11. GEMINI TEST
-      # ==========================================================
-
       - name: Test Gemini
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
-          set -e
-
           python scripts/test_gemini.py || true
 
 
       # ==========================================================
-      # 12. CHARACTER BIBLE
+      # 10. CHARACTER BIBLE
       # ==========================================================
 
       - name: Generate character bible
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
-          set -e
-
           python scripts/generate_character_bible.py
 
 
       # ==========================================================
-      # 13. GENERATE SCENES
+      # 11. SCENES
       # ==========================================================
 
       - name: Generate scenes
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
-          set -e
-
           python scripts/generate_scenes.py
 
 
       # ==========================================================
-      # 14. GENERATE NARRATION JOBS
+      # 12. NARRATION
       # ==========================================================
 
-      - name: Generate narration
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
+      - name: Generate narration jobs
         run: |
-          set -e
-
           python scripts/generate_narration.py
 
 
       # ==========================================================
-      # 15. GENERATE TTS
+      # 13. TTS
       # ==========================================================
 
       - name: Generate Hindi TTS
-        shell: bash
         run: |
-          set -e
-
           python scripts/generate_tts.py
 
 
       # ==========================================================
-      # 16. PREPARE VISUALS
+      # 14. VISUAL JOBS
       # ==========================================================
 
-      - name: Prepare Photo Motion visual jobs
-        shell: bash
+      - name: Prepare visual jobs
         run: |
-          set -e
-
           python scripts/generate_visuals.py
 
 
       # ==========================================================
-      # 17. CHECK SCENE IMAGES
+      # 15. FREE IMAGE GENERATION
+      # ==========================================================
+      #
+      # This is the important new step.
+      #
+      # Scene prompt
+      #      ↓
+      # Free Hugging Face Z-Image-Turbo
+      #      ↓
+      # output/visuals/scene_XX.png
+      #
+      # No paid API.
+      # No Gemini image API.
+      # No Wan2GP.
+      # No Colab.
+      #
       # ==========================================================
 
-      - name: Check scene images
-        shell: bash
+      - name: Generate free realistic scene images
         run: |
-          set -e
+          echo "============================================================"
+          echo "FREE IMAGE GENERATION"
+          echo "============================================================"
 
-          echo "=============================================="
-          echo "CHECKING PHOTO MOTION INPUT IMAGES"
-          echo "=============================================="
+          python scripts/free_image_generator.py
 
-          COUNT=$(find output/visuals \
-            -type f \
-            \( \
-              -iname "*.png" \
-              -o -iname "*.jpg" \
-              -o -iname "*.jpeg" \
-              -o -iname "*.webp" \
-            \) | wc -l)
 
-          echo "Images found: $COUNT"
+      # ==========================================================
+      # 16. VERIFY IMAGES
+      # ==========================================================
 
-          if [ "$COUNT" -eq 0 ]; then
+      - name: Verify generated images
+        run: |
+          echo "============================================================"
+          echo "VERIFYING SCENE IMAGES"
+          echo "============================================================"
 
-            echo
-            echo "ERROR: No scene images found."
-            echo
-            echo "Photo Motion requires scene images in:"
-            echo "output/visuals/"
-            echo
-            echo "The workflow intentionally does not call"
-            echo "a paid image-generation API."
-            echo
-            echo "No fake video will be produced."
+          if [ ! -d "output/visuals" ]; then
+            echo "ERROR: output/visuals does not exist"
             exit 1
           fi
 
-          echo
-          echo "Scene images:"
-          find output/visuals \
-            -type f \
-            \( \
-              -iname "*.png" \
-              -o -iname "*.jpg" \
-              -o -iname "*.jpeg" \
-              -o -iname "*.webp" \
-            \) \
-            | sort
+          COUNT=$(find output/visuals -type f \
+            \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) \
+            | wc -l)
+
+          echo "Image count: $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No scene images generated"
+            exit 1
+          fi
+
+          find output/visuals -maxdepth 1 -type f \
+            \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) \
+            -print
 
 
       # ==========================================================
-      # 18. PHOTO MOTION
+      # 17. PHOTO MOTION
+      # ==========================================================
+      #
+      # Static realistic image
+      #        ↓
+      # Zoom In / Zoom Out
+      # Pan Left / Pan Right
+      # Subtle camera movement
+      #        ↓
+      # Scene MP4
+      #
       # ==========================================================
 
       - name: Create Photo Motion scene videos
-        shell: bash
         run: |
-          set -e
-
-          echo "=============================================="
-          echo "PHOTO MOTION"
-          echo "=============================================="
-
           python scripts/photo_motion.py
 
 
       # ==========================================================
-      # 19. CHECK PHOTO MOTION OUTPUT
-      # ==========================================================
-
-      - name: Check generated scene videos
-        shell: bash
-        run: |
-          set -e
-
-          COUNT=$(find output/photo_motion \
-            -type f \
-            -iname "*.mp4" \
-            | wc -l)
-
-          echo "Scene videos: $COUNT"
-
-          if [ "$COUNT" -eq 0 ]; then
-            echo "ERROR: Photo Motion produced no videos."
-            exit 1
-          fi
-
-          find output/photo_motion \
-            -type f \
-            -iname "*.mp4" \
-            | sort
-
-
-      # ==========================================================
-      # 20. RENDER FINAL VIDEO
+      # 18. RENDER FINAL VIDEO
       # ==========================================================
 
       - name: Render final video
-        shell: bash
         run: |
-          set -e
-
-          echo "=============================================="
-          echo "FINAL VIDEO RENDER"
-          echo "=============================================="
-
           python scripts/render_video.py
 
 
       # ==========================================================
-      # 21. GENERATE THUMBNAIL
+      # 19. THUMBNAIL
       # ==========================================================
 
       - name: Generate thumbnail
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
-          set -e
-
           python scripts/generate_thumbnail.py || true
 
 
       # ==========================================================
-      # 22. CREATE YOUTUBE METADATA
+      # 20. YOUTUBE METADATA
       # ==========================================================
 
       - name: Create YouTube metadata
-        shell: bash
         run: |
-          set -e
+          mkdir -p output
 
-          python - <<'PY'
-          import json
-          from pathlib import Path
+          TITLE="Katha Lok AI"
 
-          root = Path(".")
+          if [ -f "Input/topic.txt" ]; then
+            TOPIC=$(tr '\n' ' ' < "Input/topic.txt" | xargs)
 
-          topic_file = root / "Input" / "topic.txt"
-
-          topic = ""
-
-          if topic_file.exists():
-              topic = topic_file.read_text(
-                  encoding="utf-8"
-              ).strip()
-
-          if not topic:
-              topic = "Katha Lok AI Story"
-
-          output = root / "output"
-
-          metadata = output / "youtube_metadata.txt"
-
-          text = f"""KATHA LOK AI — YOUTUBE METADATA
-
-          TITLE
-          {topic}
-
-          DESCRIPTION
-          {topic}
-
-          A cinematic Hindi story created by Katha Lok AI.
-
-          FORMAT
-          {__import__("os").environ.get("FORMAT", "short")}
-
-          LANGUAGE
-          Hindi
-
-          CATEGORY
-          Entertainment
-
-          HASHTAGS
-          #KathaLokAI #HindiStory #AIStory #HindiKahani
-          """
-
-          metadata.write_text(
-              text.strip() + "\n",
-              encoding="utf-8"
-          )
-
-          print(
-              "Created:",
-              metadata
-          )
-          PY
-
-
-      # ==========================================================
-      # 23. CREATE FINAL ZIP
-      # ==========================================================
-
-      - name: Create final output ZIP
-        shell: bash
-        run: |
-          set -e
-
-          ZIP_NAME="katha-lok-ai-photo-motion-${GITHUB_RUN_NUMBER}.zip"
-
-          rm -f "$ZIP_NAME"
-
-          zip -r "$ZIP_NAME" \
-            output/videos \
-            output/parts \
-            output/photo_motion \
-            output/visuals \
-            output/thumbnails \
-            output/story \
-            output/scenes \
-            output/narration \
-            output/youtube_metadata.txt \
-            output/config \
-            2>/dev/null || true
-
-          if [ ! -f "$ZIP_NAME" ]; then
-            echo "ERROR: Final ZIP was not created."
-            exit 1
+            if [ -n "$TOPIC" ]; then
+              TITLE="$TOPIC"
+            fi
           fi
 
-          echo "FINAL ZIP:"
-          ls -lh "$ZIP_NAME"
+          cat > output/youtube_metadata.txt <<EOF
+Title:
+$TITLE
+
+Description:
+
+Katha Lok AI — Hindi AI Story Video
+
+This video was generated using the Katha Lok AI
+Photo Motion pipeline.
+
+#KathaLokAI #HindiStory #AIStory #HindiKahani
+
+Tags:
+Katha Lok AI, Hindi story, Hindi kahani, AI story,
+Hindi AI video, Indian story, Hindi storytelling
+EOF
+
+          echo "Metadata created:"
+          cat output/youtube_metadata.txt
 
 
       # ==========================================================
-      # 24. UPLOAD FINAL ARTIFACT
+      # 21. FINAL OUTPUT CHECK
       # ==========================================================
 
-      - name: Upload final video package
+      - name: Check final output
+        run: |
+          echo "============================================================"
+          echo "FINAL OUTPUT"
+          echo "============================================================"
+
+          find output -maxdepth 3 -type f \
+            \( -name "*.mp4" -o -name "*.png" -o -name "*.txt" \) \
+            -print
+
+
+      # ==========================================================
+      # 22. CREATE FINAL ZIP
+      # ==========================================================
+
+      - name: Create final ZIP
+        run: |
+          cd output
+
+          zip -r ../katha-lok-ai-photo-motion-output.zip . \
+            -x "*.pyc" \
+            -x "__pycache__/*"
+
+          cd ..
+
+          ls -lh katha-lok-ai-photo-motion-output.zip
+
+
+      # ==========================================================
+      # 23. UPLOAD ARTIFACT
+      # ==========================================================
+
+      - name: Upload final output
         uses: actions/upload-artifact@v4
         with:
-          name: katha-lok-ai-photo-motion-${{ github.run_number }}
+          name: katha-lok-ai-photo-motion-output
           path: |
-            katha-lok-ai-photo-motion-${{ github.run_number }}.zip
-            output/videos/**
-            output/parts/**
-            output/photo_motion/**
-            output/thumbnails/**
-            output/youtube_metadata.txt
+            output/**
+            katha-lok-ai-photo-motion-output.zip
           if-no-files-found: error
           retention-days: 7
-
-
-      # ==========================================================
-      # 25. UPLOAD DEBUG / JOB DATA
-      # ==========================================================
-
-      - name: Upload pipeline data
-        uses: actions/upload-artifact@v4
-        with:
-          name: katha-lok-ai-photo-motion-data-${{ github.run_number }}
-          path: |
-            output/story/**
-            output/scenes/**
-            output/visuals/**
-            output/narration/**
-            output/photo_motion/**
-          if-no-files-found: warn
-          retention-days: 7
-
-
-      # ==========================================================
-      # 26. FINAL STATUS
-      # ==========================================================
-
-      - name: Final status
-        shell: bash
-        run: |
-          echo
-          echo "============================================================"
-          echo "KATHA LOK AI — PHOTO MOTION COMPLETE"
-          echo "============================================================"
-          echo
-          echo "Repository : PHOTO MOTION"
-          echo "Engine     : FFmpeg Photo Motion"
-          echo "Wan2GP     : DISABLED"
-          echo "Colab      : NOT REQUIRED"
-          echo
-          echo "Motion:"
-          echo "  Zoom In"
-          echo "  Zoom Out"
-          echo "  Pan Left"
-          echo "  Pan Right"
-          echo "  Subtle Camera Motion"
-          echo
-          echo "Final package:"
-          echo "  katha-lok-ai-photo-motion-${GITHUB_RUN_NUMBER}.zip"
-          echo
-          echo "Download from:"
-          echo "  GitHub Actions → Artifacts"
-          echo
-          echo "============================================================"
-
