@@ -1,4 +1,27 @@
 #!/usr/bin/env python3
+"""
+KATHA LOK AI — PHOTO MOTION FINAL VIDEO RENDERER
+
+Pipeline:
+
+output/photo_motion/scene_01.mp4
+output/photo_motion/scene_02.mp4
+...
+        ↓
+ordered scene videos
+        ↓
+part videos
+        ↓
+narration audio
+        ↓
+final MP4
+
+NO Wan2GP
+NO Colab
+NO paid video API
+
+FFmpeg only.
+"""
 
 import json
 import os
@@ -9,466 +32,315 @@ import sys
 from pathlib import Path
 
 
-CONFIG_FILE = Path("Input/topic.txt")
-SCENES_FILE = Path("output/scenes/scenes.json")
+# ============================================================
+# PATHS
+# ============================================================
 
-I2V_DIR = Path("output/i2v")
-AUDIO_DIR = Path("output/narration/audio")
+ROOT = Path(__file__).resolve().parent.parent
 
-SCENES_OUT = Path("output/scenes")
-PARTS_OUT = Path("output/parts")
+OUTPUT = ROOT / "output"
 
-MANIFEST_OUT = Path("output/video_render_manifest.json")
+PHOTO_MOTION_DIR = OUTPUT / "photo_motion"
+PARTS_DIR = OUTPUT / "parts"
+VIDEOS_DIR = OUTPUT / "videos"
+NARRATION_DIR = OUTPUT / "narration"
+SCENES_DIR = OUTPUT / "scenes"
+
+MANIFEST = (
+    PHOTO_MOTION_DIR /
+    "photo_motion_manifest.json"
+)
+
+FINAL_VIDEO = (
+    VIDEOS_DIR /
+    "katha_lok_ai_final.mp4"
+)
+
+CONCAT_FILE = (
+    PHOTO_MOTION_DIR /
+    "concat.txt"
+)
+
+FINAL_CONCAT_FILE = (
+    PHOTO_MOTION_DIR /
+    "final_concat.txt"
+)
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-def clean_config_value(value: str) -> str:
-    value = value.strip()
+FPS = 24
+CRF = 20
+PRESET = "medium"
 
-    if "#" in value:
-        value = value.split("#", 1)[0].strip()
-
-    value = value.strip().strip('"').strip("'")
-
-    return value.strip()
-
-
-def load_config():
-    config = {}
-
-    if not CONFIG_FILE.exists():
-        raise RuntimeError("Input/topic.txt not found.")
-
-    for raw in CONFIG_FILE.read_text(
-        encoding="utf-8"
-    ).splitlines():
-
-        line = raw.strip()
-
-        if not line:
-            continue
-
-        if line.startswith("#"):
-            continue
-
-        if "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-
-        key = key.strip().upper()
-        value = clean_config_value(value)
-
-        config[key] = value
-
-    return config
-
-
-CONFIG = load_config()
-
-FORMAT = CONFIG.get("FORMAT", "full").lower()
-
-if FORMAT not in {"short", "full"}:
-    raise RuntimeError(
-        f"Invalid FORMAT: {FORMAT}. "
-        f"Expected short or full."
-    )
-
-
-# ============================================================
-# FORMAT
-# ============================================================
-
-def get_output_geometry():
-
-    if FORMAT == "short":
-        return 720, 1280
-
-    return 1920, 1080
-
-
-WIDTH, HEIGHT = get_output_geometry()
+DEFAULT_PART_SIZE = 4
 
 
 # ============================================================
 # HELPERS
 # ============================================================
 
-def run(cmd, label):
+def run(cmd):
 
     print()
-    print("=" * 70)
-    print(label)
-    print("=" * 70)
-
+    print("COMMAND:")
     print(" ".join(str(x) for x in cmd))
+    print()
 
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        text=True
     )
 
     print(result.stdout)
 
     if result.returncode != 0:
+
         raise RuntimeError(
-            f"{label} failed with exit code "
-            f"{result.returncode}"
+            "FFmpeg command failed "
+            f"with exit code {result.returncode}"
         )
 
 
-def probe_duration(path: Path) -> float:
+def find_ffmpeg():
 
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    ffmpeg = shutil.which("ffmpeg")
+
+    if not ffmpeg:
+
+        raise RuntimeError(
+            "FFmpeg not found."
+        )
+
+    return ffmpeg
+
+
+def natural_number(path):
+
+    digits = re.findall(
+        r"\d+",
+        Path(path).stem
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Unable to read duration: {path}"
-        )
+    if digits:
+
+        return int(digits[-1])
+
+    return 999999
+
+
+def discover_scene_videos():
+
+    if not PHOTO_MOTION_DIR.exists():
+
+        return []
+
+    files = []
+
+    for path in PHOTO_MOTION_DIR.glob(
+        "scene_*.mp4"
+    ):
+
+        if path.is_file():
+
+            files.append(path)
+
+    files.sort(
+        key=natural_number
+    )
+
+    return files
+
+
+def load_manifest():
+
+    if not MANIFEST.exists():
+
+        return []
 
     try:
-        return float(result.stdout.strip())
+
+        data = json.loads(
+            MANIFEST.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        if isinstance(data, list):
+
+            return data
+
+        if isinstance(data, dict):
+
+            if isinstance(
+                data.get("scenes"),
+                list
+            ):
+
+                return data["scenes"]
+
+            if isinstance(
+                data.get("manifest"),
+                list
+            ):
+
+                return data["manifest"]
+
+        return []
+
+    except Exception as exc:
+
+        print(
+            "WARNING: manifest read failed:",
+            exc
+        )
+
+        return []
+
+
+def safe_duration(ffprobe, path):
+
+    probe = shutil.which(
+        "ffprobe"
+    )
+
+    if not probe:
+
+        return 0.0
+
+    cmd = [
+        probe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path)
+    ]
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    try:
+
+        return float(
+            result.stdout.strip()
+        )
+
     except Exception:
-        raise RuntimeError(
-            f"Invalid duration returned for: {path}"
-        )
 
-
-def find_i2v_clip(part: int, scene: int):
-
-    directory = I2V_DIR / f"part_{part:02d}"
-
-    candidates = [
-        directory / f"scene_{scene:02d}.mp4",
-        directory / f"scene_{scene}.mp4",
-    ]
-
-    for path in candidates:
-        if path.exists() and path.stat().st_size > 1000:
-            return path
-
-    return None
-
-
-def find_audio(part: int, scene: int):
-
-    directory = AUDIO_DIR / f"part_{part:02d}"
-
-    candidates = [
-        directory / f"scene_{scene:02d}.mp3",
-        directory / f"scene_{scene}.mp3",
-    ]
-
-    for path in candidates:
-        if path.exists() and path.stat().st_size > 1000:
-            return path
-
-    return None
-
-
-def natural_part_sort(path: Path):
-
-    match = re.search(
-        r"(\d+)",
-        path.stem
-    )
-
-    return int(match.group(1)) if match else 999999
+        return 0.0
 
 
 # ============================================================
-# VALIDATE SCENES
+# CONCAT FILE
 # ============================================================
 
-def load_scenes():
-
-    if not SCENES_FILE.exists():
-        raise RuntimeError(
-            "output/scenes/scenes.json not found."
-        )
-
-    data = json.loads(
-        SCENES_FILE.read_text(
-            encoding="utf-8"
-        )
-    )
-
-    if data.get("status") != "completed":
-        raise RuntimeError(
-            "scenes.json is not marked completed."
-        )
-
-    scenes = data.get("scenes", [])
-
-    if not scenes:
-        raise RuntimeError(
-            "No scenes found."
-        )
-
-    return scenes
-
-
-# ============================================================
-# RENDER ONE SCENE
-# ============================================================
-
-def render_scene(
-    part: int,
-    scene: int,
-    i2v_path: Path,
-    audio_path: Path,
-    output_path: Path,
+def create_concat_file(
+    paths,
+    output_file
 ):
 
-    output_path.parent.mkdir(
+    lines = []
+
+    for path in paths:
+
+        # FFmpeg concat format.
+        # Absolute paths are converted to safe POSIX strings.
+
+        escaped = (
+            str(path.resolve())
+            .replace("'", "'\\''")
+        )
+
+        lines.append(
+            f"file '{escaped}'"
+        )
+
+    output_file.write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8"
+    )
+
+
+# ============================================================
+# CONCAT VIDEOS
+# ============================================================
+
+def concat_videos(
+    ffmpeg,
+    paths,
+    output
+):
+
+    if not paths:
+
+        raise RuntimeError(
+            "No videos supplied for concatenation."
+        )
+
+    create_concat_file(
+        paths,
+        CONCAT_FILE
+    )
+
+    output.parent.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    audio_duration = probe_duration(
-        audio_path
-    )
-
-    video_duration = probe_duration(
-        i2v_path
-    )
-
-    print()
-    print(
-        f"Part {part} Scene {scene}"
-    )
-    print(
-        f"I2V duration   : {video_duration:.2f}s"
-    )
-    print(
-        f"Audio duration : {audio_duration:.2f}s"
-    )
-
-    # --------------------------------------------------------
-    # If AI video is shorter than narration:
-    # loop the I2V clip naturally until narration finishes.
-    #
-    # If AI video is longer:
-    # trim it to narration length.
-    # --------------------------------------------------------
-
-    filter_complex = (
-        f"[0:v]"
-        f"scale={WIDTH}:{HEIGHT}:"
-        f"force_original_aspect_ratio=increase,"
-        f"crop={WIDTH}:{HEIGHT},"
-        f"setsar=1,"
-        f"format=yuv420p"
-        f"[v]"
-    )
-
     cmd = [
-        "ffmpeg",
+
+        ffmpeg,
+
         "-y",
 
-        # Loop I2V only when needed.
-        "-stream_loop",
-        "-1",
+        "-f",
+        "concat",
+
+        "-safe",
+        "0",
 
         "-i",
-        str(i2v_path),
+        str(CONCAT_FILE),
 
-        "-i",
-        str(audio_path),
-
-        "-filter_complex",
-        filter_complex,
-
-        "-map",
-        "[v]",
-
-        "-map",
-        "1:a:0",
-
-        "-t",
-        f"{audio_duration:.3f}",
-
-        "-r",
-        "24",
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "medium",
-
-        "-crf",
-        "18",
-
-        "-pix_fmt",
-        "yuv420p",
-
-        "-c:a",
-        "aac",
-
-        "-b:a",
-        "192k",
-
-        "-ar",
-        "48000",
+        "-c",
+        "copy",
 
         "-movflags",
         "+faststart",
 
-        str(output_path),
+        str(output)
     ]
 
-    run(
-        cmd,
-        f"Rendering Part {part} Scene {scene}"
-    )
-
-    if not output_path.exists():
-        raise RuntimeError(
-            f"Scene output missing: {output_path}"
-        )
-
-    if output_path.stat().st_size < 1000:
-        raise RuntimeError(
-            f"Scene output is too small: "
-            f"{output_path}"
-        )
+    run(cmd)
 
 
 # ============================================================
-# CONCAT PART
+# PART CREATION
 # ============================================================
 
-def concat_part(
-    part: int,
-    scene_files,
-    output_path: Path,
+def make_parts(
+    ffmpeg,
+    scene_videos
 ):
 
-    concat_file = Path(
-        f"/tmp/lok_ai_part_{part:02d}.txt"
-    )
-
-    with concat_file.open(
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        for scene_file in scene_files:
-
-            f.write(
-                f"file '{scene_file.resolve()}'\n"
-            )
-
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_file),
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(output_path),
-        ],
-        f"Creating Part {part} video"
-    )
-
-    if not output_path.exists():
-        raise RuntimeError(
-            f"Part video missing: {output_path}"
-        )
-
-    if output_path.stat().st_size < 10000:
-        raise RuntimeError(
-            f"Part video is too small: {output_path}"
-        )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print()
-    print("=" * 70)
-    print("        REAL AI IMAGE-TO-VIDEO RENDER")
-    print("=" * 70)
-
-    print()
-    print(f"FORMAT : {FORMAT}")
-    print(
-        f"OUTPUT : {WIDTH}x{HEIGHT}"
-    )
-
-    print()
-    print(
-        "IMPORTANT: Rendering from I2V clips."
-    )
-    print(
-        "Still images are NOT used as video sources."
-    )
-
-    scenes = load_scenes()
-
-    print()
-    print(
-        f"Total scenes: {len(scenes)}"
-    )
-
-    # --------------------------------------------------------
-    # Prepare directories
-    # --------------------------------------------------------
-
-    SCENES_OUT.mkdir(
+    PARTS_DIR.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    PARTS_OUT.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # Remove stale rendered scene videos.
-    if SCENES_OUT.exists():
-
-        for old in SCENES_OUT.glob(
-            "part_*/scene_*.mp4"
-        ):
-
-            try:
-                old.unlink()
-            except Exception:
-                pass
-
-    # Remove stale part videos.
-    for old in PARTS_OUT.glob(
+    # Remove old parts
+    for old in PARTS_DIR.glob(
         "part_*.mp4"
     ):
 
@@ -477,256 +349,624 @@ def main():
         except Exception:
             pass
 
-    # --------------------------------------------------------
-    # Group scenes by part
-    # --------------------------------------------------------
+    parts = []
 
-    parts = {}
+    for start in range(
+        0,
+        len(scene_videos),
+        DEFAULT_PART_SIZE
+    ):
 
-    for item in scenes:
+        group = scene_videos[
+            start:start + DEFAULT_PART_SIZE
+        ]
 
-        part = int(
-            item.get("part", 0)
+        part_number = (
+            start // DEFAULT_PART_SIZE
+        ) + 1
+
+        part_path = (
+            PARTS_DIR /
+            f"part_{part_number:02d}.mp4"
         )
-
-        scene = int(
-            item.get("scene", 0)
-        )
-
-        if part <= 0 or scene <= 0:
-            raise RuntimeError(
-                f"Invalid scene reference: {item}"
-            )
-
-        parts.setdefault(
-            part,
-            []
-        ).append(
-            scene
-        )
-
-    manifest = {
-        "status": "rendering",
-        "format": FORMAT,
-        "width": WIDTH,
-        "height": HEIGHT,
-        "source": "image_to_video",
-        "parts": [],
-    }
-
-    # --------------------------------------------------------
-    # Render every scene
-    # --------------------------------------------------------
-
-    for part in sorted(parts):
 
         print()
         print(
-            "#" * 70
+            "=" * 60
         )
         print(
-            f"# PART {part}"
+            f"PART {part_number}"
         )
         print(
-            "#" * 70
+            "=" * 60
         )
 
-        scene_outputs = []
+        for item in group:
 
-        for scene in sorted(
-            parts[part]
-        ):
-
-            i2v = find_i2v_clip(
-                part,
-                scene
+            print(
+                "  ",
+                item.name
             )
 
-            if i2v is None:
-                raise RuntimeError(
-                    f"Missing I2V video for "
-                    f"Part {part} Scene {scene}"
-                )
-
-            audio = find_audio(
-                part,
-                scene
-            )
-
-            if audio is None:
-                raise RuntimeError(
-                    f"Missing narration audio for "
-                    f"Part {part} Scene {scene}"
-                )
-
-            scene_output_dir = (
-                SCENES_OUT /
-                f"part_{part:02d}"
-            )
-
-            scene_output = (
-                scene_output_dir /
-                f"scene_{scene:02d}.mp4"
-            )
-
-            render_scene(
-                part=part,
-                scene=scene,
-                i2v_path=i2v,
-                audio_path=audio,
-                output_path=scene_output,
-            )
-
-            scene_outputs.append(
-                scene_output
-            )
-
-        # ----------------------------------------------------
-        # Validate scene count
-        # ----------------------------------------------------
-
-        if len(scene_outputs) != len(
-            parts[part]
-        ):
-
-            raise RuntimeError(
-                f"Part {part} scene count mismatch."
-            )
-
-        # ----------------------------------------------------
-        # Create part video
-        # ----------------------------------------------------
-
-        part_output = (
-            PARTS_OUT /
-            f"part_{part:02d}.mp4"
+        concat_videos(
+            ffmpeg,
+            group,
+            part_path
         )
 
-        concat_part(
-            part=part,
-            scene_files=scene_outputs,
-            output_path=part_output,
+        parts.append(
+            part_path
         )
 
-        manifest["parts"].append(
-            {
-                "part": part,
-                "scenes": len(scene_outputs),
-                "output": str(
-                    part_output
-                ),
-                "duration": probe_duration(
-                    part_output
-                ),
-            }
+    return parts
+
+
+# ============================================================
+# AUDIO DISCOVERY
+# ============================================================
+
+def discover_audio():
+
+    if not NARRATION_DIR.exists():
+
+        return []
+
+    candidates = []
+
+    for extension in [
+        "*.mp3",
+        "*.wav",
+        "*.m4a",
+        "*.aac",
+        "*.ogg"
+    ]:
+
+        candidates.extend(
+            NARRATION_DIR.rglob(
+                extension
+            )
         )
 
-    # --------------------------------------------------------
-    # Final validation
-    # --------------------------------------------------------
+    candidates = [
+        p
+        for p in candidates
+        if p.is_file()
+    ]
 
-    expected_parts = len(parts)
-
-    actual_parts = len(
-        list(
-            PARTS_OUT.glob("part_*.mp4")
-        )
+    candidates.sort(
+        key=natural_number
     )
 
-    if actual_parts != expected_parts:
+    return candidates
 
-        raise RuntimeError(
-            f"Part video count mismatch: "
-            f"{actual_parts}/{expected_parts}"
+
+def discover_single_final_audio():
+
+    names = [
+        "final.mp3",
+        "final.wav",
+        "narration.mp3",
+        "narration.wav",
+        "full_narration.mp3",
+        "full_narration.wav",
+        "voiceover.mp3",
+        "voiceover.wav"
+    ]
+
+    for name in names:
+
+        path = NARRATION_DIR / name
+
+        if path.exists():
+
+            return path
+
+    return None
+
+
+# ============================================================
+# CREATE AUDIO CONCAT
+# ============================================================
+
+def concat_audio(
+    ffmpeg,
+    audio_files
+):
+
+    if not audio_files:
+
+        return None
+
+    audio_concat = (
+        NARRATION_DIR /
+        "audio_concat.txt"
+    )
+
+    lines = []
+
+    for path in audio_files:
+
+        escaped = (
+            str(path.resolve())
+            .replace("'", "'\\''")
         )
 
-    manifest["status"] = "completed"
+        lines.append(
+            f"file '{escaped}'"
+        )
 
-    MANIFEST_OUT.write_text(
-        json.dumps(
-            manifest,
-            ensure_ascii=False,
-            indent=2
-        ),
+    audio_concat.write_text(
+        "\n".join(lines) + "\n",
         encoding="utf-8"
     )
 
+    audio_output = (
+        NARRATION_DIR /
+        "combined_narration.m4a"
+    )
+
+    cmd = [
+
+        ffmpeg,
+
+        "-y",
+
+        "-f",
+        "concat",
+
+        "-safe",
+        "0",
+
+        "-i",
+        str(audio_concat),
+
+        "-vn",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "192k",
+
+        str(audio_output)
+    ]
+
+    run(cmd)
+
+    return audio_output
+
+
+# ============================================================
+# FINAL VIDEO + AUDIO
+# ============================================================
+
+def attach_audio(
+    ffmpeg,
+    video,
+    audio,
+    output
+):
+
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    cmd = [
+
+        ffmpeg,
+
+        "-y",
+
+        "-i",
+        str(video),
+
+        "-i",
+        str(audio),
+
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "1:a:0",
+
+        "-c:v",
+        "copy",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "192k",
+
+        "-shortest",
+
+        "-movflags",
+        "+faststart",
+
+        str(output)
+    ]
+
+    run(cmd)
+
+
+# ============================================================
+# FINAL VIDEO WITHOUT AUDIO
+# ============================================================
+
+def copy_final_video(
+    ffmpeg,
+    video,
+    output
+):
+
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    cmd = [
+
+        ffmpeg,
+
+        "-y",
+
+        "-i",
+        str(video),
+
+        "-c:v",
+        "copy",
+
+        "-an",
+
+        "-movflags",
+        "+faststart",
+
+        str(output)
+    ]
+
+    run(cmd)
+
+
+# ============================================================
+# CLEAN OLD FINAL FILES
+# ============================================================
+
+def clean():
+
+    VIDEOS_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    for path in [
+        FINAL_VIDEO,
+        CONCAT_FILE,
+        FINAL_CONCAT_FILE
+    ]:
+
+        if path.exists():
+
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print("=" * 68)
+    print("KATHA LOK AI — PHOTO MOTION FINAL RENDER")
+    print("=" * 68)
+
+    ffmpeg = find_ffmpeg()
+
+    print()
+    print("FFmpeg:", ffmpeg)
+
+    clean()
+
     # --------------------------------------------------------
-    # Summary
+    # Discover scene videos
     # --------------------------------------------------------
 
-    print()
-    print("=" * 70)
-    print("              RENDER COMPLETE")
-    print("=" * 70)
-
-    print()
-    print(
-        f"Format          : {FORMAT}"
-    )
-
-    print(
-        f"Resolution      : {WIDTH}x{HEIGHT}"
-    )
-
-    print(
-        f"Parts           : {actual_parts}"
-    )
-
-    print(
-        f"Scenes          : {len(scenes)}"
+    scene_videos = (
+        discover_scene_videos()
     )
 
     print()
     print(
-        "Source: REAL AI IMAGE-TO-VIDEO clips"
+        "Scene videos found:",
+        len(scene_videos)
     )
 
-    print(
-        "Audio: Hindi scene narration"
-    )
+    if not scene_videos:
 
-    print()
-    print("Generated parts:")
-
-    for part_file in sorted(
-        PARTS_OUT.glob("part_*.mp4"),
-        key=natural_part_sort
-    ):
-
-        duration = probe_duration(
-            part_file
+        raise RuntimeError(
+            "No Photo Motion scene videos found in "
+            f"{PHOTO_MOTION_DIR}"
         )
 
-        size_mb = (
-            part_file.stat().st_size /
-            (1024 * 1024)
+    print()
+
+    for path in scene_videos:
+
+        print(
+            "  ",
+            path.name
+        )
+
+    # --------------------------------------------------------
+    # Manifest
+    # --------------------------------------------------------
+
+    manifest = load_manifest()
+
+    if manifest:
+
+        print()
+        print(
+            "Photo Motion manifest loaded:",
+            len(manifest)
+        )
+
+    # --------------------------------------------------------
+    # Scene durations
+    # --------------------------------------------------------
+
+    total_video_duration = 0.0
+
+    for path in scene_videos:
+
+        duration = safe_duration(
+            ffmpeg,
+            path
+        )
+
+        total_video_duration += duration
+
+    print()
+    print(
+        "Total scene-video duration:",
+        f"{total_video_duration:.2f}s"
+    )
+
+    # --------------------------------------------------------
+    # Create parts
+    # --------------------------------------------------------
+
+    parts = make_parts(
+        ffmpeg,
+        scene_videos
+    )
+
+    print()
+    print(
+        "Parts created:",
+        len(parts)
+    )
+
+    # --------------------------------------------------------
+    # Combine all scene videos
+    # --------------------------------------------------------
+
+    combined_video = (
+        VIDEOS_DIR /
+        "video_without_audio.mp4"
+    )
+
+    concat_videos(
+        ffmpeg,
+        scene_videos,
+        combined_video
+    )
+
+    # --------------------------------------------------------
+    # Find narration
+    # --------------------------------------------------------
+
+    final_audio = (
+        discover_single_final_audio()
+    )
+
+    if final_audio:
+
+        print()
+        print(
+            "Final narration found:",
+            final_audio
+        )
+
+    else:
+
+        audio_files = discover_audio()
+
+        # Do not accidentally use generated combined file
+        audio_files = [
+            p
+            for p in audio_files
+            if p.name !=
+            "combined_narration.m4a"
+        ]
+
+        print()
+        print(
+            "Narration files found:",
+            len(audio_files)
+        )
+
+        if audio_files:
+
+            final_audio = concat_audio(
+                ffmpeg,
+                audio_files
+            )
+
+    # --------------------------------------------------------
+    # Attach narration
+    # --------------------------------------------------------
+
+    if final_audio and final_audio.exists():
+
+        print()
+        print(
+            "=" * 68
+        )
+        print(
+            "ATTACHING NARRATION"
+        )
+        print(
+            "=" * 68
+        )
+
+        attach_audio(
+            ffmpeg,
+            combined_video,
+            final_audio,
+            FINAL_VIDEO
+        )
+
+    else:
+
+        print()
+        print(
+            "WARNING: No narration audio found."
         )
 
         print(
-            f"  {part_file} | "
-            f"{duration:.2f}s | "
-            f"{size_mb:.2f} MB"
+            "Creating video without audio."
         )
+
+        copy_final_video(
+            ffmpeg,
+            combined_video,
+            FINAL_VIDEO
+        )
+
+    # --------------------------------------------------------
+    # Verify final file
+    # --------------------------------------------------------
+
+    if not FINAL_VIDEO.exists():
+
+        raise RuntimeError(
+            "Final video was not created."
+        )
+
+    size = (
+        FINAL_VIDEO.stat().st_size
+    )
+
+    if size <= 0:
+
+        raise RuntimeError(
+            "Final video is empty."
+        )
+
+    # --------------------------------------------------------
+    # Optional aliases
+    # --------------------------------------------------------
+
+    format_value = os.environ.get(
+        "FORMAT",
+        "short"
+    ).lower()
+
+    if format_value == "full":
+
+        final_alias = (
+            VIDEOS_DIR /
+            "katha_lok_ai_full.mp4"
+        )
+
+    else:
+
+        final_alias = (
+            VIDEOS_DIR /
+            "katha_lok_ai_short.mp4"
+        )
+
+    if final_alias != FINAL_VIDEO:
+
+        try:
+
+            if final_alias.exists():
+                final_alias.unlink()
+
+            shutil.copy2(
+                FINAL_VIDEO,
+                final_alias
+            )
+
+        except Exception as exc:
+
+            print(
+                "WARNING: alias creation failed:",
+                exc
+            )
+
+    # --------------------------------------------------------
+    # Final report
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 68)
+    print("PHOTO MOTION FINAL VIDEO READY")
+    print("=" * 68)
 
     print()
     print(
-        f"Manifest: {MANIFEST_OUT}"
+        "Scenes:",
+        len(scene_videos)
+    )
+
+    print(
+        "Parts:",
+        len(parts)
+    )
+
+    print(
+        "Duration:",
+        f"{total_video_duration:.2f}s"
+    )
+
+    print(
+        "Format:",
+        format_value
+    )
+
+    print(
+        "Final video:",
+        FINAL_VIDEO
+    )
+
+    print(
+        "Size:",
+        f"{size / (1024 * 1024):.2f} MB"
     )
 
     print()
-    print("=" * 70)
+    print(
+        "STATUS: SUCCESS"
+    )
+
+    print("=" * 68)
 
 
 if __name__ == "__main__":
 
     try:
+
         main()
 
     except KeyboardInterrupt:
 
         print(
-            "Interrupted."
+            "\nStopped by user."
         )
 
         sys.exit(130)
@@ -734,8 +974,12 @@ if __name__ == "__main__":
     except Exception as exc:
 
         print()
+        print("=" * 68)
+        print("PHOTO MOTION RENDER FAILED")
+        print("=" * 68)
+
         print(
-            f"ERROR: {exc}"
+            str(exc)
         )
 
         sys.exit(1)
