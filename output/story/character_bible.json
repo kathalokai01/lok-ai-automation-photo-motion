@@ -1,0 +1,51 @@
+{
+  "status": "completed",
+  "topic": "आत्माराम की कहानी",
+  "model": "gemini-3.5-flash-lite",
+  "characters": [
+    {
+      "character_id": "CHAR_001",
+      "name": "Atmaram",
+      "role": "Protagonist / Seeker of Truth",
+      "importance": "Primary",
+      "age": "Late 60s",
+      "gender": "Male",
+      "personality": "Determined, courageous, haunted by the past, inquisitive",
+      "appearance": "An elderly Indian man with a weathered, rugged look, deeply etched wrinkles from age and sorrow, and a lean yet sturdy frame suited for his age.",
+      "face_features": "Deep-set brown eyes reflecting shock and resolve, prominent cheekbones, sharp jawline covered by subtle stubble, intense and expressive gaze.",
+      "hair": "Short silver-white hair, neatly combed back with receding hairline, matching a neatly trimmed silver beard and mustache.",
+      "clothing": "Traditional layered Indian attire consisting of a loose cotton kurta, a dark vest over it, and loose trousers, often draped with a simple shawl for the cold nights.",
+      "body_features": "Lean build, slightly hunched with age but stands straight when determined, hands showing prominent veins and weathered knuckles.",
+      "distinctive_features": "A scar on his left hand from an old incident, piercing observant eyes, often seen carrying a wooden walking stick.",
+      "visual_identity": "Elderly Indian man, late 60s, silver-white hair, trimmed silver beard, deep wrinkles, traditional kurta and vest, intense and determined expression.",
+      "consistency_rules": [
+        "Must always maintain silver-white hair and trimmed silver beard",
+        "Must wear traditional Indian kurta and vest combinations across all scenes",
+        "Facial wrinkles and deep-set eyes must remain consistent",
+        "Must look like a man in his late 60s with a lean and weathered frame"
+      ]
+    },
+    {
+      "character_id": "CHAR_002",
+      "name": "Village Leader",
+      "role": "Antagonist / Obstacle to Truth",
+      "importance": "Secondary",
+      "age": "Late 50s",
+      "gender": "Male",
+      "personality": "Stern, authoritarian, manipulative, protective of dark secrets",
+      "appearance": "A commanding and intimidating middle-aged man with an imposing physical presence and authoritative demeanor.",
+      "face_features": "Stern expression, sharp piercing eyes, thick eyebrows, strong jawline, cold and calculating look.",
+      "hair": "Short salt-and-pepper hair, slicked back neatly, clean-shaven face with a sharp mustache.",
+      "clothing": "Traditional upper-class rural attire including a well-fitted white kurta-pyjama and a dark Nehru jacket, exuding power and status.",
+      "body_features": "Tall, broad-shouldered, upright posture reflecting dominance.",
+      "distinctive_features": "A commanding aura, sharp intimidating gaze, authoritative stance.",
+      "visual_identity": "Middle-aged Indian man, late 50s, salt-and-pepper hair, clean-shaven with mustache, white kurta-pyjama with dark Nehru jacket, stern and authoritative expression.",
+      "consistency_rules": [
+        "Must always look stern and authoritative",
+        "Must wear traditional upper-class rural clothing like Nehru jackets",
+        "Hair must remain short salt-and-pepper",
+        "Must be visibly imposing compared to the protagonist"
+      ]
+    }
+  ]
+}

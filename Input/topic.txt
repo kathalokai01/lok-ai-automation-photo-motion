@@ -1,0 +1,204 @@
+# ============================================================
+# VIDEO FORMAT & AUDIENCE
+# ============================================================
+
+FORMAT = "short"                  # short = 9:16 vertical ~1 min | full = 16:9 long-form video
+AUDIENCE = "adult"                # adult = बड़ों के लिए | kids = बच्चों के लिए
+
+
+# ============================================================
+# VOICE / NARRATION
+# ============================================================
+
+VOICE = "male"                    # male = पुरुष voice | female = महिला voice
+SPEED = "+0%"                     # -10% = धीमी | 0% = normal | +10% = तेज
+
+
+# ============================================================
+# STORY INPUT
+# ============================================================
+
+TOPIC = "आत्माराम की कहानी"        # नया story topic; STORY_TEXT खाली होने पर इसी से कहानी बनेगी
+
+STORY_TEXT = """
+"""                               # अपनी कहानी डालें; खाली = TOPIC से नई कहानी generate होगी
+
+PARTS = 4                          # 1 = single video | 2/3/4... = अलग-अलग video parts
+SCENES = 11                        # हर part में scenes की संख्या
+
+STORY_LENGTH = "auto"              # auto = format/scenes के अनुसार | short | medium | long
+SCENE_DURATION = "auto"            # auto = narration/story के अनुसार | fixed = लगभग समान duration
+
+
+# ============================================================
+# CAPTIONS
+# ============================================================
+
+CAPTIONS = "hindi"                 # hindi | english | Hinglish
+
+
+# ============================================================
+# STORY STRUCTURE
+# ============================================================
+
+PART_HOOK = true                   # हर part की शुरुआत में strong hook
+PART_SUSPENSE = true               # अंतिम part को छोड़कर हर part के अंत में suspense/cliffhanger
+FINAL_RESOLUTION = true             # अंतिम part में complete story resolution
+
+
+# ============================================================
+# VISUAL STYLE
+# ============================================================
+
+VISUAL_STYLE = "cinematic_realistic"
+# cinematic_realistic = realistic movie-style cinematic look
+# realistic_3d = realistic 3D animation
+# cinematic_2d = detailed cinematic 2D animation
+# indian_folk = Indian folk-art inspired animation
+# storybook = illustrated storybook / fairy-tale style
+# historical = historical-period cinematic style
+# fantasy = cinematic fantasy world
+# dark_fantasy = dark and mysterious fantasy
+# anime_cinematic = cinematic anime style
+# clay_animation = stop-motion clay animation
+# watercolor = watercolor animation
+# comic_cinematic = cinematic comic-book style
+# minimalist = clean/simple artistic style
+
+REALISM = "high"
+# high = maximum practical realism
+# medium = realistic + slightly stylized
+# low = clearly artistic/animated
+
+
+# ============================================================
+# CHARACTER & WORLD CONSISTENCY
+# ============================================================
+
+CHARACTER_BIBLE = true              # characters की appearance, age, clothing, personality पहले define करना
+CHARACTER_CONSISTENCY = true        # face, hair, clothes, age और identity scenes में consistent रखना
+WORLD_CONSISTENCY = true            # locations, architecture, environment और time-period consistent रखना
+SCENE_CONTINUITY = true             # previous scene की location/action/time से next scene connect करना
+
+
+# ============================================================
+# CAMERA
+# ============================================================
+
+CINEMATIC_CAMERA = true             # movie-style framing, camera movement और depth effects
+
+CAMERA_STYLE = "cinematic"
+# cinematic = film-style camera movement
+# dynamic = energetic/fast camera movement
+# slow = slow dramatic movement
+# documentary = natural observational camera
+# static = mostly fixed shots
+
+
+# ============================================================
+# LIGHTING
+# ============================================================
+
+LIGHTING = "cinematic"
+# cinematic = controlled film-style lighting
+# natural = realistic natural light
+# warm = warm emotional lighting
+# dark = low-key dark lighting
+# dramatic = strong contrast/shadows
+# soft = soft gentle lighting
+# night = realistic night lighting
+
+
+# ============================================================
+# MOOD
+# ============================================================
+
+MOOD = "dramatic"
+# dramatic = serious/intense
+# emotional = emotional/heart-touching
+# mysterious = mysterious
+# suspense = tension/curiosity
+# horror = frightening atmosphere
+# joyful = happy/positive
+# inspirational = inspirational
+# peaceful = calm
+
+
+# ============================================================
+# VISUAL QUALITY / CLEAN OUTPUT
+# ============================================================
+
+QUALITY = "high"
+# draft = fast testing
+# standard = normal production
+# high = maximum practical quality
+
+FPS = 24                             # 24 = cinematic | 30 = smoother/general video
+
+NEGATIVE_PROMPT = true               # distorted faces, extra fingers, duplicate people, text, watermark आदि avoid करना
+
+AVOID_CARTOON_LOOK = true            # unnecessary cartoon appearance avoid करना
+AVOID_NEON = true                    # neon/glowing cyberpunk appearance avoid करना
+AVOID_GLITCH_EFFECTS = true          # unnecessary glitch effects avoid करना
+NATURAL_MOTION = true                # natural character/camera movement prioritize करना
+REALISTIC_LIGHTING = true            # believable light और shadows
+
+
+# ============================================================
+# MUSIC & SOUND
+# ============================================================
+
+MUSIC = true                         # cinematic background music
+
+MUSIC_STYLE = "cinematic"
+# cinematic = movie-style score
+# emotional = emotional music
+# suspense = suspense/tension music
+# devotional = devotional atmosphere
+# folk = traditional/folk-inspired
+# fantasy = fantasy score
+# none = no music
+
+SFX = true                           # actions/events के matching sound effects
+AMBIENT_SOUND = true                 # environment sounds: wind, rain, village, forest आदि
+
+
+# ============================================================
+# EDITING
+# ============================================================
+
+TRANSITIONS = "cinematic"
+# cinematic = context के अनुसार cut/fade/dissolve
+# clean = mostly clean cuts
+# none = direct cuts
+
+
+# ============================================================
+# BRANDING
+# ============================================================
+
+WATERMARK = false                    # false = automatic watermark नहीं
+LOGO = false                         # false = automatic logo नहीं
+
+
+# ============================================================
+# ERROR RECOVERY / RESUME
+# ============================================================
+
+RESUME_ENABLED = true
+# true = failure के बाद last completed point से continue
+# false = fresh run
+
+MAX_RETRIES = 3
+# एक failed scene को अधिकतम कितनी बार retry करना है
+
+SAVE_CHECKPOINT_AFTER_EACH_SCENE = true
+# हर successful scene के बाद progress save करना
+
+SKIP_COMPLETED_SCENES = true
+# पहले से successfully generated scenes दोबारा नहीं बनाना
+
+FAILURE_POLICY = "retry_then_checkpoint"
+# retry_then_checkpoint = retry → फिर भी fail हो तो checkpoint save करके stop
+# skip = failed scene छोड़कर आगे बढ़ना
+# stop = पहली failure पर workflow रोकना

@@ -1,0 +1,491 @@
+{
+  "status": "planned",
+  "topic": "आत्माराम की कहानी",
+  "format": "short",
+  "audience": "adult",
+  "parts": [
+    {
+      "part": 1,
+      "hook_required": true,
+      "suspense_required": true,
+      "final_resolution": false,
+      "scenes": [
+        {
+          "scene": 1,
+          "status": "pending",
+          "role": "opening hook and setup",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 2,
+          "status": "pending",
+          "role": "introduce the central situation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 3,
+          "status": "pending",
+          "role": "develop the main conflict",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 4,
+          "status": "pending",
+          "role": "raise the stakes",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 5,
+          "status": "pending",
+          "role": "reveal an important clue",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 6,
+          "status": "pending",
+          "role": "turning point",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 7,
+          "status": "pending",
+          "role": "confrontation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 8,
+          "status": "pending",
+          "role": "consequence",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 9,
+          "status": "pending",
+          "role": "emotional or thematic development",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 10,
+          "status": "pending",
+          "role": "climax preparation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 11,
+          "status": "pending",
+          "role": "climax or resolution",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        }
+      ]
+    },
+    {
+      "part": 2,
+      "hook_required": true,
+      "suspense_required": true,
+      "final_resolution": false,
+      "scenes": [
+        {
+          "scene": 1,
+          "status": "pending",
+          "role": "opening hook and setup",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 2,
+          "status": "pending",
+          "role": "introduce the central situation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 3,
+          "status": "pending",
+          "role": "develop the main conflict",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 4,
+          "status": "pending",
+          "role": "raise the stakes",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 5,
+          "status": "pending",
+          "role": "reveal an important clue",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 6,
+          "status": "pending",
+          "role": "turning point",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 7,
+          "status": "pending",
+          "role": "confrontation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 8,
+          "status": "pending",
+          "role": "consequence",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 9,
+          "status": "pending",
+          "role": "emotional or thematic development",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 10,
+          "status": "pending",
+          "role": "climax preparation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 11,
+          "status": "pending",
+          "role": "climax or resolution",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        }
+      ]
+    },
+    {
+      "part": 3,
+      "hook_required": true,
+      "suspense_required": true,
+      "final_resolution": false,
+      "scenes": [
+        {
+          "scene": 1,
+          "status": "pending",
+          "role": "opening hook and setup",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 2,
+          "status": "pending",
+          "role": "introduce the central situation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 3,
+          "status": "pending",
+          "role": "develop the main conflict",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 4,
+          "status": "pending",
+          "role": "raise the stakes",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 5,
+          "status": "pending",
+          "role": "reveal an important clue",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 6,
+          "status": "pending",
+          "role": "turning point",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 7,
+          "status": "pending",
+          "role": "confrontation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 8,
+          "status": "pending",
+          "role": "consequence",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 9,
+          "status": "pending",
+          "role": "emotional or thematic development",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 10,
+          "status": "pending",
+          "role": "climax preparation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 11,
+          "status": "pending",
+          "role": "climax or resolution",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        }
+      ]
+    },
+    {
+      "part": 4,
+      "hook_required": true,
+      "suspense_required": false,
+      "final_resolution": true,
+      "scenes": [
+        {
+          "scene": 1,
+          "status": "pending",
+          "role": "opening hook and setup",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 2,
+          "status": "pending",
+          "role": "introduce the central situation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 3,
+          "status": "pending",
+          "role": "develop the main conflict",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 4,
+          "status": "pending",
+          "role": "raise the stakes",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 5,
+          "status": "pending",
+          "role": "reveal an important clue",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 6,
+          "status": "pending",
+          "role": "turning point",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 7,
+          "status": "pending",
+          "role": "confrontation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 8,
+          "status": "pending",
+          "role": "consequence",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 9,
+          "status": "pending",
+          "role": "emotional or thematic development",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 10,
+          "status": "pending",
+          "role": "climax preparation",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        },
+        {
+          "scene": 11,
+          "status": "pending",
+          "role": "climax or resolution",
+          "narration": "",
+          "visual_prompt": "",
+          "negative_prompt": "",
+          "sfx_prompt": "",
+          "music_prompt": ""
+        }
+      ]
+    }
+  ],
+  "generation_notes": {
+    "story_text_supplied": true,
+    "character_bible": true,
+    "character_consistency": true,
+    "world_consistency": true,
+    "scene_continuity": true,
+    "visual_style": "cinematic_realistic",
+    "camera_style": "cinematic",
+    "lighting": "cinematic",
+    "mood": "dramatic"
+  }
+}
