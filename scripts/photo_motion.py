@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Generate validated Photo Motion clips from scene images."""
+"""Generate validated cinematic Photo Motion clips from scene images."""
 
 import json
 import math
@@ -21,12 +22,18 @@ MANIFEST_FILE = OUTPUT_DIR / "photo_motion_manifest.json"
 CRF = 20
 PRESET = "medium"
 
+# Effects rotate deterministically through scenes.
+# No external paid motion service is used.
 EFFECTS = [
     "zoom_in",
     "pan_left",
+    "tilt_up",
     "zoom_out",
     "pan_right",
-    "subtle",
+    "tilt_down",
+    "diagonal_drift",
+    "handheld_drift",
+    "cinematic_sweep",
 ]
 
 
@@ -36,17 +43,14 @@ def log(*items):
 
 def run_command(command):
     log("\n$", " ".join(map(str, command)))
-
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
-
     if result.stdout:
         log(result.stdout)
-
     if result.returncode != 0:
         raise RuntimeError(
             f"Command failed with exit code {result.returncode}."
@@ -63,9 +67,7 @@ def read_jobs():
     try:
         data = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise RuntimeError(
-            f"Cannot read visual jobs: {exc}"
-        ) from exc
+        raise RuntimeError(f"Cannot read visual jobs: {exc}") from exc
 
     if isinstance(data, list):
         jobs = data
@@ -80,9 +82,7 @@ def read_jobs():
         jobs = []
 
     if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError(
-            "visual_jobs.json contains no valid scene jobs."
-        )
+        raise RuntimeError("visual_jobs.json contains no valid scene jobs.")
 
     return jobs
 
@@ -92,18 +92,15 @@ def safe_path(value, label):
         raise RuntimeError(f"Missing {label}.")
 
     path = (ROOT / str(value)).resolve()
-
     if not path.is_relative_to(ROOT):
         raise RuntimeError(
             f"{label} must remain inside the repository: {value}"
         )
-
     return path
 
 
 def scene_number(job, index):
     value = job.get("global_scene", job.get("scene", index))
-
     if isinstance(value, dict):
         value = value.get("global_scene", value.get("number"))
 
@@ -115,10 +112,7 @@ def scene_number(job, index):
         ) from exc
 
     if number < 1:
-        raise RuntimeError(
-            f"Scene number must be positive: {number}"
-        )
-
+        raise RuntimeError(f"Scene number must be positive: {number}")
     return number
 
 
@@ -131,15 +125,12 @@ def scene_duration(job):
     ):
         try:
             value = float(job.get(key))
-
             if math.isfinite(value) and 0.5 <= value <= 3600:
                 return value
         except (TypeError, ValueError):
             continue
 
-    raise RuntimeError(
-        "Every scene needs a valid positive duration."
-    )
+    raise RuntimeError("Every scene needs a valid positive duration.")
 
 
 def prepare_jobs(jobs):
@@ -148,37 +139,26 @@ def prepare_jobs(jobs):
 
     for index, job in enumerate(jobs, start=1):
         if not isinstance(job, dict):
-            raise RuntimeError(
-                f"Scene job {index} is not a JSON object."
-            )
+            raise RuntimeError(f"Scene job {index} is not a JSON object.")
 
         number = scene_number(job, index)
-
         if number in seen:
-            raise RuntimeError(
-                f"Duplicate global scene number: {number}"
-            )
-
+            raise RuntimeError(f"Duplicate global scene number: {number}")
         seen.add(number)
 
         image_value = job.get("image_path") or job.get("image")
-        image = safe_path(
-            image_value,
-            f"image path for scene {number}",
-        )
+        image = safe_path(image_value, f"image path for scene {number}")
 
         if not image.is_file() or image.stat().st_size < 1000:
             raise RuntimeError(
                 f"Scene {number} image is missing or too small: {image}"
             )
 
-        # Validate the actual image rather than only its filename.
         try:
             from PIL import Image
 
             with Image.open(image) as source:
                 source.verify()
-
             with Image.open(image) as source:
                 if source.width < 64 or source.height < 64:
                     raise RuntimeError(
@@ -199,7 +179,6 @@ def prepare_jobs(jobs):
         })
 
     prepared.sort(key=lambda item: item["number"])
-
     actual = [item["number"] for item in prepared]
     expected = list(range(1, len(prepared) + 1))
 
@@ -213,12 +192,15 @@ def prepare_jobs(jobs):
 
 
 def make_filter(effect, frames, width, height, fps):
-    """Create a smooth pan/zoom filter for a still image."""
+    """Build smooth camera-like movement from a still image."""
 
     denominator = max(frames - 1, 1)
+
+    # Work on a larger canvas to provide room for movement.
     source_width = width * 2
     source_height = height * 2
 
+    # The zoom range is deliberately restrained to avoid excessive motion.
     if effect == "zoom_in":
         zoom = f"min(1+0.10*on/{denominator},1.10)"
         x = "(iw-iw/zoom)/2"
@@ -239,10 +221,33 @@ def make_filter(effect, frames, width, height, fps):
         x = f"(iw-iw/zoom)*on/{denominator}"
         y = "(ih-ih/zoom)/2"
 
-    else:
-        zoom = f"1+0.015*sin(on/{max(frames, 1)}*PI)"
+    elif effect == "tilt_up":
+        zoom = "1.07"
         x = "(iw-iw/zoom)/2"
-        y = "(ih-ih/zoom)/2"
+        y = f"(ih-ih/zoom)*(1-on/{denominator})"
+
+    elif effect == "tilt_down":
+        zoom = "1.07"
+        x = "(iw-iw/zoom)/2"
+        y = f"(ih-ih/zoom)*on/{denominator}"
+
+    elif effect == "diagonal_drift":
+        zoom = "1.09"
+        x = f"(iw-iw/zoom)*on/{denominator}"
+        y = f"(ih-ih/zoom)*(1-on/{denominator})"
+
+    elif effect == "handheld_drift":
+        zoom = "1.055"
+        x = f"(iw-iw/zoom)/2+2*sin(on*0.16)"
+        y = f"(ih-ih/zoom)/2+2*sin(on*0.11)"
+
+    elif effect == "cinematic_sweep":
+        zoom = f"1.035+0.025*sin(PI*on/{denominator})"
+        x = f"(iw-iw/zoom)*(0.5-0.35*cos(PI*on/{denominator}))"
+        y = f"(ih-ih/zoom)*(0.5+0.20*sin(PI*on/{denominator}))"
+
+    else:
+        raise RuntimeError(f"Unsupported motion effect: {effect}")
 
     return (
         f"scale={source_width}:{source_height}:"
@@ -256,9 +261,7 @@ def make_filter(effect, frames, width, height, fps):
 
 def probe_clip(path, ffprobe, width, height, expected_duration):
     if not path.is_file() or path.stat().st_size <= 0:
-        raise RuntimeError(
-            f"Scene video is missing or empty: {path}"
-        )
+        raise RuntimeError(f"Scene video is missing or empty: {path}")
 
     result = subprocess.run(
         [
@@ -287,26 +290,21 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
             f"Invalid ffprobe output for {path.name}: {exc}"
         ) from exc
 
-    streams = data.get("streams", [])
     video_streams = [
-        stream for stream in streams
+        stream for stream in data.get("streams", [])
         if stream.get("codec_type") == "video"
     ]
-
     if not video_streams:
-        raise RuntimeError(
-            f"{path.name} has no video stream."
-        )
+        raise RuntimeError(f"{path.name} has no video stream.")
 
     stream = video_streams[0]
+    actual_width = int(stream.get("width", 0))
+    actual_height = int(stream.get("height", 0))
 
-    if (
-        int(stream.get("width", 0)) != width
-        or int(stream.get("height", 0)) != height
-    ):
+    if (actual_width, actual_height) != (width, height):
         raise RuntimeError(
             f"Wrong resolution for {path.name}: "
-            f"{stream.get('width')}x{stream.get('height')}"
+            f"{actual_width}x{actual_height}"
         )
 
     if abs(actual_duration - expected_duration) > 1.0:
@@ -321,14 +319,11 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
 
 def write_manifest(entries):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
     temporary = MANIFEST_FILE.with_suffix(".json.tmp")
-
     temporary.write_text(
         json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-
     temporary.replace(MANIFEST_FILE)
 
 
@@ -339,7 +334,7 @@ def main():
 
     if not 1 <= fps <= 60:
         raise RuntimeError(
-            f"FPS must be between 1 and 60 for this workflow; got {fps}."
+            f"FPS must be between 1 and 60; got {fps}."
         )
 
     if mode == "full":
@@ -349,51 +344,42 @@ def main():
 
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
-
     if not ffmpeg:
         raise RuntimeError("FFmpeg is not installed.")
-
     if not ffprobe:
         raise RuntimeError("ffprobe is not installed.")
 
     jobs = read_jobs()
     prepared = prepare_jobs(jobs)
-
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Remove only this renderer's old outputs.
-    for pattern in ("scene_*.mp4",):
-        for old_file in OUTPUT_DIR.glob(pattern):
-            if old_file.is_file():
-                old_file.unlink()
+    # Remove old scene clips from this renderer before a fresh run.
+    for old_file in OUTPUT_DIR.glob("scene_*.mp4"):
+        if old_file.is_file():
+            old_file.unlink()
 
     manifest = []
 
     for index, item in enumerate(prepared):
         number = item["number"]
         image = item["image"]
-        seconds = item["duration"]
+        requested_seconds = item["duration"]
         target = item["target"]
 
-        frames = max(1, round(seconds * fps))
+        frames = max(1, round(requested_seconds * fps))
         actual_duration = frames / fps
         effect = EFFECTS[index % len(EFFECTS)]
 
         log("\n" + "=" * 55)
         log(f"Scene: {number}/{len(prepared)}")
         log(f"Image: {image.relative_to(ROOT)}")
-        log(f"Effect: {effect}")
+        log(f"Motion: {effect}")
         log(f"Duration: {actual_duration:.3f}s")
         log(f"FPS: {fps}")
         log(f"Resolution: {width}x{height}")
-        log(f"Output: {target.relative_to(ROOT)}")
 
         video_filter = make_filter(
-            effect,
-            frames,
-            width,
-            height,
-            fps,
+            effect, frames, width, height, fps
         )
 
         run_command([
@@ -417,11 +403,7 @@ def main():
         ])
 
         actual = probe_clip(
-            target,
-            ffprobe,
-            width,
-            height,
-            actual_duration,
+            target, ffprobe, width, height, actual_duration
         )
 
         manifest.append({
@@ -432,7 +414,7 @@ def main():
             "image": str(image.relative_to(ROOT)),
             "video": str(target.relative_to(ROOT)),
             "duration": actual,
-            "requested_duration": seconds,
+            "requested_duration": requested_seconds,
             "frames": frames,
             "effect": effect,
             "width": width,
@@ -442,14 +424,12 @@ def main():
             "size_bytes": target.stat().st_size,
         })
 
-        # Save progress after every scene, so completed clips
-        # remain represented in the manifest if a later scene fails.
+        # Save after every scene so completed work is recorded.
         write_manifest(manifest)
 
     if len(manifest) != len(jobs):
         raise RuntimeError(
-            f"Clip count mismatch: jobs={len(jobs)}, "
-            f"clips={len(manifest)}"
+            f"Clip count mismatch: jobs={len(jobs)}, clips={len(manifest)}"
         )
 
     log("\n" + "=" * 55)
@@ -462,6 +442,7 @@ def main():
         "Total duration:",
         f"{sum(row['duration'] for row in manifest):.2f}s",
     )
+    log("Motion effects used:", ", ".join(EFFECTS))
     log("Manifest:", MANIFEST_FILE.relative_to(ROOT))
 
 
@@ -471,8 +452,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         sys.exit(130)
     except Exception as exc:
-        print(
-            f"PHOTO MOTION FAILED: {exc}",
-            file=sys.stderr,
-        )
+        print(f"PHOTO MOTION FAILED: {exc}", file=sys.stderr)
         sys.exit(1)
