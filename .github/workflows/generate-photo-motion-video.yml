@@ -13,6 +13,10 @@ jobs:
 
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
+      REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+      ALLOW_BILLABLE_PROVIDERS: "false"
 
     steps:
       - name: Checkout repository
@@ -146,7 +150,10 @@ jobs:
           if title_file.is_file():
               story_title = title_file.read_text(encoding="utf-8").strip().splitlines()[0]
 
-          title = re.sub(r"\s+", " ", story_title or topic or "Katha Lok AI Hindi Story").strip()[:100]
+          title = re.sub(
+              r"\s+", " ",
+              story_title or topic or "Katha Lok AI Hindi Story"
+          ).strip()[:100]
 
           story_file = output / "story" / "story.json"
           story_text = ""
@@ -168,15 +175,22 @@ jobs:
           if len(story_text) > 2500:
               description_story = description_story.rsplit(" ", 1)[0] + "..."
 
-          description = (
-              f"{title}\n\n{description_story}\n\n"
-              "Watch the story till the end and share your thoughts in the comments."
-              if description_story else
-              f"{title}\n\nWatch this Hindi story from Katha Lok AI, based on: {topic or title}.\n\n"
-              "Share your thoughts in the comments."
-          )
+          if description_story:
+              description = (
+                  f"{title}\n\n{description_story}\n\n"
+                  "Watch the story till the end and share your thoughts in the comments."
+              )
+          else:
+              description = (
+                  f"{title}\n\n"
+                  f"Watch this Hindi story from Katha Lok AI, based on: {topic or title}.\n\n"
+                  "Share your thoughts in the comments."
+              )
 
-          words = re.findall(r"[A-Za-z0-9]+|[\u0900-\u097F]+", f"{title} {topic} {story_text[:5000]}")
+          words = re.findall(
+              r"[A-Za-z0-9]+|[\u0900-\u097F]+",
+              f"{title} {topic} {story_text[:5000]}"
+          )
           dynamic_tags = []
           seen = set()
           for word in words:
@@ -186,17 +200,26 @@ jobs:
                   seen.add(key)
                   dynamic_tags.append(word)
 
-          fixed_tags = ["Katha Lok AI", "Hindi story", "Hindi kahani", "Hindi storytelling"]
+          fixed_tags = [
+              "Katha Lok AI",
+              "Hindi story",
+              "Hindi kahani",
+              "Hindi storytelling"
+          ]
           tags = []
           for tag in dynamic_tags + fixed_tags:
               if tag.casefold() not in {x.casefold() for x in tags}:
                   tags.append(tag)
           tags = tags[:20]
 
-          title_words = re.findall(r"[A-Za-z0-9]+|[\u0900-\u097F]+", title)
+          title_words = re.findall(
+              r"[A-Za-z0-9]+|[\u0900-\u097F]+", title
+          )
           title_hashtag = "".join(title_words[:3])
           hashtags = ["#KathaLokAI", "#HindiKahani"]
-          if title_hashtag and ("#" + title_hashtag).casefold() not in {x.casefold() for x in hashtags}:
+          if title_hashtag and (
+              "#" + title_hashtag
+          ).casefold() not in {x.casefold() for x in hashtags}:
               hashtags.append("#" + title_hashtag)
 
           description += "\n\n" + " ".join(hashtags)
