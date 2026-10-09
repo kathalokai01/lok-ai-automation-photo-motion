@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Katha Lok AI: resumable multi-provider scene image fallback."""
+"""Katha Lok AI - resumable scene image fallback."""
 
 from __future__ import annotations
 
@@ -26,29 +25,27 @@ VISUAL_DIR = ROOT / "output/visuals"
 JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUAL_DIR / "image_generation_manifest.json"
 
-HF_SPACE = "mrfakename/Z-Image-Turbo"
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 POLLINATIONS_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 REPLICATE_KEY = os.getenv("REPLICATE_API_TOKEN", "").strip()
 
-# Billable or uncertain services remain disabled unless explicitly enabled.
 ALLOW_BILLABLE = (
     os.getenv("ALLOW_BILLABLE_PROVIDERS", "false").strip().lower()
     in {"true", "1", "yes"}
 )
 
-BASE_SEED = 20261009
-MAX_ATTEMPTS = 2
 TIMEOUT = 150
+MAX_ATTEMPTS = 2
+BASE_SEED = 20261009
 
 QUALITY = """
 Photorealistic live-action cinematic photography.
-Realistic Indian people, locations, clothing and architecture.
-Natural skin texture, believable anatomy, realistic lighting and shadows.
-Preserve recurring character appearance and clothing.
-No cartoon, anime, illustration, painting, CGI, plastic skin,
-extra limbs, distorted faces, text, logos or watermarks.
+Realistic Indian people, clothing, locations and architecture.
+Natural skin texture, believable anatomy, realistic lighting.
+Consistent recurring characters and clothing.
+No cartoon, anime, illustration, CGI, plastic skin,
+distorted faces, extra limbs, text, logos or watermarks.
 """
 
 session = requests.Session()
@@ -59,8 +56,7 @@ def log(message):
 
 
 def load_json(path):
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def save_json(path, data):
@@ -74,10 +70,11 @@ def save_json(path, data):
 
 
 def image_size(job):
-    value = str(job.get("image_size", "720x1280")).lower()
     try:
-        width, height = map(int, value.split("x", 1))
-        if width >= 256 and height >= 256:
+        width, height = map(
+            int, str(job.get("image_size", "720x1280")).lower().split("x", 1)
+        )
+        if 256 <= width <= 2048 and 256 <= height <= 2048:
             return width, height
     except (ValueError, TypeError):
         pass
@@ -97,41 +94,39 @@ def valid_image(path):
     try:
         if not path.is_file() or path.stat().st_size < 5000:
             return False
-        with Image.open(path) as im:
-            im.verify()
+        with Image.open(path) as image:
+            image.verify()
         return True
     except Exception:
         return False
 
 
 def save_pil(image, destination, size):
-    """Save a verified RGB/RGBA image at the required scene dimensions."""
     if not isinstance(image, Image.Image):
-        raise ValueError("Provider returned no PIL image")
+        raise ValueError("Provider did not return a PIL image")
 
     image = ImageOps.exif_transpose(image).convert("RGB")
     image = ImageOps.fit(
         image,
         size,
         method=Image.Resampling.LANCZOS,
-        centering=(0.5, 0.5),
     )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp = destination.with_suffix(".tmp.png")
-    image.save(temp, format="PNG", optimize=True)
+    image.save(temp, "PNG", optimize=True)
 
     if not valid_image(temp):
         temp.unlink(missing_ok=True)
-        raise ValueError("Saved image failed file validation")
+        raise ValueError("Generated image failed validation")
 
     temp.replace(destination)
 
 
-def save_bytes(data, destination, size):
-    with Image.open(BytesIO(data)) as im:
-        im.load()
-        save_pil(im, destination, size)
+def save_bytes(raw, destination, size):
+    with Image.open(BytesIO(raw)) as image:
+        image.load()
+        save_pil(image, destination, size)
 
 
 def download_image(url, destination, size, headers=None):
@@ -141,39 +136,42 @@ def download_image(url, destination, size, headers=None):
     response.raise_for_status()
 
     if not response.headers.get("content-type", "").lower().startswith("image/"):
-        raise ValueError(
-            f"Expected image response, got "
-            f"{response.headers.get('content-type', 'unknown')}"
-        )
+        raise ValueError("Provider returned non-image content")
 
     save_bytes(response.content, destination, size)
 
 
 def prompt_for(job):
-    prompt = ""
-    for key in ("prompt", "image_prompt", "visual_prompt", "scene_prompt"):
-        value = job.get(key)
-        if isinstance(value, str) and value.strip():
-            prompt = value.strip()
-            break
-
-    if not prompt:
-        prompt = str(job.get("description", "A scene from an Indian story"))
-
+    prompt = next(
+        (
+            str(job[key]).strip()
+            for key in (
+                "prompt",
+                "image_prompt",
+                "visual_prompt",
+                "scene_prompt",
+                "description",
+            )
+            if job.get(key)
+        ),
+        "A realistic scene from an Indian story",
+    )
     negative = str(job.get("negative_prompt", "")).strip()
     return f"{prompt}\n\n{QUALITY}\n\nAvoid: {negative}"
 
 
-def generate_huggingface_space(prompt, destination, size, seed):
+# 1. Hugging Face ZeroGPU Space
+def generate_hf_space(prompt, destination, size, seed):
     if Client is None:
-        raise RuntimeError("gradio_client dependency is missing")
+        raise RuntimeError("gradio_client is not installed")
 
-    width, height = size
     kwargs = {"verbose": False}
     if HF_TOKEN:
         kwargs["token"] = HF_TOKEN
 
-    client = Client(HF_SPACE, **kwargs)
+    client = Client("mrfakename/Z-Image-Turbo", **kwargs)
+    width, height = size
+
     result = client.predict(
         prompt,
         height,
@@ -184,19 +182,24 @@ def generate_huggingface_space(prompt, destination, size, seed):
         api_name="/generate_image",
     )
 
-    # This Space has previously returned an image path in a tuple/list.
     if isinstance(result, (tuple, list)):
         if not result:
             raise ValueError("Space returned an empty result")
         result = result[0]
 
     if isinstance(result, dict):
-        for key in ("path", "filepath", "file"):
-            value = result.get(key)
-            if value and Path(str(value)).is_file():
-                with Image.open(str(value)) as im:
-                    save_pil(im, destination, size)
-                return
+        local = next(
+            (
+                result[key]
+                for key in ("path", "filepath", "file")
+                if result.get(key)
+            ),
+            None,
+        )
+        if local and Path(str(local)).is_file():
+            with Image.open(str(local)) as image:
+                save_pil(image, destination, size)
+            return
         result = result.get("url")
 
     if isinstance(result, Image.Image):
@@ -204,31 +207,30 @@ def generate_huggingface_space(prompt, destination, size, seed):
         return
 
     if isinstance(result, str):
-        source = Path(result)
-        if source.is_file():
-            with Image.open(source) as im:
-                save_pil(im, destination, size)
+        if Path(result).is_file():
+            with Image.open(result) as image:
+                save_pil(image, destination, size)
             return
-        if result.startswith(("http://", "https://")):
+        if result.startswith(("https://", "http://")):
             download_image(result, destination, size)
             return
 
-    raise ValueError("Space returned no usable image file or URL")
+    raise ValueError("Space returned no usable image")
 
 
-def generate_gemini_image(prompt, destination, size, model):
-    """Gemini image API. Requires explicit opt-in because billing may apply."""
+# 2. Gemini image endpoint; disabled by default
+def generate_gemini(prompt, destination, size, seed, model):
     if not GEMINI_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not configured")
+        raise RuntimeError("GEMINI_API_KEY is missing")
 
     width, height = size
     ratio = "9:16" if height > width else "16:9"
-
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         + model
         + ":generateContent"
     )
+
     response = session.post(
         url,
         headers={
@@ -251,26 +253,28 @@ def generate_gemini_image(prompt, destination, size, model):
         for part in candidate.get("content", {}).get("parts", []):
             inline = part.get("inlineData") or part.get("inline_data")
             if inline and inline.get("data"):
-                raw = base64.b64decode(inline["data"])
-                save_bytes(raw, destination, size)
+                save_bytes(
+                    base64.b64decode(inline["data"]),
+                    destination,
+                    size,
+                )
                 return
 
-    raise ValueError(
-        "Gemini returned no image data: "
-        + json.dumps(data, ensure_ascii=False)[:500]
-    )
+    raise ValueError("Gemini response contained no image data")
 
 
-def generate_pollinations(prompt, destination, size, seed):
+# 3. Pollinations model adapter
+def generate_pollinations(prompt, destination, size, seed, model):
     if not POLLINATIONS_KEY:
-        raise RuntimeError("POLLINATIONS_API_KEY is not configured")
+        raise RuntimeError("POLLINATIONS_API_KEY is missing")
 
     width, height = size
     url = "https://gen.pollinations.ai/image/" + quote(prompt, safe="")
+
     response = session.get(
         url,
         params={
-            "model": "flux",
+            "model": model,
             "width": width,
             "height": height,
             "seed": seed,
@@ -282,21 +286,19 @@ def generate_pollinations(prompt, destination, size, seed):
 
     if not response.headers.get("content-type", "").lower().startswith("image/"):
         raise ValueError(
-            "Pollinations returned non-image content: "
-            + response.text[:300]
+            "Pollinations returned non-image response: "
+            + response.text[:250]
         )
 
     save_bytes(response.content, destination, size)
 
 
-def generate_hf_inference(prompt, destination, size, seed):
+# 4. Hugging Face Inference Providers
+def generate_hf_inference(prompt, destination, size, seed, model):
     if not HF_TOKEN:
-        raise RuntimeError("HF_TOKEN is not configured")
+        raise RuntimeError("HF_TOKEN is missing")
 
-    try:
-        from huggingface_hub import InferenceClient
-    except ImportError as exc:
-        raise RuntimeError("huggingface_hub dependency is missing") from exc
+    from huggingface_hub import InferenceClient
 
     width, height = size
     client = InferenceClient(
@@ -306,7 +308,7 @@ def generate_hf_inference(prompt, destination, size, seed):
     )
     image = client.text_to_image(
         prompt=prompt,
-        model="black-forest-labs/FLUX.1-Krea-dev",
+        model=model,
         width=width,
         height=height,
         seed=seed,
@@ -314,37 +316,58 @@ def generate_hf_inference(prompt, destination, size, seed):
     save_pil(image, destination, size)
 
 
-def generate_replicate(prompt, destination, size, seed):
+# 5. Replicate model adapter
+def generate_replicate(prompt, destination, size, seed, model):
     if not REPLICATE_KEY:
-        raise RuntimeError("REPLICATE_API_TOKEN is not configured")
+        raise RuntimeError("REPLICATE_API_TOKEN is missing")
 
     width, height = size
+    owner, model_name = model.split("/", 1)
+
+    inputs = {
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "seed": seed,
+        "num_outputs": 1,
+        "output_format": "png",
+    }
+
+    # Imagen and Ideogram models can use different input schemas.
+    if model == "google/imagen-4":
+        inputs = {
+            "prompt": prompt,
+            "aspect_ratio": "9:16" if height > width else "16:9",
+        }
+    elif model == "ideogram-ai/ideogram-v3-turbo":
+        inputs = {
+            "prompt": prompt,
+            "aspect_ratio": "9:16" if height > width else "16:9",
+            "magic_prompt_option": "AUTO",
+        }
+    elif "flux-kontext" in model:
+        inputs = {
+            "prompt": prompt,
+            "aspect_ratio": "9:16" if height > width else "16:9",
+            "output_format": "png",
+        }
+
     response = session.post(
-        "https://api.replicate.com/v1/models/"
-        "black-forest-labs/flux-schnell/predictions",
+        f"https://api.replicate.com/v1/models/{owner}/{model_name}/predictions",
         headers={
             "Authorization": f"Bearer {REPLICATE_KEY}",
             "Content-Type": "application/json",
             "Prefer": "wait",
         },
-        json={
-            "input": {
-                "prompt": prompt,
-                "width": width,
-                "height": height,
-                "seed": seed,
-                "num_outputs": 1,
-                "output_format": "png",
-            }
-        },
+        json={"input": inputs},
         timeout=TIMEOUT,
     )
     response.raise_for_status()
     data = response.json()
 
-    # Poll asynchronous predictions, if the model takes longer than the wait.
-    for _ in range(18):
+    for _ in range(24):
         status = data.get("status")
+
         if status in ("succeeded", "failed", "canceled"):
             break
 
@@ -363,15 +386,17 @@ def generate_replicate(prompt, destination, size, seed):
 
     if data.get("status") != "succeeded":
         raise RuntimeError(
-            "Replicate prediction status: "
-            + str(data.get("status", "unknown"))
-            + " "
-            + str(data.get("error", ""))[:300]
+            f"Replicate status={data.get('status')}; "
+            f"error={str(data.get('error', ''))[:250]}"
         )
 
     output = data.get("output")
     if isinstance(output, list):
         output = output[0] if output else None
+
+    if isinstance(output, dict):
+        output = output.get("url")
+
     if not isinstance(output, str):
         raise ValueError("Replicate returned no image URL")
 
@@ -379,67 +404,97 @@ def generate_replicate(prompt, destination, size, seed):
 
 
 def provider_chain():
-    """Ordered fallbacks. Unsupported UI-only/video-only options are logged."""
+    """Provider order. Model names are attempted individually."""
+
     providers = [
         {
-            "name": "Hugging Face ZeroGPU Space",
-            "run": generate_huggingface_space,
+            "name": "Hugging Face ZeroGPU: Z-Image-Turbo",
+            "run": generate_hf_space,
             "enabled": True,
             "reason": "",
         },
         {
-            "name": "Gemini Image API",
-            "run": lambda p, d, s, seed: generate_gemini_image(
-                p, d, s, "gemini-3.1-flash-image"
+            "name": "Gemini 3.1 Flash Image",
+            "run": lambda p, d, s, seed: generate_gemini(
+                p, d, s, seed, "gemini-3.1-flash-image"
             ),
             "enabled": ALLOW_BILLABLE and bool(GEMINI_KEY),
-            "reason": "Paid/uncertain API disabled or GEMINI_API_KEY missing",
-        },
-        {
-            "name": "Google Flow",
-            "run": None,
-            "enabled": False,
-            "reason": "No supported official GitHub Actions image-generation API verified",
+            "reason": "Billable providers disabled or Gemini key missing",
         },
         {
             "name": "Nano Banana 2.1",
-            "run": lambda p, d, s, seed: generate_gemini_image(
-                p, d, s, "gemini-nano-banana-2.1"
+            "run": lambda p, d, s, seed: generate_gemini(
+                p, d, s, seed, "gemini-nano-banana-2.1"
             ),
             "enabled": ALLOW_BILLABLE and bool(GEMINI_KEY),
-            "reason": "Paid/uncertain API disabled or GEMINI_API_KEY missing",
-        },
-        {
-            "name": "Veo",
-            "run": None,
-            "enabled": False,
-            "reason": "Video-generation API, not a still-image fallback; billing not enabled here",
-        },
-        {
-            "name": "Pollinations",
-            "run": generate_pollinations,
-            "enabled": ALLOW_BILLABLE and bool(POLLINATIONS_KEY),
-            "reason": "Paid/uncertain API disabled or POLLINATIONS_API_KEY missing",
-        },
-        {
-            "name": "Hugging Face Inference Providers",
-            "run": generate_hf_inference,
-            "enabled": ALLOW_BILLABLE and bool(HF_TOKEN),
-            "reason": "May incur provider charges; disabled or HF_TOKEN missing",
-        },
-        {
-            "name": "Replicate FLUX Schnell",
-            "run": generate_replicate,
-            "enabled": ALLOW_BILLABLE and bool(REPLICATE_KEY),
-            "reason": "Paid service disabled or REPLICATE_API_TOKEN missing",
-        },
-        {
-            "name": "NVIDIA Cosmos",
-            "run": None,
-            "enabled": False,
-            "reason": "No verified general-purpose still-image API endpoint configured",
+            "reason": "API model ID unverified, or billing disabled/key missing",
         },
     ]
+
+    # User-listed Pollinations models. The API may reject unsupported IDs.
+    pollinations_models = [
+        "black-forest-labs/flux.2-flex",
+        "google/gemini-3.1-flash-image",
+        "google/gemini-nano-banana-2.1",
+        "bytedance/seedream-5.0-flash",
+        "qwen/qwen-image-2.1",
+        "black-forest-labs/flux.1-schnell",
+    ]
+
+    for model in pollinations_models:
+        providers.append({
+            "name": f"Pollinations: {model}",
+            "run": lambda p, d, s, seed, m=model:
+                generate_pollinations(p, d, s, seed, m),
+            "enabled": ALLOW_BILLABLE and bool(POLLINATIONS_KEY),
+            "reason": "Billing disabled, key missing, or model may be unsupported",
+        })
+
+    # HF inference providers may require credits or provider-specific access.
+    for model in [
+        "black-forest-labs/FLUX.1-Krea-dev",
+        "Qwen/Qwen-Image",
+    ]:
+        providers.append({
+            "name": f"Hugging Face Inference: {model}",
+            "run": lambda p, d, s, seed, m=model:
+                generate_hf_inference(p, d, s, seed, m),
+            "enabled": ALLOW_BILLABLE and bool(HF_TOKEN),
+            "reason": "Billing disabled or HF_TOKEN missing",
+        })
+
+    # User-listed Replicate models.
+    replicate_models = [
+        "google/imagen-4",
+        "black-forest-labs/flux-kontext-pro",
+        "ideogram-ai/ideogram-v3-turbo",
+        "black-forest-labs/flux-1.1-pro",
+        "black-forest-labs/flux-dev",
+        "black-forest-labs/flux-schnell",
+    ]
+
+    for model in replicate_models:
+        providers.append({
+            "name": f"Replicate: {model}",
+            "run": lambda p, d, s, seed, m=model:
+                generate_replicate(p, d, s, seed, m),
+            "enabled": ALLOW_BILLABLE and bool(REPLICATE_KEY),
+            "reason": "Billing disabled, key missing, or model schema unsupported",
+        })
+
+    # These are intentionally not falsely presented as working image APIs.
+    for name, reason in [
+        ("Google Flow", "No verified supported automation API configured"),
+        ("Veo", "Video model, not a still-image endpoint in this script"),
+        ("NVIDIA Cosmos", "No verified still-image endpoint configured"),
+    ]:
+        providers.append({
+            "name": name,
+            "run": None,
+            "enabled": False,
+            "reason": reason,
+        })
+
     return providers
 
 
@@ -447,35 +502,33 @@ def main():
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
 
     if not JOBS_FILE.is_file():
-        raise SystemExit(f"ERROR: Missing jobs file: {JOBS_FILE}")
+        raise SystemExit(f"Missing scene jobs file: {JOBS_FILE}")
 
     data = load_json(JOBS_FILE)
     jobs = data if isinstance(data, list) else (
         data.get("jobs") or data.get("visual_jobs") or data.get("scenes") or []
     )
-    if not isinstance(jobs, list) or not jobs:
-        raise SystemExit("ERROR: visual_jobs.json contains no scene jobs")
 
-    # Build resumable records. Existing valid images are never deleted.
+    if not isinstance(jobs, list) or not jobs:
+        raise SystemExit("visual_jobs.json contains no scene jobs")
+
     records = []
     pending = []
 
     for index, job in enumerate(jobs, start=1):
         if not isinstance(job, dict):
-            raise SystemExit(f"ERROR: Invalid scene job at index {index}")
+            raise SystemExit(f"Invalid scene job at index {index}")
 
-        number = job.get("global_scene", job.get("scene", index))
         try:
-            number = int(number)
+            number = int(job.get("global_scene", job.get("scene", index)))
         except (TypeError, ValueError):
             number = index
 
         destination = image_path(job, number)
         size = image_size(job)
+
         record = {
             "scene": number,
-            "part": job.get("part"),
-            "local_scene": job.get("local_scene"),
             "file": str(destination.relative_to(ROOT)),
             "width": size[0],
             "height": size[1],
@@ -493,9 +546,9 @@ def main():
         records.append(record)
 
     manifest = {
-        "version": "fallback-1.0",
-        "provider_order": [],
+        "version": "fallback-2.0",
         "allow_billable_providers": ALLOW_BILLABLE,
+        "provider_order": [],
         "total_scenes": len(jobs),
         "scenes": records,
         "summary": {},
@@ -504,8 +557,7 @@ def main():
     def checkpoint():
         manifest["summary"] = {
             "ready": sum(
-                r["status"] in ("existing", "generated")
-                for r in records
+                r["status"] in ("existing", "generated") for r in records
             ),
             "pending": sum(r["status"] == "pending" for r in records),
             "failed": sum(r["status"] == "failed" for r in records),
@@ -514,22 +566,22 @@ def main():
 
     checkpoint()
 
-    log("=" * 68)
-    log("KATHA LOK AI — IMAGE PROVIDER FALLBACK")
+    log("=" * 65)
+    log("KATHA LOK AI - ORDERED IMAGE FALLBACK")
     log(f"Total scenes: {len(jobs)}")
     log(f"Already ready: {len(jobs) - len(pending)}")
-    log(f"Billable/uncertain providers enabled: {ALLOW_BILLABLE}")
-    log("=" * 68)
+    log(f"Billable providers enabled: {ALLOW_BILLABLE}")
+    log("=" * 65)
 
     for provider in provider_chain():
-        name = provider["name"]
-        manifest["provider_order"].append(name)
-
         if not pending:
             break
 
+        name = provider["name"]
+        manifest["provider_order"].append(name)
+
         if not provider["enabled"] or provider["run"] is None:
-            log(f"\nSKIPPED: {name} — {provider['reason']}")
+            log(f"SKIPPED: {name} - {provider['reason']}")
             for _, record, _, _ in pending:
                 record["attempts"].append({
                     "provider": name,
@@ -540,15 +592,13 @@ def main():
             continue
 
         log(f"\nPROVIDER: {name}")
-        still_pending = []
-        consecutive_errors = 0
-        provider_blocked = False
+        remaining = []
 
         for job, record, destination, size in pending:
-            prompt = prompt_for(job)
-            seed = BASE_SEED + int(record["scene"])
             success = False
             last_error = ""
+            prompt = prompt_for(job)
+            seed = BASE_SEED + int(record["scene"])
 
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 try:
@@ -556,10 +606,11 @@ def main():
                         f"Scene {record['scene']}: "
                         f"attempt {attempt}/{MAX_ATTEMPTS}"
                     )
+
                     provider["run"](prompt, destination, size, seed)
 
                     if not valid_image(destination):
-                        raise ValueError("Image file failed validation")
+                        raise ValueError("Image failed validation")
 
                     record["status"] = "generated"
                     record["provider"] = name
@@ -568,93 +619,71 @@ def main():
                         "status": "success",
                         "attempt": attempt,
                     })
-                    log(f"SAVED: {destination.relative_to(ROOT)}")
+                    log(f"SAVED: {record['file']}")
                     success = True
-                    consecutive_errors = 0
                     checkpoint()
                     break
 
                 except Exception as exc:
                     last_error = f"{type(exc).__name__}: {exc}"
-                    log(f"Provider error: {last_error[:350]}")
-                    time.sleep(2)
+                    log(f"FAILED: {last_error[:300]}")
 
-            if success:
-                continue
+                    if destination.exists() and not valid_image(destination):
+                        destination.unlink(missing_ok=True)
 
-            # Do not retain corrupt/partial outputs as successful images.
-            if destination.exists() and not valid_image(destination):
-                destination.unlink(missing_ok=True)
+                    # Quota/auth/billing failures generally affect the whole
+                    # provider, so stop retrying this provider for this scene.
+                    lower = last_error.lower()
+                    if any(token in lower for token in (
+                        "quota", "429", "401", "403", "402",
+                        "payment", "billing", "unauthorized",
+                        "forbidden", "zero gpu", "zero-gpu",
+                    )):
+                        break
 
-            record["status"] = "pending"
-            record["attempts"].append({
-                "provider": name,
-                "status": "failed",
-                "error": last_error[:800],
-            })
-            still_pending.append((job, record, destination, size))
-            checkpoint()
+                    if attempt < MAX_ATTEMPTS:
+                        time.sleep(2)
 
-            consecutive_errors += 1
+            if not success:
+                record["status"] = "pending"
+                record["attempts"].append({
+                    "provider": name,
+                    "status": "failed",
+                    "error": last_error[:800],
+                })
+                remaining.append((job, record, destination, size))
+                checkpoint()
 
-            # A quota, authentication, billing or provider outage often affects
-            # every remaining scene. Stop wasting retries and switch provider.
-            error_lower = last_error.lower()
-            if any(term in error_lower for term in (
-                "quota", "exceeded", "429", "401", "403", "402",
-                "payment", "billing", "unauthorized", "forbidden",
-                "zero gpu", "zero-gpu",
-            )):
-                provider_blocked = True
-                log(f"Provider appears unavailable/quota-limited: {name}")
-                break
+        pending = remaining
+        log(f"Scenes still needing images: {len(pending)}")
 
-            if consecutive_errors >= 2:
-                provider_blocked = True
-                log(f"Provider repeatedly failed; moving on: {name}")
-                break
-
-        if provider_blocked:
-            # Unprocessed scenes remain pending for the next provider.
-            processed_ids = {id(item[1]) for item in still_pending}
-            for item in pending:
-                if id(item[1]) not in processed_ids and item[1]["status"] == "pending":
-                    still_pending.append(item)
-
-        pending = still_pending
-        checkpoint()
-        log(f"Remaining scenes after {name}: {len(pending)}")
-
-    # Final status and manifest are saved even when some scenes could not be made.
     for _, record, _, _ in pending:
         record["status"] = "failed"
 
     checkpoint()
 
-    ready = sum(r["status"] in ("existing", "generated") for r in records)
+    ready = sum(
+        r["status"] in ("existing", "generated") for r in records
+    )
     failed = [r["scene"] for r in records if r["status"] == "failed"]
 
-    log("\nFINAL IMAGE SUMMARY")
-    log(f"Ready: {ready}/{len(records)}")
-    log(f"Failed scenes: {failed}")
+    log("\nFINAL SUMMARY")
+    log(f"Images ready: {ready}/{len(records)}")
+    log(f"Missing scenes: {failed}")
     log(f"Manifest: {MANIFEST_FILE}")
 
     if failed:
         raise SystemExit(
-            "ERROR: All configured fallbacks exhausted. "
-            f"Images still missing for scenes: {failed}"
+            "Image fallbacks exhausted. Missing scene images: "
+            + str(failed)
         )
 
-    log("ALL SCENE IMAGES READY.")
+    log("ALL SCENE IMAGES READY")
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(f"IMAGE FALLBACK FAILED: {exc}", file=sys.stderr)
+        print(f"IMAGE GENERATION ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
-
-Commit message:
-
-"Add resumable multi-provider image generation fallback"
