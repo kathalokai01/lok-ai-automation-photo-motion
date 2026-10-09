@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Katha Lok AI - resumable scene image fallback."""
+"""Katha Lok AI: resumable scene-image fallback pipeline."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ BASE_SEED = 20261009
 QUALITY = """
 Photorealistic live-action cinematic photography.
 Realistic Indian people, clothing, locations and architecture.
-Natural skin texture, believable anatomy, realistic lighting.
+Natural skin texture, believable anatomy and realistic lighting.
 Consistent recurring characters and clothing.
 No cartoon, anime, illustration, CGI, plastic skin,
 distorted faces, extra limbs, text, logos or watermarks.
@@ -107,9 +107,7 @@ def save_pil(image, destination, size):
 
     image = ImageOps.exif_transpose(image).convert("RGB")
     image = ImageOps.fit(
-        image,
-        size,
-        method=Image.Resampling.LANCZOS,
+        image, size, method=Image.Resampling.LANCZOS
     )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -160,7 +158,6 @@ def prompt_for(job):
     return f"{prompt}\n\n{QUALITY}\n\nAvoid: {negative}"
 
 
-# 1. Hugging Face ZeroGPU Space
 def generate_hf_space(prompt, destination, size, seed):
     if Client is None:
         raise RuntimeError("gradio_client is not installed")
@@ -173,26 +170,21 @@ def generate_hf_space(prompt, destination, size, seed):
     width, height = size
 
     result = client.predict(
-        prompt,
-        height,
-        width,
-        9,
-        seed,
-        False,
+        prompt, height, width, 9, seed, False,
         api_name="/generate_image",
     )
 
     if isinstance(result, (tuple, list)):
         if not result:
-            raise ValueError("Space returned an empty result")
+            raise ValueError("Hugging Face Space returned an empty result")
         result = result[0]
 
     if isinstance(result, dict):
         local = next(
             (
-                result[key]
-                for key in ("path", "filepath", "file")
-                if result.get(key)
+                result[k]
+                for k in ("path", "filepath", "file")
+                if result.get(k)
             ),
             None,
         )
@@ -215,10 +207,9 @@ def generate_hf_space(prompt, destination, size, seed):
             download_image(result, destination, size)
             return
 
-    raise ValueError("Space returned no usable image")
+    raise ValueError("Hugging Face Space returned no usable image")
 
 
-# 2. Gemini image endpoint; disabled by default
 def generate_gemini(prompt, destination, size, seed, model):
     if not GEMINI_KEY:
         raise RuntimeError("GEMINI_API_KEY is missing")
@@ -227,8 +218,7 @@ def generate_gemini(prompt, destination, size, seed, model):
     ratio = "9:16" if height > width else "16:9"
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        + model
-        + ":generateContent"
+        + model + ":generateContent"
     )
 
     response = session.post(
@@ -247,9 +237,8 @@ def generate_gemini(prompt, destination, size, seed, model):
         timeout=TIMEOUT,
     )
     response.raise_for_status()
-    data = response.json()
 
-    for candidate in data.get("candidates", []):
+    for candidate in response.json().get("candidates", []):
         for part in candidate.get("content", {}).get("parts", []):
             inline = part.get("inlineData") or part.get("inline_data")
             if inline and inline.get("data"):
@@ -260,10 +249,9 @@ def generate_gemini(prompt, destination, size, seed, model):
                 )
                 return
 
-    raise ValueError("Gemini response contained no image data")
+    raise ValueError("Gemini returned no image data")
 
 
-# 3. Pollinations model adapter
 def generate_pollinations(prompt, destination, size, seed, model):
     if not POLLINATIONS_KEY:
         raise RuntimeError("POLLINATIONS_API_KEY is missing")
@@ -286,14 +274,13 @@ def generate_pollinations(prompt, destination, size, seed, model):
 
     if not response.headers.get("content-type", "").lower().startswith("image/"):
         raise ValueError(
-            "Pollinations returned non-image response: "
+            "Pollinations returned non-image content: "
             + response.text[:250]
         )
 
     save_bytes(response.content, destination, size)
 
 
-# 4. Hugging Face Inference Providers
 def generate_hf_inference(prompt, destination, size, seed, model):
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN is missing")
@@ -316,13 +303,12 @@ def generate_hf_inference(prompt, destination, size, seed, model):
     save_pil(image, destination, size)
 
 
-# 5. Replicate model adapter
 def generate_replicate(prompt, destination, size, seed, model):
     if not REPLICATE_KEY:
         raise RuntimeError("REPLICATE_API_TOKEN is missing")
 
     width, height = size
-    owner, model_name = model.split("/", 1)
+    ratio = "9:16" if height > width else "16:9"
 
     inputs = {
         "prompt": prompt,
@@ -333,25 +319,23 @@ def generate_replicate(prompt, destination, size, seed, model):
         "output_format": "png",
     }
 
-    # Imagen and Ideogram models can use different input schemas.
+    # Model-specific input fields are not identical across Replicate.
     if model == "google/imagen-4":
-        inputs = {
-            "prompt": prompt,
-            "aspect_ratio": "9:16" if height > width else "16:9",
-        }
+        inputs = {"prompt": prompt, "aspect_ratio": ratio}
     elif model == "ideogram-ai/ideogram-v3-turbo":
         inputs = {
             "prompt": prompt,
-            "aspect_ratio": "9:16" if height > width else "16:9",
+            "aspect_ratio": ratio,
             "magic_prompt_option": "AUTO",
         }
     elif "flux-kontext" in model:
         inputs = {
             "prompt": prompt,
-            "aspect_ratio": "9:16" if height > width else "16:9",
+            "aspect_ratio": ratio,
             "output_format": "png",
         }
 
+    owner, model_name = model.split("/", 1)
     response = session.post(
         f"https://api.replicate.com/v1/models/{owner}/{model_name}/predictions",
         headers={
@@ -366,9 +350,7 @@ def generate_replicate(prompt, destination, size, seed, model):
     data = response.json()
 
     for _ in range(24):
-        status = data.get("status")
-
-        if status in ("succeeded", "failed", "canceled"):
+        if data.get("status") in ("succeeded", "failed", "canceled"):
             break
 
         poll_url = data.get("urls", {}).get("get")
@@ -393,7 +375,6 @@ def generate_replicate(prompt, destination, size, seed, model):
     output = data.get("output")
     if isinstance(output, list):
         output = output[0] if output else None
-
     if isinstance(output, dict):
         output = output.get("url")
 
@@ -404,14 +385,13 @@ def generate_replicate(prompt, destination, size, seed, model):
 
 
 def provider_chain():
-    """Provider order. Model names are attempted individually."""
-
     providers = [
         {
             "name": "Hugging Face ZeroGPU: Z-Image-Turbo",
             "run": generate_hf_space,
             "enabled": True,
             "reason": "",
+            "potentially_billable": False,
         },
         {
             "name": "Gemini 3.1 Flash Image",
@@ -419,7 +399,8 @@ def provider_chain():
                 p, d, s, seed, "gemini-3.1-flash-image"
             ),
             "enabled": ALLOW_BILLABLE and bool(GEMINI_KEY),
-            "reason": "Billable providers disabled or Gemini key missing",
+            "reason": "Billing disabled or Gemini key missing",
+            "potentially_billable": True,
         },
         {
             "name": "Nano Banana 2.1",
@@ -427,30 +408,28 @@ def provider_chain():
                 p, d, s, seed, "gemini-nano-banana-2.1"
             ),
             "enabled": ALLOW_BILLABLE and bool(GEMINI_KEY),
-            "reason": "API model ID unverified, or billing disabled/key missing",
+            "reason": "Billing disabled/key missing; model ID needs verification",
+            "potentially_billable": True,
         },
     ]
 
-    # User-listed Pollinations models. The API may reject unsupported IDs.
-    pollinations_models = [
+    for model in [
         "black-forest-labs/flux.2-flex",
         "google/gemini-3.1-flash-image",
         "google/gemini-nano-banana-2.1",
         "bytedance/seedream-5.0-flash",
         "qwen/qwen-image-2.1",
         "black-forest-labs/flux.1-schnell",
-    ]
-
-    for model in pollinations_models:
+    ]:
         providers.append({
             "name": f"Pollinations: {model}",
             "run": lambda p, d, s, seed, m=model:
                 generate_pollinations(p, d, s, seed, m),
             "enabled": ALLOW_BILLABLE and bool(POLLINATIONS_KEY),
-            "reason": "Billing disabled, key missing, or model may be unsupported",
+            "reason": "Billing disabled/key missing; model support unverified",
+            "potentially_billable": True,
         })
 
-    # HF inference providers may require credits or provider-specific access.
     for model in [
         "black-forest-labs/FLUX.1-Krea-dev",
         "Qwen/Qwen-Image",
@@ -461,30 +440,29 @@ def provider_chain():
                 generate_hf_inference(p, d, s, seed, m),
             "enabled": ALLOW_BILLABLE and bool(HF_TOKEN),
             "reason": "Billing disabled or HF_TOKEN missing",
+            "potentially_billable": True,
         })
 
-    # User-listed Replicate models.
-    replicate_models = [
+    for model in [
         "google/imagen-4",
         "black-forest-labs/flux-kontext-pro",
         "ideogram-ai/ideogram-v3-turbo",
         "black-forest-labs/flux-1.1-pro",
         "black-forest-labs/flux-dev",
         "black-forest-labs/flux-schnell",
-    ]
-
-    for model in replicate_models:
+    ]:
         providers.append({
             "name": f"Replicate: {model}",
             "run": lambda p, d, s, seed, m=model:
                 generate_replicate(p, d, s, seed, m),
             "enabled": ALLOW_BILLABLE and bool(REPLICATE_KEY),
-            "reason": "Billing disabled, key missing, or model schema unsupported",
+            "reason": "Billing disabled/key missing; model schema may differ",
+            "potentially_billable": True,
         })
 
-    # These are intentionally not falsely presented as working image APIs.
+    # Do not pretend these have working still-image API integrations here.
     for name, reason in [
-        ("Google Flow", "No verified supported automation API configured"),
+        ("Google Flow", "No verified automation API configured"),
         ("Veo", "Video model, not a still-image endpoint in this script"),
         ("NVIDIA Cosmos", "No verified still-image endpoint configured"),
     ]:
@@ -493,6 +471,7 @@ def provider_chain():
             "run": None,
             "enabled": False,
             "reason": reason,
+            "potentially_billable": False,
         })
 
     return providers
@@ -506,7 +485,10 @@ def main():
 
     data = load_json(JOBS_FILE)
     jobs = data if isinstance(data, list) else (
-        data.get("jobs") or data.get("visual_jobs") or data.get("scenes") or []
+        data.get("jobs")
+        or data.get("visual_jobs")
+        or data.get("scenes")
+        or []
     )
 
     if not isinstance(jobs, list) or not jobs:
@@ -546,7 +528,7 @@ def main():
         records.append(record)
 
     manifest = {
-        "version": "fallback-2.0",
+        "version": "fallback-3.0",
         "allow_billable_providers": ALLOW_BILLABLE,
         "provider_order": [],
         "total_scenes": len(jobs),
@@ -593,8 +575,20 @@ def main():
 
         log(f"\nPROVIDER: {name}")
         remaining = []
+        provider_blocked = False
 
         for job, record, destination, size in pending:
+            if provider_blocked:
+                record["attempts"].append({
+                    "provider": name,
+                    "status": "skipped",
+                    "reason": (
+                        "Provider blocked after quota/auth/billing failure"
+                    ),
+                })
+                remaining.append((job, record, destination, size))
+                continue
+
             success = False
             last_error = ""
             prompt = prompt_for(job)
@@ -631,14 +625,26 @@ def main():
                     if destination.exists() and not valid_image(destination):
                         destination.unlink(missing_ok=True)
 
-                    # Quota/auth/billing failures generally affect the whole
-                    # provider, so stop retrying this provider for this scene.
                     lower = last_error.lower()
-                    if any(token in lower for token in (
-                        "quota", "429", "401", "403", "402",
-                        "payment", "billing", "unauthorized",
-                        "forbidden", "zero gpu", "zero-gpu",
-                    )):
+                    global_failure_tokens = (
+                        "quota",
+                        "429",
+                        "401",
+                        "403",
+                        "402",
+                        "payment",
+                        "billing",
+                        "unauthorized",
+                        "forbidden",
+                        "zero gpu",
+                        "zero-gpu",
+                        "insufficient credit",
+                        "rate limit",
+                    )
+
+                    if any(token in lower for token in global_failure_tokens):
+                        provider_blocked = True
+                        log(f"BLOCKING PROVIDER: {name}")
                         break
 
                     if attempt < MAX_ATTEMPTS:
@@ -649,7 +655,9 @@ def main():
                 record["attempts"].append({
                     "provider": name,
                     "status": "failed",
-                    "error": last_error[:800],
+                    "error": last_error[:800] if last_error else (
+                        "Skipped after provider-wide failure"
+                    ),
                 })
                 remaining.append((job, record, destination, size))
                 checkpoint()
