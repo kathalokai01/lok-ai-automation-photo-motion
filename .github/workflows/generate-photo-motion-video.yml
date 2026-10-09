@@ -7,64 +7,31 @@ permissions:
   contents: write
 
 jobs:
-
   generate-video:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 60
 
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
     steps:
-
-      # ==========================================================
-      # 1. CHECKOUT
-      # ==========================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-
-      # ==========================================================
-      # 2. PYTHON
-      # ==========================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-
-      # ==========================================================
-      # 3. FFMPEG
-      # ==========================================================
-
       - name: Install FFmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-
-      # ==========================================================
-      # 4. PYTHON DEPENDENCIES
-      # ==========================================================
+          sudo apt-get install -y ffmpeg zip
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-
-          pip install \
-            requests \
-            pillow \
-            edge-tts \
-            gradio_client
-
-
-      # ==========================================================
-      # 5. INPUT CHECK
-      # ==========================================================
+          pip install requests pillow edge-tts gradio_client
 
       - name: Check input
         run: |
@@ -73,130 +40,56 @@ jobs:
           echo "============================================================"
 
           if [ -f "Input/topic.txt" ]; then
-            echo "Topic file:"
             cat "Input/topic.txt"
           else
-            echo "Input/topic.txt not found"
+            echo "ERROR: Input/topic.txt not found"
+            exit 1
           fi
 
-          echo
-
-
-      # ==========================================================
-      # 6. STORY PLAN
-      # ==========================================================
-
       - name: Generate story plan
-        run: |
-          python scripts/generate_story_plan.py
-
-
-      # ==========================================================
-      # 7. STORY
-      # ==========================================================
+        run: python scripts/generate_story_plan.py
 
       - name: Generate story
-        run: |
-          python scripts/generate_story.py
-
-
-      # ==========================================================
-      # 8. AI STORY
-      # ==========================================================
+        run: python scripts/generate_story.py
 
       - name: Generate AI story
-        run: |
-          python scripts/generate_ai_story.py
-
-
-      # ==========================================================
-      # 9. MODEL SELECTION
-      # ==========================================================
+        run: python scripts/generate_ai_story.py
 
       - name: Select Gemini model
-        run: |
-          python scripts/select_gemini_model.py || true
+        run: python scripts/select_gemini_model.py || true
 
       - name: Test Gemini
-        run: |
-          python scripts/test_gemini.py || true
-
-
-      # ==========================================================
-      # 10. CHARACTER BIBLE
-      # ==========================================================
+        run: python scripts/test_gemini.py || true
 
       - name: Generate character bible
-        run: |
-          python scripts/generate_character_bible.py
-
-
-      # ==========================================================
-      # 11. SCENES
-      # ==========================================================
+        run: python scripts/generate_character_bible.py
 
       - name: Generate scenes
-        run: |
-          python scripts/generate_scenes.py
-
-
-      # ==========================================================
-      # 12. NARRATION
-      # ==========================================================
+        run: python scripts/generate_scenes.py
 
       - name: Generate narration jobs
-        run: |
-          python scripts/generate_narration.py
-
-
-      # ==========================================================
-      # 13. TTS
-      # ==========================================================
+        run: python scripts/generate_narration.py
 
       - name: Generate Hindi TTS
-        run: |
-          python scripts/generate_tts.py
-
-
-      # ==========================================================
-      # 14. VISUAL JOBS
-      # ==========================================================
+        run: python scripts/generate_tts.py
 
       - name: Prepare visual jobs
-        run: |
-          python scripts/generate_visuals.py
-
-
-      # ==========================================================
-      # 15. FREE IMAGE GENERATION
-      # ==========================================================
+        run: python scripts/generate_visuals.py
 
       - name: Generate free realistic scene images
         run: |
-          echo "============================================================"
-          echo "FREE IMAGE GENERATION"
-          echo "============================================================"
-
           python scripts/free_image_generator.py
 
-
-      # ==========================================================
-      # 16. VERIFY IMAGES
-      # ==========================================================
-
       - name: Verify generated images
+        shell: bash
         run: |
-          echo "============================================================"
-          echo "VERIFYING SCENE IMAGES"
-          echo "============================================================"
-
           if [ ! -d "output/visuals" ]; then
             echo "ERROR: output/visuals does not exist"
             exit 1
           fi
 
           COUNT=$(find output/visuals -type f \
-            \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) \
+            \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.webp" \) \
             | wc -l)
 
           echo "Image count: $COUNT"
@@ -206,113 +99,241 @@ jobs:
             exit 1
           fi
 
-          find output/visuals -maxdepth 1 -type f \
-            \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) \
-            -print
-
-
-      # ==========================================================
-      # 17. PHOTO MOTION
-      # ==========================================================
+          find output/visuals -maxdepth 1 -type f -print
 
       - name: Create Photo Motion scene videos
-        run: |
-          python scripts/photo_motion.py
-
-
-      # ==========================================================
-      # 18. RENDER FINAL VIDEO
-      # ==========================================================
+        run: python scripts/photo_motion.py
 
       - name: Render final video
-        run: |
-          python scripts/render_video.py
-
-
-      # ==========================================================
-      # 19. THUMBNAIL
-      # ==========================================================
+        run: python scripts/render_video.py
 
       - name: Generate thumbnail
+        run: python scripts/generate_thumbnail.py || true
+
+      # STORY-SPECIFIC YOUTUBE METADATA
+      - name: Create dynamic YouTube metadata
+        shell: bash
         run: |
-          python scripts/generate_thumbnail.py || true
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
 
+          output = Path("output")
+          output.mkdir(parents=True, exist_ok=True)
 
-      # ==========================================================
-      # 20. YOUTUBE METADATA
-      # ==========================================================
+          topic_path = Path("Input/topic.txt")
+          topic = (
+              topic_path.read_text(encoding="utf-8").strip()
+              if topic_path.exists()
+              else ""
+          )
+          topic = re.sub(r"\s+", " ", topic)
 
-      - name: Create YouTube metadata
-        run: |
-          mkdir -p output
+          # Read available story-related files.
+          # Exclude generated metadata and binary media.
+          text_parts = []
+          story_title = ""
+          story_files = []
 
-          TITLE="Katha Lok AI"
+          for folder in (output, Path("Input")):
+              if not folder.exists():
+                  continue
 
-          if [ -f "Input/topic.txt" ]; then
-            TOPIC=$(tr '\n' ' ' < "Input/topic.txt" | xargs)
+              for path in folder.rglob("*"):
+                  if not path.is_file():
+                      continue
 
-            if [ -n "$TOPIC" ]; then
-              TITLE="$TOPIC"
-            fi
-          fi
+                  if path.name.lower() in {
+                      "youtube_metadata.txt",
+                      "final_title.txt",
+                  }:
+                      if path.name.lower() == "final_title.txt":
+                          try:
+                              candidate = path.read_text(
+                                  encoding="utf-8"
+                              ).strip()
+                              if candidate and not story_title:
+                                  story_title = candidate.splitlines()[0].strip()
+                          except (OSError, UnicodeError):
+                              pass
+                      continue
 
-          cat > output/youtube_metadata.txt <<EOF
-Title:
-$TITLE
+                  if path.suffix.lower() not in {
+                      ".txt", ".md", ".json"
+                  }:
+                      continue
 
-Description:
+                  try:
+                      content = path.read_text(encoding="utf-8").strip()
+                  except (OSError, UnicodeError):
+                      continue
 
-Katha Lok AI — Hindi AI Story Video
+                  if not content:
+                      continue
 
-This video was generated using the Katha Lok AI
-Photo Motion pipeline.
+                  story_files.append(path)
 
-#KathaLokAI #HindiStory #AIStory #HindiKahani
+                  if path.suffix.lower() == ".json":
+                      try:
+                          data = json.loads(content)
 
-Tags:
-Katha Lok AI, Hindi story, Hindi kahani, AI story,
-Hindi AI video, Indian story, Hindi storytelling
-EOF
+                          if isinstance(data, dict):
+                              for key in (
+                                  "title", "story_title",
+                                  "topic", "name"
+                              ):
+                                  value = data.get(key)
+                                  if (
+                                      isinstance(value, str)
+                                      and value.strip()
+                                      and not story_title
+                                  ):
+                                      story_title = value.strip()
+                                      break
+                      except (json.JSONDecodeError, ValueError):
+                          pass
 
-          echo "Metadata created:"
-          cat output/youtube_metadata.txt
+                  # Avoid using the entire JSON structure as prose.
+                  if path.suffix.lower() != ".json":
+                      text_parts.append(content)
 
+          # Prefer a story-specific title when one is available.
+          title = story_title or topic or "Katha Lok AI Hindi Story"
+          title = re.sub(r"\s+", " ", title).strip()
+          title = title[:100].rstrip()
 
-      # ==========================================================
-      # 21. FINAL OUTPUT CHECK
-      # ==========================================================
+          # Build description from actual available story text.
+          combined_story = "\n".join(text_parts)
+          combined_story = re.sub(
+              r"\s+", " ", combined_story
+          ).strip()
+
+          # Remove obvious script/configuration clutter.
+          if combined_story:
+              combined_story = combined_story[:2500].rstrip()
+              if len(combined_story) == 2500:
+                  combined_story = combined_story.rsplit(" ", 1)[0] + "..."
+
+              description = (
+                  f"{title}\n\n"
+                  f"{combined_story}\n\n"
+                  "Watch the story till the end and share "
+                  "your thoughts in the comments."
+              )
+          else:
+              description = (
+                  f"{title}\n\n"
+                  f"Watch this Hindi story from Katha Lok AI. "
+                  f"This video is based on the topic: "
+                  f"{topic or title}.\n\n"
+                  "Share your thoughts in the comments."
+              )
+
+          # Build relevant tags from the topic and story text.
+          tag_source = " ".join([
+              title,
+              topic,
+              combined_story[:5000],
+          ])
+
+          words = re.findall(
+              r"[A-Za-z0-9]+|[\u0900-\u097F]+",
+              tag_source
+          )
+
+          dynamic_tags = []
+          seen = set()
+
+          for word in words:
+              word = word.strip()
+              normalized = word.casefold()
+
+              if len(word) < 3 or normalized in seen:
+                  continue
+
+              seen.add(normalized)
+              dynamic_tags.append(word)
+
+          # These channel tags stay consistent across videos.
+          fixed_tags = [
+              "Katha Lok AI",
+              "Hindi story",
+              "Hindi kahani",
+              "Hindi storytelling",
+          ]
+
+          tags = []
+          tag_seen = set()
+
+          for tag in dynamic_tags + fixed_tags:
+              normalized = tag.casefold()
+              if normalized not in tag_seen:
+                  tag_seen.add(normalized)
+                  tags.append(tag)
+
+          tags = tags[:20]
+
+          # Keep hashtags partly consistent and partly story-specific.
+          hashtag_words = re.findall(
+              r"[A-Za-z0-9]+|[\u0900-\u097F]+",
+              title
+          )
+
+          title_hashtag = "".join(hashtag_words[:3])
+          hashtags = ["#KathaLokAI", "#HindiKahani"]
+
+          if title_hashtag:
+              story_hashtag = "#" + title_hashtag
+              if story_hashtag.casefold() not in {
+                  item.casefold() for item in hashtags
+              }:
+                  hashtags.append(story_hashtag)
+
+          description += "\n\n" + " ".join(hashtags)
+
+          metadata = (
+              f"Title:\n{title}\n\n"
+              f"Description:\n\n{description}\n\n"
+              f"Tags:\n{', '.join(tags)}\n"
+          )
+
+          metadata_path = output / "youtube_metadata.txt"
+          metadata_path.write_text(
+              metadata,
+              encoding="utf-8"
+          )
+
+          print("Dynamic YouTube metadata created:")
+          print(metadata)
+          PY
 
       - name: Check final output
+        shell: bash
         run: |
           echo "============================================================"
           echo "FINAL OUTPUT"
           echo "============================================================"
 
-          find output -maxdepth 3 -type f \
-            \( -name "*.mp4" -o -name "*.png" -o -name "*.txt" \) \
-            -print
+          find output -maxdepth 4 -type f -print
 
+          if ! find output -type f -iname "*.mp4" -print -quit | grep -q .; then
+            echo "ERROR: No MP4 video found in output"
+            exit 1
+          fi
 
-      # ==========================================================
-      # 22. CREATE FINAL ZIP
-      # ==========================================================
+          if [ ! -s "output/youtube_metadata.txt" ]; then
+            echo "ERROR: YouTube metadata file is missing or empty"
+            exit 1
+          fi
 
       - name: Create final ZIP
+        shell: bash
         run: |
           cd output
-
-          zip -r ../katha-lok-ai-photo-motion-output.zip . \
-            -x "*.pyc" \
-            -x "__pycache__/*"
-
+          zip -r ../katha-lok-ai-photo-motion-output.zip .
           cd ..
-
           ls -lh katha-lok-ai-photo-motion-output.zip
-
-
-      # ==========================================================
-      # 23. UPLOAD ARTIFACT
-      # ==========================================================
 
       - name: Upload final output
         uses: actions/upload-artifact@v4
