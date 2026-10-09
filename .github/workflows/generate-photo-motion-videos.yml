@@ -1,0 +1,325 @@
+name: Generate Katha Lok AI Photo Motion Video
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  generate-video:
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 60
+
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+    steps:
+
+      # ==========================================================
+      # 1. CHECKOUT
+      # ==========================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ==========================================================
+      # 2. PYTHON
+      # ==========================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+
+      # ==========================================================
+      # 3. FFMPEG
+      # ==========================================================
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+
+      # ==========================================================
+      # 4. PYTHON DEPENDENCIES
+      # ==========================================================
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+
+          pip install \
+            requests \
+            pillow \
+            edge-tts \
+            gradio_client
+
+
+      # ==========================================================
+      # 5. INPUT CHECK
+      # ==========================================================
+
+      - name: Check input
+        run: |
+          echo "============================================================"
+          echo "INPUT"
+          echo "============================================================"
+
+          if [ -f "Input/topic.txt" ]; then
+            echo "Topic file:"
+            cat "Input/topic.txt"
+          else
+            echo "Input/topic.txt not found"
+          fi
+
+          echo
+
+
+      # ==========================================================
+      # 6. STORY PLAN
+      # ==========================================================
+
+      - name: Generate story plan
+        run: |
+          python scripts/generate_story_plan.py
+
+
+      # ==========================================================
+      # 7. STORY
+      # ==========================================================
+
+      - name: Generate story
+        run: |
+          python scripts/generate_story.py
+
+
+      # ==========================================================
+      # 8. AI STORY
+      # ==========================================================
+
+      - name: Generate AI story
+        run: |
+          python scripts/generate_ai_story.py
+
+
+      # ==========================================================
+      # 9. MODEL SELECTION
+      # ==========================================================
+
+      - name: Select Gemini model
+        run: |
+          python scripts/select_gemini_model.py || true
+
+      - name: Test Gemini
+        run: |
+          python scripts/test_gemini.py || true
+
+
+      # ==========================================================
+      # 10. CHARACTER BIBLE
+      # ==========================================================
+
+      - name: Generate character bible
+        run: |
+          python scripts/generate_character_bible.py
+
+
+      # ==========================================================
+      # 11. SCENES
+      # ==========================================================
+
+      - name: Generate scenes
+        run: |
+          python scripts/generate_scenes.py
+
+
+      # ==========================================================
+      # 12. NARRATION
+      # ==========================================================
+
+      - name: Generate narration jobs
+        run: |
+          python scripts/generate_narration.py
+
+
+      # ==========================================================
+      # 13. TTS
+      # ==========================================================
+
+      - name: Generate Hindi TTS
+        run: |
+          python scripts/generate_tts.py
+
+
+      # ==========================================================
+      # 14. VISUAL JOBS
+      # ==========================================================
+
+      - name: Prepare visual jobs
+        run: |
+          python scripts/generate_visuals.py
+
+
+      # ==========================================================
+      # 15. FREE IMAGE GENERATION
+      # ==========================================================
+
+      - name: Generate free realistic scene images
+        run: |
+          echo "============================================================"
+          echo "FREE IMAGE GENERATION"
+          echo "============================================================"
+
+          python scripts/free_image_generator.py
+
+
+      # ==========================================================
+      # 16. VERIFY IMAGES
+      # ==========================================================
+
+      - name: Verify generated images
+        run: |
+          echo "============================================================"
+          echo "VERIFYING SCENE IMAGES"
+          echo "============================================================"
+
+          if [ ! -d "output/visuals" ]; then
+            echo "ERROR: output/visuals does not exist"
+            exit 1
+          fi
+
+          COUNT=$(find output/visuals -type f \
+            \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) \
+            | wc -l)
+
+          echo "Image count: $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No scene images generated"
+            exit 1
+          fi
+
+          find output/visuals -maxdepth 1 -type f \
+            \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) \
+            -print
+
+
+      # ==========================================================
+      # 17. PHOTO MOTION
+      # ==========================================================
+
+      - name: Create Photo Motion scene videos
+        run: |
+          python scripts/photo_motion.py
+
+
+      # ==========================================================
+      # 18. RENDER FINAL VIDEO
+      # ==========================================================
+
+      - name: Render final video
+        run: |
+          python scripts/render_video.py
+
+
+      # ==========================================================
+      # 19. THUMBNAIL
+      # ==========================================================
+
+      - name: Generate thumbnail
+        run: |
+          python scripts/generate_thumbnail.py || true
+
+
+      # ==========================================================
+      # 20. YOUTUBE METADATA
+      # ==========================================================
+
+      - name: Create YouTube metadata
+        run: |
+          mkdir -p output
+
+          TITLE="Katha Lok AI"
+
+          if [ -f "Input/topic.txt" ]; then
+            TOPIC=$(tr '\n' ' ' < "Input/topic.txt" | xargs)
+
+            if [ -n "$TOPIC" ]; then
+              TITLE="$TOPIC"
+            fi
+          fi
+
+          cat > output/youtube_metadata.txt <<EOF
+Title:
+$TITLE
+
+Description:
+
+Katha Lok AI — Hindi AI Story Video
+
+This video was generated using the Katha Lok AI
+Photo Motion pipeline.
+
+#KathaLokAI #HindiStory #AIStory #HindiKahani
+
+Tags:
+Katha Lok AI, Hindi story, Hindi kahani, AI story,
+Hindi AI video, Indian story, Hindi storytelling
+EOF
+
+          echo "Metadata created:"
+          cat output/youtube_metadata.txt
+
+
+      # ==========================================================
+      # 21. FINAL OUTPUT CHECK
+      # ==========================================================
+
+      - name: Check final output
+        run: |
+          echo "============================================================"
+          echo "FINAL OUTPUT"
+          echo "============================================================"
+
+          find output -maxdepth 3 -type f \
+            \( -name "*.mp4" -o -name "*.png" -o -name "*.txt" \) \
+            -print
+
+
+      # ==========================================================
+      # 22. CREATE FINAL ZIP
+      # ==========================================================
+
+      - name: Create final ZIP
+        run: |
+          cd output
+
+          zip -r ../katha-lok-ai-photo-motion-output.zip . \
+            -x "*.pyc" \
+            -x "__pycache__/*"
+
+          cd ..
+
+          ls -lh katha-lok-ai-photo-motion-output.zip
+
+
+      # ==========================================================
+      # 23. UPLOAD ARTIFACT
+      # ==========================================================
+
+      - name: Upload final output
+        uses: actions/upload-artifact@v4
+        with:
+          name: katha-lok-ai-photo-motion-output
+          path: |
+            output/**
+            katha-lok-ai-photo-motion-output.zip
+          if-no-files-found: error
+          retention-days: 7
