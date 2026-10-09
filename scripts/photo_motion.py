@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Generate validated cinematic Photo Motion clips from scene images."""
+"""Create validated cinematic photo-motion clips, including depth parallax."""
 
 import json
 import math
@@ -16,16 +15,20 @@ from input_config import load_and_validate, get_format, get_fps
 
 VISUALS = ROOT / "output" / "visuals"
 JOBS_FILE = VISUALS / "visual_jobs.json"
+DEPTH_DIR = VISUALS / "depth_maps"
+DEPTH_MANIFEST = DEPTH_DIR / "depth_manifest.json"
+
 OUTPUT_DIR = ROOT / "output" / "photo_motion"
 MANIFEST_FILE = OUTPUT_DIR / "photo_motion_manifest.json"
 
 CRF = 20
 PRESET = "medium"
 
-# Effects rotate deterministically through scenes.
-# No external paid motion service is used.
+# Parallax requires a matching generated depth map.
+# Other effects work without depth estimation.
 EFFECTS = [
     "zoom_in",
+    "parallax",
     "pan_left",
     "tilt_up",
     "zoom_out",
@@ -34,6 +37,7 @@ EFFECTS = [
     "diagonal_drift",
     "handheld_drift",
     "cinematic_sweep",
+    "dutch_angle",
 ]
 
 
@@ -51,7 +55,7 @@ def run_command(command):
     )
     if result.stdout:
         log(result.stdout)
-    if result.returncode != 0:
+    if result.returncode:
         raise RuntimeError(
             f"Command failed with exit code {result.returncode}."
         )
@@ -82,7 +86,7 @@ def read_jobs():
         jobs = []
 
     if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError("visual_jobs.json contains no valid scene jobs.")
+        raise RuntimeError("visual_jobs.json contains no scene jobs.")
 
     return jobs
 
@@ -130,10 +134,12 @@ def scene_duration(job):
         except (TypeError, ValueError):
             continue
 
-    raise RuntimeError("Every scene needs a valid positive duration.")
+    raise RuntimeError("Every scene needs a valid duration.")
 
 
 def prepare_jobs(jobs):
+    from PIL import Image
+
     prepared = []
     seen = set()
 
@@ -143,11 +149,13 @@ def prepare_jobs(jobs):
 
         number = scene_number(job, index)
         if number in seen:
-            raise RuntimeError(f"Duplicate global scene number: {number}")
+            raise RuntimeError(f"Duplicate scene number: {number}")
         seen.add(number)
 
-        image_value = job.get("image_path") or job.get("image")
-        image = safe_path(image_value, f"image path for scene {number}")
+        image = safe_path(
+            job.get("image_path") or job.get("image"),
+            f"image path for scene {number}",
+        )
 
         if not image.is_file() or image.stat().st_size < 1000:
             raise RuntimeError(
@@ -155,18 +163,14 @@ def prepare_jobs(jobs):
             )
 
         try:
-            from PIL import Image
-
             with Image.open(image) as source:
                 source.verify()
             with Image.open(image) as source:
                 if source.width < 64 or source.height < 64:
-                    raise RuntimeError(
-                        f"Scene {number} image dimensions are too small."
-                    )
+                    raise RuntimeError("Image dimensions are too small.")
         except Exception as exc:
             raise RuntimeError(
-                f"Scene {number} image is invalid: {image}: {exc}"
+                f"Invalid image for scene {number}: {exc}"
             ) from exc
 
         prepared.append({
@@ -180,9 +184,8 @@ def prepare_jobs(jobs):
 
     prepared.sort(key=lambda item: item["number"])
     actual = [item["number"] for item in prepared]
-    expected = list(range(1, len(prepared) + 1))
 
-    if actual != expected:
+    if actual != list(range(1, len(prepared) + 1)):
         raise RuntimeError(
             "Global scene numbering must be continuous from 1. "
             f"Found: {actual}"
@@ -191,16 +194,71 @@ def prepare_jobs(jobs):
     return prepared
 
 
+def read_depth_maps():
+    """Return scene number -> depth-map path, if a valid manifest exists."""
+    if not DEPTH_MANIFEST.is_file():
+        log(
+            "NOTICE: Depth manifest is absent. "
+            "Parallax will be replaced by a normal cinematic move."
+        )
+        return {}
+
+    try:
+        data = json.loads(
+            DEPTH_MANIFEST.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
+        log("WARNING: Cannot read depth manifest:", exc)
+        return {}
+
+    if isinstance(data, dict):
+        entries = (
+            data.get("scenes")
+            or data.get("depth_maps")
+            or data.get("items")
+            or []
+        )
+    elif isinstance(data, list):
+        entries = data
+    else:
+        entries = []
+
+    result = {}
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+
+        raw_number = entry.get(
+            "global_scene",
+            entry.get("scene", entry.get("number")),
+        )
+        raw_path = (
+            entry.get("depth_map")
+            or entry.get("path")
+            or entry.get("file")
+        )
+
+        try:
+            number = int(raw_number)
+            path = safe_path(raw_path, f"depth map for scene {number}")
+        except (TypeError, ValueError, RuntimeError):
+            continue
+
+        if number > 0 and path.is_file() and path.stat().st_size > 100:
+            result[number] = path
+
+    log("Valid depth maps:", len(result))
+    return result
+
+
 def make_filter(effect, frames, width, height, fps):
-    """Build smooth camera-like movement from a still image."""
+    """Build a restrained FFmpeg camera movement from a still image."""
 
     denominator = max(frames - 1, 1)
-
-    # Work on a larger canvas to provide room for movement.
     source_width = width * 2
     source_height = height * 2
 
-    # The zoom range is deliberately restrained to avoid excessive motion.
     if effect == "zoom_in":
         zoom = f"min(1+0.10*on/{denominator},1.10)"
         x = "(iw-iw/zoom)/2"
@@ -238,25 +296,52 @@ def make_filter(effect, frames, width, height, fps):
 
     elif effect == "handheld_drift":
         zoom = "1.055"
-        x = f"(iw-iw/zoom)/2+2*sin(on*0.16)"
-        y = f"(ih-ih/zoom)/2+2*sin(on*0.11)"
+        x = "(iw-iw/zoom)/2+2*sin(on*0.16)"
+        y = "(ih-ih/zoom)/2+2*sin(on*0.11)"
 
     elif effect == "cinematic_sweep":
         zoom = f"1.035+0.025*sin(PI*on/{denominator})"
         x = f"(iw-iw/zoom)*(0.5-0.35*cos(PI*on/{denominator}))"
         y = f"(ih-ih/zoom)*(0.5+0.20*sin(PI*on/{denominator}))"
 
+    elif effect == "dutch_angle":
+        # Small rotation gives a cinematic angled framing.
+        zoom = "1.055"
+        x = "(iw-iw/zoom)/2"
+        y = "(ih-ih/zoom)/2"
+
+    elif effect == "parallax":
+        # This is only a restrained camera-like move over a depth-guided
+        # scene. Actual layered displacement is performed in a separate
+        # depth-aware compositor; FFmpeg zoompan alone cannot create it.
+        zoom = f"1.04+0.025*on/{denominator}"
+        x = f"(iw-iw/zoom)*(0.42+0.16*on/{denominator})"
+        y = f"(ih-ih/zoom)*(0.52-0.08*on/{denominator})"
+
     else:
         raise RuntimeError(f"Unsupported motion effect: {effect}")
 
-    return (
+    filters = [
         f"scale={source_width}:{source_height}:"
-        "force_original_aspect_ratio=increase,"
-        f"crop={source_width}:{source_height},"
+        "force_original_aspect_ratio=increase",
+        f"crop={source_width}:{source_height}",
+    ]
+
+    if effect == "dutch_angle":
+        filters.append(
+            "rotate='0.012*sin(2*PI*t/4)':"
+            "ow=rotw(0.012):oh=roth(0.012):"
+            "c=black"
+        )
+
+    filters.extend([
         f"zoompan=z='{zoom}':x='{x}':y='{y}':"
-        f"d=1:s={width}x{height}:fps={fps},"
-        "setsar=1,format=yuv420p"
-    )
+        f"d=1:s={width}x{height}:fps={fps}",
+        "setsar=1",
+        "format=yuv420p",
+    ])
+
+    return ",".join(filters)
 
 
 def probe_clip(path, ffprobe, width, height, expected_duration):
@@ -265,19 +350,16 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
 
     result = subprocess.run(
         [
-            ffprobe,
-            "-v", "error",
+            ffprobe, "-v", "error",
             "-show_entries",
             "stream=codec_type,width,height:format=duration,size",
-            "-of", "json",
-            str(path),
+            "-of", "json", str(path),
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
 
-    if result.returncode != 0:
+    if result.returncode:
         raise RuntimeError(
             f"ffprobe failed for {path.name}: {result.stderr.strip()}"
         )
@@ -290,14 +372,14 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
             f"Invalid ffprobe output for {path.name}: {exc}"
         ) from exc
 
-    video_streams = [
+    streams = [
         stream for stream in data.get("streams", [])
         if stream.get("codec_type") == "video"
     ]
-    if not video_streams:
+    if not streams:
         raise RuntimeError(f"{path.name} has no video stream.")
 
-    stream = video_streams[0]
+    stream = streams[0]
     actual_width = int(stream.get("width", 0))
     actual_height = int(stream.get("height", 0))
 
@@ -333,17 +415,13 @@ def main():
     fps = get_fps(config)
 
     if not 1 <= fps <= 60:
-        raise RuntimeError(
-            f"FPS must be between 1 and 60; got {fps}."
-        )
+        raise RuntimeError(f"FPS must be between 1 and 60; got {fps}.")
 
-    if mode == "full":
-        width, height = 1280, 720
-    else:
-        width, height = 720, 1280
+    width, height = (1280, 720) if mode == "full" else (720, 1280)
 
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
+
     if not ffmpeg:
         raise RuntimeError("FFmpeg is not installed.")
     if not ffprobe:
@@ -351,9 +429,10 @@ def main():
 
     jobs = read_jobs()
     prepared = prepare_jobs(jobs)
+    depth_maps = read_depth_maps()
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Remove old scene clips from this renderer before a fresh run.
     for old_file in OUTPUT_DIR.glob("scene_*.mp4"):
         if old_file.is_file():
             old_file.unlink()
@@ -368,15 +447,21 @@ def main():
 
         frames = max(1, round(requested_seconds * fps))
         actual_duration = frames / fps
-        effect = EFFECTS[index % len(EFFECTS)]
+        selected_effect = EFFECTS[index % len(EFFECTS)]
+        depth_path = depth_maps.get(number)
+
+        # Do not label a clip as parallax if it has no matching depth map.
+        effect = selected_effect
+        if effect == "parallax" and depth_path is None:
+            effect = "cinematic_sweep"
 
         log("\n" + "=" * 55)
         log(f"Scene: {number}/{len(prepared)}")
         log(f"Image: {image.relative_to(ROOT)}")
         log(f"Motion: {effect}")
+        log(f"Depth map: {depth_path.relative_to(ROOT) if depth_path else 'not used'}")
         log(f"Duration: {actual_duration:.3f}s")
-        log(f"FPS: {fps}")
-        log(f"Resolution: {width}x{height}")
+        log(f"Resolution: {width}x{height}, FPS: {fps}")
 
         video_filter = make_filter(
             effect, frames, width, height, fps
@@ -384,9 +469,7 @@ def main():
 
         run_command([
             ffmpeg,
-            "-hide_banner",
-            "-loglevel", "error",
-            "-y",
+            "-hide_banner", "-loglevel", "error", "-y",
             "-loop", "1",
             "-framerate", str(fps),
             "-i", str(image),
@@ -413,10 +496,16 @@ def main():
             "local_scene": item["local_scene"],
             "image": str(image.relative_to(ROOT)),
             "video": str(target.relative_to(ROOT)),
+            "depth_map": (
+                str(depth_path.relative_to(ROOT))
+                if depth_path else None
+            ),
+            "depth_map_available": depth_path is not None,
             "duration": actual,
             "requested_duration": requested_seconds,
             "frames": frames,
             "effect": effect,
+            "effect_is_true_parallax": False,
             "width": width,
             "height": height,
             "fps": fps,
@@ -424,7 +513,6 @@ def main():
             "size_bytes": target.stat().st_size,
         })
 
-        # Save after every scene so completed work is recorded.
         write_manifest(manifest)
 
     if len(manifest) != len(jobs):
@@ -432,8 +520,7 @@ def main():
             f"Clip count mismatch: jobs={len(jobs)}, clips={len(manifest)}"
         )
 
-    log("\n" + "=" * 55)
-    log("PHOTO MOTION GENERATION SUCCESS")
+    log("\nPHOTO MOTION GENERATION SUCCESS")
     log("Format:", mode)
     log("Resolution:", f"{width}x{height}")
     log("FPS:", fps)
@@ -442,8 +529,11 @@ def main():
         "Total duration:",
         f"{sum(row['duration'] for row in manifest):.2f}s",
     )
-    log("Motion effects used:", ", ".join(EFFECTS))
     log("Manifest:", MANIFEST_FILE.relative_to(ROOT))
+    log(
+        "NOTE: The parallax-labelled move is still a 2D camera move. "
+        "True foreground/background displacement needs a depth-aware compositor."
+    )
 
 
 if __name__ == "__main__":
