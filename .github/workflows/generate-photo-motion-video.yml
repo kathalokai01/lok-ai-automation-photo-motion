@@ -34,7 +34,9 @@ jobs:
           pip install requests pillow edge-tts gradio_client
 
       - name: Check input
+        shell: bash
         run: |
+          set -e
           echo "============================================================"
           echo "INPUT"
           echo "============================================================"
@@ -52,14 +54,15 @@ jobs:
       - name: Generate story
         run: python scripts/generate_story.py
 
+      # IMPORTANT: select and test the model BEFORE AI story generation.
+      - name: Select Gemini model
+        run: python scripts/select_gemini_model.py
+
+      - name: Test selected Gemini model
+        run: python scripts/test_gemini.py
+
       - name: Generate AI story
         run: python scripts/generate_ai_story.py
-
-      - name: Select Gemini model
-        run: python scripts/select_gemini_model.py || true
-
-      - name: Test Gemini
-        run: python scripts/test_gemini.py || true
 
       - name: Generate character bible
         run: python scripts/generate_character_bible.py
@@ -77,12 +80,13 @@ jobs:
         run: python scripts/generate_visuals.py
 
       - name: Generate free realistic scene images
-        run: |
-          python scripts/free_image_generator.py
+        run: python scripts/free_image_generator.py
 
       - name: Verify generated images
         shell: bash
         run: |
+          set -e
+
           if [ ! -d "output/visuals" ]; then
             echo "ERROR: output/visuals does not exist"
             exit 1
@@ -99,7 +103,7 @@ jobs:
             exit 1
           fi
 
-          find output/visuals -maxdepth 1 -type f -print
+          find output/visuals -maxdepth 2 -type f -print
 
       - name: Create Photo Motion scene videos
         run: python scripts/photo_motion.py
@@ -130,11 +134,8 @@ jobs:
           )
           topic = re.sub(r"\s+", " ", topic)
 
-          # Read available story-related files.
-          # Exclude generated metadata and binary media.
           text_parts = []
           story_title = ""
-          story_files = []
 
           for folder in (output, Path("Input")):
               if not folder.exists():
@@ -165,23 +166,24 @@ jobs:
                       continue
 
                   try:
-                      content = path.read_text(encoding="utf-8").strip()
+                      content = path.read_text(
+                          encoding="utf-8"
+                      ).strip()
                   except (OSError, UnicodeError):
                       continue
 
                   if not content:
                       continue
 
-                  story_files.append(path)
-
                   if path.suffix.lower() == ".json":
                       try:
                           data = json.loads(content)
-
                           if isinstance(data, dict):
                               for key in (
-                                  "title", "story_title",
-                                  "topic", "name"
+                                  "title",
+                                  "story_title",
+                                  "topic",
+                                  "name",
                               ):
                                   value = data.get(key)
                                   if (
@@ -193,27 +195,23 @@ jobs:
                                       break
                       except (json.JSONDecodeError, ValueError):
                           pass
-
-                  # Avoid using the entire JSON structure as prose.
-                  if path.suffix.lower() != ".json":
+                  else:
                       text_parts.append(content)
 
-          # Prefer a story-specific title when one is available.
           title = story_title or topic or "Katha Lok AI Hindi Story"
-          title = re.sub(r"\s+", " ", title).strip()
-          title = title[:100].rstrip()
+          title = re.sub(r"\s+", " ", title).strip()[:100].rstrip()
 
-          # Build description from actual available story text.
-          combined_story = "\n".join(text_parts)
+          combined_story = " ".join(text_parts)
           combined_story = re.sub(
               r"\s+", " ", combined_story
           ).strip()
 
-          # Remove obvious script/configuration clutter.
           if combined_story:
               combined_story = combined_story[:2500].rstrip()
               if len(combined_story) == 2500:
-                  combined_story = combined_story.rsplit(" ", 1)[0] + "..."
+                  combined_story = (
+                      combined_story.rsplit(" ", 1)[0] + "..."
+                  )
 
               description = (
                   f"{title}\n\n"
@@ -224,13 +222,11 @@ jobs:
           else:
               description = (
                   f"{title}\n\n"
-                  f"Watch this Hindi story from Katha Lok AI. "
-                  f"This video is based on the topic: "
-                  f"{topic or title}.\n\n"
+                  "Watch this Hindi story from Katha Lok AI. "
+                  f"This video is based on the topic: {topic or title}.\n\n"
                   "Share your thoughts in the comments."
               )
 
-          # Build relevant tags from the topic and story text.
           tag_source = " ".join([
               title,
               topic,
@@ -239,7 +235,7 @@ jobs:
 
           words = re.findall(
               r"[A-Za-z0-9]+|[\u0900-\u097F]+",
-              tag_source
+              tag_source,
           )
 
           dynamic_tags = []
@@ -255,7 +251,6 @@ jobs:
               seen.add(normalized)
               dynamic_tags.append(word)
 
-          # These channel tags stay consistent across videos.
           fixed_tags = [
               "Katha Lok AI",
               "Hindi story",
@@ -274,10 +269,9 @@ jobs:
 
           tags = tags[:20]
 
-          # Keep hashtags partly consistent and partly story-specific.
           hashtag_words = re.findall(
               r"[A-Za-z0-9]+|[\u0900-\u097F]+",
-              title
+              title,
           )
 
           title_hashtag = "".join(hashtag_words[:3])
@@ -299,10 +293,7 @@ jobs:
           )
 
           metadata_path = output / "youtube_metadata.txt"
-          metadata_path.write_text(
-              metadata,
-              encoding="utf-8"
-          )
+          metadata_path.write_text(metadata, encoding="utf-8")
 
           print("Dynamic YouTube metadata created:")
           print(metadata)
@@ -311,6 +302,8 @@ jobs:
       - name: Check final output
         shell: bash
         run: |
+          set -e
+
           echo "============================================================"
           echo "FINAL OUTPUT"
           echo "============================================================"
@@ -323,13 +316,14 @@ jobs:
           fi
 
           if [ ! -s "output/youtube_metadata.txt" ]; then
-            echo "ERROR: YouTube metadata file is missing or empty"
+            echo "ERROR: YouTube metadata is missing or empty"
             exit 1
           fi
 
       - name: Create final ZIP
         shell: bash
         run: |
+          set -e
           cd output
           zip -r ../katha-lok-ai-photo-motion-output.zip .
           cd ..
