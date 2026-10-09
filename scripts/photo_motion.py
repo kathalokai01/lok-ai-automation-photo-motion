@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create validated photo-motion clips with actual depth-guided 2.5D parallax."""
+"""Generate validated photo-motion clips with optional 2.5D parallax."""
 
 import json
 import math
@@ -16,7 +16,6 @@ from input_config import load_and_validate, get_format, get_fps
 VISUALS = ROOT / "output" / "visuals"
 JOBS_FILE = VISUALS / "visual_jobs.json"
 DEPTH_MANIFEST = VISUALS / "depth_maps" / "depth_manifest.json"
-
 OUTPUT_DIR = ROOT / "output" / "photo_motion"
 MANIFEST_FILE = OUTPUT_DIR / "photo_motion_manifest.json"
 
@@ -42,6 +41,21 @@ def log(*items):
     print(*items, flush=True)
 
 
+def safe_path(value, label):
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"Missing {label}.")
+
+    path = Path(value.strip())
+    if not path.is_absolute():
+        path = ROOT / path
+
+    path = path.resolve()
+    if not path.is_relative_to(ROOT):
+        raise RuntimeError(f"{label} must be inside the repository.")
+
+    return path
+
+
 def run_command(command):
     log("\n$", " ".join(map(str, command)))
     result = subprocess.run(
@@ -51,8 +65,9 @@ def run_command(command):
         text=True,
     )
     if result.stdout:
-        log(result.stdout)
-    if result.returncode:
+        log(result.stdout.rstrip())
+
+    if result.returncode != 0:
         raise RuntimeError(
             f"Command failed with exit code {result.returncode}."
         )
@@ -60,7 +75,10 @@ def run_command(command):
 
 def read_jobs():
     if not JOBS_FILE.is_file():
-        raise RuntimeError(f"Missing visual jobs file: {JOBS_FILE}")
+        raise RuntimeError(
+            "Missing output/visuals/visual_jobs.json. "
+            "Run scripts/generate_visuals.py first."
+        )
 
     try:
         data = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
@@ -85,16 +103,6 @@ def read_jobs():
     return jobs
 
 
-def safe_path(value, label):
-    if not value:
-        raise RuntimeError(f"Missing {label}.")
-
-    path = (ROOT / str(value)).resolve()
-    if not path.is_relative_to(ROOT):
-        raise RuntimeError(f"{label} must be inside the repository.")
-    return path
-
-
 def scene_number(job, index):
     value = job.get("global_scene", job.get("scene", index))
     if isinstance(value, dict):
@@ -109,24 +117,20 @@ def scene_number(job, index):
 
     if number < 1:
         raise RuntimeError(f"Scene number must be positive: {number}")
+
     return number
 
 
 def scene_duration(job):
-    for key in (
-        "duration",
-        "scene_duration",
-        "duration_seconds",
-        "seconds",
-    ):
+    for key in ("duration", "scene_duration", "duration_seconds", "seconds"):
         try:
             value = float(job.get(key))
             if math.isfinite(value) and 0.5 <= value <= 3600:
                 return value
         except (TypeError, ValueError):
-            pass
+            continue
 
-    raise RuntimeError("Every scene needs a valid duration.")
+    raise RuntimeError("Every scene needs a valid duration between 0.5 and 3600 seconds.")
 
 
 def prepare_jobs(jobs):
@@ -174,8 +178,9 @@ def prepare_jobs(jobs):
 
     prepared.sort(key=lambda item: item["number"])
     actual = [item["number"] for item in prepared]
+    expected = list(range(1, len(prepared) + 1))
 
-    if actual != list(range(1, len(prepared) + 1)):
+    if actual != expected:
         raise RuntimeError(
             f"Scene numbering must be continuous from 1. Found {actual}"
         )
@@ -185,53 +190,53 @@ def prepare_jobs(jobs):
 
 def read_depth_maps():
     if not DEPTH_MANIFEST.is_file():
-        log("NOTICE: Depth manifest missing; parallax will use cinematic fallback.")
+        log("NOTICE: Depth manifest missing; parallax scenes will use cinematic sweep.")
         return {}
 
     try:
-        data = json.loads(
-            DEPTH_MANIFEST.read_text(encoding="utf-8")
-        )
+        data = json.loads(DEPTH_MANIFEST.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         log("WARNING: Cannot read depth manifest:", exc)
         return {}
 
-    if isinstance(data, dict):
+    if isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict):
         entries = (
             data.get("scenes")
             or data.get("depth_maps")
             or data.get("items")
             or []
         )
-    elif isinstance(data, list):
-        entries = data
     else:
         entries = []
 
-    result = {}
+    if not isinstance(entries, list):
+        log("WARNING: Depth manifest entries are not a list.")
+        return {}
 
+    result = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
 
-        raw_number = entry.get(
-            "global_scene",
-            entry.get("scene", entry.get("number")),
-        )
-        raw_path = (
-            entry.get("depth_map")
-            or entry.get("path")
-            or entry.get("file")
-        )
-
         try:
+            raw_number = entry.get(
+                "global_scene",
+                entry.get("scene", entry.get("number")),
+            )
             number = int(raw_number)
-            path = safe_path(raw_path, f"depth map for scene {number}")
+            path = safe_path(
+                entry.get("depth_map") or entry.get("path") or entry.get("file"),
+                f"depth map for scene {number}",
+            )
         except (TypeError, ValueError, RuntimeError):
             continue
 
-        if number > 0 and path.is_file() and path.stat().st_size > 100:
-            result[number] = path
+        if number < 1 or not path.is_file() or path.stat().st_size < 100:
+            continue
+
+        result[number] = path
 
     log("Valid depth maps:", len(result))
     return result
@@ -296,8 +301,7 @@ def make_filter(effect, frames, width, height, fps):
         raise RuntimeError(f"Unsupported FFmpeg effect: {effect}")
 
     filters = [
-        f"scale={source_width}:{source_height}:"
-        "force_original_aspect_ratio=increase",
+        f"scale={source_width}:{source_height}:force_original_aspect_ratio=increase",
         f"crop={source_width}:{source_height}",
     ]
 
@@ -319,7 +323,6 @@ def make_filter(effect, frames, width, height, fps):
 
 def create_parallax_clip(item, depth_path, frames, width, height, fps):
     script = ROOT / "scripts" / "depth_parallax.py"
-
     if not script.is_file():
         raise RuntimeError(f"Parallax compositor is missing: {script}")
 
@@ -338,21 +341,20 @@ def create_parallax_clip(item, depth_path, frames, width, height, fps):
 
 
 def probe_clip(path, ffprobe, width, height, expected_duration):
-    if not path.is_file() or path.stat().st_size <= 0:
-        raise RuntimeError(f"Scene video is missing or empty: {path}")
+    if not path.is_file() or path.stat().st_size < 1000:
+        raise RuntimeError(f"Scene video is missing or too small: {path}")
 
     result = subprocess.run(
         [
             ffprobe, "-v", "error",
-            "-show_entries",
-            "stream=codec_type,width,height:format=duration,size",
+            "-show_entries", "stream=codec_type,width,height:format=duration,size",
             "-of", "json", str(path),
         ],
         capture_output=True,
         text=True,
     )
 
-    if result.returncode:
+    if result.returncode != 0:
         raise RuntimeError(
             f"ffprobe failed for {path.name}: {result.stderr.strip()}"
         )
@@ -360,15 +362,15 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
     try:
         data = json.loads(result.stdout)
         actual_duration = float(data["format"]["duration"])
+        streams = [
+            stream for stream in data.get("streams", [])
+            if stream.get("codec_type") == "video"
+        ]
     except (ValueError, TypeError, KeyError) as exc:
         raise RuntimeError(
             f"Invalid ffprobe output for {path.name}: {exc}"
         ) from exc
 
-    streams = [
-        stream for stream in data.get("streams", [])
-        if stream.get("codec_type") == "video"
-    ]
     if not streams:
         raise RuntimeError(f"{path.name} has no video stream.")
 
@@ -379,13 +381,16 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
     if (actual_width, actual_height) != (width, height):
         raise RuntimeError(
             f"Wrong resolution for {path.name}: "
-            f"{actual_width}x{actual_height}"
+            f"{actual_width}x{actual_height}; expected {width}x{height}"
         )
 
-    if abs(actual_duration - expected_duration) > 1.0:
+    if not math.isfinite(actual_duration) or actual_duration <= 0:
+        raise RuntimeError(f"Invalid video duration for {path.name}.")
+
+    if abs(actual_duration - expected_duration) > max(1.0, 2.0 / 24.0):
         raise RuntimeError(
-            f"Unexpected duration for {path.name}: "
-            f"{actual_duration:.3f}s; expected about {expected_duration:.3f}s"
+            f"Unexpected duration for {path.name}: {actual_duration:.3f}s; "
+            f"expected about {expected_duration:.3f}s"
         )
 
     return actual_duration
@@ -421,31 +426,36 @@ def main():
     depth_maps = read_depth_maps()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    for old_file in OUTPUT_DIR.glob("scene_*.mp4"):
-        old_file.unlink()
-
     manifest = []
+
+    log("=" * 60)
+    log("KATHA LOK AI PHOTO MOTION")
+    log("Format:", mode)
+    log("Resolution:", f"{width}x{height}")
+    log("FPS:", fps)
+    log("Scenes:", len(prepared))
+    log("=" * 60)
 
     for index, item in enumerate(prepared):
         number = item["number"]
         frames = max(1, round(item["duration"] * fps))
-        actual_duration = frames / fps
+        actual_duration_expected = frames / fps
         selected_effect = EFFECTS[index % len(EFFECTS)]
         depth_path = depth_maps.get(number)
 
-        true_parallax = (
-            selected_effect == "parallax"
-            and depth_path is not None
-        )
-
+        true_parallax = selected_effect == "parallax" and depth_path is not None
         effect = selected_effect
+
         if selected_effect == "parallax" and depth_path is None:
             effect = "cinematic_sweep"
 
         log("\n" + "=" * 55)
         log(f"Scene: {number}/{len(prepared)}")
-        log(f"Motion: {effect}")
-        log(f"Depth map: {depth_path if depth_path else 'not available'}")
+        log("Motion:", effect)
+        log("Depth map:", depth_path if depth_path else "not available")
+
+        # Remove an old clip for this scene before creating its replacement.
+        item["target"].unlink(missing_ok=True)
 
         if true_parallax:
             create_parallax_clip(
@@ -471,7 +481,7 @@ def main():
             ])
 
         actual = probe_clip(
-            item["target"], ffprobe, width, height, actual_duration
+            item["target"], ffprobe, width, height, actual_duration_expected
         )
 
         manifest.append({
@@ -479,10 +489,10 @@ def main():
             "global_scene": number,
             "part": item["part"],
             "local_scene": item["local_scene"],
-            "image": str(item["image"].relative_to(ROOT)),
-            "video": str(item["target"].relative_to(ROOT)),
+            "image": item["image"].relative_to(ROOT).as_posix(),
+            "video": item["target"].relative_to(ROOT).as_posix(),
             "depth_map": (
-                str(depth_path.relative_to(ROOT))
+                depth_path.relative_to(ROOT).as_posix()
                 if depth_path else None
             ),
             "depth_map_available": depth_path is not None,
@@ -498,11 +508,12 @@ def main():
             "size_bytes": item["target"].stat().st_size,
         })
 
+        # Preserve progress after each completed scene.
         write_manifest(manifest)
 
-    if len(manifest) != len(jobs):
+    if len(manifest) != len(prepared):
         raise RuntimeError(
-            f"Clip count mismatch: jobs={len(jobs)}, clips={len(manifest)}"
+            f"Clip count mismatch: jobs={len(prepared)}, clips={len(manifest)}"
         )
 
     log("\nPHOTO MOTION GENERATION SUCCESS")
@@ -520,6 +531,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        print("PHOTO MOTION CANCELLED", file=sys.stderr)
         sys.exit(130)
     except Exception as exc:
         print(f"PHOTO MOTION FAILED: {exc}", file=sys.stderr)
