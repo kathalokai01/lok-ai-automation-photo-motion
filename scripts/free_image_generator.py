@@ -1,722 +1,304 @@
 #!/usr/bin/env python3
-"""
-KATHA LOK AI — FREE IMAGE GENERATOR
-===================================
-
-PHOTO-MOTION REPO
-
-Free image generation through a public Hugging Face
-ZeroGPU Z-Image-Turbo Space.
-
-NO:
-- Gemini image API
-- OpenAI image API
-- paid API
-- Cloudflare AI
-- Wan2GP
-- Colab
-
-The generated images are saved into:
-    output/visuals/
-
-This script reads:
-    output/visuals/visual_jobs.json
-
-and generates missing scene images.
-
-Verified HF Space:
-    mrfakename/Z-Image-Turbo
-
-Verified generation function:
-    generate_image(
-        prompt,
-        height,
-        width,
-        num_inference_steps,
-        seed,
-        randomize_seed
-    )
-
-Returns:
-    image, seed
-"""
+"""KATHA LOK AI — Free Z-Image-Turbo scene image generator."""
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
-import random
 from pathlib import Path
 
 try:
     from gradio_client import Client
-except ImportError:
-    print("ERROR: gradio_client is not installed.")
-    print("Install with: pip install gradio_client")
+    from PIL import Image
+except ImportError as exc:
+    print(f"ERROR: Missing dependency: {exc}")
+    print("Install: pip install gradio_client pillow")
     sys.exit(1)
 
-
-# ============================================================
-# PATHS
-# ============================================================
-
 ROOT = Path(__file__).resolve().parents[1]
-
 VISUAL_DIR = ROOT / "output" / "visuals"
 JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUAL_DIR / "image_generation_manifest.json"
 
-VISUAL_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# ============================================================
-# VERIFIED FREE SPACE
-# ============================================================
-
 HF_SPACE = "mrfakename/Z-Image-Turbo"
-
-
-# ============================================================
-# GENERATION SETTINGS
-# ============================================================
-
-# Photo-motion needs portrait images.
-# Z-Image-Turbo supports dimensions >= 512 and multiples of 64.
-HEIGHT = 1536
-WIDTH = 1024
-
-# Turbo model is designed for very few steps.
 STEPS = 9
-
-# Fixed starting seed; each scene gets a different deterministic seed.
 BASE_SEED = 20261009
 
-
-# ============================================================
-# NEGATIVE / QUALITY GUIDANCE
-# ============================================================
+# Dimensions are multiples of 64, supported by the image workflow.
+# Full = landscape; Short = portrait.
+LANDSCAPE = (1024, 576)  # width, height
+PORTRAIT = (576, 1024)   # width, height
 
 QUALITY_SUFFIX = """
-Photorealistic live-action photography.
-Real Indian people and real Indian environment.
-Natural skin texture.
-Natural facial proportions.
-Natural human anatomy.
-Realistic clothing and materials.
-Realistic lighting.
-Realistic shadows.
-Natural depth of field.
-Cinematic documentary photography.
-Highly detailed but physically believable.
-No illustration.
-No cartoon.
-No painting.
-No 3D render.
-No anime.
-No fantasy CGI.
-No artificial plastic skin.
-No text.
-No watermark.
+Photorealistic live-action photography, realistic Indian people and
+Indian environments, natural skin texture, believable anatomy,
+realistic clothing, physically accurate lighting and shadows,
+cinematic documentary photography, natural depth of field.
+No illustration, cartoon, painting, anime, 3D render, plastic skin,
+text, logo, watermark, duplicate people, distorted hands or faces.
 """
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def load_json(path: Path, default):
+def load_json(path, default=None):
     if not path.exists():
         return default
-
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"WARNING: Could not read {path}: {e}")
-        return default
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def save_json(path: Path, data):
+def save_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-
     with path.open("w", encoding="utf-8") as f:
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def find_image(scene_number: int):
-    candidates = [
-        VISUAL_DIR / f"scene_{scene_number:02d}.png",
-        VISUAL_DIR / f"scene_{scene_number:02d}.jpg",
-        VISUAL_DIR / f"scene_{scene_number:02d}.jpeg",
-        VISUAL_DIR / f"scene_{scene_number}.png",
-        VISUAL_DIR / f"scene_{scene_number}.jpg",
-        VISUAL_DIR / f"scene_{scene_number}.jpeg",
-    ]
-
-    for path in candidates:
-        if path.exists() and path.stat().st_size > 5000:
-            return path
-
-    return None
-
-
-def extract_prompt(job):
-    """
-    Accept multiple visual_jobs schemas so the generator
-    remains compatible with the copied repository.
-    """
-
-    for key in (
-        "prompt",
-        "image_prompt",
-        "visual_prompt",
-        "scene_prompt",
-        "description",
-    ):
+def scene_number(job, fallback):
+    for key in ("global_scene", "scene_number", "scene", "scene_id", "number", "id"):
         value = job.get(key)
-
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    # Nested prompt support
-    prompt_data = job.get("prompts")
-
-    if isinstance(prompt_data, dict):
-        for key in (
-            "image",
-            "visual",
-            "prompt",
-            "scene",
-        ):
-            value = prompt_data.get(key)
-
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-
-    return ""
-
-
-def extract_scene_number(job, fallback):
-    for key in (
-        "scene_number",
-        "scene",
-        "scene_id",
-        "number",
-        "id",
-    ):
-        value = job.get(key)
-
         if value is None:
             continue
-
         try:
             if isinstance(value, str):
-                digits = "".join(ch for ch in value if ch.isdigit())
-
+                digits = "".join(c for c in value if c.isdigit())
                 if digits:
                     return int(digits)
-
             return int(value)
-
-        except Exception:
-            pass
-
+        except (TypeError, ValueError):
+            continue
     return fallback
 
 
-def build_prompt(job):
-    prompt = extract_prompt(job)
+def dimensions_for(job):
+    """Use the format selected by generate_visuals.py."""
+    value = str(job.get("image_size", "")).lower().replace(" ", "")
+    if value in ("1280x720", "1024x576", "landscape", "full", "16:9"):
+        return LANDSCAPE
+    if value in ("720x1280", "576x1024", "portrait", "short", "9:16"):
+        return PORTRAIT
 
-    if not prompt:
-        title = job.get("title", "")
-        description = job.get("description", "")
+    # If the job doesn't specify dimensions, read the input config.
+    config = ROOT / "Input" / "topic.txt"
+    if config.exists():
+        for line in config.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            if key.strip().upper() == "FORMAT":
+                if val.strip().lower() == "full":
+                    return LANDSCAPE
+                return PORTRAIT
 
-        prompt = f"""
-A realistic cinematic scene from an Indian story.
-Story title: {title}
-Scene description: {description}
-"""
+    return PORTRAIT
+
+
+def find_image(number):
+    for suffix in (".png", ".jpg", ".jpeg"):
+        path = VISUAL_DIR / f"scene_{number:02d}{suffix}"
+        if path.exists() and path.stat().st_size > 5000:
+            return path
+    return None
+
+
+def image_has_dimensions(path, expected):
+    try:
+        with Image.open(path) as im:
+            return im.size == expected
+    except Exception:
+        return False
+
+
+def get_prompt(job):
+    for key in ("prompt", "image_prompt", "visual_prompt", "scene_prompt"):
+        value = job.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip() + "\n\n" + QUALITY_SUFFIX.strip()
 
     return (
-        prompt.strip()
-        + "\n\n"
-        + QUALITY_SUFFIX.strip()
+        "Create a photorealistic cinematic scene from an Indian story. "
+        + str(job.get("description", job.get("title", "")))
+        + "\n\n" + QUALITY_SUFFIX.strip()
     )
 
 
-def save_result_image(result, output_path: Path):
-    """
-    Gradio can return:
-      - local filepath
-      - PIL image
-      - dict containing a filepath
-      - dict containing a URL
-    """
+def save_image_result(result, destination):
+    if isinstance(result, (tuple, list)):
+        result = result[0] if result else None
 
-    # --------------------------------------------------------
-    # PIL image
-    # --------------------------------------------------------
     if hasattr(result, "save"):
-        result.save(output_path)
+        result.save(destination)
         return True
 
-    # --------------------------------------------------------
-    # String filepath
-    # --------------------------------------------------------
+    if isinstance(result, dict):
+        for key in ("path", "filepath", "file"):
+            value = result.get(key)
+            if value and Path(str(value)).is_file():
+                with Image.open(str(value)) as im:
+                    im.save(destination)
+                return True
+        result = result.get("url")
+
     if isinstance(result, str):
-
         source = Path(result)
-
-        if source.exists():
-            output_path.write_bytes(source.read_bytes())
+        if source.is_file():
+            with Image.open(source) as im:
+                im.save(destination)
             return True
 
-        return False
-
-    # --------------------------------------------------------
-    # Dictionary result
-    # --------------------------------------------------------
-    if isinstance(result, dict):
-
-        for key in (
-            "path",
-            "filepath",
-            "file",
-        ):
-            value = result.get(key)
-
-            if value:
-                source = Path(str(value))
-
-                if source.exists():
-                    output_path.write_bytes(
-                        source.read_bytes()
-                    )
-                    return True
-
-        # Some Gradio versions may expose a URL.
-        url = result.get("url")
-
-        if url:
-            try:
-                import requests
-
-                response = requests.get(
-                    url,
-                    timeout=120
-                )
-
-                response.raise_for_status()
-
-                output_path.write_bytes(
-                    response.content
-                )
-
-                return True
-
-            except Exception as e:
-                print(
-                    "WARNING: Could not download image URL:",
-                    e
-                )
+        if result.startswith(("https://", "http://")):
+            import requests
+            response = requests.get(result, timeout=120)
+            response.raise_for_status()
+            destination.write_bytes(response.content)
+            with Image.open(destination) as im:
+                im.verify()
+            return True
 
     return False
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
-
-    print("=" * 70)
-    print("KATHA LOK AI — FREE Z-IMAGE-TURBO GENERATOR")
-    print("=" * 70)
-
-    print()
-    print("HF Space :", HF_SPACE)
-    print("Size     :", f"{WIDTH}x{HEIGHT}")
-    print("Steps    :", STEPS)
-    print("Output   :", VISUAL_DIR)
-    print()
-
-    # --------------------------------------------------------
-    # JOB FILE
-    # --------------------------------------------------------
+    VISUAL_DIR.mkdir(parents=True, exist_ok=True)
 
     if not JOBS_FILE.exists():
-        print("ERROR:")
-        print(f"Missing: {JOBS_FILE}")
-        print()
-        print("Run generate_visuals.py first.")
-        sys.exit(2)
+        raise SystemExit(f"ERROR: Missing {JOBS_FILE}. Run generate_visuals.py first.")
 
-    jobs_data = load_json(JOBS_FILE, [])
+    data = load_json(JOBS_FILE, {})
+    jobs = data if isinstance(data, list) else (
+        data.get("jobs") or data.get("visual_jobs") or data.get("scenes") or []
+    )
 
-    # Support:
-    # [] 
-    # {"jobs":[...]}
-    # {"scenes":[...]}
+    if not isinstance(jobs, list) or not jobs:
+        raise SystemExit("ERROR: visual_jobs.json contains no scene jobs.")
 
-    if isinstance(jobs_data, dict):
-
-        jobs = (
-            jobs_data.get("jobs")
-            or jobs_data.get("visual_jobs")
-            or jobs_data.get("scenes")
-            or []
-        )
-
-    else:
-        jobs = jobs_data
-
-    if not isinstance(jobs, list):
-        print("ERROR: visual_jobs.json does not contain a list.")
-        sys.exit(2)
-
-    if not jobs:
-        print("ERROR: No visual jobs found.")
-        sys.exit(2)
-
-    print(f"Visual jobs: {len(jobs)}")
-    print()
-
-    # --------------------------------------------------------
-    # EXISTING IMAGES
-    # --------------------------------------------------------
-
-    existing = []
-
-    for i, job in enumerate(jobs, start=1):
-
-        scene_number = extract_scene_number(
-            job,
-            i
-        )
-
-        image = find_image(scene_number)
-
-        if image:
-            existing.append(scene_number)
-
-    if existing:
-        print(
-            "Existing scene images:",
-            len(existing)
-        )
-
-    # --------------------------------------------------------
-    # CONNECT TO HF
-    # --------------------------------------------------------
-
-    print()
-    print("Connecting to free Hugging Face Space...")
+    print("=" * 64)
+    print("KATHA LOK AI — FREE IMAGE GENERATION")
+    print("Space:", HF_SPACE)
+    print("Scene jobs:", len(jobs))
+    print("=" * 64)
 
     try:
-        client = Client(
-            HF_SPACE,
-            verbose=False
-        )
-
-    except Exception as e:
-
-        print()
-        print("ERROR: Could not connect to Hugging Face Space.")
-        print(str(e))
-        print()
-        print(
-            "This is usually a temporary Space/queue/network "
-            "availability problem."
-        )
-
-        sys.exit(3)
-
-    print("HF connection: OK")
-    print()
-
-    # --------------------------------------------------------
-    # MANIFEST
-    # --------------------------------------------------------
+        client = Client(HF_SPACE, verbose=False)
+    except Exception as exc:
+        raise SystemExit(f"ERROR: Could not connect to Hugging Face Space: {exc}")
 
     manifest = {
-        "generator": "Tongyi-MAI/Z-Image-Turbo",
+        "generator": "Z-Image-Turbo",
         "space": HF_SPACE,
-        "mode": "free_zerogpu",
-        "width": WIDTH,
-        "height": HEIGHT,
-        "steps": STEPS,
         "scenes": [],
     }
 
-    # --------------------------------------------------------
-    # GENERATE
-    # --------------------------------------------------------
-
-    generated_count = 0
-    skipped_count = 0
-    failed_count = 0
+    failed = []
+    generated = 0
+    skipped = 0
 
     for index, job in enumerate(jobs, start=1):
+        number = scene_number(job, index)
+        width, height = dimensions_for(job)
+        destination = VISUAL_DIR / f"scene_{number:02d}.png"
 
-        scene_number = extract_scene_number(
-            job,
-            index
-        )
+        print(f"\n[{index}/{len(jobs)}] Scene {number:02d}")
+        print(f"Format dimensions: {width}x{height}")
 
-        output_path = (
-            VISUAL_DIR
-            / f"scene_{scene_number:02d}.png"
-        )
-
-        print("-" * 70)
-        print(
-            f"SCENE {scene_number:02d} "
-            f"({index}/{len(jobs)})"
-        )
-
-        # ----------------------------------------------------
-        # Existing image
-        # ----------------------------------------------------
-
-        existing_image = find_image(scene_number)
-
-        if existing_image:
-
-            print(
-                "STATUS : EXISTING IMAGE — SKIP"
-            )
-
+        existing = find_image(number)
+        if existing and image_has_dimensions(existing, (width, height)):
+            print("Existing image matches dimensions; skipping.")
             manifest["scenes"].append({
-                "scene": scene_number,
+                "scene": number,
                 "status": "existing",
-                "file": str(existing_image.relative_to(ROOT)),
+                "file": str(existing.relative_to(ROOT)),
+                "width": width,
+                "height": height,
             })
-
-            skipped_count += 1
+            skipped += 1
             continue
 
-        # ----------------------------------------------------
-        # Prompt
-        # ----------------------------------------------------
+        # Remove an old image with the wrong orientation so it cannot
+        # accidentally be mistaken for the new result.
+        if existing and existing != destination:
+            existing.unlink(missing_ok=True)
+        if destination.exists() and not image_has_dimensions(destination, (width, height)):
+            destination.unlink()
 
-        prompt = build_prompt(job)
-
-        print()
-        print("Generating image...")
-        print("Model  :", HF_SPACE)
-        print("Size   :", f"{WIDTH}x{HEIGHT}")
-        print("Steps  :", STEPS)
-
-        # Different deterministic seed per scene.
-        seed = BASE_SEED + scene_number
-
+        prompt = get_prompt(job)
+        seed = BASE_SEED + number
         success = False
         last_error = None
 
-        # ----------------------------------------------------
-        # Retry
-        # ----------------------------------------------------
-
         for attempt in range(1, 4):
-
-            print(
-                f"Attempt {attempt}/3..."
-            )
-
             try:
-
+                print(f"Generating image (attempt {attempt}/3)...")
                 result = client.predict(
                     prompt,
-                    HEIGHT,
-                    WIDTH,
+                    height,
+                    width,
                     STEPS,
                     seed,
                     False,
                     api_name="/generate_image",
                 )
 
-                if isinstance(result, tuple):
-                    image_result = result[0]
-                    used_seed = (
-                        result[1]
-                        if len(result) > 1
-                        else seed
-                    )
-                else:
-                    image_result = result
-                    used_seed = seed
+                if save_image_result(result, destination):
+                    with Image.open(destination) as im:
+                        actual_size = im.size
 
-                if save_result_image(
-                    image_result,
-                    output_path
-                ):
-
-                    if (
-                        output_path.exists()
-                        and output_path.stat().st_size > 5000
-                    ):
+                    if actual_size == (width, height) and destination.stat().st_size > 5000:
                         success = True
-
-                        print()
-                        print(
-                            "STATUS : SUCCESS"
-                        )
-                        print(
-                            "IMAGE  :",
-                            output_path
-                        )
-                        print(
-                            "SIZE   :",
-                            output_path.stat().st_size,
-                            "bytes"
-                        )
-
+                        generated += 1
                         manifest["scenes"].append({
-                            "scene": scene_number,
+                            "scene": number,
                             "status": "generated",
-                            "file": str(
-                                output_path.relative_to(ROOT)
-                            ),
-                            "seed": used_seed,
+                            "file": str(destination.relative_to(ROOT)),
+                            "seed": seed,
+                            "width": width,
+                            "height": height,
                             "model": HF_SPACE,
                         })
-
-                        generated_count += 1
+                        print("SUCCESS:", destination.name, actual_size)
                         break
 
-            except Exception as e:
+                    last_error = f"Unexpected image dimensions: {actual_size}"
+                    destination.unlink(missing_ok=True)
+                else:
+                    last_error = "The Space returned no usable image."
 
-                last_error = str(e)
+            except Exception as exc:
+                last_error = str(exc)
+                print("Attempt error:", last_error[:400])
 
-                print(
-                    "Attempt failed:",
-                    last_error[:500]
-                )
-
-                if attempt < 3:
-                    time.sleep(5)
+            if attempt < 3:
+                time.sleep(5)
 
         if not success:
-
-            print()
-            print(
-                "STATUS : FAILED"
-            )
-
-            if last_error:
-                print(
-                    "ERROR  :",
-                    last_error[:800]
-                )
-
+            print("FAILED:", last_error)
+            failed.append(number)
             manifest["scenes"].append({
-                "scene": scene_number,
+                "scene": number,
                 "status": "failed",
                 "error": last_error,
+                "width": width,
+                "height": height,
             })
 
-            failed_count += 1
-
-    # --------------------------------------------------------
-    # SAVE MANIFEST
-    # --------------------------------------------------------
-
     manifest["summary"] = {
-        "total_jobs": len(jobs),
-        "existing": skipped_count,
-        "generated": generated_count,
-        "failed": failed_count,
+        "total": len(jobs),
+        "generated": generated,
+        "skipped": skipped,
+        "failed": len(failed),
+        "failed_scenes": failed,
     }
+    save_json(MANIFEST_FILE, manifest)
 
-    save_json(
-        MANIFEST_FILE,
-        manifest
-    )
+    print("\nIMAGE GENERATION SUMMARY")
+    print("Generated:", generated)
+    print("Skipped:", skipped)
+    print("Failed:", len(failed))
+    print("Manifest:", MANIFEST_FILE)
 
-    # --------------------------------------------------------
-    # FINAL STATUS
-    # --------------------------------------------------------
+    if failed:
+        raise SystemExit(f"ERROR: Image generation failed for scenes: {failed}")
 
-    print()
-    print("=" * 70)
-    print("IMAGE GENERATION COMPLETE")
-    print("=" * 70)
-
-    print(
-        "Total scenes :",
-        len(jobs)
-    )
-
-    print(
-        "Existing     :",
-        skipped_count
-    )
-
-    print(
-        "Generated    :",
-        generated_count
-    )
-
-    print(
-        "Failed       :",
-        failed_count
-    )
-
-    print(
-        "Manifest     :",
-        MANIFEST_FILE
-    )
-
-    print()
-
-    if failed_count > 0:
-
-        print(
-            "ERROR: Some scene images could not be generated."
-        )
-
-        print(
-            "Photo Motion will NOT continue with incomplete visuals."
-        )
-
-        sys.exit(4)
-
-    # Verify every scene exists.
-    missing = []
-
-    for index, job in enumerate(jobs, start=1):
-
-        scene_number = extract_scene_number(
-            job,
-            index
-        )
-
-        image = find_image(scene_number)
-
-        if not image:
-            missing.append(scene_number)
-
-    if missing:
-
-        print(
-            "ERROR: Missing final images:",
-            missing
-        )
-
-        sys.exit(5)
-
-    print(
-        "ALL SCENE IMAGES READY."
-    )
-
-    sys.exit(0)
+    print("ALL SCENE IMAGES READY.")
 
 
 if __name__ == "__main__":
