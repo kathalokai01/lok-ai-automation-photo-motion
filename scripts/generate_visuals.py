@@ -1,33 +1,5 @@
 #!/usr/bin/env python3
-"""
-KATHA LOK AI — PHOTO MOTION VISUAL PREPARATION
-
-Purpose:
-    Prepare realistic scene-image jobs for the PHOTO MOTION pipeline.
-
-IMPORTANT:
-    This script does NOT call a paid image-generation API.
-    It does NOT use Wan2GP.
-    It does NOT require Colab.
-
-It prepares:
-    output/visuals/visual_jobs.json
-    output/visuals/image_manifest.json
-
-If actual scene images already exist in output/visuals/,
-they are detected automatically.
-
-Expected image names:
-    scene_01.png
-    scene_02.png
-    scene_03.png
-    ...
-
-The next stage:
-    scripts/photo_motion.py
-
-converts those images into MP4 camera-motion clips.
-"""
+"""Prepare uniquely numbered image jobs for every story scene."""
 
 import json
 import os
@@ -35,798 +7,207 @@ import re
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+SCENES_FILE = ROOT / "output/scenes/scenes.json"
+BIBLE_FILE = ROOT / "output/story/character_bible.json"
+VISUAL_DIR = ROOT / "output/visuals"
+JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
+MANIFEST_FILE = VISUAL_DIR / "image_manifest.json"
 
-# ============================================================
-# PATHS
-# ============================================================
-
-ROOT = Path(__file__).resolve().parent.parent
-
-INPUT_DIR = ROOT / "Input"
-
-OUTPUT_DIR = ROOT / "output"
-
-SCENES_DIR = OUTPUT_DIR / "scenes"
-VISUALS_DIR = OUTPUT_DIR / "visuals"
-STORY_DIR = OUTPUT_DIR / "story"
-
-SCENES_JSON = SCENES_DIR / "scenes.json"
-CHARACTER_BIBLE_JSON = STORY_DIR / "character_bible.json"
-
-VISUAL_JOBS_JSON = VISUALS_DIR / "visual_jobs.json"
-IMAGE_MANIFEST_JSON = VISUALS_DIR / "image_manifest.json"
-
-VISUALS_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
-DEFAULT_SHORT_SIZE = "720x1280"
-DEFAULT_FULL_SIZE = "1280x720"
-
-IMAGE_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".webp"
-}
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def load_json(path, default=None):
-
-    if default is None:
-        default = {}
-
-    if not path.exists():
+def read_json(path, default=None):
+    if not path.is_file():
         return default
-
     try:
-
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            return json.load(f)
-
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-
-        print(
-            f"WARNING: Could not read {path}: {exc}"
-        )
-
-        return default
+        raise RuntimeError(f"Could not read {path}: {exc}") from exc
 
 
-def save_json(path, data):
-
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )
-
-    with open(
-        path,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
+    temp.replace(path)
 
 
-def first_value(data, keys, default=None):
+def scene_list(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("scenes", "scene_list", "items", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    return []
 
-    if not isinstance(data, dict):
-        return default
 
+def get_text(scene, keys):
     for key in keys:
-
-        value = data.get(key)
-
-        if value is not None:
-            return value
-
-    return default
-
-
-def scene_number(scene, fallback):
-
-    if not isinstance(scene, dict):
-        return fallback
-
-    value = first_value(
-        scene,
-        [
-            "scene",
-            "scene_id",
-            "scene_number",
-            "id",
-            "number"
-        ]
-    )
-
-    if value is None:
-        return fallback
-
-    digits = re.findall(
-        r"\d+",
-        str(value)
-    )
-
-    if digits:
-        return int(digits[0])
-
-    return fallback
-
-
-def scene_text(scene):
-
-    if not isinstance(scene, dict):
-        return ""
-
-    keys = [
-        "visual_prompt",
-        "image_prompt",
-        "visual_description",
-        "description",
-        "scene_description",
-        "prompt",
-        "action",
-        "text"
-    ]
-
-    parts = []
-
-    for key in keys:
-
         value = scene.get(key)
-
         if isinstance(value, str) and value.strip():
-
-            parts.append(
-                value.strip()
-            )
-
-    # Remove duplicates while preserving order
-    result = []
-
-    seen = set()
-
-    for item in parts:
-
-        normalized = item.lower()
-
-        if normalized not in seen:
-
-            seen.add(normalized)
-            result.append(item)
-
-    return " ".join(result)
+            return value.strip()
+    return ""
 
 
-def get_duration(scene):
-
-    if not isinstance(scene, dict):
-        return 5.0
-
-    keys = [
-        "duration",
-        "scene_duration",
-        "duration_seconds",
-        "seconds"
-    ]
-
-    for key in keys:
-
-        value = scene.get(key)
-
+def scene_duration(scene):
+    for key in ("duration", "scene_duration", "duration_seconds", "seconds"):
         try:
-
-            value = float(value)
-
+            value = float(scene.get(key))
             if value > 0:
                 return value
-
-        except Exception:
+        except (TypeError, ValueError):
             pass
-
     return 5.0
 
 
-def detect_format():
+def image_dimensions():
+    config_path = ROOT / "Input/topic.txt"
+    config = {}
+    if config_path.is_file():
+        for line in config_path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            config[key.strip().upper()] = value.split("#", 1)[0].strip().strip("'\"")
+
+    mode = config.get("FORMAT", "short").lower()
+    if mode in {"full", "long", "landscape", "youtube"}:
+        return "full", "1280x720"
+    return "short", "720x1280"
 
-    format_value = os.environ.get(
-        "FORMAT",
-        "short"
-    ).strip().lower()
-
-    if format_value == "full":
-        return "full"
-
-    return "short"
-
-
-def image_size_for_format(format_value):
-
-    if format_value == "full":
-        return DEFAULT_FULL_SIZE
-
-    return DEFAULT_SHORT_SIZE
-
-
-# ============================================================
-# CHARACTER BIBLE
-# ============================================================
-
-def load_character_bible():
-
-    data = load_json(
-        CHARACTER_BIBLE_JSON,
-        {}
-    )
-
-    if not data:
-        return ""
-
-    # Try common character-bible structures.
-    if isinstance(data, dict):
-
-        for key in [
-            "character_bible",
-            "characters",
-            "main_character",
-            "character"
-        ]:
-
-            value = data.get(key)
-
-            if isinstance(value, str):
-                return value
-
-            if isinstance(value, list):
-
-                text_parts = []
-
-                for item in value:
-
-                    if isinstance(item, str):
-                        text_parts.append(item)
-
-                    elif isinstance(item, dict):
-
-                        text_parts.append(
-                            json.dumps(
-                                item,
-                                ensure_ascii=False
-                            )
-                        )
-
-                if text_parts:
-                    return " ".join(text_parts)
-
-            if isinstance(value, dict):
-
-                return json.dumps(
-                    value,
-                    ensure_ascii=False
-                )
-
-        return json.dumps(
-            data,
-            ensure_ascii=False
-        )
-
-    if isinstance(data, list):
-
-        return json.dumps(
-            data,
-            ensure_ascii=False
-        )
-
-    return str(data)
-
-
-# ============================================================
-# REALISTIC IMAGE PROMPT
-# ============================================================
-
-def build_prompt(
-    scene,
-    number,
-    character_bible,
-    format_value
-):
-
-    description = scene_text(
-        scene
-    )
-
-    if not description:
-
-        description = (
-            "A realistic cinematic scene "
-            "from an Indian human story"
-        )
-
-    if format_value == "full":
-
-        framing = (
-            "16:9 cinematic landscape composition"
-        )
-
-    else:
-
-        framing = (
-            "9:16 vertical cinematic composition"
-        )
-
-    prompt_parts = [
-
-        "Photorealistic live-action cinematic still.",
-
-        "Real Indian environment and natural human appearance.",
-
-        "Natural skin texture, realistic clothing, "
-        "realistic lighting and physically believable details.",
-
-        "No cartoon, no illustration, no anime, "
-        "no 3D render, no painting.",
-
-        framing,
-
-        "The same characters must remain visually consistent "
-        "across all scenes.",
-
-        "Natural realistic photography, cinematic depth, "
-        "subtle atmospheric detail.",
-
-        description
-
-    ]
-
-    if character_bible:
-
-        prompt_parts.extend([
-            "",
-            "CHARACTER CONSISTENCY:",
-            character_bible
-        ])
-
-    return "\n".join(
-        prompt_parts
-    )
-
-
-def build_negative_prompt():
-
-    return (
-        "cartoon, anime, illustration, painting, "
-        "3d render, CGI, plastic skin, doll face, "
-        "deformed face, distorted body, extra fingers, "
-        "extra limbs, duplicate person, "
-        "bad anatomy, unrealistic eyes, "
-        "asymmetrical face, warped background, "
-        "text, watermark, logo, blurry face, "
-        "low quality, oversharpened, artificial skin"
-    )
-
-
-# ============================================================
-# FIND EXISTING IMAGES
-# ============================================================
-
-def find_existing_image(number):
-
-    candidates = [
-
-        VISUALS_DIR / f"scene_{number:02d}.png",
-        VISUALS_DIR / f"scene_{number:02d}.jpg",
-        VISUALS_DIR / f"scene_{number:02d}.jpeg",
-        VISUALS_DIR / f"scene_{number:02d}.webp",
-
-        VISUALS_DIR / f"scene_{number}.png",
-        VISUALS_DIR / f"scene_{number}.jpg",
-        VISUALS_DIR / f"scene_{number}.jpeg",
-        VISUALS_DIR / f"scene_{number}.webp",
-
-        VISUALS_DIR / f"{number:02d}.png",
-        VISUALS_DIR / f"{number:02d}.jpg",
-        VISUALS_DIR / f"{number:02d}.jpeg",
-        VISUALS_DIR / f"{number:02d}.webp",
-
-        VISUALS_DIR / f"{number}.png",
-        VISUALS_DIR / f"{number}.jpg",
-        VISUALS_DIR / f"{number}.jpeg",
-        VISUALS_DIR / f"{number}.webp",
-    ]
-
-    for path in candidates:
-
-        if path.exists():
-            return path
-
-    # Recursive fallback
-    for path in VISUALS_DIR.rglob("*"):
-
-        if not path.is_file():
-            continue
-
-        if path.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
-
-        digits = re.findall(
-            r"\d+",
-            path.stem
-        )
-
-        if not digits:
-            continue
-
-        try:
-
-            if int(digits[-1]) == number:
-                return path
-
-        except Exception:
-            pass
-
-    return None
-
-
-# ============================================================
-# BUILD VISUAL JOBS
-# ============================================================
 
 def main():
+    VISUAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 68)
-    print("KATHA LOK AI — PHOTO MOTION VISUAL PREPARATION")
-    print("=" * 68)
+    scenes = scene_list(read_json(SCENES_FILE, {}))
+    if not scenes:
+        raise RuntimeError(f"No scenes found in {SCENES_FILE}")
 
-    format_value = detect_format()
-
-    image_size = image_size_for_format(
-        format_value
-    )
-
-    print()
-    print("FORMAT      :", format_value)
-    print("IMAGE SIZE  :", image_size)
-    print("SCENES JSON :", SCENES_JSON)
-    print("VISUAL DIR  :", VISUALS_DIR)
-
-    scenes_data = load_json(
-        SCENES_JSON,
-        []
-    )
-
-    # --------------------------------------------------------
-    # Normalize scene list
-    # --------------------------------------------------------
-
-    if isinstance(scenes_data, list):
-
-        scenes = scenes_data
-
-    elif isinstance(scenes_data, dict):
-
-        scenes = None
-
-        for key in [
-            "scenes",
-            "scene_list",
-            "items",
-            "data"
-        ]:
-
-            if isinstance(
-                scenes_data.get(key),
-                list
-            ):
-
-                scenes = scenes_data[key]
-                break
-
-        if scenes is None:
-            scenes = []
-
-    else:
-
-        scenes = []
-
-    print()
-    print("SCENES FOUND:", len(scenes))
-
-    character_bible = load_character_bible()
+    mode, size = image_dimensions()
+    bible = read_json(BIBLE_FILE, {})
+    bible_text = json.dumps(bible, ensure_ascii=False) if bible else ""
 
     jobs = []
     manifest = []
+    seen_keys = set()
 
-    # --------------------------------------------------------
-    # Build one job per scene
-    # --------------------------------------------------------
+    for index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            raise RuntimeError(f"Invalid scene record at position {index}")
 
-    for index, scene in enumerate(
-        scenes,
-        start=1
-    ):
+        part = scene.get("part", 1)
+        local_scene = scene.get("scene", index)
 
-        number = scene_number(
+        key = (str(part), str(local_scene))
+        if key in seen_keys:
+            raise RuntimeError(
+                f"Duplicate part/scene pair found: Part {part}, Scene {local_scene}"
+            )
+        seen_keys.add(key)
+
+        # The global number is unique even when each part restarts at Scene 1.
+        global_number = index
+        image_path = VISUAL_DIR / f"scene_{global_number:02d}.png"
+
+        description = get_text(
             scene,
-            index
+            (
+                "visual_prompt",
+                "image_prompt",
+                "visual_description",
+                "description",
+                "scene_description",
+                "prompt",
+                "action",
+                "text",
+            ),
         )
+        if not description:
+            description = "A realistic cinematic scene from an Indian story."
 
-        duration = get_duration(
-            scene
-        )
+        prompt = "\n".join([
+            "Photorealistic live-action cinematic still.",
+            "Realistic Indian people and environment.",
+            "Natural skin texture, anatomy, clothing, lighting and shadows.",
+            "Keep recurring character identity and clothing consistent.",
+            "No cartoon, anime, illustration, CGI, text, or watermark.",
+            f"Composition: {mode} video, {size}.",
+            f"Story part: {part}. Original scene number: {local_scene}.",
+            description,
+            f"Character reference: {bible_text}" if bible_text else "",
+        ]).strip()
 
-        image_path = find_existing_image(
-            number
-        )
-
-        prompt = build_prompt(
-            scene=scene,
-            number=number,
-            character_bible=character_bible,
-            format_value=format_value
-        )
-
-        negative_prompt = (
-            build_negative_prompt()
-        )
-
-        if image_path:
-
-            status = "ready"
-
-            relative_image = str(
-                image_path.relative_to(ROOT)
-            )
-
-        else:
-
-            status = "image_required"
-
-            relative_image = (
-                f"output/visuals/"
-                f"scene_{number:02d}.png"
-            )
-
-        job = {
-
-            "scene": number,
-
-            "status": status,
-
-            "image_path": relative_image,
-
+        jobs.append({
+            "scene": global_number,
+            "global_scene": global_number,
+            "part": part,
+            "local_scene": local_scene,
+            "status": "image_required",
+            "image_path": str(image_path.relative_to(ROOT)),
             "prompt": prompt,
-
-            "negative_prompt": negative_prompt,
-
-            "image_size": image_size,
-
-            "duration": duration,
-
+            "negative_prompt": (
+                "cartoon, anime, illustration, painting, CGI, plastic skin, "
+                "deformed face, bad anatomy, extra limbs, duplicate person, "
+                "blurry face, text, watermark, logo"
+            ),
+            "image_size": size,
+            "duration": scene_duration(scene),
             "motion_engine": "photo_motion",
-
-            "output_video":
-                f"output/photo_motion/"
-                f"scene_{number:02d}.mp4"
-
-        }
-
-        jobs.append(
-            job
-        )
-
-        manifest.append({
-
-            "scene": number,
-
-            "image": relative_image,
-
-            "image_exists":
-                image_path is not None,
-
-            "duration": duration,
-
-            "status": status
-
+            "output_video": f"output/photo_motion/scene_{global_number:02d}.mp4",
         })
 
-    # --------------------------------------------------------
-    # Save jobs
-    # --------------------------------------------------------
+        manifest.append({
+            "scene": global_number,
+            "global_scene": global_number,
+            "part": part,
+            "local_scene": local_scene,
+            "image": str(image_path.relative_to(ROOT)),
+            "duration": scene_duration(scene),
+            "status": "image_required",
+        })
 
-    save_json(
-        VISUAL_JOBS_JSON,
-        {
-            "version": "photo-motion-1.0",
-            "format": format_value,
-            "image_size": image_size,
-            "motion_engine": "photo_motion",
-            "uses_wan2gp": False,
-            "uses_colab": False,
-            "uses_paid_image_api": False,
-            "jobs": jobs
-        }
-    )
+    write_json(JOBS_FILE, {
+        "version": "photo-motion-2.0",
+        "format": mode,
+        "image_size": size,
+        "total_scenes": len(jobs),
+        "motion_engine": "photo_motion",
+        "uses_wan2gp": False,
+        "uses_colab": False,
+        "jobs": jobs,
+    })
 
-    save_json(
-        IMAGE_MANIFEST_JSON,
-        {
-            "version": "photo-motion-1.0",
-            "format": format_value,
-            "total_scenes": len(manifest),
-            "images_ready": sum(
-                1
-                for item in manifest
-                if item["image_exists"]
-            ),
-            "images_required": sum(
-                1
-                for item in manifest
-                if not item["image_exists"]
-            ),
-            "scenes": manifest
-        }
-    )
+    write_json(MANIFEST_FILE, {
+        "version": "photo-motion-2.0",
+        "format": mode,
+        "total_scenes": len(manifest),
+        "images_ready": 0,
+        "images_required": len(manifest),
+        "scenes": manifest,
+    })
 
-    # --------------------------------------------------------
-    # Summary
-    # --------------------------------------------------------
+    print("VISUAL JOBS PREPARED")
+    print("Format:", mode)
+    print("Image size:", size)
+    print("Total scenes:", len(jobs))
+    print("Jobs file:", JOBS_FILE)
+    print("Manifest:", MANIFEST_FILE)
+    print("Scene numbers are globally unique.")
 
-    ready = sum(
-        1
-        for item in manifest
-        if item["image_exists"]
-    )
-
-    missing = (
-        len(manifest) - ready
-    )
-
-    print()
-    print("=" * 68)
-    print("PHOTO MOTION VISUAL JOBS READY")
-    print("=" * 68)
-
-    print(
-        "Total scenes       :",
-        len(manifest)
-    )
-
-    print(
-        "Images already here:",
-        ready
-    )
-
-    print(
-        "Images required    :",
-        missing
-    )
-
-    print()
-    print(
-        "Visual jobs:",
-        VISUAL_JOBS_JSON
-    )
-
-    print(
-        "Image manifest:",
-        IMAGE_MANIFEST_JSON
-    )
-
-    # --------------------------------------------------------
-    # IMPORTANT
-    # --------------------------------------------------------
-
-    if missing > 0:
-
-        print()
-        print("=" * 68)
-        print("IMAGE GENERATION IS STILL A SEPARATE STAGE")
-        print("=" * 68)
-
-        print(
-            "Scene prompts/jobs have been prepared."
-        )
-
-        print(
-            "No paid image-generation API was called."
-        )
-
-        print(
-            "No Wan2GP queue was created."
-        )
-
-        print(
-            "No Colab worker is required by this script."
-        )
-
-        print()
-        print(
-            "Once scene images exist in:"
-        )
-
-        print(
-            f"  {VISUALS_DIR}"
-        )
-
-        print()
-        print(
-            "run:"
-        )
-
-        print(
-            "  python scripts/photo_motion.py"
-        )
-
-    else:
-
-        print()
-        print(
-            "ALL SCENE IMAGES ARE AVAILABLE."
-        )
-
-        print(
-            "Photo Motion can now create scene videos."
-        )
-
-        print()
-        print(
-            "Next:"
-        )
-
-        print(
-            "  python scripts/photo_motion.py"
-        )
-
-    print()
-    print("=" * 68)
-    print("DONE")
-    print("=" * 68)
+    if len(jobs) != len(seen_keys):
+        raise RuntimeError("Scene count validation failed.")
 
 
 if __name__ == "__main__":
-
     try:
-
         main()
-
-    except KeyboardInterrupt:
-
-        print(
-            "\nStopped by user."
-        )
-
-        sys.exit(130)
-
     except Exception as exc:
-
-        print()
-        print("=" * 68)
-        print("FAILED")
-        print("=" * 68)
-
-        print(
-            str(exc)
-        )
-
+        print(f"VISUAL JOB PREPARATION FAILED: {exc}", file=sys.stderr)
         sys.exit(1)
