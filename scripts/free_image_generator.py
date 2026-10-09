@@ -1,4 +1,3 @@
-पूरा पुराना code हटाकर यह पूरा replacement code paste करें।
 
 #!/usr/bin/env python3
 """Katha Lok AI: resumable multi-provider scene image fallback."""
