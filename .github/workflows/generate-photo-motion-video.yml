@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   generate-video:
@@ -37,29 +37,41 @@ jobs:
         shell: bash
         run: |
           set -e
-          echo "============================================================"
-          echo "INPUT"
-          echo "============================================================"
-
-          if [ -f "Input/topic.txt" ]; then
-            cat "Input/topic.txt"
-          else
+          test -f "Input/topic.txt" || {
             echo "ERROR: Input/topic.txt not found"
             exit 1
-          fi
+          }
+          cat "Input/topic.txt"
+
+      # Select and test the model before any story generation.
+      - name: Select Gemini model
+        run: python scripts/select_gemini_model.py
+
+      - name: Test selected Gemini model
+        run: python scripts/test_gemini.py
+
+      - name: Verify selected model file
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/config/selected_model.json")
+          if not path.is_file():
+              raise SystemExit("ERROR: Selected model file is missing")
+
+          data = json.loads(path.read_text(encoding="utf-8"))
+          if data.get("status") != "selected" or not data.get("model"):
+              raise SystemExit("ERROR: Selected model file is invalid")
+
+          print("Selected Gemini model:", data["model"])
+          PY
 
       - name: Generate story plan
         run: python scripts/generate_story_plan.py
 
       - name: Generate story
         run: python scripts/generate_story.py
-
-      # IMPORTANT: select and test the model BEFORE AI story generation.
-      - name: Select Gemini model
-        run: python scripts/select_gemini_model.py
-
-      - name: Test selected Gemini model
-        run: python scripts/test_gemini.py
 
       - name: Generate AI story
         run: python scripts/generate_ai_story.py
@@ -86,22 +98,20 @@ jobs:
         shell: bash
         run: |
           set -e
-
-          if [ ! -d "output/visuals" ]; then
+          test -d "output/visuals" || {
             echo "ERROR: output/visuals does not exist"
             exit 1
-          fi
+          }
 
           COUNT=$(find output/visuals -type f \
             \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.webp" \) \
             | wc -l)
 
           echo "Image count: $COUNT"
-
-          if [ "$COUNT" -eq 0 ]; then
+          test "$COUNT" -gt 0 || {
             echo "ERROR: No scene images generated"
             exit 1
-          fi
+          }
 
           find output/visuals -maxdepth 2 -type f -print
 
@@ -114,7 +124,6 @@ jobs:
       - name: Generate thumbnail
         run: python scripts/generate_thumbnail.py || true
 
-      # STORY-SPECIFIC YOUTUBE METADATA
       - name: Create dynamic YouTube metadata
         shell: bash
         run: |
@@ -127,175 +136,77 @@ jobs:
           output.mkdir(parents=True, exist_ok=True)
 
           topic_path = Path("Input/topic.txt")
-          topic = (
-              topic_path.read_text(encoding="utf-8").strip()
-              if topic_path.exists()
-              else ""
-          )
+          topic = topic_path.read_text(encoding="utf-8").strip() if topic_path.exists() else ""
           topic = re.sub(r"\s+", " ", topic)
 
-          text_parts = []
+          title_file = output / "story" / "final_title.txt"
           story_title = ""
+          if title_file.is_file():
+              story_title = title_file.read_text(encoding="utf-8").strip().splitlines()[0]
 
-          for folder in (output, Path("Input")):
-              if not folder.exists():
-                  continue
+          title = re.sub(r"\s+", " ", story_title or topic or "Katha Lok AI Hindi Story").strip()[:100]
 
-              for path in folder.rglob("*"):
-                  if not path.is_file():
-                      continue
+          story_file = output / "story" / "story.json"
+          story_text = ""
+          if story_file.is_file():
+              try:
+                  data = json.loads(story_file.read_text(encoding="utf-8"))
+                  chunks = []
+                  for part in data.get("parts", []):
+                      for scene in part.get("scenes", []):
+                          narration = scene.get("narration", "")
+                          if narration:
+                              chunks.append(str(narration).strip())
+                  story_text = " ".join(chunks)
+              except (OSError, ValueError, TypeError):
+                  story_text = ""
 
-                  if path.name.lower() in {
-                      "youtube_metadata.txt",
-                      "final_title.txt",
-                  }:
-                      if path.name.lower() == "final_title.txt":
-                          try:
-                              candidate = path.read_text(
-                                  encoding="utf-8"
-                              ).strip()
-                              if candidate and not story_title:
-                                  story_title = candidate.splitlines()[0].strip()
-                          except (OSError, UnicodeError):
-                              pass
-                      continue
+          story_text = re.sub(r"\s+", " ", story_text).strip()
+          description_story = story_text[:2500]
+          if len(story_text) > 2500:
+              description_story = description_story.rsplit(" ", 1)[0] + "..."
 
-                  if path.suffix.lower() not in {
-                      ".txt", ".md", ".json"
-                  }:
-                      continue
-
-                  try:
-                      content = path.read_text(
-                          encoding="utf-8"
-                      ).strip()
-                  except (OSError, UnicodeError):
-                      continue
-
-                  if not content:
-                      continue
-
-                  if path.suffix.lower() == ".json":
-                      try:
-                          data = json.loads(content)
-                          if isinstance(data, dict):
-                              for key in (
-                                  "title",
-                                  "story_title",
-                                  "topic",
-                                  "name",
-                              ):
-                                  value = data.get(key)
-                                  if (
-                                      isinstance(value, str)
-                                      and value.strip()
-                                      and not story_title
-                                  ):
-                                      story_title = value.strip()
-                                      break
-                      except (json.JSONDecodeError, ValueError):
-                          pass
-                  else:
-                      text_parts.append(content)
-
-          title = story_title or topic or "Katha Lok AI Hindi Story"
-          title = re.sub(r"\s+", " ", title).strip()[:100].rstrip()
-
-          combined_story = " ".join(text_parts)
-          combined_story = re.sub(
-              r"\s+", " ", combined_story
-          ).strip()
-
-          if combined_story:
-              combined_story = combined_story[:2500].rstrip()
-              if len(combined_story) == 2500:
-                  combined_story = (
-                      combined_story.rsplit(" ", 1)[0] + "..."
-                  )
-
-              description = (
-                  f"{title}\n\n"
-                  f"{combined_story}\n\n"
-                  "Watch the story till the end and share "
-                  "your thoughts in the comments."
-              )
-          else:
-              description = (
-                  f"{title}\n\n"
-                  "Watch this Hindi story from Katha Lok AI. "
-                  f"This video is based on the topic: {topic or title}.\n\n"
-                  "Share your thoughts in the comments."
-              )
-
-          tag_source = " ".join([
-              title,
-              topic,
-              combined_story[:5000],
-          ])
-
-          words = re.findall(
-              r"[A-Za-z0-9]+|[\u0900-\u097F]+",
-              tag_source,
+          description = (
+              f"{title}\n\n{description_story}\n\n"
+              "Watch the story till the end and share your thoughts in the comments."
+              if description_story else
+              f"{title}\n\nWatch this Hindi story from Katha Lok AI, based on: {topic or title}.\n\n"
+              "Share your thoughts in the comments."
           )
 
+          words = re.findall(r"[A-Za-z0-9]+|[\u0900-\u097F]+", f"{title} {topic} {story_text[:5000]}")
           dynamic_tags = []
           seen = set()
-
           for word in words:
               word = word.strip()
-              normalized = word.casefold()
+              key = word.casefold()
+              if len(word) >= 3 and key not in seen:
+                  seen.add(key)
+                  dynamic_tags.append(word)
 
-              if len(word) < 3 or normalized in seen:
-                  continue
-
-              seen.add(normalized)
-              dynamic_tags.append(word)
-
-          fixed_tags = [
-              "Katha Lok AI",
-              "Hindi story",
-              "Hindi kahani",
-              "Hindi storytelling",
-          ]
-
+          fixed_tags = ["Katha Lok AI", "Hindi story", "Hindi kahani", "Hindi storytelling"]
           tags = []
-          tag_seen = set()
-
           for tag in dynamic_tags + fixed_tags:
-              normalized = tag.casefold()
-              if normalized not in tag_seen:
-                  tag_seen.add(normalized)
+              if tag.casefold() not in {x.casefold() for x in tags}:
                   tags.append(tag)
-
           tags = tags[:20]
 
-          hashtag_words = re.findall(
-              r"[A-Za-z0-9]+|[\u0900-\u097F]+",
-              title,
-          )
-
-          title_hashtag = "".join(hashtag_words[:3])
+          title_words = re.findall(r"[A-Za-z0-9]+|[\u0900-\u097F]+", title)
+          title_hashtag = "".join(title_words[:3])
           hashtags = ["#KathaLokAI", "#HindiKahani"]
-
-          if title_hashtag:
-              story_hashtag = "#" + title_hashtag
-              if story_hashtag.casefold() not in {
-                  item.casefold() for item in hashtags
-              }:
-                  hashtags.append(story_hashtag)
+          if title_hashtag and ("#" + title_hashtag).casefold() not in {x.casefold() for x in hashtags}:
+              hashtags.append("#" + title_hashtag)
 
           description += "\n\n" + " ".join(hashtags)
-
           metadata = (
               f"Title:\n{title}\n\n"
               f"Description:\n\n{description}\n\n"
               f"Tags:\n{', '.join(tags)}\n"
           )
 
-          metadata_path = output / "youtube_metadata.txt"
-          metadata_path.write_text(metadata, encoding="utf-8")
-
-          print("Dynamic YouTube metadata created:")
+          path = output / "youtube_metadata.txt"
+          path.write_text(metadata, encoding="utf-8")
+          print("Created:", path)
           print(metadata)
           PY
 
@@ -303,15 +214,11 @@ jobs:
         shell: bash
         run: |
           set -e
-
-          echo "============================================================"
-          echo "FINAL OUTPUT"
-          echo "============================================================"
-
           find output -maxdepth 4 -type f -print
 
-          if ! find output -type f -iname "*.mp4" -print -quit | grep -q .; then
-            echo "ERROR: No MP4 video found in output"
+          expected="output/videos/katha_lok_ai_final.mp4"
+          if [ ! -s "$expected" ]; then
+            echo "ERROR: Expected final video is missing or empty: $expected"
             exit 1
           fi
 
