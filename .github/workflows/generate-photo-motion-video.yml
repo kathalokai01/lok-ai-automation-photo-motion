@@ -43,7 +43,6 @@ jobs:
           }
           cat "Input/topic.txt"
 
-      # Select and test the model before any story generation.
       - name: Select Gemini model
         run: python scripts/select_gemini_model.py
 
@@ -84,6 +83,9 @@ jobs:
 
       - name: Generate narration jobs
         run: python scripts/generate_narration.py
+
+      - name: Prepare captions in selected language
+        run: python scripts/prepare_captions.py
 
       - name: Generate Hindi TTS
         run: python scripts/generate_tts.py
@@ -224,6 +226,11 @@ jobs:
 
           if [ ! -s "output/youtube_metadata.txt" ]; then
             echo "ERROR: YouTube metadata is missing or empty"
+            exit 1
+          fi
+
+          if [ ! -s "output/captions/captions.json" ]; then
+            echo "ERROR: Prepared captions file is missing or empty"
             exit 1
           fi
 
