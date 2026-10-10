@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Validate scene clips and assemble the final Photo Motion video."""
+"""Assemble validated Photo Motion clips into a narrated final video."""
 
 import json
 import math
@@ -14,19 +15,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from input_config import load_and_validate, get_format
 
 OUTPUT = ROOT / "output"
-MOTION_DIR = OUTPUT / "photo_motion"
+MOTION_MANIFEST = OUTPUT / "photo_motion" / "photo_motion_manifest.json"
+NARRATION_DIR = OUTPUT / "narration"
+NARRATION_AUDIO = NARRATION_DIR / "audio"
 PARTS_DIR = OUTPUT / "parts"
 VIDEOS_DIR = OUTPUT / "videos"
-NARRATION_DIR = OUTPUT / "narration"
 
-MANIFEST_FILE = MOTION_DIR / "photo_motion_manifest.json"
-PART_SIZE = 4
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 
-AUDIO_EXTENSIONS = {
-    ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"
-}
-
-AUDIO_DIRECTORIES = {
+OPTIONAL_AUDIO_DIRS = {
     "music": [
         OUTPUT / "audio" / "music",
         OUTPUT / "music",
@@ -49,188 +46,248 @@ def log(*args):
     print(*args, flush=True)
 
 
-def run_command(command):
-    log("\n$", " ".join(map(str, command)))
+def run(command):
+    log("$", " ".join(map(str, command)))
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
-
     if result.stdout:
         log(result.stdout.rstrip())
-
-    if result.returncode != 0:
+    if result.returncode:
         raise RuntimeError(
-            f"Command failed with exit code {result.returncode}."
+            f"Command failed ({result.returncode}): {command[0]}"
         )
 
 
-def probe_media(path):
+def probe(path):
+    if not path.is_file() or path.stat().st_size < 1000:
+        raise RuntimeError(f"Missing, empty, or too-small media file: {path}")
+
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         raise RuntimeError("ffprobe is not installed.")
 
     result = subprocess.run(
         [
-            ffprobe,
-            "-v", "error",
+            ffprobe, "-v", "error",
             "-show_entries",
-            "format=duration,size:"
-            "stream=codec_type,codec_name,width,height",
-            "-of", "json",
-            str(path),
+            "format=duration:stream=codec_type,width,height",
+            "-of", "json", str(path),
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Cannot inspect {path}: {result.stderr.strip()}"
-        )
+    if result.returncode:
+        raise RuntimeError(f"ffprobe failed for {path}: {result.stderr.strip()}")
 
     try:
         data = json.loads(result.stdout)
-        duration = float(data.get("format", {}).get("duration") or 0)
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError(
-            f"Invalid media information for {path}: {exc}"
-        ) from exc
+        duration = float(data["format"]["duration"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"Invalid media metadata: {path}") from exc
 
     if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError(f"Invalid media duration: {path}")
 
-    return data, duration
+    streams = data.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = any(s.get("codec_type") == "audio" for s in streams)
+
+    if video is None:
+        raise RuntimeError(f"No video stream in {path}")
+
+    return {
+        "duration": duration,
+        "width": int(video.get("width") or 0),
+        "height": int(video.get("height") or 0),
+        "has_audio": audio,
+    }
 
 
-def validate_video_file(path):
-    if not path.is_file() or path.stat().st_size < 1000:
-        raise RuntimeError(f"Video is missing or too small: {path}")
-
-    data, duration = probe_media(path)
-    streams = [
-        item for item in data.get("streams", [])
-        if item.get("codec_type") == "video"
-    ]
-
-    if not streams:
-        raise RuntimeError(f"No video stream found: {path}")
-
-    stream = streams[0]
-    width = int(stream.get("width") or 0)
-    height = int(stream.get("height") or 0)
-
-    if width < 64 or height < 64:
-        raise RuntimeError(
-            f"Invalid video resolution for {path.name}: {width}x{height}"
-        )
-
-    return data, duration, width, height
+def validate_audio(path):
+    info = probe(path)
+    data = subprocess.run(
+        [
+            shutil.which("ffprobe"), "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "json", str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if data.returncode or not json.loads(data.stdout or "{}").get("streams"):
+        raise RuntimeError(f"Audio file has no usable audio stream: {path}")
+    return info["duration"]
 
 
-def write_concat_list(paths, destination):
+def read_motion_clips():
+    if not MOTION_MANIFEST.is_file():
+        raise RuntimeError(f"Missing motion manifest: {MOTION_MANIFEST}")
+
+    try:
+        rows = json.loads(MOTION_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Cannot read motion manifest: {exc}") from exc
+
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("Motion manifest must be a non-empty JSON list.")
+
+    clips = []
+    expected = (1280, 720) if get_format(
+        load_and_validate(ROOT / "Input" / "topic.txt")
+    ) == "full" else (720, 1280)
+
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise RuntimeError(f"Invalid motion manifest row {index}.")
+
+        scene = int(row.get("global_scene", row.get("scene", 0)))
+        if scene != index:
+            raise RuntimeError(
+                f"Scene numbering must be sequential; row {index} has scene {scene}."
+            )
+
+        value = row.get("video")
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(f"Scene {scene} has no video path.")
+
+        path = Path(value)
+        if not path.is_absolute():
+            path = ROOT / path
+        path = path.resolve()
+
+        if not path.is_relative_to(ROOT.resolve()):
+            raise RuntimeError(f"Scene {scene} path escapes the repository.")
+
+        info = probe(path)
+        if (info["width"], info["height"]) != expected:
+            raise RuntimeError(
+                f"Scene {scene} is {info['width']}x{info['height']}; "
+                f"expected {expected[0]}x{expected[1]}."
+            )
+
+        clips.append((scene, path, info["duration"]))
+
+    return clips, expected
+
+
+def write_concat_file(paths, destination):
     lines = []
-
     for path in paths:
-        resolved = str(path.resolve())
-
-        if "\n" in resolved or "\r" in resolved:
-            raise RuntimeError("Media paths cannot contain newlines.")
-
-        safe_path = resolved.replace("'", "'\\''")
-        lines.append(f"file '{safe_path}'")
+        value = str(path.resolve())
+        if "\n" in value or "\r" in value:
+            raise RuntimeError("Newlines are not allowed in media paths.")
+        lines.append("file '" + value.replace("'", "'\\''") + "'")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(
-        "\n".join(lines) + "\n",
-        encoding="utf-8",
-    )
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def concatenate_videos(ffmpeg, paths, destination, list_file):
     if not paths:
-        raise RuntimeError("No video clips were supplied.")
+        raise RuntimeError("Cannot concatenate an empty video list.")
 
-    reference = None
-    for path in paths:
-        _, _, width, height = validate_video_file(path)
-        if reference is None:
-            reference = (width, height)
-        elif (width, height) != reference:
-            raise RuntimeError(
-                f"Cannot concatenate mixed resolutions: {path.name} "
-                f"is {width}x{height}, expected {reference[0]}x{reference[1]}."
-            )
-
-    write_concat_list(paths, list_file)
+    write_concat_file(paths, list_file)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.unlink(missing_ok=True)
 
-    temporary = destination.with_name(
-        destination.stem + ".temporary.mp4"
-    )
-    temporary.unlink(missing_ok=True)
+    temp = destination.with_name(destination.stem + ".tmp.mp4")
+    temp.unlink(missing_ok=True)
 
-    run_command([
-        ffmpeg,
-        "-hide_banner", "-y",
-        "-f", "concat",
-        "-safe", "0",
+    run([
+        ffmpeg, "-hide_banner", "-y",
+        "-f", "concat", "-safe", "0",
         "-i", str(list_file),
-        "-map", "0:v:0",
-        "-an",
-        "-c:v", "copy",
+        "-map", "0:v:0", "-an",
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        str(temporary),
+        str(temp),
     ])
-
-    validate_video_file(temporary)
-    temporary.replace(destination)
-    validate_video_file(destination)
+    probe(temp)
+    temp.replace(destination)
+    probe(destination)
 
 
 def discover_narration():
-    if not NARRATION_DIR.exists():
-        return []
+    """Use generated per-scene TTS files in part/scene order."""
+    if not NARRATION_AUDIO.is_dir():
+        raise RuntimeError(
+            f"Narration audio directory is missing: {NARRATION_AUDIO}"
+        )
 
+    manifest_path = NARRATION_DIR / "audio_jobs.json"
+    manifest = None
+
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Invalid TTS audio manifest: {exc}") from exc
+
+    jobs = manifest.get("jobs", []) if isinstance(manifest, dict) else []
+    ordered = []
+
+    if isinstance(jobs, list):
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            if str(job.get("status", "")).lower() != "completed":
+                continue
+
+            value = job.get("output")
+            if not value:
+                continue
+
+            path = Path(str(value))
+            if not path.is_absolute():
+                path = ROOT / path
+            path = path.resolve()
+
+            if not path.is_relative_to(ROOT.resolve()):
+                raise RuntimeError("Narration path escapes the repository.")
+
+            if path.is_file() and path.stat().st_size > 0:
+                ordered.append((
+                    int(job.get("part", 1)),
+                    int(job.get("scene", 1)),
+                    path,
+                ))
+
+    if ordered:
+        ordered.sort(key=lambda item: (item[0], item[1]))
+        keys = [(part, scene) for part, scene, _ in ordered]
+        if len(keys) != len(set(keys)):
+            raise RuntimeError("Duplicate part/scene entries in audio_jobs.json.")
+        return [path for _, _, path in ordered]
+
+    # Fallback to the actual output folder's numbered scene layout.
     files = sorted(
-        (
-            path for path in NARRATION_DIR.rglob("*")
-            if path.is_file()
-            and path.suffix.lower() in AUDIO_EXTENSIONS
-            and path.name.lower() not in {
-                "combined_narration.m4a",
-                "audio_concat.txt",
-            }
-            and path.stat().st_size > 0
+        NARRATION_AUDIO.glob("part_*/scene_*.mp3"),
+        key=lambda path: (
+            path.parent.name.lower(),
+            path.name.lower(),
         ),
-        key=lambda path: path.as_posix().lower(),
     )
+    files = [p for p in files if p.is_file() and p.stat().st_size > 0]
+    if files:
+        return files
 
-    preferred = {
-        "final",
-        "narration",
-        "full_narration",
-        "voiceover",
-    }
-
-    for path in files:
-        if path.stem.lower() in preferred:
-            return [path]
-
-    return files
+    raise RuntimeError(
+        "No completed narration audio was found. "
+        "The pipeline will not silently produce a silent final video."
+    )
 
 
 def discover_optional_audio(kind):
     found = []
-
-    for directory in AUDIO_DIRECTORIES[kind]:
-        if not directory.exists():
+    for directory in OPTIONAL_AUDIO_DIRS[kind]:
+        if not directory.is_dir():
             continue
-
         for path in directory.rglob("*"):
             if (
                 path.is_file()
@@ -239,90 +296,48 @@ def discover_optional_audio(kind):
                 and path not in found
             ):
                 found.append(path)
-
     return sorted(found, key=lambda path: path.as_posix().lower())
 
 
-def validate_audio_file(path):
-    if not path.is_file() or path.stat().st_size == 0:
-        raise RuntimeError(f"Audio file is missing or empty: {path}")
-
-    data, duration = probe_media(path)
-    if not any(
-        stream.get("codec_type") == "audio"
-        for stream in data.get("streams", [])
-    ):
-        raise RuntimeError(f"No audio stream found: {path}")
-
-    return duration
-
-
 def concatenate_audio(ffmpeg, files):
-    if not files:
-        return None
-
     for path in files:
-        validate_audio_file(path)
+        validate_audio(path)
 
     if len(files) == 1:
         return files[0]
 
-    list_file = NARRATION_DIR / "audio_concat.txt"
+    concat_file = NARRATION_DIR / "audio_concat.txt"
     combined = NARRATION_DIR / "combined_narration.m4a"
-    temporary = NARRATION_DIR / "combined_narration.temporary.m4a"
+    temp = NARRATION_DIR / "combined_narration.tmp.m4a"
 
-    write_concat_list(files, list_file)
-    temporary.unlink(missing_ok=True)
+    write_concat_file(files, concat_file)
+    temp.unlink(missing_ok=True)
 
-    run_command([
-        ffmpeg,
-        "-hide_banner", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(list_file),
-        "-vn",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        str(temporary),
+    run([
+        ffmpeg, "-hide_banner", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", str(concat_file),
+        "-vn", "-c:a", "aac", "-b:a", "192k",
+        str(temp),
     ])
-
-    validate_audio_file(temporary)
-    temporary.replace(combined)
-    validate_audio_file(combined)
+    validate_audio(temp)
+    temp.replace(combined)
     return combined
 
 
-def mix_audio(ffmpeg, silent_video, final_video, duration,
-              voice, music, ambient, sfx):
-    tracks = []
-
-    if voice:
-        tracks.append(("voice", voice))
-
+def mix_audio(ffmpeg, silent_video, final_video, duration, voice, music, ambient, sfx):
+    tracks = [("voice", voice)]
     if music:
         tracks.append(("music", music[0]))
-
     if ambient:
         tracks.append(("ambient", ambient[0]))
-
     if sfx:
         tracks.append(("sfx", sfx[0]))
 
-    if not tracks:
-        log("WARNING: No audio files found; final video will be silent.")
-        shutil.copy2(silent_video, final_video)
-        validate_video_file(final_video)
-        return
+    for _, path in tracks:
+        validate_audio(path)
 
-    for kind, path in tracks:
-        validate_audio_file(path)
-
-    command = [
-        ffmpeg,
-        "-hide_banner", "-y",
-        "-i", str(silent_video),
-    ]
-
+    command = [ffmpeg, "-hide_banner", "-y", "-i", str(silent_video)]
     for kind, path in tracks:
         if kind in {"music", "ambient"}:
             command.extend(["-stream_loop", "-1"])
@@ -331,251 +346,138 @@ def mix_audio(ffmpeg, silent_video, final_video, duration,
     filters = []
     labels = []
 
-    for index, (kind, _path) in enumerate(tracks, start=1):
-        label = f"audio{index}"
+    for index, (kind, _) in enumerate(tracks, start=1):
+        label = f"a{index}"
         source = f"[{index}:a]"
-
         if kind == "voice":
-            filters.append(
+            chain = (
                 f"{source}aresample=44100,"
                 "aformat=sample_fmts=fltp:channel_layouts=stereo,"
                 f"apad,atrim=duration={duration:.6f},"
                 f"asetpts=PTS-STARTPTS[{label}]"
             )
         else:
-            volume = {
-                "music": 0.15,
-                "ambient": 0.10,
-                "sfx": 0.25,
-            }[kind]
-
-            filters.append(
+            volume = {"music": 0.15, "ambient": 0.10, "sfx": 0.25}[kind]
+            chain = (
                 f"{source}aresample=44100,"
                 "aformat=sample_fmts=fltp:channel_layouts=stereo,"
                 f"volume={volume},"
                 f"atrim=duration={duration:.6f},"
                 f"asetpts=PTS-STARTPTS[{label}]"
             )
-
+        filters.append(chain)
         labels.append(f"[{label}]")
 
     filters.append(
         "".join(labels)
-        + f"amix=inputs={len(labels)}:duration=longest:"
-        "dropout_transition=2,"
-        f"atrim=duration={duration:.6f},"
-        "alimiter=limit=0.95,"
-        "aresample=44100[aout]"
+        + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=2,"
+        + f"atrim=duration={duration:.6f},alimiter=limit=0.95,"
+        + "aresample=44100[aout]"
     )
 
-    temporary = final_video.with_name(
-        final_video.stem + ".temporary.mp4"
-    )
-    temporary.unlink(missing_ok=True)
+    temp = final_video.with_name(final_video.stem + ".tmp.mp4")
+    temp.unlink(missing_ok=True)
 
     command.extend([
         "-filter_complex", ";".join(filters),
-        "-map", "0:v:0",
-        "-map", "[aout]",
+        "-map", "0:v:0", "-map", "[aout]",
         "-t", f"{duration:.6f}",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "44100",
-        "-ac", "2",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-ar", "44100", "-ac", "2",
         "-movflags", "+faststart",
-        str(temporary),
+        str(temp),
     ])
+    run(command)
 
-    run_command(command)
-    validate_video_file(temporary)
-    temporary.replace(final_video)
-    validate_video_file(final_video)
+    info = probe(temp)
+    if not info["has_audio"]:
+        raise RuntimeError("Final output has no audio stream.")
 
-
-def load_scene_clips():
-    if not MANIFEST_FILE.is_file():
-        raise RuntimeError(
-            "Photo Motion manifest is missing. "
-            "Run scripts/photo_motion.py first."
-        )
-
-    try:
-        manifest = json.loads(
-            MANIFEST_FILE.read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(
-            f"Cannot read motion manifest: {exc}"
-        ) from exc
-
-    if not isinstance(manifest, list) or not manifest:
-        raise RuntimeError("Photo Motion manifest is empty or invalid.")
-
-    clips = []
-    scene_numbers = []
-
-    for index, item in enumerate(manifest, start=1):
-        if not isinstance(item, dict):
-            raise RuntimeError(f"Manifest item {index} is invalid.")
-
-        try:
-            number = int(item.get("global_scene", item.get("scene", 0)))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid scene number in manifest item {index}."
-            ) from exc
-
-        if number < 1:
-            raise RuntimeError(f"Invalid scene number: {number}")
-
-        video_value = item.get("video")
-        if not video_value:
-            raise RuntimeError(f"Scene {number} has no video path.")
-
-        video_path = Path(str(video_value))
-        if not video_path.is_absolute():
-            video_path = ROOT / video_path
-        video_path = video_path.resolve()
-
-        if not video_path.is_relative_to(ROOT):
-            raise RuntimeError(
-                f"Scene {number} path escapes repository: {video_value}"
-            )
-
-        validate_video_file(video_path)
-        clips.append(video_path)
-        scene_numbers.append(number)
-
-    expected = list(range(1, len(clips) + 1))
-    if scene_numbers != expected:
-        raise RuntimeError(
-            "Manifest scene numbers must be sequential from 1. "
-            f"Found: {scene_numbers}"
-        )
-
-    return clips
+    temp.replace(final_video)
+    probe(final_video)
 
 
 def main():
     config = load_and_validate(ROOT / "Input" / "topic.txt")
     mode = get_format(config)
+    expected = (1280, 720) if mode == "full" else (720, 1280)
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg or not shutil.which("ffprobe"):
-        raise RuntimeError("FFmpeg and ffprobe must both be installed.")
+        raise RuntimeError("FFmpeg and ffprobe are required.")
 
-    for directory in (MOTION_DIR, PARTS_DIR, VIDEOS_DIR, NARRATION_DIR):
+    for directory in (PARTS_DIR, VIDEOS_DIR, NARRATION_DIR):
         directory.mkdir(parents=True, exist_ok=True)
 
-    clips = load_scene_clips()
+    clips, resolution = read_motion_clips()
+    if resolution != expected:
+        raise RuntimeError("Input FORMAT and scene resolution do not match.")
 
-    reference_resolution = None
-    for clip in clips:
-        _, _, width, height = validate_video_file(clip)
-        resolution = (width, height)
-        if reference_resolution is None:
-            reference_resolution = resolution
-        elif resolution != reference_resolution:
-            raise RuntimeError(
-                "Scene clips have inconsistent resolutions."
-            )
-
-    expected_resolution = (1280, 720) if mode == "full" else (720, 1280)
-    if reference_resolution != expected_resolution:
-        raise RuntimeError(
-            f"FORMAT={mode} expects {expected_resolution[0]}x"
-            f"{expected_resolution[1]}, but scene clips are "
-            f"{reference_resolution[0]}x{reference_resolution[1]}."
+    part_paths = []
+    for start in range(0, len(clips), 4):
+        group = clips[start:start + 4]
+        part_number = start // 4 + 1
+        part_path = PARTS_DIR / f"part_{part_number:02d}.mp4"
+        concatenate_videos(
+            ffmpeg,
+            [item[1] for item in group],
+            part_path,
+            OUTPUT / "photo_motion" / f"concat_part_{part_number:02d}.txt",
         )
-
-    for old in PARTS_DIR.glob("part_*.mp4"):
-        old.unlink()
+        part_paths.append(part_path)
 
     silent_video = VIDEOS_DIR / "video_without_audio.mp4"
     final_video = VIDEOS_DIR / "katha_lok_ai_final.mp4"
-    short_alias = VIDEOS_DIR / "katha_lok_ai_short.mp4"
-    full_alias = VIDEOS_DIR / "katha_lok_ai_full.mp4"
-
-    for old in (silent_video, final_video, short_alias, full_alias):
-        old.unlink(missing_ok=True)
-
-    for start in range(0, len(clips), PART_SIZE):
-        group = clips[start:start + PART_SIZE]
-        part_number = start // PART_SIZE + 1
-
-        concatenate_videos(
-            ffmpeg,
-            group,
-            PARTS_DIR / f"part_{part_number:02d}.mp4",
-            MOTION_DIR / f"concat_part_{part_number:02d}.txt",
-        )
 
     concatenate_videos(
         ffmpeg,
-        clips,
+        [item[1] for item in clips],
         silent_video,
-        MOTION_DIR / "concat_final.txt",
+        OUTPUT / "photo_motion" / "concat_final.txt",
     )
-
-    _, video_duration, _, _ = validate_video_file(silent_video)
+    video_info = probe(silent_video)
 
     narration_files = discover_narration()
     voice = concatenate_audio(ffmpeg, narration_files)
-
     music = discover_optional_audio("music")
     ambient = discover_optional_audio("ambient")
     sfx = discover_optional_audio("sfx")
 
-    log("\nAudio inventory")
-    log("Narration:", voice or "not found")
-    log("Music:", music[0] if music else "not found")
-    log("Ambient:", ambient[0] if ambient else "not found")
-    log("SFX:", sfx[0] if sfx else "not found")
+    log("Narration files:", len(narration_files))
+    log("Narration source:", voice)
+    log("Music:", music[0] if music else "not found (optional)")
+    log("Ambient:", ambient[0] if ambient else "not found (optional)")
+    log("SFX:", sfx[0] if sfx else "not found (optional)")
 
     mix_audio(
-        ffmpeg=ffmpeg,
-        silent_video=silent_video,
-        final_video=final_video,
-        duration=video_duration,
-        voice=voice,
-        music=music,
-        ambient=ambient,
-        sfx=sfx,
+        ffmpeg, silent_video, final_video, video_info["duration"],
+        voice, music, ambient, sfx,
     )
 
-    final_data, final_duration, final_width, final_height = (
-        validate_video_file(final_video)
-    )
-
-    if (final_width, final_height) != expected_resolution:
+    final_info = probe(final_video)
+    if (final_info["width"], final_info["height"]) != expected:
         raise RuntimeError("Final video resolution does not match FORMAT.")
+    if not final_info["has_audio"]:
+        raise RuntimeError("Final video is missing its audio stream.")
+    if abs(final_info["duration"] - video_info["duration"]) > 1.0:
+        raise RuntimeError("Final video duration differs from the scene timeline.")
 
-    if abs(final_duration - video_duration) > 1.0:
-        raise RuntimeError(
-            "Final duration differs from scene timeline: "
-            f"video={video_duration:.2f}s, final={final_duration:.2f}s"
-        )
-
-    if voice and not any(
-        stream.get("codec_type") == "audio"
-        for stream in final_data.get("streams", [])
-    ):
-        raise RuntimeError("Narration was expected but final audio is missing.")
-
-    alias = full_alias if mode == "full" else short_alias
+    alias = VIDEOS_DIR / (
+        "katha_lok_ai_full.mp4" if mode == "full"
+        else "katha_lok_ai_short.mp4"
+    )
     shutil.copy2(final_video, alias)
-    validate_video_file(alias)
+    probe(alias)
 
-    log("\n" + "=" * 55)
-    log("RENDER SUCCESS")
+    log("=" * 52)
+    log("FINAL RENDER SUCCESS")
     log("Format:", mode)
     log("Scenes:", len(clips))
-    log("Parts:", len(list(PARTS_DIR.glob("part_*.mp4"))))
+    log("Parts:", len(part_paths))
+    log("Resolution:", f"{final_info['width']}x{final_info['height']}")
+    log("Duration:", f"{final_info['duration']:.2f}s")
     log("Final video:", final_video.relative_to(ROOT))
-    log("Format output:", alias.relative_to(ROOT))
-    log("Resolution:", f"{final_width}x{final_height}")
-    log("Duration:", f"{final_duration:.2f} seconds")
+    log("Format alias:", alias.relative_to(ROOT))
     log("Size:", f"{final_video.stat().st_size / 1048576:.2f} MB")
 
 
