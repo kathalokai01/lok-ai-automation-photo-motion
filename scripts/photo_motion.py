@@ -1,6 +1,10 @@
-#!/usr/bin/env python3
-"""Generate validated photo-motion clips with optional 2.5D parallax."""
 
+#!/usr/bin/env python3
+"""Render validated photo-motion clips with resumable scene checkpoints."""
+
+from __future__ import annotations
+
+import hashlib
 import json
 import math
 import shutil
@@ -41,29 +45,53 @@ def log(*items):
     print(*items, flush=True)
 
 
+def atomic_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def safe_path(value, label):
     if not isinstance(value, str) or not value.strip():
         raise RuntimeError(f"Missing {label}.")
 
     path = Path(value.strip())
+
     if not path.is_absolute():
         path = ROOT / path
 
     path = path.resolve()
+
     if not path.is_relative_to(ROOT):
         raise RuntimeError(f"{label} must be inside the repository.")
 
     return path
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
 def run_command(command):
     log("\n$", " ".join(map(str, command)))
+
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
+
     if result.stdout:
         log(result.stdout.rstrip())
 
@@ -105,6 +133,7 @@ def read_jobs():
 
 def scene_number(job, index):
     value = job.get("global_scene", job.get("scene", index))
+
     if isinstance(value, dict):
         value = value.get("global_scene", value.get("number"))
 
@@ -122,15 +151,24 @@ def scene_number(job, index):
 
 
 def scene_duration(job):
-    for key in ("duration", "scene_duration", "duration_seconds", "seconds"):
+    for key in (
+        "duration",
+        "scene_duration",
+        "duration_seconds",
+        "seconds",
+    ):
         try:
             value = float(job.get(key))
+
             if math.isfinite(value) and 0.5 <= value <= 3600:
                 return value
         except (TypeError, ValueError):
             continue
 
-    raise RuntimeError("Every scene needs a valid duration between 0.5 and 3600 seconds.")
+    raise RuntimeError(
+        "Every scene needs a valid duration between "
+        "0.5 and 3600 seconds."
+    )
 
 
 def prepare_jobs(jobs):
@@ -144,8 +182,10 @@ def prepare_jobs(jobs):
             raise RuntimeError(f"Scene job {index} is not an object.")
 
         number = scene_number(job, index)
+
         if number in seen:
             raise RuntimeError(f"Duplicate scene number: {number}")
+
         seen.add(number)
 
         image = safe_path(
@@ -159,6 +199,7 @@ def prepare_jobs(jobs):
         try:
             with Image.open(image) as source:
                 source.verify()
+
             with Image.open(image) as source:
                 if source.width < 64 or source.height < 64:
                     raise RuntimeError("Image dimensions are too small.")
@@ -172,11 +213,13 @@ def prepare_jobs(jobs):
             "part": job.get("part", 1),
             "local_scene": job.get("local_scene", number),
             "image": image,
+            "image_sha256": sha256_file(image),
             "duration": scene_duration(job),
             "target": OUTPUT_DIR / f"scene_{number:04d}.mp4",
         })
 
     prepared.sort(key=lambda item: item["number"])
+
     actual = [item["number"] for item in prepared]
     expected = list(range(1, len(prepared) + 1))
 
@@ -190,7 +233,7 @@ def prepare_jobs(jobs):
 
 def read_depth_maps():
     if not DEPTH_MANIFEST.is_file():
-        log("NOTICE: Depth manifest missing; parallax scenes will use cinematic sweep.")
+        log("NOTICE: Depth manifest missing; using 2D motion effects.")
         return {}
 
     try:
@@ -216,6 +259,7 @@ def read_depth_maps():
         return {}
 
     result = {}
+
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -226,6 +270,7 @@ def read_depth_maps():
                 entry.get("scene", entry.get("number")),
             )
             number = int(raw_number)
+
             path = safe_path(
                 entry.get("depth_map") or entry.get("path") or entry.get("file"),
                 f"depth map for scene {number}",
@@ -236,10 +281,53 @@ def read_depth_maps():
         if number < 1 or not path.is_file() or path.stat().st_size < 100:
             continue
 
-        result[number] = path
+        # A depth map must be traceable to its source image.
+        source_hash = entry.get("image_sha256")
+        if not isinstance(source_hash, str) or len(source_hash) != 64:
+            log(
+                f"NOTICE: Scene {number} depth map has no source hash; "
+                "it will not be used for parallax."
+            )
+            continue
 
-    log("Valid depth maps:", len(result))
+        result[number] = {
+            "path": path,
+            "image_sha256": source_hash,
+            "depth_sha256": sha256_file(path),
+        }
+
+    log("Source-validated depth maps:", len(result))
     return result
+
+
+def read_previous_manifest():
+    if not MANIFEST_FILE.is_file():
+        return {}
+
+    try:
+        data = json.loads(MANIFEST_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log("WARNING: Previous clip manifest cannot be read:", exc)
+        return {}
+
+    if not isinstance(data, list):
+        return {}
+
+    previous = {}
+
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+
+        try:
+            number = int(entry.get("global_scene", entry.get("scene")))
+        except (TypeError, ValueError):
+            continue
+
+        if number > 0:
+            previous[number] = entry
+
+    return previous
 
 
 def make_filter(effect, frames, width, height, fps):
@@ -301,7 +389,8 @@ def make_filter(effect, frames, width, height, fps):
         raise RuntimeError(f"Unsupported FFmpeg effect: {effect}")
 
     filters = [
-        f"scale={source_width}:{source_height}:force_original_aspect_ratio=increase",
+        f"scale={source_width}:{source_height}:"
+        "force_original_aspect_ratio=increase",
         f"crop={source_width}:{source_height}",
     ]
 
@@ -323,6 +412,7 @@ def make_filter(effect, frames, width, height, fps):
 
 def create_parallax_clip(item, depth_path, frames, width, height, fps):
     script = ROOT / "scripts" / "depth_parallax.py"
+
     if not script.is_file():
         raise RuntimeError(f"Parallax compositor is missing: {script}")
 
@@ -346,9 +436,13 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
 
     result = subprocess.run(
         [
-            ffprobe, "-v", "error",
-            "-show_entries", "stream=codec_type,width,height:format=duration,size",
-            "-of", "json", str(path),
+            ffprobe,
+            "-v", "error",
+            "-show_entries",
+            "stream=codec_type,width,height,nb_frames:"
+            "format=duration,size",
+            "-of", "json",
+            str(path),
         ],
         capture_output=True,
         text=True,
@@ -387,23 +481,90 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
     if not math.isfinite(actual_duration) or actual_duration <= 0:
         raise RuntimeError(f"Invalid video duration for {path.name}.")
 
-    if abs(actual_duration - expected_duration) > max(1.0, 2.0 / 24.0):
+    tolerance = max(0.15, 2.0 / max(1, 24))
+
+    if abs(actual_duration - expected_duration) > tolerance:
         raise RuntimeError(
             f"Unexpected duration for {path.name}: {actual_duration:.3f}s; "
             f"expected about {expected_duration:.3f}s"
         )
 
+    raw_frames = stream.get("nb_frames")
+
+    if raw_frames not in (None, "N/A"):
+        try:
+            if int(raw_frames) < 1:
+                raise RuntimeError(f"{path.name} contains no video frames.")
+        except ValueError:
+            pass
+
     return actual_duration
 
 
 def write_manifest(entries):
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    temporary = MANIFEST_FILE.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(MANIFEST_FILE)
+    atomic_json(MANIFEST_FILE, entries)
+
+
+def cache_signature(item, effect, depth_info, frames, width, height, fps, mode):
+    payload = {
+        "image_sha256": item["image_sha256"],
+        "effect": effect,
+        "depth_sha256": (
+            depth_info["depth_sha256"] if depth_info else None
+        ),
+        "frames": frames,
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "format": mode,
+        "crf": CRF,
+        "preset": PRESET,
+    }
+
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def try_reuse_clip(item, old_entry, signature, ffprobe, width, height, expected):
+    if not isinstance(old_entry, dict):
+        return None
+
+    if old_entry.get("cache_signature") != signature:
+        return None
+
+    try:
+        old_path = safe_path(
+            old_entry.get("video"),
+            f"cached video for scene {item['number']}",
+        )
+
+        if old_path != item["target"] or not old_path.is_file():
+            return None
+
+        actual_duration = probe_clip(
+            old_path, ffprobe, width, height, expected
+        )
+
+        entry = dict(old_entry)
+        entry.update({
+            "scene": item["number"],
+            "global_scene": item["number"],
+            "image": item["image"].relative_to(ROOT).as_posix(),
+            "video": old_path.relative_to(ROOT).as_posix(),
+            "duration": actual_duration,
+            "size_bytes": old_path.stat().st_size,
+            "status": "reused",
+        })
+
+        return entry
+
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def main():
@@ -418,15 +579,20 @@ def main():
 
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
+
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and ffprobe must both be installed.")
 
-    jobs = read_jobs()
-    prepared = prepare_jobs(jobs)
+    prepared = prepare_jobs(read_jobs())
     depth_maps = read_depth_maps()
+    previous = read_previous_manifest()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     manifest = []
+    generated_count = 0
+    reused_count = 0
+    parallax_count = 0
 
     log("=" * 60)
     log("KATHA LOK AI PHOTO MOTION")
@@ -434,62 +600,133 @@ def main():
     log("Resolution:", f"{width}x{height}")
     log("FPS:", fps)
     log("Scenes:", len(prepared))
+    log("Resume enabled: yes")
     log("=" * 60)
 
     for index, item in enumerate(prepared):
         number = item["number"]
         frames = max(1, round(item["duration"] * fps))
-        actual_duration_expected = frames / fps
-        selected_effect = EFFECTS[index % len(EFFECTS)]
-        depth_path = depth_maps.get(number)
+        expected_duration = frames / fps
 
-        true_parallax = selected_effect == "parallax" and depth_path is not None
+        selected_effect = EFFECTS[index % len(EFFECTS)]
+        depth_info = depth_maps.get(number)
+
+        # A depth map is only safe when it belongs to this exact image.
+        if (
+            depth_info is not None
+            and depth_info["image_sha256"] != item["image_sha256"]
+        ):
+            log(
+                f"NOTICE: Scene {number} depth map is stale; "
+                "using 2D motion for this scene."
+            )
+            depth_info = None
+
+        true_parallax = (
+            selected_effect == "parallax" and depth_info is not None
+        )
+
         effect = selected_effect
 
-        if selected_effect == "parallax" and depth_path is None:
+        if selected_effect == "parallax" and not true_parallax:
             effect = "cinematic_sweep"
+
+        depth_path = depth_info["path"] if true_parallax else None
+
+        signature = cache_signature(
+            item,
+            effect,
+            depth_info if true_parallax else None,
+            frames,
+            width,
+            height,
+            fps,
+            mode,
+        )
 
         log("\n" + "=" * 55)
         log(f"Scene: {number}/{len(prepared)}")
         log("Motion:", effect)
-        log("Depth map:", depth_path if depth_path else "not available")
+        log("True depth parallax:", true_parallax)
 
-        # Remove an old clip for this scene before creating its replacement.
-        item["target"].unlink(missing_ok=True)
-
-        if true_parallax:
-            create_parallax_clip(
-                item, depth_path, frames, width, height, fps
-            )
-        else:
-            run_command([
-                ffmpeg,
-                "-hide_banner", "-loglevel", "error", "-y",
-                "-loop", "1",
-                "-framerate", str(fps),
-                "-i", str(item["image"]),
-                "-vf", make_filter(effect, frames, width, height, fps),
-                "-frames:v", str(frames),
-                "-an",
-                "-c:v", "libx264",
-                "-preset", PRESET,
-                "-crf", str(CRF),
-                "-pix_fmt", "yuv420p",
-                "-r", str(fps),
-                "-movflags", "+faststart",
-                str(item["target"]),
-            ])
-
-        actual = probe_clip(
-            item["target"], ffprobe, width, height, actual_duration_expected
+        cached = try_reuse_clip(
+            item,
+            previous.get(number),
+            signature,
+            ffprobe,
+            width,
+            height,
+            expected_duration,
         )
 
-        manifest.append({
+        if cached is not None:
+            log("Reusing validated scene clip:", cached["video"])
+            manifest.append(cached)
+            reused_count += 1
+            write_manifest(manifest)
+            continue
+
+        temporary_target = item["target"].with_name(
+            item["target"].stem + ".rendering.mp4"
+        )
+        temporary_target.unlink(missing_ok=True)
+
+        render_item = dict(item)
+        render_item["target"] = temporary_target
+
+        try:
+            if true_parallax:
+                create_parallax_clip(
+                    render_item,
+                    depth_path,
+                    frames,
+                    width,
+                    height,
+                    fps,
+                )
+            else:
+                run_command([
+                    ffmpeg,
+                    "-hide_banner", "-loglevel", "error", "-y",
+                    "-loop", "1",
+                    "-framerate", str(fps),
+                    "-i", str(item["image"]),
+                    "-vf", make_filter(
+                        effect, frames, width, height, fps
+                    ),
+                    "-frames:v", str(frames),
+                    "-an",
+                    "-c:v", "libx264",
+                    "-preset", PRESET,
+                    "-crf", str(CRF),
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(fps),
+                    "-movflags", "+faststart",
+                    str(temporary_target),
+                ])
+
+            actual_duration = probe_clip(
+                temporary_target,
+                ffprobe,
+                width,
+                height,
+                expected_duration,
+            )
+
+            # Only replace the final clip after validation succeeds.
+            temporary_target.replace(item["target"])
+
+        except Exception:
+            temporary_target.unlink(missing_ok=True)
+            raise
+
+        entry = {
             "scene": number,
             "global_scene": number,
             "part": item["part"],
             "local_scene": item["local_scene"],
             "image": item["image"].relative_to(ROOT).as_posix(),
+            "image_sha256": item["image_sha256"],
             "video": item["target"].relative_to(ROOT).as_posix(),
             "depth_map": (
                 depth_path.relative_to(ROOT).as_posix()
@@ -498,7 +735,7 @@ def main():
             "depth_map_available": depth_path is not None,
             "effect": effect,
             "effect_is_true_parallax": true_parallax,
-            "duration": actual,
+            "duration": actual_duration,
             "requested_duration": item["duration"],
             "frames": frames,
             "width": width,
@@ -506,25 +743,42 @@ def main():
             "fps": fps,
             "format": mode,
             "size_bytes": item["target"].stat().st_size,
-        })
+            "cache_signature": signature,
+            "status": "generated",
+        }
 
-        # Preserve progress after each completed scene.
+        manifest.append(entry)
+        generated_count += 1
+
+        if true_parallax:
+            parallax_count += 1
+
+        # Keep completed scene metadata after every successful scene.
         write_manifest(manifest)
+
+        log(
+            "Saved:",
+            entry["video"],
+            "| bytes:",
+            entry["size_bytes"],
+        )
 
     if len(manifest) != len(prepared):
         raise RuntimeError(
             f"Clip count mismatch: jobs={len(prepared)}, clips={len(manifest)}"
         )
 
-    log("\nPHOTO MOTION GENERATION SUCCESS")
+    log("=" * 60)
+    log("PHOTO MOTION GENERATION SUCCESS")
     log("Format:", mode)
     log("Resolution:", f"{width}x{height}")
     log("FPS:", fps)
-    log("Scenes:", len(manifest))
-    log("True parallax scenes:", sum(
-        row["effect_is_true_parallax"] for row in manifest
-    ))
+    log("Total scenes:", len(manifest))
+    log("New clips:", generated_count)
+    log("Reused clips:", reused_count)
+    log("New true-parallax clips:", parallax_count)
     log("Manifest:", MANIFEST_FILE.relative_to(ROOT))
+    log("=" * 60)
 
 
 if __name__ == "__main__":
