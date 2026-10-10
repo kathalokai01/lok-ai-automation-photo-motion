@@ -1,5 +1,4 @@
 
-
 name: Generate Katha Lok AI Photo Motion Video
 
 on:
@@ -30,6 +29,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-py311-${{ hashFiles('.github/workflows/generate-photo-motion-video.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-py311-
 
       - name: Install FFmpeg and fonts
         shell: bash
@@ -66,6 +73,7 @@ jobs:
           import transformers
           import cv2
           from PIL import Image
+
           print("PyTorch:", torch.__version__)
           print("Transformers:", transformers.__version__)
           print("OpenCV:", cv2.__version__)
