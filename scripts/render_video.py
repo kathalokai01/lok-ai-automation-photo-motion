@@ -1,8 +1,8 @@
-
 #!/usr/bin/env python3
-"""Validate Photo Motion clips and render the final Katha Lok AI video."""
+"""Validate scene clips and assemble the final Photo Motion video."""
 
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -21,6 +21,7 @@ NARRATION_DIR = OUTPUT / "narration"
 
 MANIFEST_FILE = MOTION_DIR / "photo_motion_manifest.json"
 PART_SIZE = 4
+
 AUDIO_EXTENSIONS = {
     ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"
 }
@@ -58,7 +59,7 @@ def run_command(command):
     )
 
     if result.stdout:
-        log(result.stdout)
+        log(result.stdout.rstrip())
 
     if result.returncode != 0:
         raise RuntimeError(
@@ -99,10 +100,35 @@ def probe_media(path):
             f"Invalid media information for {path}: {exc}"
         ) from exc
 
-    if duration <= 0:
-        raise RuntimeError(f"Invalid duration: {path}")
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(f"Invalid media duration: {path}")
 
     return data, duration
+
+
+def validate_video_file(path):
+    if not path.is_file() or path.stat().st_size < 1000:
+        raise RuntimeError(f"Video is missing or too small: {path}")
+
+    data, duration = probe_media(path)
+    streams = [
+        item for item in data.get("streams", [])
+        if item.get("codec_type") == "video"
+    ]
+
+    if not streams:
+        raise RuntimeError(f"No video stream found: {path}")
+
+    stream = streams[0]
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+
+    if width < 64 or height < 64:
+        raise RuntimeError(
+            f"Invalid video resolution for {path.name}: {width}x{height}"
+        )
+
+    return data, duration, width, height
 
 
 def write_concat_list(paths, destination):
@@ -114,7 +140,6 @@ def write_concat_list(paths, destination):
         if "\n" in resolved or "\r" in resolved:
             raise RuntimeError("Media paths cannot contain newlines.")
 
-        # Escape single quotes for FFmpeg concat demuxer.
         safe_path = resolved.replace("'", "'\\''")
         lines.append(f"file '{safe_path}'")
 
@@ -129,13 +154,29 @@ def concatenate_videos(ffmpeg, paths, destination, list_file):
     if not paths:
         raise RuntimeError("No video clips were supplied.")
 
+    reference = None
+    for path in paths:
+        _, _, width, height = validate_video_file(path)
+        if reference is None:
+            reference = (width, height)
+        elif (width, height) != reference:
+            raise RuntimeError(
+                f"Cannot concatenate mixed resolutions: {path.name} "
+                f"is {width}x{height}, expected {reference[0]}x{reference[1]}."
+            )
+
     write_concat_list(paths, list_file)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.unlink(missing_ok=True)
+
+    temporary = destination.with_name(
+        destination.stem + ".temporary.mp4"
+    )
+    temporary.unlink(missing_ok=True)
 
     run_command([
         ffmpeg,
-        "-hide_banner",
-        "-y",
+        "-hide_banner", "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", str(list_file),
@@ -143,15 +184,12 @@ def concatenate_videos(ffmpeg, paths, destination, list_file):
         "-an",
         "-c:v", "copy",
         "-movflags", "+faststart",
-        str(destination),
+        str(temporary),
     ])
 
-    if not destination.is_file() or destination.stat().st_size == 0:
-        raise RuntimeError(
-            f"Video concatenation produced no output: {destination}"
-        )
-
-    probe_media(destination)
+    validate_video_file(temporary)
+    temporary.replace(destination)
+    validate_video_file(destination)
 
 
 def discover_narration():
@@ -202,42 +240,55 @@ def discover_optional_audio(kind):
             ):
                 found.append(path)
 
-    return sorted(found, key=lambda p: p.as_posix().lower())
+    return sorted(found, key=lambda path: path.as_posix().lower())
+
+
+def validate_audio_file(path):
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError(f"Audio file is missing or empty: {path}")
+
+    data, duration = probe_media(path)
+    if not any(
+        stream.get("codec_type") == "audio"
+        for stream in data.get("streams", [])
+    ):
+        raise RuntimeError(f"No audio stream found: {path}")
+
+    return duration
 
 
 def concatenate_audio(ffmpeg, files):
     if not files:
         return None
 
+    for path in files:
+        validate_audio_file(path)
+
     if len(files) == 1:
         return files[0]
 
-    for path in files:
-        if not path.is_file() or path.stat().st_size == 0:
-            raise RuntimeError(f"Narration file is missing or empty: {path}")
-
     list_file = NARRATION_DIR / "audio_concat.txt"
     combined = NARRATION_DIR / "combined_narration.m4a"
+    temporary = NARRATION_DIR / "combined_narration.temporary.m4a"
 
     write_concat_list(files, list_file)
+    temporary.unlink(missing_ok=True)
 
     run_command([
         ffmpeg,
-        "-hide_banner",
-        "-y",
+        "-hide_banner", "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", str(list_file),
         "-vn",
         "-c:a", "aac",
         "-b:a", "192k",
-        str(combined),
+        str(temporary),
     ])
 
-    if not combined.is_file() or combined.stat().st_size == 0:
-        raise RuntimeError("Could not combine narration audio.")
-
-    probe_media(combined)
+    validate_audio_file(temporary)
+    temporary.replace(combined)
+    validate_audio_file(combined)
     return combined
 
 
@@ -258,21 +309,23 @@ def mix_audio(ffmpeg, silent_video, final_video, duration,
         tracks.append(("sfx", sfx[0]))
 
     if not tracks:
-        log("WARNING: No audio files found; rendering silent video.")
+        log("WARNING: No audio files found; final video will be silent.")
         shutil.copy2(silent_video, final_video)
+        validate_video_file(final_video)
         return
+
+    for kind, path in tracks:
+        validate_audio_file(path)
 
     command = [
         ffmpeg,
-        "-hide_banner",
-        "-y",
+        "-hide_banner", "-y",
         "-i", str(silent_video),
     ]
 
     for kind, path in tracks:
         if kind in {"music", "ambient"}:
             command.extend(["-stream_loop", "-1"])
-
         command.extend(["-i", str(path)])
 
     filters = []
@@ -283,7 +336,6 @@ def mix_audio(ffmpeg, silent_video, final_video, duration,
         source = f"[{index}:a]"
 
         if kind == "voice":
-            # Keep the video running if narration is shorter.
             filters.append(
                 f"{source}aresample=44100,"
                 "aformat=sample_fmts=fltp:channel_layouts=stereo,"
@@ -316,6 +368,11 @@ def mix_audio(ffmpeg, silent_video, final_video, duration,
         "aresample=44100[aout]"
     )
 
+    temporary = final_video.with_name(
+        final_video.stem + ".temporary.mp4"
+    )
+    temporary.unlink(missing_ok=True)
+
     command.extend([
         "-filter_complex", ";".join(filters),
         "-map", "0:v:0",
@@ -327,13 +384,13 @@ def mix_audio(ffmpeg, silent_video, final_video, duration,
         "-ar", "44100",
         "-ac", "2",
         "-movflags", "+faststart",
-        str(final_video),
+        str(temporary),
     ])
 
     run_command(command)
-
-    if not final_video.is_file() or final_video.stat().st_size == 0:
-        raise RuntimeError("Final video with audio was not created.")
+    validate_video_file(temporary)
+    temporary.replace(final_video)
+    validate_video_file(final_video)
 
 
 def load_scene_clips():
@@ -348,7 +405,9 @@ def load_scene_clips():
             MANIFEST_FILE.read_text(encoding="utf-8")
         )
     except (OSError, ValueError) as exc:
-        raise RuntimeError(f"Cannot read motion manifest: {exc}") from exc
+        raise RuntimeError(
+            f"Cannot read motion manifest: {exc}"
+        ) from exc
 
     if not isinstance(manifest, list) or not manifest:
         raise RuntimeError("Photo Motion manifest is empty or invalid.")
@@ -360,7 +419,13 @@ def load_scene_clips():
         if not isinstance(item, dict):
             raise RuntimeError(f"Manifest item {index} is invalid.")
 
-        number = int(item.get("global_scene", item.get("scene", 0)))
+        try:
+            number = int(item.get("global_scene", item.get("scene", 0)))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid scene number in manifest item {index}."
+            ) from exc
+
         if number < 1:
             raise RuntimeError(f"Invalid scene number: {number}")
 
@@ -368,19 +433,17 @@ def load_scene_clips():
         if not video_value:
             raise RuntimeError(f"Scene {number} has no video path.")
 
-        video_path = (ROOT / str(video_value)).resolve()
+        video_path = Path(str(video_value))
+        if not video_path.is_absolute():
+            video_path = ROOT / video_path
+        video_path = video_path.resolve()
 
         if not video_path.is_relative_to(ROOT):
             raise RuntimeError(
                 f"Scene {number} path escapes repository: {video_value}"
             )
 
-        if not video_path.is_file() or video_path.stat().st_size == 0:
-            raise RuntimeError(
-                f"Scene {number} video is missing or empty: {video_path}"
-            )
-
-        probe_media(video_path)
+        validate_video_file(video_path)
         clips.append(video_path)
         scene_numbers.append(number)
 
@@ -399,15 +462,33 @@ def main():
     mode = get_format(config)
 
     ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("FFmpeg is not installed.")
+    if not ffmpeg or not shutil.which("ffprobe"):
+        raise RuntimeError("FFmpeg and ffprobe must both be installed.")
 
     for directory in (MOTION_DIR, PARTS_DIR, VIDEOS_DIR, NARRATION_DIR):
         directory.mkdir(parents=True, exist_ok=True)
 
     clips = load_scene_clips()
 
-    # Remove old part files so a shorter new run cannot leave stale parts.
+    reference_resolution = None
+    for clip in clips:
+        _, _, width, height = validate_video_file(clip)
+        resolution = (width, height)
+        if reference_resolution is None:
+            reference_resolution = resolution
+        elif resolution != reference_resolution:
+            raise RuntimeError(
+                "Scene clips have inconsistent resolutions."
+            )
+
+    expected_resolution = (1280, 720) if mode == "full" else (720, 1280)
+    if reference_resolution != expected_resolution:
+        raise RuntimeError(
+            f"FORMAT={mode} expects {expected_resolution[0]}x"
+            f"{expected_resolution[1]}, but scene clips are "
+            f"{reference_resolution[0]}x{reference_resolution[1]}."
+        )
+
     for old in PARTS_DIR.glob("part_*.mp4"):
         old.unlink()
 
@@ -417,10 +498,8 @@ def main():
     full_alias = VIDEOS_DIR / "katha_lok_ai_full.mp4"
 
     for old in (silent_video, final_video, short_alias, full_alias):
-        if old.exists():
-            old.unlink()
+        old.unlink(missing_ok=True)
 
-    # Create part videos of up to four consecutive scenes each.
     for start in range(0, len(clips), PART_SIZE):
         group = clips[start:start + PART_SIZE]
         part_number = start // PART_SIZE + 1
@@ -432,7 +511,6 @@ def main():
             MOTION_DIR / f"concat_part_{part_number:02d}.txt",
         )
 
-    # Assemble the complete silent visual timeline.
     concatenate_videos(
         ffmpeg,
         clips,
@@ -440,7 +518,7 @@ def main():
         MOTION_DIR / "concat_final.txt",
     )
 
-    _, video_duration = probe_media(silent_video)
+    _, video_duration, _, _ = validate_video_file(silent_video)
 
     narration_files = discover_narration()
     voice = concatenate_audio(ffmpeg, narration_files)
@@ -466,27 +544,28 @@ def main():
         sfx=sfx,
     )
 
-    final_data, final_duration = probe_media(final_video)
-    streams = final_data.get("streams", [])
-    video_streams = [
-        stream for stream in streams
-        if stream.get("codec_type") == "video"
-    ]
+    final_data, final_duration, final_width, final_height = (
+        validate_video_file(final_video)
+    )
 
-    if not video_streams:
-        raise RuntimeError("Final output has no video stream.")
+    if (final_width, final_height) != expected_resolution:
+        raise RuntimeError("Final video resolution does not match FORMAT.")
 
     if abs(final_duration - video_duration) > 1.0:
         raise RuntimeError(
-            "Final duration differs too much from the scene timeline: "
+            "Final duration differs from scene timeline: "
             f"video={video_duration:.2f}s, final={final_duration:.2f}s"
         )
 
+    if voice and not any(
+        stream.get("codec_type") == "audio"
+        for stream in final_data.get("streams", [])
+    ):
+        raise RuntimeError("Narration was expected but final audio is missing.")
+
     alias = full_alias if mode == "full" else short_alias
     shutil.copy2(final_video, alias)
-
-    if not alias.is_file() or alias.stat().st_size == 0:
-        raise RuntimeError("Format-specific video alias was not created.")
+    validate_video_file(alias)
 
     log("\n" + "=" * 55)
     log("RENDER SUCCESS")
@@ -495,6 +574,7 @@ def main():
     log("Parts:", len(list(PARTS_DIR.glob("part_*.mp4"))))
     log("Final video:", final_video.relative_to(ROOT))
     log("Format output:", alias.relative_to(ROOT))
+    log("Resolution:", f"{final_width}x{final_height}")
     log("Duration:", f"{final_duration:.2f} seconds")
     log("Size:", f"{final_video.stat().st_size / 1048576:.2f} MB")
 
@@ -503,6 +583,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        print("FINAL RENDER CANCELLED", file=sys.stderr)
         sys.exit(130)
     except Exception as exc:
         print(f"FINAL RENDER FAILED: {exc}", file=sys.stderr)
