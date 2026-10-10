@@ -1,8 +1,8 @@
-
 #!/usr/bin/env python3
-"""Validate scene mapping and burn selected-language captions into the final MP4."""
+"""Validate scene timing and burn Hindi, English, or Hinglish captions."""
 
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -15,7 +15,6 @@ VIDEO = OUTPUT / "videos" / "katha_lok_ai_final.mp4"
 CAPTIONS = OUTPUT / "captions" / "captions.json"
 VISUAL_JOBS = OUTPUT / "visuals" / "visual_jobs.json"
 MOTION_MANIFEST = OUTPUT / "photo_motion" / "photo_motion_manifest.json"
-
 SRT = OUTPUT / "captions" / "final_captions.srt"
 TEMP_VIDEO = OUTPUT / "videos" / "katha_lok_ai_captioned.tmp.mp4"
 
@@ -23,382 +22,303 @@ TEMP_VIDEO = OUTPUT / "videos" / "katha_lok_ai_captioned.tmp.mp4"
 def read_json(path):
     if not path.is_file():
         raise RuntimeError(f"Required file missing: {path}")
-
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise RuntimeError(f"Cannot read JSON {path}: {exc}") from exc
+        raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
 
 
 def run(command):
-    print("\n$", " ".join(map(str, command)), flush=True)
-
+    print("$", " ".join(map(str, command)), flush=True)
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
-
-    print(result.stdout, flush=True)
-
+    if result.stdout:
+        print(result.stdout, flush=True)
     if result.returncode != 0:
-        raise RuntimeError(
-            f"Command failed with exit code {result.returncode}"
-        )
+        raise RuntimeError(f"Command failed with exit code {result.returncode}")
 
 
-def seconds_to_srt(value):
-    milliseconds = max(0, round(value * 1000))
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, millis = divmod(remainder, 1000)
-
-    return (
-        f"{hours:02}:{minutes:02}:"
-        f"{seconds:02},{millis:03}"
-    )
-
-
-def clean_caption(value):
-    text = str(value or "")
-    text = text.replace("\r", " ").replace("\n", " ")
-    return " ".join(text.split()).strip()
-
-
-def extract_jobs(data):
+def extract_list(data, label, keys):
     if isinstance(data, list):
-        jobs = data
+        rows = data
     elif isinstance(data, dict):
-        jobs = (
-            data.get("jobs")
-            or data.get("visual_jobs")
-            or data.get("scenes")
-            or []
+        rows = next(
+            (data.get(key) for key in keys
+             if isinstance(data.get(key), list)),
+            None,
         )
     else:
-        jobs = []
-
-    if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError("visual_jobs.json contains no scene jobs.")
-
-    return jobs
-
-
-def extract_caption_rows(data):
-    if not isinstance(data, dict):
-        raise RuntimeError("captions.json must contain a JSON object.")
-
-    if data.get("status") != "completed":
-        raise RuntimeError("Captions are not marked completed.")
-
-    rows = data.get("captions")
+        rows = None
 
     if not isinstance(rows, list) or not rows:
-        raise RuntimeError("captions.json contains no captions.")
-
+        raise RuntimeError(f"{label} contains no usable entries.")
+    if any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError(f"{label} contains a non-object entry.")
     return rows
 
 
-def extract_motion_rows(data):
-    if not isinstance(data, list) or not data:
-        raise RuntimeError(
-            "Photo Motion manifest must be a non-empty JSON list."
-        )
-
-    result = {}
-
-    for row in data:
-        if not isinstance(row, dict):
-            raise RuntimeError("Invalid entry in Photo Motion manifest.")
-
-        try:
-            number = int(row.get("global_scene", row.get("scene")))
-            duration = float(row["duration"])
-        except (TypeError, ValueError, KeyError) as exc:
-            raise RuntimeError(
-                f"Invalid scene number or duration in manifest: {row}"
-            ) from exc
-
-        if number < 1 or duration <= 0:
-            raise RuntimeError(
-                f"Invalid scene number/duration in manifest: {row}"
-            )
-
-        if number in result:
-            raise RuntimeError(
-                f"Duplicate global scene {number} in motion manifest."
-            )
-
-        result[number] = duration
-
+def positive_int(value, label):
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid {label}: {value!r}") from exc
+    if result < 1:
+        raise RuntimeError(f"{label} must be positive.")
     return result
 
 
-def build_caption_map(rows):
-    result = {}
+def scene_key(row, index, *, caption=False):
+    """Return (part, local scene, global scene)."""
+    try:
+        part = positive_int(row.get("part", 1), "part")
+        local = positive_int(
+            row.get("local_scene", row.get("scene", index)),
+            "local scene",
+        )
+        global_scene = positive_int(
+            row.get("global_scene", row.get("scene", index)),
+            "global scene",
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid scene identifiers: {row}") from exc
 
+    return part, local, global_scene
+
+
+def clean_text(value):
+    return " ".join(str(value or "").replace("\r", " ").split()).strip()
+
+
+def extract_captions(data):
+    if not isinstance(data, dict) or data.get("status") != "completed":
+        raise RuntimeError("Captions are not marked completed.")
+
+    rows = data.get("captions")
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("captions.json has no captions.")
+
+    result = {}
     for row in rows:
         if not isinstance(row, dict):
             raise RuntimeError("Invalid caption entry.")
-
-        try:
-            part = int(row["part"])
-            local_scene = int(row["scene"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Caption is missing numeric part/scene fields: {row}"
-            ) from exc
-
-        if part < 1 or local_scene < 1:
-            raise RuntimeError(
-                f"Invalid caption scene identifiers: {row}"
-            )
-
-        text = clean_caption(row.get("text", ""))
-
+        part = positive_int(row.get("part"), "caption part")
+        local = positive_int(row.get("scene"), "caption scene")
+        text = clean_text(row.get("text"))
         if not text:
-            raise RuntimeError(
-                f"Empty caption for Part {part}, Scene {local_scene}."
-            )
-
-        key = (part, local_scene)
-
+            raise RuntimeError(f"Empty caption at Part {part}, Scene {local}.")
+        key = (part, local)
         if key in result:
-            raise RuntimeError(
-                f"Duplicate caption for Part {part}, Scene {local_scene}."
-            )
-
+            raise RuntimeError(f"Duplicate caption for Part {part}, Scene {local}.")
         result[key] = text
 
     return result
 
 
-def build_scene_timeline(jobs, caption_map, duration_map):
-    scenes = []
-    seen_global = set()
-    seen_local = set()
+def extract_motion(data):
+    rows = extract_list(
+        data, "Photo Motion manifest",
+        ("scenes", "clips", "jobs", "items"),
+    )
+    result = {}
 
-    for index, job in enumerate(jobs, start=1):
-        if not isinstance(job, dict):
-            raise RuntimeError(
-                f"Invalid visual job at position {index}."
-            )
-
+    for index, row in enumerate(rows, 1):
+        part, local, global_scene = scene_key(row, index)
         try:
-            global_scene = int(
-                job.get("global_scene", job.get("scene", index))
-            )
-            part = int(job["part"])
-            local_scene = int(job.get("local_scene", job.get("scene", index)))
+            duration = float(row["duration"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid scene identifiers in visual job {index}: {job}"
-            ) from exc
+            raise RuntimeError(f"Invalid duration in motion row: {row}") from exc
 
-        if global_scene < 1 or part < 1 or local_scene < 1:
-            raise RuntimeError(
-                f"Scene identifiers must be positive: {job}"
-            )
+        if not math.isfinite(duration) or duration <= 0:
+            raise RuntimeError(f"Invalid duration for scene {global_scene}.")
 
-        if global_scene in seen_global:
-            raise RuntimeError(
-                f"Duplicate global scene number {global_scene}."
-            )
+        key = (part, local)
+        if key in result:
+            raise RuntimeError(f"Duplicate motion scene: Part {part}, Scene {local}.")
+        result[key] = {"global_scene": global_scene, "duration": duration}
 
-        key = (part, local_scene)
+    return result
 
-        if key in seen_local:
-            raise RuntimeError(
-                f"Duplicate Part {part}, Scene {local_scene}."
-            )
 
+def build_timeline(jobs_data, motion_data, captions):
+    jobs = extract_list(
+        jobs_data, "Visual jobs",
+        ("jobs", "visual_jobs", "scenes"),
+    )
+
+    scenes = []
+    seen_keys = set()
+    seen_global = set()
+
+    for index, job in enumerate(jobs, 1):
+        part, local, global_scene = scene_key(job, index)
+        key = (part, local)
+
+        if key in seen_keys or global_scene in seen_global:
+            raise RuntimeError(f"Duplicate visual scene: {job}")
+        seen_keys.add(key)
         seen_global.add(global_scene)
-        seen_local.add(key)
 
-        if key not in caption_map:
+        if key not in captions:
+            raise RuntimeError(f"Caption missing for Part {part}, Scene {local}.")
+        if key not in motion_data:
+            raise RuntimeError(f"Motion clip missing for Part {part}, Scene {local}.")
+
+        motion = motion_data[key]
+        if motion["global_scene"] != global_scene:
             raise RuntimeError(
-                f"Caption missing for Part {part}, Scene {local_scene}."
-            )
-
-        duration = duration_map.get(global_scene)
-
-        if duration is None:
-            try:
-                duration = float(job.get("duration", 0))
-            except (TypeError, ValueError):
-                duration = 0
-
-        if duration <= 0:
-            raise RuntimeError(
-                f"Duration missing for global scene {global_scene}."
+                f"Scene numbering mismatch for Part {part}, Scene {local}: "
+                f"visual={global_scene}, motion={motion['global_scene']}."
             )
 
         scenes.append({
-            "global_scene": global_scene,
             "part": part,
-            "local_scene": local_scene,
-            "duration": duration,
-            "text": caption_map[key],
+            "local_scene": local,
+            "global_scene": global_scene,
+            "duration": motion["duration"],
+            "text": captions[key],
         })
 
-    scenes.sort(key=lambda item: item["global_scene"])
-
+    scenes.sort(key=lambda row: row["global_scene"])
+    actual = [row["global_scene"] for row in scenes]
     expected = list(range(1, len(scenes) + 1))
-    actual = [item["global_scene"] for item in scenes]
 
     if actual != expected:
+        raise RuntimeError(f"Global scene numbering is not continuous: {actual}")
+
+    if seen_keys != set(captions):
         raise RuntimeError(
-            "Global scene numbers must be continuous from 1. "
-            f"Found: {actual}"
+            "Caption and visual scene sets differ. "
+            f"Caption-only={sorted(set(captions) - seen_keys)}; "
+            f"Visual-only={sorted(seen_keys - set(captions))}"
         )
 
-    if len(caption_map) != len(scenes):
-        missing = sorted(set(caption_map) - seen_local)
-        extra = sorted(seen_local - set(caption_map))
-
+    if seen_keys != set(motion_data):
         raise RuntimeError(
-            "Caption/job count mismatch. "
-            f"Caption count={len(caption_map)}, job count={len(scenes)}. "
-            f"Caption-only keys={missing}; job-only keys={extra}"
+            "Visual and motion scene sets differ. "
+            f"Motion-only={sorted(set(motion_data) - seen_keys)}"
         )
 
     return scenes
 
 
-def probe_duration(ffprobe, video):
+def probe(ffprobe, path):
     result = subprocess.run(
         [
-            ffprobe,
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(video),
+            ffprobe, "-v", "error",
+            "-show_entries", "format=duration:stream=codec_type",
+            "-of", "json", str(path),
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
-
     if result.returncode != 0:
-        raise RuntimeError(
-            f"Could not inspect final video: {result.stderr}"
-        )
+        raise RuntimeError(f"ffprobe failed for {path.name}: {result.stderr}")
 
     try:
-        duration = float(result.stdout.strip())
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            "Could not determine final video duration."
-        ) from exc
+        data = json.loads(result.stdout)
+        duration = float(data["format"]["duration"])
+        streams = data.get("streams", [])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise RuntimeError(f"Cannot inspect {path.name}: {exc}") from exc
 
-    if duration <= 0:
-        raise RuntimeError("Final video duration is invalid.")
-
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(f"Invalid duration in {path.name}.")
+    if not any(row.get("codec_type") == "video" for row in streams):
+        raise RuntimeError(f"No video stream in {path.name}.")
     return duration
 
 
+def srt_time(seconds):
+    ms = max(0, round(seconds * 1000))
+    hours, ms = divmod(ms, 3_600_000)
+    minutes, ms = divmod(ms, 60_000)
+    secs, ms = divmod(ms, 1000)
+    return f"{hours:02}:{minutes:02}:{secs:02},{ms:03}"
+
+
 def make_srt(scenes, video_duration):
+    timeline = sum(row["duration"] for row in scenes)
+    tolerance = max(2.0, video_duration * 0.03)
+
+    if abs(timeline - video_duration) > tolerance:
+        raise RuntimeError(
+            "Scene timeline does not match final video duration. "
+            f"Scenes={timeline:.2f}s; video={video_duration:.2f}s. "
+            "Check the video assembly and scene durations before burning captions."
+        )
+
     entries = []
     cursor = 0.0
 
-    for index, scene in enumerate(scenes, start=1):
+    for index, scene in enumerate(scenes, 1):
         start = cursor
-        end = cursor + scene["duration"]
-        cursor = end
-
-        if start >= video_duration:
-            raise RuntimeError(
-                f"Scene {scene['global_scene']} starts after the final "
-                "video ends. Scene timing and video duration do not match."
-            )
-
-        end = min(end, video_duration)
+        end = min(cursor + scene["duration"], video_duration)
+        cursor += scene["duration"]
 
         if end <= start:
-            raise RuntimeError(
-                f"Invalid subtitle interval for scene {scene['global_scene']}."
-            )
+            continue
 
         entries.append(
             f"{index}\n"
-            f"{seconds_to_srt(start)} --> {seconds_to_srt(end)}\n"
+            f"{srt_time(start)} --> {srt_time(end)}\n"
             f"{scene['text']}\n"
         )
 
-    timeline_duration = sum(item["duration"] for item in scenes)
-
-    if abs(timeline_duration - video_duration) > max(2.0, video_duration * 0.03):
-        raise RuntimeError(
-            "Scene-duration timeline differs from final MP4 duration. "
-            f"Scene total={timeline_duration:.3f}s; "
-            f"video={video_duration:.3f}s. "
-            "Refusing to burn potentially misaligned captions."
-        )
-
-    return "\n".join(entries)
+    if not entries:
+        raise RuntimeError("No valid subtitle intervals were generated.")
+    return "\n".join(entries) + "\n"
 
 
 def escape_filter_path(path):
     value = str(path.resolve())
-    value = value.replace("\\", "\\\\")
-    value = value.replace(":", "\\:")
-    value = value.replace("'", "\\'")
-    value = value.replace(",", "\\,")
-    value = value.replace("[", "\\[")
-    value = value.replace("]", "\\]")
+    for old, new in (
+        ("\\", "\\\\"),
+        (":", "\\:"),
+        ("'", "\\'"),
+        (",", "\\,"),
+        ("[", "\\["),
+        ("]", "\\]"),
+    ):
+        value = value.replace(old, new)
     return value
 
 
 def main():
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
-
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and ffprobe must be installed.")
 
     for path in (VIDEO, CAPTIONS, VISUAL_JOBS, MOTION_MANIFEST):
         if not path.is_file():
-            raise RuntimeError(f"Required input file missing: {path}")
-
-    if VIDEO.stat().st_size == 0:
-        raise RuntimeError(f"Final video is empty: {VIDEO}")
+            raise RuntimeError(f"Required input missing: {path}")
+    if VIDEO.stat().st_size < 1000:
+        raise RuntimeError("Final video is missing or too small.")
 
     caption_data = read_json(CAPTIONS)
-    jobs_data = read_json(VISUAL_JOBS)
-    motion_data = read_json(MOTION_MANIFEST)
-
-    caption_map = build_caption_map(
-        extract_caption_rows(caption_data)
+    scenes = build_timeline(
+        read_json(VISUAL_JOBS),
+        extract_motion(read_json(MOTION_MANIFEST)),
+        extract_captions(caption_data),
     )
-    jobs = extract_jobs(jobs_data)
-    duration_map = extract_motion_rows(motion_data)
 
-    scenes = build_scene_timeline(jobs, caption_map, duration_map)
-    video_duration = probe_duration(ffprobe, VIDEO)
-    srt_text = make_srt(scenes, video_duration)
-
+    video_duration = probe(ffprobe, VIDEO)
     SRT.parent.mkdir(parents=True, exist_ok=True)
-    SRT.write_text(srt_text + "\n", encoding="utf-8")
+    SRT.write_text(make_srt(scenes, video_duration), encoding="utf-8")
 
-    # Confirm subtitles contain visible text before encoding.
-    if not SRT.read_text(encoding="utf-8").strip():
-        raise RuntimeError("Generated subtitle file is empty.")
-
-    subtitle_path = escape_filter_path(SRT)
     subtitle_filter = (
-        f"subtitles=filename='{subtitle_path}':"
+        f"subtitles=filename='{escape_filter_path(SRT)}':"
         "force_style='FontName=Noto Sans Devanagari,"
-        "FontSize=22,Outline=2,Shadow=0,"
-        "Alignment=2,MarginV=48'"
+        "FontSize=22,Outline=2,Shadow=0,Alignment=2,MarginV=48'"
     )
 
     TEMP_VIDEO.unlink(missing_ok=True)
-
     run([
-        ffmpeg,
-        "-hide_banner",
-        "-y",
+        ffmpeg, "-hide_banner", "-y",
         "-i", str(VIDEO),
         "-map", "0:v:0",
         "-map", "0:a?",
@@ -412,22 +332,44 @@ def main():
         str(TEMP_VIDEO),
     ])
 
-    if not TEMP_VIDEO.is_file() or TEMP_VIDEO.stat().st_size == 0:
-        raise RuntimeError("Captioned MP4 was not created.")
+    if not TEMP_VIDEO.is_file() or TEMP_VIDEO.stat().st_size < 1000:
+        raise RuntimeError("Captioned MP4 was not created correctly.")
 
-    # Verify temporary output before replacing the original final MP4.
-    probe_duration(ffprobe, TEMP_VIDEO)
-
+    probe(ffprobe, TEMP_VIDEO)
     TEMP_VIDEO.replace(VIDEO)
+
+    # Keep the format-specific alias in sync with the captioned final video.
+    alias = (
+        OUTPUT / "videos" / "katha_lok_ai_full.mp4"
+        if str(caption_data.get("format", "")).lower() == "full"
+        else OUTPUT / "videos" / "katha_lok_ai_short.mp4"
+    )
+    # Determine alias from the input configuration if captions.json lacks format.
+    config_path = ROOT / "Input" / "topic.txt"
+    if config_path.is_file():
+        for line in config_path.read_text(encoding="utf-8-sig").splitlines():
+            if "=" in line and line.split("=", 1)[0].strip().upper() == "FORMAT":
+                value = line.split("=", 1)[1].split("#", 1)[0].strip().strip("'\"").lower()
+                alias = (
+                    OUTPUT / "videos" / "katha_lok_ai_full.mp4"
+                    if value in {"full", "long", "landscape", "youtube", "youtube_full", "youtube-long"}
+                    else OUTPUT / "videos" / "katha_lok_ai_short.mp4"
+                )
+                break
+
+    if alias != VIDEO and alias.exists():
+        shutil.copy2(VIDEO, alias)
+        if alias.stat().st_size != VIDEO.stat().st_size:
+            raise RuntimeError("Captioned format alias failed verification.")
 
     print("=" * 55)
     print("CAPTION BURN-IN: SUCCESS")
     print("Caption mode:", caption_data.get("mode", "unknown"))
-    print("Global scenes:", len(scenes))
-    print("Captions:", len(caption_map))
+    print("Scenes:", len(scenes))
+    print("Captions:", len(scenes))
     print("Duration:", f"{video_duration:.2f}s")
-    print("Final MP4:", VIDEO)
-    print("Subtitle file:", SRT)
+    print("Final MP4:", VIDEO.relative_to(ROOT))
+    print("Subtitle file:", SRT.relative_to(ROOT))
     print("=" * 55)
 
 
