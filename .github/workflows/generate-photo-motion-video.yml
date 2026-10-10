@@ -69,7 +69,7 @@ jobs:
           print("PyTorch:", torch.__version__)
           print("Transformers:", transformers.__version__)
           print("OpenCV:", cv2.__version__)
-          print("Pillow:", Image.__module__)
+          print("Pillow:", Image.__name__)
           PY
 
       - name: Check input and required scripts
