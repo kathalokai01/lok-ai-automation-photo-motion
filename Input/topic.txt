@@ -34,10 +34,12 @@ SCENE_DURATION = "auto"            # auto = narration/story के अनुस�
 # CAPTIONS
 # ============================================================
 
-CAPTIONS = "hindi"                 # hindi | english | Hinglish
+CAPTIONS = "hindi"
 
 
-# ============================================================
+# Allowed modes: hindi, english, hinglish
+
+ ============================================================
 # STORY STRUCTURE
 # ============================================================
 
