@@ -1,5 +1,3 @@
-File path: "scripts/generate_scenes.py"
-
 #!/usr/bin/env python3
 """Generate resumable, fingerprint-validated cinematic scenes."""
 
@@ -162,9 +160,8 @@ def build_settings(config):
 
 
 def make_fingerprint(config, settings, story, bible, model, topic, story_text):
-    # Include the actual source content and settings, not just scene numbers.
     return fingerprint({
-        "version": 2,
+        "version": 3,
         "topic": topic,
         "story_text": story_text,
         "story": story,
@@ -183,6 +180,7 @@ def scene_key(part, scene):
 def valid_scene(scene, part, number):
     if not isinstance(scene, dict):
         return False
+
     try:
         if int(scene.get("part", -1)) != part:
             return False
@@ -210,9 +208,15 @@ def load_compatible_scenes(source_fingerprint, parts, scenes_per_part):
         return {}
 
     result = {}
-    for item in data.get("scenes", []):
+    items = data.get("scenes", [])
+    if not isinstance(items, list):
+        log("Saved scenes list is invalid; regenerating scenes.")
+        return {}
+
+    for item in items:
         if not isinstance(item, dict):
             continue
+
         try:
             part = int(item.get("part", -1))
             number = int(item.get("scene", -1))
@@ -227,8 +231,17 @@ def load_compatible_scenes(source_fingerprint, parts, scenes_per_part):
     return result
 
 
-def save_progress(scenes, total, source_fingerprint, model, settings,
-                  topic, story_text, status="in_progress", failed_scene=None):
+def save_progress(
+    scenes,
+    total,
+    source_fingerprint,
+    model,
+    settings,
+    topic,
+    story_text,
+    status="in_progress",
+    failed_scene=None,
+):
     ordered = sorted(
         scenes.values(),
         key=lambda item: (int(item["part"]), int(item["scene"])),
@@ -273,9 +286,20 @@ def previous_context(scenes, part, number):
     return earlier[-3:]
 
 
-def build_prompt(config, settings, story, bible, previous, part, number,
-                 scenes_per_part, topic, story_text):
+def build_prompt(
+    config,
+    settings,
+    story,
+    bible,
+    previous,
+    part,
+    number,
+    scenes_per_part,
+    topic,
+    story_text,
+):
     consistency = []
+
     if settings["character_consistency"]:
         consistency.append(
             "Maintain exact recurring character identity, face, age, hair, "
@@ -309,8 +333,8 @@ def build_prompt(config, settings, story, bible, previous, part, number,
 
     suspense_rule = (
         "The final scene of each part must contain a story-specific suspense beat."
-        if settings["part_suspense"] else
-        "Use suspense only where it naturally serves the story."
+        if settings["part_suspense"]
+        else "Use suspense only where it naturally serves the story."
     )
 
     negative = []
@@ -320,11 +344,22 @@ def build_prompt(config, settings, story, bible, previous, part, number,
         negative.extend(["unnecessary neon", "artificial glow"])
     if settings["avoid_glitch"]:
         negative.extend(["glitch", "digital distortion"])
+
     negative.extend([
-        "plastic skin", "wax face", "deformed hands", "extra fingers",
-        "duplicate people", "incorrect anatomy", "floating objects",
-        "text artifacts", "watermark", "logo",
+        "plastic skin",
+        "wax face",
+        "deformed hands",
+        "extra fingers",
+        "duplicate people",
+        "incorrect anatomy",
+        "floating objects",
+        "text artifacts",
+        "watermark",
+        "logo",
     ])
+
+    # json.dumps safely escapes the string for the JSON-shaped prompt below.
+    negative_json = json.dumps(", ".join(negative), ensure_ascii=False)
 
     return f"""
 You are a professional Hindi cinematic scene director.
@@ -369,6 +404,9 @@ PART HOOK ENABLED: {settings["part_hook"]}
 PART SUSPENSE ENABLED: {settings["part_suspense"]}
 FINAL RESOLUTION ENABLED: {settings["final_resolution"]}
 
+SUSPENSE GUIDANCE:
+{suspense_rule}
+
 CONTINUITY RULES:
 {chr(10).join("- " + item for item in consistency) or "- Follow natural continuity."}
 
@@ -398,7 +436,7 @@ Return this exact field structure:
   "world_context": "specific location and world context",
   "narration": "Hindi narration",
   "visual_prompt": "detailed photorealistic live-action visual prompt with motion",
-  "negative_prompt": "{", ".join(negative)}",
+  "negative_prompt": {negative_json},
   "duration": "{settings["scene_duration"]}",
   "transition": "{settings["transitions"]}",
   "camera": "shot size, lens feel and camera movement",
@@ -462,7 +500,8 @@ def call_gemini(model, prompt, max_attempts):
             text = "\n".join(
                 item.get("text", "")
                 for item in parts
-                if isinstance(item, dict) and isinstance(item.get("text"), str)
+                if isinstance(item, dict)
+                and isinstance(item.get("text"), str)
             ).strip()
 
             if not text:
@@ -478,13 +517,16 @@ def call_gemini(model, prompt, max_attempts):
 
             if not isinstance(scene, dict):
                 raise RuntimeError("Generated scene must be a JSON object.")
+
             return scene
 
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")[:1000]
             last_error = RuntimeError(f"Gemini HTTP {exc.code}: {body_text}")
+
             if exc.code not in {429, 500, 502, 503, 504}:
                 raise last_error from exc
+
             retry_after = exc.headers.get("Retry-After")
             try:
                 wait = max(1, float(retry_after)) if retry_after else min(
@@ -492,6 +534,7 @@ def call_gemini(model, prompt, max_attempts):
                 )
             except ValueError:
                 wait = min(60, 5 * (2 ** (attempt - 1)))
+
         except Exception as exc:
             last_error = exc
             wait = min(30, 3 * (2 ** (attempt - 1)))
@@ -512,9 +555,19 @@ def validate_scene(scene, part, number):
     scene["scene"] = number
 
     for key in (
-        "title", "narration", "visual_prompt", "negative_prompt",
-        "duration", "transition", "camera", "lighting", "mood",
-        "sfx", "ambient_sound", "music_direction", "world_context",
+        "title",
+        "narration",
+        "visual_prompt",
+        "negative_prompt",
+        "duration",
+        "transition",
+        "camera",
+        "lighting",
+        "mood",
+        "sfx",
+        "ambient_sound",
+        "music_direction",
+        "world_context",
     ):
         value = scene.get(key, "")
         if not isinstance(value, str):
@@ -530,7 +583,10 @@ def validate_scene(scene, part, number):
     scene["character_ids"] = (
         character_ids if isinstance(character_ids, list) else []
     )
-    scene.setdefault("title", f"Part {part}, Scene {number}")
+
+    if not scene["title"]:
+        scene["title"] = f"Part {part}, Scene {number}"
+
     return scene
 
 
@@ -540,6 +596,7 @@ def main():
     config = load_input_config()
     parts = int(get_parts(config))
     scenes_per_part = int(get_scenes(config))
+
     if parts < 1 or scenes_per_part < 1:
         raise RuntimeError("PARTS and SCENES must both be positive.")
 
@@ -549,6 +606,7 @@ def main():
     bible = load_character_bible(config)
     topic = str(get_topic(config) or "").strip()
     story_text = str(get_story_text(config) or "").strip()
+
     source_fingerprint = make_fingerprint(
         config, settings, story, bible, model, topic, story_text
     )
@@ -590,15 +648,26 @@ def main():
                 scene = validate_scene(scene, part, number)
             except Exception:
                 save_progress(
-                    scenes, total, source_fingerprint, model, settings,
-                    topic, story_text, failed_scene=key,
+                    scenes,
+                    total,
+                    source_fingerprint,
+                    model,
+                    settings,
+                    topic,
+                    story_text,
+                    failed_scene=key,
                 )
                 raise
 
             scenes[key] = scene
             save_progress(
-                scenes, total, source_fingerprint, model, settings,
-                topic, story_text,
+                scenes,
+                total,
+                source_fingerprint,
+                model,
+                settings,
+                topic,
+                story_text,
             )
             log(f"Saved Part {part} scene {number} ({len(scenes)}/{total})")
 
@@ -610,13 +679,20 @@ def main():
         for part in range(1, parts + 1)
         for number in range(1, scenes_per_part + 1)
     }
+
     if set(scenes) != expected:
         missing = sorted(expected - set(scenes))
         raise RuntimeError(f"Missing scenes after generation: {missing[:20]}")
 
     save_progress(
-        scenes, total, source_fingerprint, model, settings,
-        topic, story_text, status="completed",
+        scenes,
+        total,
+        source_fingerprint,
+        model,
+        settings,
+        topic,
+        story_text,
+        status="completed",
     )
     log(f"SUCCESS: all {total} scenes validated and saved.")
 
