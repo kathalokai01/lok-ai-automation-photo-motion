@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a topic-specific story guided by the saved story plan."""
+"""Generate and validate a topic-specific Hindi cinematic story."""
 
 import json
 import os
@@ -40,7 +40,7 @@ def read_json(path, required=False):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Cannot read valid JSON from {path}: {exc}")
+        raise RuntimeError(f"Cannot read valid JSON from {path}: {exc}") from exc
 
 
 def selected_model():
@@ -48,8 +48,7 @@ def selected_model():
 
     if not isinstance(data, dict) or data.get("status") != "selected":
         raise RuntimeError(
-            "No tested Gemini model is selected. "
-            "Run scripts/select_gemini_model.py first."
+            "No selected Gemini model. Run scripts/select_gemini_model.py first."
         )
 
     model = str(data.get("model", "")).strip()
@@ -82,6 +81,16 @@ def bool_value(config, key, default=True):
     return default
 
 
+def normalize_text(value):
+    value = str(value or "").lower()
+    value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def word_count(value):
+    return len(normalize_text(value).split())
+
+
 def clean_title(value):
     value = str(value or "").strip()
     value = re.sub(r"^['\"]+|['\"]+$", "", value)
@@ -98,7 +107,7 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
     plan = read_json(PLAN_FILE)
 
     if plan is None:
-        print("WARNING: Story plan not found; using validated input settings.")
+        print("WARNING: Story plan not found; using input settings.")
         return None
 
     if not isinstance(plan, dict):
@@ -110,14 +119,20 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
     plan_topic = str(plan.get("topic", "")).strip()
     if topic and plan_topic and plan_topic != topic:
         raise RuntimeError(
-            "Story plan topic does not match the current input. "
-            "Regenerate the story plan before continuing."
+            "Story plan topic does not match current input. "
+            "Regenerate the story plan first."
         )
 
-    if int(plan.get("parts_count", -1)) != parts_count:
+    try:
+        plan_parts_count = int(plan.get("parts_count", -1))
+        plan_scenes_count = int(plan.get("scenes_per_part", -1))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Story plan counts are invalid.") from exc
+
+    if plan_parts_count != parts_count:
         raise RuntimeError("Story plan part count does not match input.")
 
-    if int(plan.get("scenes_per_part", -1)) != scenes_per_part:
+    if plan_scenes_count != scenes_per_part:
         raise RuntimeError("Story plan scene count does not match input.")
 
     plan_parts = plan.get("parts")
@@ -128,7 +143,12 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
         if not isinstance(part, dict):
             raise RuntimeError(f"Story plan part {part_index} is invalid.")
 
-        if int(part.get("part", -1)) != part_index:
+        try:
+            part_number = int(part.get("part", -1))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Story plan part numbering is invalid.") from exc
+
+        if part_number != part_index:
             raise RuntimeError("Story plan part numbering is not continuous.")
 
         scenes = part.get("scenes")
@@ -142,7 +162,12 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
             if not isinstance(scene, dict):
                 raise RuntimeError("Story plan contains an invalid scene.")
 
-            if int(scene.get("scene", -1)) != scene_index:
+            try:
+                scene_number = int(scene.get("scene", -1))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Story plan scene numbering is invalid.") from exc
+
+            if scene_number != scene_index:
                 raise RuntimeError(
                     f"Part {part_index} scene numbering is invalid."
                 )
@@ -253,10 +278,10 @@ def call_gemini(model, prompt):
             if reason in {"MAX_TOKENS", "LENGTH"}:
                 raise RuntimeError("Gemini output was truncated.")
 
-            parts = candidate.get("content", {}).get("parts", [])
+            response_parts = candidate.get("content", {}).get("parts", [])
             response_text = "\n".join(
                 item.get("text", "")
-                for item in parts
+                for item in response_parts
                 if isinstance(item, dict)
                 and isinstance(item.get("text"), str)
             ).strip()
@@ -283,7 +308,7 @@ def call_gemini(model, prompt):
             )
 
             if exc.code not in {429, 500, 502, 503, 504}:
-                raise last_error
+                raise last_error from exc
 
         except Exception as exc:
             last_error = exc
@@ -295,8 +320,7 @@ def call_gemini(model, prompt):
             time.sleep(delay)
 
     raise RuntimeError(
-        f"Story generation failed after {MAX_RETRIES} attempts: "
-        f"{last_error}"
+        f"Story generation failed after {MAX_RETRIES} attempts: {last_error}"
     )
 
 
@@ -321,36 +345,59 @@ def build_prompt(
     final_resolution = bool_value(config, "FINAL_RESOLUTION", True)
 
     if format_type == "short":
+        hook_minimum = 7
         format_rule = (
-            "Write a short-form story with a fast hook, focused conflict, "
-            "quick escalation and a clear payoff. Avoid filler."
+            "Create a concise short-form story with rapid escalation, "
+            "little filler, a strong payoff and a memorable ending."
+        )
+        hook_rule = (
+            "The opening hook must contain at least 7 words. "
+            "Make it immediate, specific and curiosity-driven."
         )
     else:
+        hook_minimum = 14
         format_rule = (
-            "Write a complete long-form cinematic story with setup, "
+            "Create a developed long-form cinematic story with setup, "
             "character development, escalating conflict, turning points, "
-            "climax and meaningful resolution."
+            "a climax and a meaningful resolution."
+        )
+        hook_rule = (
+            "The opening hook must contain at least 14 words. "
+            "Develop a vivid, emotionally engaging mystery, danger or "
+            "surprising contradiction rather than a short generic teaser."
         )
 
-    hook_rule = (
-        "The first scene of every part must begin with an immediate, "
-        "specific hook: mystery, danger, surprise or emotional tension."
-        if part_hook else
-        "Use a natural opening suited to the story."
-    )
+    if part_hook:
+        part_hook_rule = (
+            "The first scene of EVERY part must also open with a strong, "
+            "part-specific hook. Do not reuse the same wording."
+        )
+    else:
+        part_hook_rule = (
+            "Only the opening of the whole story has a mandatory hook. "
+            "Other part openings should still be engaging but need not "
+            "meet the opening-hook word minimum."
+        )
 
-    suspense_rule = (
-        "The final scene of every part must contain a meaningful, "
-        "story-specific suspense beat or unanswered question."
-        if part_suspense else
-        "Use suspense where it naturally serves the story."
-    )
+    if part_suspense:
+        suspense_rule = (
+            "The final scene of EVERY part must have a non-empty, "
+            "story-specific suspense field containing at least 4 words. "
+            "It must create a meaningful unanswered question, revelation "
+            "or consequence. In the final part, resolve the central "
+            "conflict before introducing any final clue."
+        )
+    else:
+        suspense_rule = (
+            "Use suspense when it serves the story. Do not force a "
+            "cliffhanger at every part ending."
+        )
 
     ending_rule = (
-        "In the final part, resolve the central conflict first, then "
-        "introduce a relevant new clue or suspense beat."
-        if final_resolution and part_suspense else
-        "Give the story a deliberate, satisfying ending."
+        "Resolve the main conflict clearly in the final part. Any final "
+        "suspense must come after the main payoff and must not erase it."
+        if final_resolution else
+        "Give the ending a deliberate outcome consistent with the story."
     )
 
     return f"""
@@ -380,8 +427,19 @@ SCENE DURATION:
 FORMAT RULE:
 {format_rule}
 
-OPENING HOOK:
+MANDATORY OPENING HOOK:
 {hook_rule}
+
+HOOK INTEGRATION — CRITICAL:
+1. Write the complete opening hook in the top-level "hook" field.
+2. Copy that hook VERBATIM to the very beginning of Part 1, Scene 1 narration.
+3. The narration may continue after the copied hook, but it must not put an
+   introduction, greeting, character biography or scene-setting before it.
+4. The hook must be in natural Hindi and must relate directly to the topic.
+5. Never satisfy this requirement with an empty, generic or unrelated hook.
+
+PART OPENINGS:
+{part_hook_rule}
 
 PART ENDINGS:
 {suspense_rule}
@@ -399,7 +457,7 @@ STRICT STRUCTURE:
 - Scene numbering restarts at 1 in each part.
 - Follow the role, purpose and order of each planned scene.
 - Do not omit, merge, duplicate or reorder planned scenes.
-- Treat the plan as the story structure, not as optional inspiration.
+- Treat the plan as the story structure, not optional inspiration.
 
 STORY QUALITY:
 - Write natural, clear Hindi narration.
@@ -415,16 +473,15 @@ STORY QUALITY:
 - Do not add a generic channel introduction.
 - Make the title and plot relevant to the input topic.
 - Do not repeat the same suspense beat across parts.
-- The final part must pay off the main conflict before its final clue.
 
 Return ONLY valid JSON with this structure:
 {{
   "status": "completed",
   "format": "{format_type}",
-  "title": "{title}",
-  "topic": "{topic}",
+  "title": "Story title",
+  "topic": "Input topic",
   "story_type": "original_story",
-  "hook": "Opening hook in Hindi",
+  "hook": "Opening hook in Hindi, at least {hook_minimum} words",
   "ending_type": "payoff_with_final_suspense",
   "parts": [
     {{
@@ -434,7 +491,7 @@ Return ONLY valid JSON with this structure:
         {{
           "scene": 1,
           "purpose": "Purpose based on the story plan",
-          "narration": "Hindi narration",
+          "narration": "Start with the exact top-level hook, copied verbatim",
           "visual": "Realistic live-action visual description",
           "dialogue": "Hindi dialogue or empty string",
           "suspense": "Suspense beat or empty string"
@@ -452,25 +509,44 @@ def validate_story(
     data, config, format_type, title, topic,
     parts_count, scenes_per_part, model,
 ):
+    if not isinstance(data, dict):
+        raise RuntimeError("Generated story must be a JSON object.")
+
     if str(data.get("format", "")).strip().lower() != format_type:
         raise RuntimeError("Generated story format does not match input.")
 
     parts = data.get("parts")
     if not isinstance(parts, list) or len(parts) != parts_count:
+        actual = len(parts) if isinstance(parts, list) else "invalid"
         raise RuntimeError(
-            f"Expected {parts_count} parts; received "
-            f"{len(parts) if isinstance(parts, list) else 'invalid'}."
+            f"Expected {parts_count} parts; received {actual}."
         )
 
     part_hook = bool_value(config, "PART_HOOK", True)
     part_suspense = bool_value(config, "PART_SUSPENSE", True)
     final_resolution = bool_value(config, "FINAL_RESOLUTION", True)
 
+    hook_minimum = 7 if format_type == "short" else 14
+    hook = str(data.get("hook", "")).strip()
+
+    if word_count(hook) < hook_minimum:
+        raise RuntimeError(
+            f"Opening hook is too short: {word_count(hook)} words; "
+            f"{format_type} requires at least {hook_minimum}."
+        )
+
+    first_scene_narration = ""
+
     for part_number, part in enumerate(parts, start=1):
         if not isinstance(part, dict):
             raise RuntimeError(f"Part {part_number} is invalid.")
 
-        if int(part.get("part", part_number)) != part_number:
+        try:
+            actual_part_number = int(part.get("part", part_number))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Generated part numbering is invalid.") from exc
+
+        if actual_part_number != part_number:
             raise RuntimeError("Generated part numbering is invalid.")
 
         scenes = part.get("scenes")
@@ -489,6 +565,16 @@ def validate_story(
             if not isinstance(scene, dict):
                 raise RuntimeError(
                     f"Part {part_number}, scene {scene_number} is invalid."
+                )
+
+            try:
+                actual_scene_number = int(scene.get("scene", scene_number))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Generated scene numbering is invalid.") from exc
+
+            if actual_scene_number != scene_number:
+                raise RuntimeError(
+                    f"Part {part_number} scene numbering is invalid."
                 )
 
             scene["scene"] = scene_number
@@ -516,15 +602,32 @@ def validate_story(
                     "has no visual description."
                 )
 
-            if scene_number == scenes_per_part and part_suspense:
-                if not scene["suspense"]:
+            if part_number == 1 and scene_number == 1:
+                first_scene_narration = scene["narration"]
+
+            if scene_number == 1 and (part_number == 1 or part_hook):
+                minimum = hook_minimum if part_number == 1 else 7
+                if word_count(scene["narration"]) < minimum:
                     raise RuntimeError(
-                        f"Part {part_number} final scene is missing suspense."
+                        f"Part {part_number}, scene 1 does not contain "
+                        f"a sufficiently developed hook."
                     )
 
-    hook = str(data.get("hook", "")).strip()
-    if part_hook and not hook:
-        raise RuntimeError("The story-level opening hook is missing.")
+            if scene_number == scenes_per_part and part_suspense:
+                if word_count(scene["suspense"]) < 4:
+                    raise RuntimeError(
+                        f"Part {part_number} final scene is missing a "
+                        "meaningful suspense beat of at least 4 words."
+                    )
+
+    normalized_hook = normalize_text(hook)
+    normalized_opening = normalize_text(first_scene_narration)
+
+    if not normalized_hook or not normalized_opening.startswith(normalized_hook):
+        raise RuntimeError(
+            "The first scene narration must begin with the exact opening "
+            "hook from the top-level hook field. Regenerate the story."
+        )
 
     data["status"] = "completed"
     data["format"] = format_type
@@ -533,6 +636,7 @@ def validate_story(
     data["story_type"] = (
         "original_short_form" if format_type == "short" else "long_form"
     )
+    data["hook"] = hook
     data["ending_type"] = str(
         data.get("ending_type") or "payoff_with_final_suspense"
     ).strip()
@@ -544,7 +648,10 @@ def validate_story(
         "scenes_per_part": scenes_per_part,
         "total_scenes": parts_count * scenes_per_part,
         "story_plan_used": PLAN_FILE.is_file(),
-        "opening_hook_required": part_hook,
+        "opening_hook_required": True,
+        "opening_hook_minimum_words": hook_minimum,
+        "opening_hook_in_scene_1": True,
+        "part_hook_required": part_hook,
         "part_suspense_required": part_suspense,
         "final_resolution_required": final_resolution,
     }
@@ -589,6 +696,9 @@ def main():
     print(f"Scenes per part : {scenes_per_part}")
     print(f"Total scenes    : {parts_count * scenes_per_part}")
     print(f"Story plan      : {'used' if plan else 'not available'}")
+    print(f"Opening hook    : required ({7 if format_type == 'short' else 14}+ words)")
+    print(f"Part hooks      : {bool_value(config, 'PART_HOOK', True)}")
+    print(f"Part suspense   : {bool_value(config, 'PART_SUSPENSE', True)}")
 
     prompt = build_prompt(
         config, plan, title, topic, story_text,
@@ -609,7 +719,10 @@ def main():
         encoding="utf-8",
     )
     temporary_file.replace(OUTPUT_FILE)
-    TITLE_FILE.write_text(title + "\n", encoding="utf-8")
+
+    title_temp = TITLE_FILE.with_suffix(".tmp")
+    title_temp.write_text(title + "\n", encoding="utf-8")
+    title_temp.replace(TITLE_FILE)
 
     print("=" * 60)
     print("STORY GENERATION SUCCESS")
@@ -618,6 +731,8 @@ def main():
     print(f"Model      : {model}")
     print(f"Parts      : {parts_count}")
     print(f"Scenes     : {parts_count * scenes_per_part}")
+    print("Opening hook validation: PASSED")
+    print("Part suspense validation: PASSED")
     print("JSON validation: PASSED")
     print("=" * 60)
 
