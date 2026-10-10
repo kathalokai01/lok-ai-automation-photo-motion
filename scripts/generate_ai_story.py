@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Generate resumable Hindi story scenes with strict hook and suspense checks."""
+"""Generate resumable Hindi story scenes with validation-aware retries."""
 
 import hashlib
 import json
@@ -124,12 +123,14 @@ def word_count(value):
 
 def selected_model():
     data = read_json(MODEL_FILE)
+
     if not isinstance(data, dict) or data.get("status") != "selected":
         raise RuntimeError("A successfully selected Gemini model is required.")
 
     model = str(data.get("model", "")).strip()
     if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
         raise RuntimeError(f"Invalid Gemini model identifier: {model!r}")
+
     return model
 
 
@@ -158,13 +159,13 @@ def build_config(source):
         "sfx": bool_value(source, "SFX", True),
         "ambient_sound": bool_value(source, "AMBIENT_SOUND", True),
         "transitions": text_value(source, "TRANSITIONS", "cinematic"),
-        "max_retries": max(1, get_max_retries(source)),
+        "max_retries": max(1, int(get_max_retries(source))),
     }
 
 
 def fingerprint(story, topic, story_text, config, model):
     payload = {
-        "version": 6,
+        "version": 7,
         "story": story,
         "topic": topic,
         "story_text": story_text,
@@ -182,11 +183,17 @@ def validate_source_parts(parts):
         raise RuntimeError("story.json contains no story parts.")
 
     total = 0
+
     for part_index, part in enumerate(parts, start=1):
         if not isinstance(part, dict):
             raise RuntimeError(f"Source part {part_index} is invalid.")
 
-        if int(part.get("part", -1)) != part_index:
+        try:
+            part_number = int(part.get("part", -1))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Source part numbering is invalid.") from exc
+
+        if part_number != part_index:
             raise RuntimeError("Source part numbers must be continuous from 1.")
 
         scenes = part.get("scenes")
@@ -195,11 +202,21 @@ def validate_source_parts(parts):
 
         for scene_index, scene in enumerate(scenes, start=1):
             if not isinstance(scene, dict):
-                raise RuntimeError(f"Part {part_index}, scene {scene_index} is invalid.")
-            if int(scene.get("scene", -1)) != scene_index:
                 raise RuntimeError(
-                    f"Part {part_index} scene numbers must be continuous from 1."
+                    f"Part {part_index}, scene {scene_index} is invalid."
                 )
+
+            try:
+                scene_number = int(scene.get("scene", -1))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Source scene numbering is invalid.") from exc
+
+            if scene_number != scene_index:
+                raise RuntimeError(
+                    f"Part {part_index} scene numbers must start at 1 "
+                    "and remain continuous."
+                )
+
         total += len(scenes)
 
     return total
@@ -211,6 +228,7 @@ def call_gemini(api_key, model, prompt, max_retries):
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model_name}:generateContent"
     )
+
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -223,6 +241,7 @@ def call_gemini(api_key, model, prompt, max_retries):
     }
 
     last_error = None
+
     for attempt in range(1, max_retries + 1):
         request = urllib.request.Request(
             url,
@@ -244,6 +263,7 @@ def call_gemini(api_key, model, prompt, max_retries):
 
             candidate = candidates[0]
             reason = str(candidate.get("finishReason", "")).upper()
+
             if reason in {"MAX_TOKENS", "LENGTH"}:
                 raise RuntimeError("Gemini response was truncated.")
 
@@ -251,33 +271,43 @@ def call_gemini(api_key, model, prompt, max_retries):
             response_text = "\n".join(
                 item.get("text", "")
                 for item in chunks
-                if isinstance(item, dict) and isinstance(item.get("text"), str)
+                if isinstance(item, dict)
+                and isinstance(item.get("text"), str)
             ).strip()
+
             if not response_text:
                 raise RuntimeError("Gemini returned empty text.")
 
             data = json.loads(response_text)
             if not isinstance(data, dict):
                 raise RuntimeError("Gemini response must be a JSON object.")
+
             return data
 
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            last_error = RuntimeError(f"Gemini HTTP {exc.code}: {body[:800]}")
+            last_error = RuntimeError(
+                f"Gemini HTTP {exc.code}: {body[:800]}"
+            )
+
             if exc.code not in {408, 429, 500, 502, 503, 504}:
                 raise last_error from exc
+
         except Exception as exc:
             last_error = exc
 
         if attempt < max_retries:
             delay = min(5 * (2 ** (attempt - 1)), 30)
-            log(f"Attempt {attempt}/{max_retries} failed: {last_error}")
+            log(f"API attempt {attempt}/{max_retries} failed: {last_error}")
             time.sleep(delay)
 
-    raise RuntimeError(f"Gemini failed after {max_retries} attempts: {last_error}")
+    raise RuntimeError(
+        f"Gemini API failed after {max_retries} attempts: {last_error}"
+    )
 
 
-def make_part_prompt(topic, story_text, story, part, config, story_hook):
+def make_part_prompt(topic, story_text, story, part, config, story_hook,
+                     validation_feedback=""):
     parts = story["parts"]
     part_number = int(part["part"])
     source_scenes = part["scenes"]
@@ -287,53 +317,53 @@ def make_part_prompt(topic, story_text, story, part, config, story_hook):
 
     if config["format"] == "short":
         opening_rule = (
-            "SHORT VIDEO: first scene must open immediately with a sharp, "
-            "curiosity-driven Hindi hook. No greeting or channel introduction. "
-            "Keep it concise but meaningful."
+            "SHORT VIDEO: start immediately with a concise, high-impact "
+            "Hindi hook that creates curiosity. No greeting or channel intro."
         )
     else:
         opening_rule = (
-            "FULL VIDEO: first scene must open with a more developed Hindi "
-            "hook than a short video. Build a vivid mystery, danger, emotional "
-            "dilemma or unexpected event over 2–4 meaningful sentences. "
-            "Do not begin with a greeting or biography."
+            "FULL VIDEO: use a more developed opening hook than a short. "
+            "Build mystery, danger or an emotional dilemma in 2-4 meaningful "
+            "sentences. No greeting or channel intro."
         )
 
     if config["part_hook"]:
         part_hook_rule = (
             "Every part must begin with a distinct story-specific hook. "
-            "Part 1 must start with the exact supplied story hook. Later "
-            "parts need a fresh curiosity gap or reveal."
+            "Part 1 narration must begin with the exact supplied story hook. "
+            "Later part openings must create fresh curiosity."
         )
     else:
         part_hook_rule = (
-            "Only the first scene of the entire story must use the supplied "
+            "Only the first scene of the complete story must use the supplied "
             "opening hook. Other part openings should continue naturally."
         )
 
     if config["part_suspense"]:
         suspense_rule = (
-            "The final scene of THIS part must contain a clear suspense beat "
-            "in its narration and a matching suspense_prompt of at least "
-            "4 words. Use an unanswered question, consequence, threat or reveal. "
-            "Do not merely label the scene as suspenseful."
+            "The final scene of this part must contain a concrete suspense "
+            "beat in narration AND a matching suspense_prompt of at least "
+            "4 words. Create a threat, consequence, reveal or unanswered "
+            "question. Do not merely say that something is mysterious."
         )
     else:
         suspense_rule = "Use suspense only where it naturally serves the story."
 
     if is_last_part and config["final_resolution"]:
         ending_rule = (
-            "Resolve the central conflict clearly in the final part. Give the "
-            "main character's choices and consequences a satisfying payoff. "
-            "Do not end with an unresolved main conflict."
+            "Resolve the central conflict clearly in the final part. Give "
+            "the main character's choices and consequences a meaningful payoff. "
+            "A small future-facing mystery is allowed, but do not leave the "
+            "central conflict unresolved."
         )
     else:
         ending_rule = (
-            "Respect the planned story progression and end this part in a way "
-            "that leads naturally into the next development."
+            "Respect the planned progression and end this part in a way that "
+            "leads naturally into the next development."
         )
 
     context = []
+
     for source in source_scenes:
         number = int(source["scene"])
         context.append({
@@ -354,6 +384,16 @@ def make_part_prompt(topic, story_text, story, part, config, story_hook):
             ),
         })
 
+    retry_block = ""
+    if validation_feedback:
+        retry_block = f"""
+IMPORTANT VALIDATION ERRORS FROM YOUR PREVIOUS ATTEMPT:
+{validation_feedback}
+
+Correct EVERY listed error in this new response. Do not explain the errors.
+Return the complete corrected scene array, not a partial answer.
+"""
+
     return f"""
 You are the Hindi cinematic scene writer for Katha Lok AI.
 
@@ -370,12 +410,13 @@ PART: {part_number} of {len(parts)}
 SOURCE SCENES:
 {json.dumps(context, ensure_ascii=False, indent=2)}
 
-OPENING:
+OPENING RULES:
 {opening_rule}
 {part_hook_rule}
-The first scene of the complete story must begin with the exact supplied
-story hook. Minimum hook length: {hook_minimum} words. Keep the exact hook
-as the beginning of narration, not merely as a separate label.
+The first narration of the complete story must begin with the exact
+REQUIRED STORY HOOK text. Do not paraphrase, shorten or put anything
+before it. Minimum hook length: {hook_minimum} words for the first scene.
+A later part hook, when enabled, must contain at least 7 narration words.
 
 PART ENDING:
 {suspense_rule}
@@ -384,20 +425,20 @@ FINAL ENDING:
 {ending_rule}
 
 CONTINUITY:
-- Follow all source scenes in order; do not merge or omit scenes.
-- Preserve established names, relationships, age, clothing, location and timeline.
-- Write natural, clear Hindi narration and believable dialogue.
-- Avoid generic greetings, filler and unrelated plot changes.
+- Keep all scenes in source order. Do not merge, omit or add scenes.
+- Preserve names, relationships, ages, clothing, location and timeline.
+- Write natural Hindi narration and believable dialogue.
+- Avoid filler, generic greetings and unrelated plot changes.
 - Do not repeat the same hook or suspense wording across parts.
 
 VISUALS:
-- Write photorealistic live-action cinematic descriptions.
+- Use photorealistic live-action cinematic descriptions.
 - Describe visible people, actions, expressions, posture, setting and objects.
-- Maintain character identity, wardrobe, lighting and spatial continuity.
-- Avoid cartoon, anime, comic, illustration, collage and slideshow aesthetics.
-- Use plausible camera framing, lighting and physical movement.
+- Maintain identity, wardrobe, lighting and spatial continuity.
+- No cartoon, anime, comic, illustration, collage or slideshow aesthetics.
+- Use plausible camera framing, light and physical movement.
 
-STYLE SETTINGS:
+STYLE:
 visual_style={config["visual_style"]}
 realism={config["realism"]}
 camera_style={config["camera_style"]}
@@ -413,12 +454,14 @@ music={config["music"]}, music_style={config["music_style"]}
 sfx={config["sfx"]}, ambient_sound={config["ambient_sound"]}
 transitions={config["transitions"]}
 
+{retry_block}
+
 Return exactly {len(source_scenes)} scenes in the original order.
-For each scene provide:
-scene, narration, dialogue, visual_prompt, negative_prompt,
-camera_prompt, lighting_prompt, sfx_prompt, music_prompt, suspense_prompt.
-Use empty strings for optional dialogue or disabled audio prompts.
-Return only valid JSON matching the schema.
+Every scene must contain: scene, narration, dialogue, visual_prompt,
+negative_prompt, camera_prompt, lighting_prompt, sfx_prompt,
+music_prompt, suspense_prompt.
+Use strings for every field. Use empty strings for optional dialogue
+or disabled audio prompts. Return only valid JSON matching the schema.
 """
 
 
@@ -433,9 +476,13 @@ def validate_generated_scenes(generated, source_scenes, part_number,
     last_scene = len(source_scenes)
     validated = []
 
-    for index, (source, scene) in enumerate(zip(source_scenes, generated), start=1):
+    for index, (source, scene) in enumerate(
+        zip(source_scenes, generated), start=1
+    ):
         if not isinstance(scene, dict):
-            raise RuntimeError(f"Part {part_number}, scene {index} is not an object.")
+            raise RuntimeError(
+                f"Part {part_number}, scene {index} is not an object."
+            )
 
         try:
             number = int(scene.get("scene", -1))
@@ -443,40 +490,52 @@ def validate_generated_scenes(generated, source_scenes, part_number,
             raise RuntimeError("Generated scene number is invalid.") from exc
 
         if number != index:
-            raise RuntimeError(f"Part {part_number}: scene order mismatch at {index}.")
+            raise RuntimeError(
+                f"Part {part_number}: scene order mismatch at scene {index}."
+            )
 
-        item = {"scene": index, "role": str(source.get("role", source.get("purpose", ""))),
-                "status": "completed"}
+        item = {
+            "scene": index,
+            "role": str(source.get("role", source.get("purpose", ""))),
+            "status": "completed",
+        }
 
         for field in SCENE_FIELDS:
             value = scene.get(field, "")
             if not isinstance(value, str):
                 raise RuntimeError(
-                    f"Part {part_number}, scene {index}: {field} must be text."
+                    f"Part {part_number}, scene {index}: "
+                    f"{field} must be text."
                 )
             item[field] = value.strip()
 
         if not item["narration"]:
-            raise RuntimeError(f"Part {part_number}, scene {index}: narration is empty.")
+            raise RuntimeError(
+                f"Part {part_number}, scene {index}: narration is empty."
+            )
+
         if len(item["visual_prompt"]) < 30:
             raise RuntimeError(
-                f"Part {part_number}, scene {index}: visual_prompt is too short."
+                f"Part {part_number}, scene {index}: "
+                "visual_prompt must contain at least 30 characters."
             )
 
         hook_required = index == 1 and (
             part_number == 1 or config["part_hook"]
         )
+
         if hook_required:
             minimum = hook_minimum if part_number == 1 else 7
             if word_count(item["narration"]) < minimum:
                 raise RuntimeError(
-                    f"Part {part_number}, scene {index}: hook needs at least "
-                    f"{minimum} narration words."
+                    f"Part {part_number}, scene {index}: hook needs at "
+                    f"least {minimum} narration words."
                 )
 
         if part_number == 1 and index == 1:
             expected = normalize_text(story_hook)
             actual = normalize_text(item["narration"])
+
             if not expected or not actual.startswith(expected):
                 raise RuntimeError(
                     "Part 1 scene 1 narration must begin with the exact "
@@ -493,14 +552,16 @@ def validate_generated_scenes(generated, source_scenes, part_number,
                     f"Part {part_number}, scene {index}: suspense_prompt "
                     "must contain at least 4 words."
                 )
+
             if word_count(item["narration"]) < 6:
                 raise RuntimeError(
-                    f"Part {part_number}, scene {index}: suspense narration "
-                    "is too short."
+                    f"Part {part_number}, scene {index}: "
+                    "suspense narration is too short."
                 )
 
         if not config["sfx"]:
             item["sfx_prompt"] = ""
+
         if not config["music"]:
             item["music_prompt"] = ""
 
@@ -509,23 +570,84 @@ def validate_generated_scenes(generated, source_scenes, part_number,
     return validated
 
 
+def generate_validated_part(api_key, model, topic, story_text, story,
+                            source_part, config, story_hook):
+    """Retry generation when the response fails scene validation."""
+    max_attempts = config["max_retries"]
+    last_error = None
+
+    for attempt in range(1, max_attempts + 1):
+        prompt = make_part_prompt(
+            topic,
+            story_text,
+            story,
+            source_part,
+            config,
+            story_hook,
+            validation_feedback=str(last_error) if last_error else "",
+        )
+
+        log(
+            f"Part {source_part['part']}: generation/validation "
+            f"attempt {attempt}/{max_attempts}."
+        )
+
+        try:
+            generated = call_gemini(
+                api_key, model, prompt, config["max_retries"]
+            )
+
+            scenes = validate_generated_scenes(
+                generated.get("scenes", []),
+                source_part["scenes"],
+                int(source_part["part"]),
+                config,
+                story_hook,
+            )
+
+            return scenes
+
+        except (RuntimeError, TypeError, ValueError, KeyError) as exc:
+            last_error = exc
+            log(f"Part {source_part['part']} validation failed: {exc}")
+
+            if attempt < max_attempts:
+                delay = min(3 * (2 ** (attempt - 1)), 15)
+                log(f"Requesting a corrected version in {delay} seconds.")
+                time.sleep(delay)
+
+    raise RuntimeError(
+        f"Part {source_part['part']} failed generation/validation after "
+        f"{max_attempts} attempts. Last error: {last_error}"
+    )
+
+
 def reusable_part(saved, source_part, config, story_hook):
     if not isinstance(saved, dict) or saved.get("status") != "completed":
         return False
-    if saved.get("part") != source_part.get("part"):
+
+    try:
+        if int(saved.get("part", -1)) != int(source_part.get("part", -2)):
+            return False
+    except (TypeError, ValueError):
         return False
 
     saved_scenes = saved.get("scenes")
     source_scenes = source_part.get("scenes")
+
     if not isinstance(saved_scenes, list) or not isinstance(source_scenes, list):
         return False
+
     if len(saved_scenes) != len(source_scenes):
         return False
 
     try:
         checked = validate_generated_scenes(
-            saved_scenes, source_scenes, int(source_part["part"]),
-            config, story_hook
+            saved_scenes,
+            source_scenes,
+            int(source_part["part"]),
+            config,
+            story_hook,
         )
     except (RuntimeError, TypeError, ValueError, KeyError):
         return False
@@ -548,13 +670,16 @@ def main():
 
     topic = get_topic(source_config) or str(story.get("topic", "")).strip()
     story_text = get_story_text(source_config)
+
     if not topic and not story_text:
         raise RuntimeError("Both TOPIC and STORY_TEXT are empty.")
+
     if not topic:
         topic = "Story from supplied STORY_TEXT"
 
     story_hook = str(story.get("hook", "")).strip()
     hook_minimum = 7 if config["format"] == "short" else 14
+
     if word_count(story_hook) < hook_minimum:
         raise RuntimeError(
             f"story.json hook must contain at least {hook_minimum} words "
@@ -563,7 +688,9 @@ def main():
 
     source_parts = story.get("parts", [])
     total_expected = validate_source_parts(source_parts)
-    source_fingerprint = fingerprint(story, topic, story_text, config, model)
+    source_fingerprint = fingerprint(
+        story, topic, story_text, config, model
+    )
 
     log("=" * 58)
     log("KATHA LOK AI - HOOK AND SUSPENSE VALIDATION")
@@ -575,16 +702,25 @@ def main():
     log(f"Part hooks: {config['part_hook']}")
     log(f"Part suspense: {config['part_suspense']}")
     log(f"Final resolution requested: {config['final_resolution']}")
+    log(f"Maximum generation/validation attempts per part: {config['max_retries']}")
 
     existing_parts = {}
     existing = read_json(OUTPUT, required=False)
-    if isinstance(existing, dict) and existing.get("source_fingerprint") == source_fingerprint:
-        for saved in existing.get("parts", []):
+
+    if (
+        isinstance(existing, dict)
+        and existing.get("source_fingerprint") == source_fingerprint
+        and isinstance(existing.get("parts"), list)
+    ):
+        for saved in existing["parts"]:
             if isinstance(saved, dict):
-                existing_parts[saved.get("part")] = saved
-        log("Matching fingerprint found; validating checkpoints.")
+                try:
+                    existing_parts[int(saved.get("part", -1))] = saved
+                except (TypeError, ValueError):
+                    continue
+        log("Matching fingerprint found; validating saved checkpoints.")
     else:
-        log("No matching checkpoint; generating from current story and settings.")
+        log("No matching checkpoint; generating from current story/settings.")
 
     result = {
         "status": "in_progress",
@@ -609,21 +745,23 @@ def main():
             completed_part = saved
             log(f"Part {part_number}: reusing validated checkpoint.")
         else:
-            prompt = make_part_prompt(
-                topic, story_text, story, source_part, config, story_hook
+            scenes = generate_validated_part(
+                api_key,
+                model,
+                topic,
+                story_text,
+                story,
+                source_part,
+                config,
+                story_hook,
             )
-            log(f"Generating part {part_number}/{len(source_parts)}...")
-            generated = call_gemini(
-                api_key, model, prompt, config["max_retries"]
-            )
-            scenes = validate_generated_scenes(
-                generated.get("scenes", []), source_part["scenes"],
-                part_number, config, story_hook
-            )
+
             completed_part = {
                 "part": part_number,
                 "status": "completed",
-                "title": str(source_part.get("title") or f"Part {part_number}"),
+                "title": str(
+                    source_part.get("title") or f"Part {part_number}"
+                ),
                 "hook_required": part_number == 1 or config["part_hook"],
                 "suspense_required": config["part_suspense"],
                 "final_resolution": (
@@ -632,24 +770,38 @@ def main():
                 ),
                 "scenes": scenes,
             }
-            log(f"Part {part_number}: hook/suspense checks passed.")
+
+            log(f"Part {part_number}: hook/suspense validation passed.")
 
         result["parts"].append(completed_part)
         save_json(result)
         log(f"Part {part_number}: checkpoint saved.")
 
     actual = 0
+
     for part_index, part in enumerate(result["parts"], start=1):
-        if part.get("part") != part_index or part.get("status") != "completed":
-            raise RuntimeError(f"Part {part_index} is incomplete or misnumbered.")
+        if (
+            int(part.get("part", -1)) != part_index
+            or part.get("status") != "completed"
+        ):
+            raise RuntimeError(
+                f"Part {part_index} is incomplete or misnumbered."
+            )
+
         validate_generated_scenes(
-            part.get("scenes", []), source_parts[part_index - 1]["scenes"],
-            part_index, config, story_hook
+            part.get("scenes", []),
+            source_parts[part_index - 1]["scenes"],
+            part_index,
+            config,
+            story_hook,
         )
+
         actual += len(part["scenes"])
 
     if actual != total_expected:
-        raise RuntimeError(f"Final scene count mismatch: {actual}/{total_expected}.")
+        raise RuntimeError(
+            f"Final scene count mismatch: {actual}/{total_expected}."
+        )
 
     result["status"] = "completed"
     result["validation"] = {
@@ -660,7 +812,9 @@ def main():
         "part_suspense_required": config["part_suspense"],
         "final_resolution_requested": config["final_resolution"],
         "total_scenes": actual,
+        "generation_validation_retries_enabled": True,
     }
+
     save_json(result)
 
     log("=" * 58)
