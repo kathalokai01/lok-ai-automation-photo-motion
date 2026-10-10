@@ -31,7 +31,7 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install FFmpeg and subtitle fonts
+      - name: Install FFmpeg and fonts
         shell: bash
         run: |
           set -euo pipefail
@@ -41,7 +41,7 @@ jobs:
           ffmpeg -version
           ffprobe -version
 
-      - name: Install core Python dependencies
+      - name: Install Python dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -58,43 +58,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          python -m pip install \
-            torch \
+          python -m pip install torch \
             --index-url https://download.pytorch.org/whl/cpu
-
           python -m pip install transformers
-
           python - <<'PY'
           import torch
           import transformers
           import cv2
           from PIL import Image
-
           print("PyTorch:", torch.__version__)
           print("Transformers:", transformers.__version__)
           print("OpenCV:", cv2.__version__)
           print("Pillow:", Image.__module__)
-          print("Depth dependencies installed.")
           PY
 
-      - name: Check input
+      - name: Check input and required scripts
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ ! -s "Input/topic.txt" ]; then
+          test -s Input/topic.txt || {
             echo "ERROR: Input/topic.txt is missing or empty."
             exit 1
-          fi
-
-          echo "Input configuration:"
-          cat "Input/topic.txt"
-
-      - name: Verify required scripts
-        shell: bash
-        run: |
-          set -euo pipefail
+          }
+          cat Input/topic.txt
 
           for file in \
             scripts/select_gemini_model.py \
@@ -117,43 +103,36 @@ jobs:
             scripts/generate_thumbnail.py \
             scripts/validate_final_output.py
           do
-            if [ ! -s "$file" ]; then
-              echo "ERROR: Required script missing or empty: $file"
+            test -s "$file" || {
+              echo "ERROR: Missing script: $file"
               exit 1
-            fi
+            }
           done
+          echo "Input and required scripts found."
 
-          echo "All required scripts are present."
-
-      - name: Select Gemini model
+      - name: Select an available Gemini model
         run: python scripts/select_gemini_model.py
 
       - name: Test selected Gemini model
         run: python scripts/test_gemini.py
 
-      - name: Verify selected model file
+      - name: Verify Gemini model selection
         shell: bash
         run: |
           set -euo pipefail
-
           python - <<'PY'
           import json
           from pathlib import Path
 
           path = Path("output/config/selected_model.json")
-
           if not path.is_file():
-              raise SystemExit("ERROR: Selected Gemini model file is missing.")
+              raise SystemExit("Selected model file is missing.")
 
-          try:
-              data = json.loads(path.read_text(encoding="utf-8"))
-          except (OSError, ValueError) as exc:
-              raise SystemExit(f"ERROR: Cannot read selected model file: {exc}")
-
+          data = json.loads(path.read_text(encoding="utf-8"))
           if data.get("status") != "selected" or not data.get("model"):
-              raise SystemExit("ERROR: Selected Gemini model is invalid.")
+              raise SystemExit("Selected model file is invalid.")
 
-          print("Selected Gemini model:", data["model"])
+          print("Selected model:", data["model"])
           PY
 
       - name: Generate story plan
@@ -171,10 +150,10 @@ jobs:
       - name: Generate scenes
         run: python scripts/generate_scenes.py
 
-      - name: Generate narration jobs
+      - name: Prepare narration jobs
         run: python scripts/generate_narration.py
 
-      - name: Prepare captions in selected language
+      - name: Prepare captions
         run: python scripts/prepare_captions.py
 
       - name: Generate narration audio
@@ -183,150 +162,122 @@ jobs:
       - name: Prepare visual jobs
         run: python scripts/generate_visuals.py
 
-      - name: Generate free realistic scene images
+      - name: Generate scene images using free-only provider chain
         run: python scripts/free_image_generator.py
 
-      - name: Verify generated images
+      - name: Verify scene images and image manifest
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from PIL import Image
 
-          if [ ! -d "output/visuals" ]; then
-            echo "ERROR: output/visuals directory is missing."
-            exit 1
-          fi
+          jobs_path = Path("output/visuals/visual_jobs.json")
+          manifest_path = Path("output/visuals/image_manifest.json")
 
-          COUNT=$(find output/visuals -type f \
-            \( -iname "*.png" -o -iname "*.jpg" \
-               -o -iname "*.jpeg" -o -iname "*.webp" \) \
-            | wc -l)
+          jobs_data = json.loads(jobs_path.read_text(encoding="utf-8"))
+          jobs = jobs_data.get("jobs", []) if isinstance(jobs_data, dict) else jobs_data
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          rows = manifest.get("scenes", []) if isinstance(manifest, dict) else []
 
-          echo "Generated image count: $COUNT"
+          if not jobs or len(rows) != len(jobs):
+              raise SystemExit("Image manifest does not match visual jobs.")
 
-          if [ "$COUNT" -eq 0 ]; then
-            echo "ERROR: No scene images were generated."
-            exit 1
-          fi
+          for index, job in enumerate(jobs, 1):
+              raw = job.get("image_path") or job.get("image")
+              if not raw:
+                  raise SystemExit(f"Scene {index} has no image path.")
+              path = Path(raw)
+              if not path.is_absolute():
+                  path = Path.cwd() / path
+              if not path.is_file() or path.stat().st_size < 1000:
+                  raise SystemExit(f"Scene image missing or too small: {path}")
+              try:
+                  with Image.open(path) as im:
+                      im.verify()
+              except Exception as exc:
+                  raise SystemExit(f"Invalid image {path}: {exc}")
 
-          find output/visuals -maxdepth 4 -type f -print
+          print("Verified scene images:", len(jobs))
+          PY
 
-      - name: Generate depth maps for parallax
+      - name: Generate depth maps for 2.5D motion
         shell: bash
         run: |
           set -euo pipefail
-
           python scripts/generate_depth_maps.py
-
-          MANIFEST="output/visuals/depth_maps/depth_manifest.json"
-
-          if [ ! -s "$MANIFEST" ]; then
-            echo "ERROR: Depth map manifest is missing or empty."
-            exit 1
-          fi
 
           python - <<'PY'
           import json
           from pathlib import Path
 
-          manifest = Path("output/visuals/depth_maps/depth_manifest.json")
+          path = Path("output/visuals/depth_maps/depth_manifest.json")
+          if not path.is_file():
+              raise SystemExit("Depth manifest is missing.")
 
-          try:
-              data = json.loads(manifest.read_text(encoding="utf-8"))
-          except (OSError, ValueError) as exc:
-              raise SystemExit(f"ERROR: Invalid depth manifest: {exc}")
-
-          entries = data if isinstance(data, list) else data.get("scenes", [])
-
-          if not entries:
-              raise SystemExit("ERROR: No depth-map entries were produced.")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          rows = data if isinstance(data, list) else data.get("scenes", [])
+          if not rows:
+              raise SystemExit("Depth manifest has no entries.")
 
           valid = 0
-
-          for entry in entries:
-              if not isinstance(entry, dict):
+          for row in rows:
+              if not isinstance(row, dict):
                   continue
-
-              raw_path = entry.get("depth_map") or entry.get("path") or entry.get("file")
-              if not raw_path:
+              raw = row.get("depth_map") or row.get("path") or row.get("file")
+              if not raw:
                   continue
-
-              path = Path(raw_path)
-              if not path.is_absolute():
-                  path = Path.cwd() / path
-
-              if path.is_file() and path.stat().st_size > 100:
+              p = Path(raw)
+              if not p.is_absolute():
+                  p = Path.cwd() / p
+              if p.is_file() and p.stat().st_size > 100:
                   valid += 1
-              else:
-                  print("WARNING: Depth map missing:", path)
 
           if valid == 0:
-              raise SystemExit("ERROR: No valid depth-map image files were found.")
-
-          print(f"Valid depth maps: {valid}/{len(entries)}")
+              raise SystemExit("No valid depth maps were produced.")
+          print(f"Valid depth maps: {valid}/{len(rows)}")
           PY
 
-          find output/visuals/depth_maps -maxdepth 2 -type f -print
-
-      - name: Create Photo Motion scene videos
+      - name: Render photo-motion scene clips
         run: python scripts/photo_motion.py
 
-      - name: Verify Photo Motion manifest
+      - name: Verify photo-motion manifest and clips
         shell: bash
         run: |
           set -euo pipefail
-
-          MANIFEST="output/photo_motion/photo_motion_manifest.json"
-
-          if [ ! -s "$MANIFEST" ]; then
-            echo "ERROR: Photo Motion manifest is missing or empty."
-            exit 1
-          fi
-
           python - <<'PY'
           import json
           import subprocess
           from pathlib import Path
 
-          path = Path("output/photo_motion/photo_motion_manifest.json")
+          manifest = Path("output/photo_motion/photo_motion_manifest.json")
+          if not manifest.is_file():
+              raise SystemExit("Photo Motion manifest is missing.")
 
-          try:
-              data = json.loads(path.read_text(encoding="utf-8"))
-          except (OSError, ValueError) as exc:
-              raise SystemExit(f"ERROR: Cannot parse Photo Motion manifest: {exc}")
-
-          if isinstance(data, dict):
-              scenes = data.get("scenes", data.get("clips", []))
-          elif isinstance(data, list):
-              scenes = data
-          else:
-              scenes = []
-
-          if not scenes:
-              raise SystemExit("ERROR: Photo Motion manifest contains no scenes.")
+          rows = json.loads(manifest.read_text(encoding="utf-8"))
+          if not isinstance(rows, list) or not rows:
+              raise SystemExit("Photo Motion manifest must be a non-empty list.")
 
           checked = 0
           parallax_count = 0
+          depth_backed_count = 0
 
-          for scene in scenes:
-              if not isinstance(scene, dict):
-                  continue
+          for row in rows:
+              if not isinstance(row, dict):
+                  raise SystemExit("Invalid scene record in motion manifest.")
 
-              raw_video = (
-                  scene.get("video")
-                  or scene.get("clip")
-                  or scene.get("output")
-                  or scene.get("video_path")
-              )
-
+              raw_video = row.get("video")
               if not raw_video:
-                  continue
+                  raise SystemExit("Motion manifest entry has no video field.")
 
               video = Path(raw_video)
               if not video.is_absolute():
                   video = Path.cwd() / video
 
               if not video.is_file() or video.stat().st_size < 1000:
-                  raise SystemExit(f"ERROR: Scene video missing or too small: {video}")
+                  raise SystemExit(f"Scene clip missing or too small: {video}")
 
               probe = subprocess.run(
                   [
@@ -334,135 +285,122 @@ jobs:
                       "-show_entries", "stream=codec_type",
                       "-of", "json", str(video)
                   ],
-                  capture_output=True,
-                  text=True,
-                  check=True,
+                  capture_output=True, text=True, check=True
               )
-
               streams = json.loads(probe.stdout).get("streams", [])
               if not any(s.get("codec_type") == "video" for s in streams):
-                  raise SystemExit(f"ERROR: No video stream in {video}")
+                  raise SystemExit(f"No video stream in {video}")
+
+              effect = str(row.get("effect", "")).strip().lower()
+              depth = row.get("depth_map")
+              if effect == "parallax":
+                  parallax_count += 1
+                  if depth:
+                      p = Path(depth)
+                      if not p.is_absolute():
+                          p = Path.cwd() / p
+                      if p.is_file() and p.stat().st_size > 100:
+                          depth_backed_count += 1
 
               checked += 1
-              if scene.get("effect_is_true_parallax") is True:
-                  parallax_count += 1
 
-          if checked == 0:
-              raise SystemExit(
-                  "ERROR: No scene video paths were found in the manifest. "
-                  "Check photo_motion.py manifest field names."
-              )
+          if checked != len(rows):
+              raise SystemExit("Not all motion clips passed verification.")
 
-          print("Verified scene videos:", checked)
-          print("Depth-guided parallax scenes:", parallax_count)
+          print("Verified motion clips:", checked)
+          print("Parallax-effect scenes:", parallax_count)
+          print("Parallax scenes with an existing depth map:", depth_backed_count)
           PY
 
-          find output/photo_motion -maxdepth 3 -type f -print
-
-      - name: Render final video
+      - name: Render final video and parts
         run: python scripts/render_video.py
 
       - name: Verify rendered video
         shell: bash
         run: |
           set -euo pipefail
-
           VIDEO="output/videos/katha_lok_ai_final.mp4"
-
-          if [ ! -s "$VIDEO" ]; then
-            echo "ERROR: Rendered MP4 is missing or empty: $VIDEO"
+          test -s "$VIDEO" || {
+            echo "ERROR: Final MP4 is missing."
             exit 1
-          fi
-
+          }
           ffprobe -v error \
             -show_entries format=duration,size \
             -show_entries stream=codec_type,codec_name,width,height \
             -of json "$VIDEO"
 
-      - name: Burn captions into final video
+      - name: Burn captions into video
         run: python scripts/burn_captions.py
 
       - name: Verify captions and captioned video
         shell: bash
         run: |
           set -euo pipefail
-
-          VIDEO="output/videos/katha_lok_ai_final.mp4"
-          CAPTIONS="output/captions/captions.json"
-          SRT="output/captions/final_captions.srt"
-
-          for file in "$VIDEO" "$CAPTIONS" "$SRT"; do
-            if [ ! -s "$file" ]; then
-              echo "ERROR: Required output is missing or empty: $file"
-              exit 1
-            fi
-          done
+          test -s output/videos/katha_lok_ai_final.mp4
+          test -s output/captions/captions.json
+          test -s output/captions/final_captions.srt
 
           python - <<'PY'
           import json
-          import subprocess
           from pathlib import Path
 
-          video = Path("output/videos/katha_lok_ai_final.mp4")
-          captions = Path("output/captions/captions.json")
-          srt = Path("output/captions/final_captions.srt")
-
-          try:
-              caption_data = json.loads(captions.read_text(encoding="utf-8"))
-          except (OSError, ValueError) as exc:
-              raise SystemExit(f"ERROR: Captions JSON cannot be parsed: {exc}")
-
-          if not caption_data:
-              raise SystemExit("ERROR: Captions JSON is empty.")
-
-          if not srt.read_text(encoding="utf-8").strip():
-              raise SystemExit("ERROR: SRT subtitle file is empty.")
-
-          result = subprocess.run(
-              [
-                  "ffprobe", "-v", "error",
-                  "-show_entries", "stream=codec_type",
-                  "-of", "json", str(video)
-              ],
-              capture_output=True,
-              text=True,
-              check=True,
+          data = json.loads(
+              Path("output/captions/captions.json").read_text(encoding="utf-8")
           )
+          if data.get("status") != "completed":
+              raise SystemExit("Captions are not marked completed.")
+          captions = data.get("captions", [])
+          if not captions or any(not str(x.get("text", "")).strip() for x in captions):
+              raise SystemExit("Captions are missing or contain empty text.")
 
-          streams = json.loads(result.stdout).get("streams", [])
-          if not any(s.get("codec_type") == "video" for s in streams):
-              raise SystemExit("ERROR: Final MP4 has no video stream.")
+          srt = Path("output/captions/final_captions.srt").read_text(
+              encoding="utf-8-sig"
+          ).strip()
+          if "-->" not in srt:
+              raise SystemExit("SRT has no valid timing intervals.")
 
-          print("Caption JSON exists and is valid.")
-          print("SRT exists and contains subtitle text.")
-          print("Captioned MP4 contains a video stream.")
+          print("Validated caption records:", len(captions))
           PY
 
-          ls -lh "$VIDEO"
-
-      - name: Generate thumbnail
+      - name: Generate thumbnails
         run: python scripts/generate_thumbnail.py
 
-      - name: Verify thumbnail
+      - name: Verify thumbnails
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
 
-          if [ ! -s "output/thumbnail.jpg" ] && \
-             [ ! -s "output/thumbnail.png" ] && \
-             [ ! -s "output/videos/thumbnail.jpg" ] && \
-             [ ! -s "output/videos/thumbnail.png" ]; then
-            echo "WARNING: Thumbnail not found at expected paths."
-            find output -maxdepth 4 -type f -iname '*thumbnail*' -print
-          else
-            echo "Thumbnail file found."
-          fi
+          candidates = [
+              Path("output/thumbnail.jpg"),
+              Path("output/thumbnail.png"),
+              Path("output/videos/thumbnail.jpg"),
+              Path("output/videos/thumbnail.png"),
+              Path("output/thumbnail_16_9.jpg"),
+              Path("output/thumbnail_vertical.jpg"),
+          ]
+          found = []
+          for path in candidates:
+              if path.is_file() and path.stat().st_size > 1000:
+                  with Image.open(path) as image:
+                      image.verify()
+                  found.append(str(path))
+
+          manifest = Path("output/thumbnail_manifest.json")
+          if not found and manifest.is_file():
+              print(manifest.read_text(encoding="utf-8"))
+          if not found:
+              print("WARNING: Thumbnail files were not found at common paths.")
+          else:
+              print("Thumbnail files:", found)
+          PY
 
       - name: Create dynamic YouTube metadata
         shell: bash
         run: |
           set -euo pipefail
-
           python - <<'PY'
           import json
           import re
@@ -472,163 +410,97 @@ jobs:
           output.mkdir(parents=True, exist_ok=True)
 
           topic_path = Path("Input/topic.txt")
-          topic = (
-              topic_path.read_text(encoding="utf-8-sig").strip()
-              if topic_path.exists()
-              else ""
-          )
+          topic = topic_path.read_text(
+              encoding="utf-8-sig"
+          ).strip() if topic_path.is_file() else ""
           topic = re.sub(r"\s+", " ", topic)
 
-          title_file = output / "story" / "final_title.txt"
-          story_title = ""
+          title_path = output / "story" / "final_title.txt"
+          title = ""
+          if title_path.is_file():
+              title = title_path.read_text(encoding="utf-8").strip().splitlines()[0]
 
-          if title_file.is_file():
-              lines = title_file.read_text(encoding="utf-8").strip().splitlines()
-              if lines:
-                  story_title = lines[0].strip()
+          title = re.sub(r"\s+", " ", title or topic or "Katha Lok AI Story")[:100]
 
-          title = re.sub(
-              r"\s+",
-              " ",
-              story_title or topic or "Katha Lok AI Story",
-          ).strip()[:100]
-
-          story_file = output / "story" / "story.json"
           story_text = ""
-
-          if story_file.is_file():
+          story_path = output / "story" / "story.json"
+          if story_path.is_file():
               try:
-                  data = json.loads(story_file.read_text(encoding="utf-8"))
+                  data = json.loads(story_path.read_text(encoding="utf-8"))
                   chunks = []
-
                   for part in data.get("parts", []):
                       for scene in part.get("scenes", []):
-                          narration = scene.get("narration", "")
-                          if narration:
-                              chunks.append(str(narration).strip())
-
+                          text = scene.get("narration", scene.get("text", ""))
+                          if text:
+                              chunks.append(str(text).strip())
                   story_text = " ".join(chunks)
-              except (OSError, ValueError, TypeError) as exc:
-                  print("WARNING: Could not parse story.json:", exc)
+              except (ValueError, OSError, TypeError) as exc:
+                  print("WARNING: story.json could not be parsed:", exc)
 
           story_text = re.sub(r"\s+", " ", story_text).strip()
-          description_story = story_text[:2500]
-
+          description = title + "\n\n"
+          description += story_text[:2500] if story_text else (
+              "A Katha Lok AI story based on: " + (topic or title)
+          )
           if len(story_text) > 2500:
-              description_story = description_story.rsplit(" ", 1)[0] + "..."
-
-          if description_story:
-              description = (
-                  f"{title}\n\n{description_story}\n\n"
-                  "Watch the story till the end and share "
-                  "your thoughts in the comments."
-              )
-          else:
-              description = (
-                  f"{title}\n\n"
-                  "Watch this story from Katha Lok AI, based on: "
-                  f"{topic or title}.\n\n"
-                  "Share your thoughts in the comments."
-              )
+              description += "..."
+          description += (
+              "\n\nWatch till the end and share your thoughts in the comments."
+              "\n\n#KathaLokAI #HindiKahani"
+          )
 
           words = re.findall(
               r"[A-Za-z0-9]+|[\u0900-\u097F]+",
-              f"{title} {topic} {story_text[:5000]}",
+              title + " " + topic + " " + story_text[:5000]
           )
-
-          dynamic_tags = []
+          tags = []
           seen = set()
-
-          for word in words:
-              word = word.strip()
+          for word in words + [
+              "Katha Lok AI", "Hindi story", "Hindi kahani",
+              "Hindi storytelling"
+          ]:
               key = word.casefold()
               if len(word) >= 3 and key not in seen:
                   seen.add(key)
-                  dynamic_tags.append(word)
-
-          fixed_tags = [
-              "Katha Lok AI",
-              "Hindi story",
-              "Hindi kahani",
-              "Hindi storytelling",
-          ]
-
-          tags = []
-          tag_seen = set()
-
-          for tag in dynamic_tags + fixed_tags:
-              key = tag.casefold()
-              if key not in tag_seen:
-                  tag_seen.add(key)
-                  tags.append(tag)
-
-          tags = tags[:20]
-
-          title_words = re.findall(
-              r"[A-Za-z0-9]+|[\u0900-\u097F]+",
-              title,
-          )
-          title_hashtag = "".join(title_words[:3])
-
-          hashtags = ["#KathaLokAI", "#HindiKahani"]
-
-          if title_hashtag:
-              candidate = "#" + title_hashtag
-              if candidate.casefold() not in {
-                  item.casefold() for item in hashtags
-              }:
-                  hashtags.append(candidate)
-
-          description += "\n\n" + " ".join(hashtags)
+                  tags.append(word)
+              if len(tags) >= 20:
+                  break
 
           metadata = (
               f"Title:\n{title}\n\n"
               f"Description:\n\n{description}\n\n"
               f"Tags:\n{', '.join(tags)}\n"
           )
-
           path = output / "youtube_metadata.txt"
           path.write_text(metadata, encoding="utf-8")
-
-          print("Created:", path)
           print(metadata)
           PY
 
-      - name: Sync captioned video and validate final output
+      - name: Sync captioned format alias and validate
         shell: bash
         run: |
           set -euo pipefail
 
           FINAL="output/videos/katha_lok_ai_final.mp4"
-
-          if [ ! -s "$FINAL" ]; then
-            echo "ERROR: Final captioned MP4 is missing or empty."
-            exit 1
-          fi
+          test -s "$FINAL"
 
           FORMAT=$(python - <<'PY'
           from pathlib import Path
-
-          path = Path("Input/topic.txt")
           values = {}
-
-          for line in path.read_text(encoding="utf-8-sig").splitlines():
+          for line in Path("Input/topic.txt").read_text(
+              encoding="utf-8-sig"
+          ).splitlines():
               line = line.strip()
-
               if not line or line.startswith("#") or "=" not in line:
                   continue
-
               key, value = line.split("=", 1)
-              values[key.strip().upper()] = (
-                  value.split("#", 1)[0].strip().strip("'\"")
-              )
-
+              values[key.strip().upper()] = value.split("#", 1)[0].strip().strip("'\"")
           print(values.get("FORMAT", "short").lower())
           PY
           )
 
           case "$FORMAT" in
-            full|long|landscape|youtube)
+            full|long|landscape|youtube|youtube_full|youtube-long)
               ALIAS="output/videos/katha_lok_ai_full.mp4"
               ;;
             *)
@@ -637,16 +509,14 @@ jobs:
           esac
 
           cp "$FINAL" "$ALIAS"
-
-          echo "Captioned video synced to: $ALIAS"
           test -s "$ALIAS"
 
           python scripts/validate_final_output.py
 
-          echo "Final output inventory:"
+          echo "===== Final output inventory ====="
           find output -maxdepth 5 -type f -print
 
-          echo "Final MP4 technical details:"
+          echo "===== Final MP4 details ====="
           ffprobe -v error \
             -show_entries format=duration,size \
             -show_entries stream=codec_type,codec_name,width,height \
@@ -656,19 +526,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          cd output
-          zip -r ../katha-lok-ai-photo-motion-output.zip .
-          cd ..
-
-          if [ ! -s "katha-lok-ai-photo-motion-output.zip" ]; then
-            echo "ERROR: Final ZIP is missing or empty."
-            exit 1
-          fi
-
+          zip -r katha-lok-ai-photo-motion-output.zip output
+          test -s katha-lok-ai-photo-motion-output.zip
           ls -lh katha-lok-ai-photo-motion-output.zip
 
-      - name: Upload final output
+      - name: Upload final output artifact
         uses: actions/upload-artifact@v4
         with:
           name: katha-lok-ai-photo-motion-output
