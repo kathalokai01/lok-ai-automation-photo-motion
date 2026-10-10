@@ -1,130 +1,146 @@
 #!/usr/bin/env python3
+"""Create validated, story-specific thumbnails for Katha Lok AI."""
 
 import json
 import re
+import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
 
-TOPIC_FILE = Path("Input/topic.txt")
-VISUAL_MANIFEST = Path("output/visuals/visual_jobs.json")
-OUTPUT_DIR = Path("output/thumbnail")
+ROOT = Path(".")
+TOPIC_FILE = ROOT / "Input/topic.txt"
+VISUAL_JOBS = ROOT / "output/visuals/visual_jobs.json"
+IMAGE_MANIFEST = ROOT / "output/visuals/image_manifest.json"
 
-THUMBNAIL_16_9 = OUTPUT_DIR / "thumbnail_1280x720.jpg"
-THUMBNAIL_VERTICAL = OUTPUT_DIR / "thumbnail_1080x1920.jpg"
-THUMBNAIL_MANIFEST = OUTPUT_DIR / "thumbnail_manifest.json"
+OUTPUT_DIR = ROOT / "output/thumbnail"
+LANDSCAPE = OUTPUT_DIR / "thumbnail_1280x720.jpg"
+VERTICAL = OUTPUT_DIR / "thumbnail_1080x1920.jpg"
+MANIFEST = OUTPUT_DIR / "thumbnail_manifest.json"
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def load_topic():
-    if not TOPIC_FILE.exists():
-        raise SystemExit(f"ERROR: Topic file not found: {TOPIC_FILE}")
+    if not TOPIC_FILE.is_file():
+        raise RuntimeError(f"Missing input file: {TOPIC_FILE}")
 
-    for line in TOPIC_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-
-        if not line or line.startswith("#") or "=" not in line:
+    for line in TOPIC_FILE.read_text(encoding="utf-8-sig").splitlines():
+        match = re.match(r"^\s*TOPIC\s*=\s*(.*?)\s*$", line)
+        if not match:
             continue
 
-        key, value = line.split("=", 1)
+        value = match.group(1).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
 
-        if key.strip() == "TOPIC":
-            value = value.strip()
+        value = value.split(" #", 1)[0].strip()
+        if value:
+            return value
 
-            value = re.sub(
-                r'^(["\']).*\1$',
-                lambda m: m.group(0)[1:-1],
-                value,
-            )
-
-            if value:
-                return value
-
-    raise SystemExit("ERROR: TOPIC not found in Input/topic.txt")
+    raise RuntimeError("TOPIC is missing or empty in Input/topic.txt")
 
 
-def load_visual():
-    if not VISUAL_MANIFEST.exists():
-        raise SystemExit(
-            f"ERROR: Visual manifest not found: {VISUAL_MANIFEST}"
-        )
+def read_json(path):
+    if not path.is_file():
+        return None
 
-    data = json.loads(
-        VISUAL_MANIFEST.read_text(encoding="utf-8")
-    )
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"WARNING: Cannot read {path}: {exc}")
+        return None
 
-    jobs = []
 
+def resolve_image(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    path = Path(value.strip())
+    if not path.is_absolute():
+        path = ROOT / path
+
+    try:
+        path = path.resolve()
+        output_root = (ROOT / "output").resolve()
+        path.relative_to(output_root)
+    except (ValueError, OSError):
+        return None
+
+    if (
+        path.is_file()
+        and path.suffix.lower() in IMAGE_EXTENSIONS
+        and "depth_maps" not in path.parts
+        and "thumbnail" not in path.parts
+    ):
+        return path
+
+    return None
+
+
+def rows_from_manifest(data):
     if isinstance(data, list):
-        jobs = data
+        return data
 
-    elif isinstance(data, dict):
-        for key in ("jobs", "scenes", "visuals", "items"):
-            value = data.get(key)
+    if isinstance(data, dict):
+        for key in ("scenes", "jobs", "visuals", "items"):
+            rows = data.get(key)
+            if isinstance(rows, list):
+                return rows
 
-            if isinstance(value, list):
-                jobs = value
-                break
+    return []
 
-    for job in jobs:
-        if not isinstance(job, dict):
-            continue
 
-        status = str(job.get("status", "")).lower()
+def choose_source_image():
+    # Prefer the generated image manifest, which identifies actual scene images.
+    candidates = []
 
-        asset = (
-            job.get("asset_path")
-            or job.get("output")
-            or job.get("file")
-            or job.get("path")
-        )
+    for manifest_path in (IMAGE_MANIFEST, VISUAL_JOBS):
+        data = read_json(manifest_path)
 
-        if not asset:
-            continue
+        for row in rows_from_manifest(data):
+            if not isinstance(row, dict):
+                continue
 
-        if status and status not in (
-            "completed",
-            "complete",
-            "success",
-            "done",
-            "generated",
-        ):
-            continue
+            status = str(row.get("status", "")).lower()
+            if status and status not in {
+                "completed", "complete", "success", "done", "generated", "ready"
+            }:
+                continue
 
-        path = Path(str(asset))
+            # Prefer image-specific fields; never use depth_map as the source.
+            for key in ("image_path", "image", "asset_path", "image_file"):
+                path = resolve_image(row.get(key))
+                if path:
+                    candidates.append(path)
+                    break
 
-        if not path.is_absolute():
-            path = Path(".") / path
+        if candidates:
+            break
 
-        if path.exists() and path.is_file():
-            return path
+    # Fallback only to numbered scene images, never arbitrary output images.
+    if not candidates:
+        visual_dir = ROOT / "output/visuals"
+        if visual_dir.is_dir():
+            for path in sorted(visual_dir.glob("scene_*")):
+                resolved = resolve_image(str(path))
+                if resolved:
+                    candidates.append(resolved)
 
-    # Fallback: find any generated image.
-    search_dirs = [
-        Path("output/visuals"),
-        Path("output"),
-    ]
+    # Verify the selected image is decodable and non-empty.
+    for path in candidates:
+        try:
+            with Image.open(path) as im:
+                im.verify()
+            with Image.open(path) as im:
+                if im.width >= 64 and im.height >= 64:
+                    return path
+        except Exception as exc:
+            print(f"WARNING: Skipping invalid image {path}: {exc}")
 
-    extensions = {
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".webp",
-    }
-
-    for directory in search_dirs:
-        if not directory.exists():
-            continue
-
-        for path in sorted(directory.rglob("*")):
-            if (
-                path.is_file()
-                and path.suffix.lower() in extensions
-            ):
-                return path
-
-    raise SystemExit(
-        "ERROR: No completed visual image found."
+    raise RuntimeError(
+        "No valid scene image found. Check image_manifest.json and visual_jobs.json."
     )
 
 
@@ -137,76 +153,51 @@ def find_font(size):
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     ]
 
-    for font_path in candidates:
-        path = Path(font_path)
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.is_file():
+            try:
+                return ImageFont.truetype(str(path), size=size)
+            except OSError:
+                pass
 
-        if path.exists():
-            return ImageFont.truetype(
-                str(path),
-                size,
-            )
-
-    raise SystemExit(
-        "ERROR: No suitable font found."
-    )
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size=size)
+    except OSError:
+        return ImageFont.load_default()
 
 
-def crop_to_ratio(image, target_ratio):
+def crop_to_ratio(image, ratio):
     width, height = image.size
-    current_ratio = width / height
+    current = width / height
 
-    if current_ratio > target_ratio:
-        new_width = int(height * target_ratio)
+    if current > ratio:
+        new_width = max(1, round(height * ratio))
         left = (width - new_width) // 2
+        return image.crop((left, 0, left + new_width, height))
 
-        return image.crop(
-            (
-                left,
-                0,
-                left + new_width,
-                height,
-            )
-        )
-
-    new_height = int(width / target_ratio)
+    new_height = max(1, round(width / ratio))
     top = (height - new_height) // 2
-
-    return image.crop(
-        (
-            0,
-            top,
-            width,
-            top + new_height,
-        )
-    )
+    return image.crop((0, top, width, top + new_height))
 
 
 def wrap_text(draw, text, font, max_width):
     words = text.split()
+    if not words:
+        return ["Katha Lok AI"]
+
     lines = []
     current = ""
 
     for word in words:
-        test = (
-            word
-            if not current
-            else current + " " + word
-        )
+        proposed = word if not current else current + " " + word
+        bounds = draw.textbbox((0, 0), proposed, font=font, stroke_width=1)
 
-        bbox = draw.textbbox(
-            (0, 0),
-            test,
-            font=font,
-        )
-
-        width = bbox[2] - bbox[0]
-
-        if width <= max_width:
-            current = test
+        if bounds[2] - bounds[0] <= max_width:
+            current = proposed
         else:
             if current:
                 lines.append(current)
-
             current = word
 
     if current:
@@ -215,214 +206,129 @@ def wrap_text(draw, text, font, max_width):
     return lines
 
 
-def add_text(image, title, vertical=False):
-    image = image.convert("RGB")
+def draw_thumbnail(source, title, size, destination):
+    with Image.open(source) as original:
+        image = original.convert("RGB")
+
+    image = crop_to_ratio(image, size[0] / size[1])
+    image = image.resize(size, Image.Resampling.LANCZOS)
 
     width, height = image.size
-
-    overlay = Image.new(
-        "RGBA",
-        image.size,
-        (0, 0, 0, 0),
-    )
-
-    draw_overlay = ImageDraw.Draw(overlay)
-
-    # Dark gradient-style overlay.
-    overlay_height = int(height * 0.48)
-
-    for y in range(overlay_height):
-        alpha = int(
-            210 * (1 - y / overlay_height)
-        )
-
-        draw_overlay.line(
-            [(0, y), (width, y)],
-            fill=(0, 0, 0, alpha),
-        )
-
-    image = Image.alpha_composite(
-        image.convert("RGBA"),
-        overlay,
-    )
-
-    image = image.convert("RGB")
-
     draw = ImageDraw.Draw(image)
 
-    if vertical:
-        font_size = max(54, width // 16)
-        max_text_width = int(width * 0.86)
-        text_y = int(height * 0.10)
-    else:
-        font_size = max(44, width // 17)
-        max_text_width = int(width * 0.84)
-        text_y = int(height * 0.09)
+    # Add a dark translucent title panel for readable text.
+    panel_height = int(height * (0.42 if width > height else 0.31))
+    panel = Image.new("RGBA", (width, panel_height), (0, 0, 0, 0))
+    panel_draw = ImageDraw.Draw(panel)
 
+    for y in range(panel_height):
+        alpha = int(205 * (1 - y / max(1, panel_height)))
+        panel_draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
+
+    image_rgba = image.convert("RGBA")
+    image_rgba.alpha_composite(panel, (0, 0))
+    image = image_rgba.convert("RGB")
+    draw = ImageDraw.Draw(image)
+
+    vertical = height > width
+    font_size = max(26, width // (15 if vertical else 18))
+    max_text_width = int(width * 0.86)
     font = find_font(font_size)
 
-    lines = wrap_text(
-        draw,
-        title,
-        font,
-        max_text_width,
-    )
+    lines = wrap_text(draw, title, font, max_text_width)
 
-    # Limit title to 4 lines.
+    # Keep long titles readable without allowing an unbounded text block.
     if len(lines) > 4:
         lines = lines[:4]
-
         last = lines[-1]
+        while last and draw.textbbox((0, 0), last + "…", font=font)[2] > max_text_width:
+            last = last[:-1]
+        lines[-1] = last.rstrip() + "…"
 
-        if len(last) > 3:
-            lines[-1] = last[:-3] + "..."
+    spacing = max(4, font_size // 6)
+    line_heights = [
+        draw.textbbox((0, 0), line, font=font, stroke_width=2)[3]
+        - draw.textbbox((0, 0), line, font=font, stroke_width=2)[1]
+        for line in lines
+    ]
 
-    line_spacing = int(font_size * 0.18)
+    total_height = sum(line_heights) + spacing * max(0, len(lines) - 1)
+    y = max(16, (panel_height - total_height) // 2)
 
-    y = text_y
+    for line, line_height in zip(lines, line_heights):
+        bounds = draw.textbbox((0, 0), line, font=font, stroke_width=2)
+        text_width = bounds[2] - bounds[0]
+        x = max(8, (width - text_width) // 2)
 
-    for line in lines:
-        bbox = draw.textbbox(
-            (0, 0),
-            line,
-            font=font,
-            stroke_width=2,
-        )
-
-        text_width = bbox[2] - bbox[0]
-
-        x = (width - text_width) // 2
-
-        # Shadow.
         draw.text(
-            (x + 4, y + 4),
-            line,
-            font=font,
-            fill=(0, 0, 0),
-            stroke_width=5,
-            stroke_fill=(0, 0, 0),
+            (x + 3, y + 3), line, font=font,
+            fill="black", stroke_width=5, stroke_fill="black"
         )
-
-        # Main text.
         draw.text(
-            (x, y),
-            line,
-            font=font,
-            fill=(255, 255, 255),
-            stroke_width=2,
-            stroke_fill=(0, 0, 0),
+            (x, y), line, font=font,
+            fill="white", stroke_width=2, stroke_fill="black"
         )
+        y += line_height + spacing
 
-        y += font_size + line_spacing
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    image.save(destination, "JPEG", quality=92, optimize=True)
 
-    return image
+    # Verify the saved output, not just its existence.
+    with Image.open(destination) as check:
+        check.verify()
 
-
-def create_thumbnail(source, title, size, output):
-    image = Image.open(source).convert("RGB")
-
-    target_ratio = size[0] / size[1]
-
-    image = crop_to_ratio(
-        image,
-        target_ratio,
-    )
-
-    image = image.resize(
-        size,
-        Image.Resampling.LANCZOS,
-    )
-
-    vertical = size[1] > size[0]
-
-    image = add_text(
-        image,
-        title,
-        vertical=vertical,
-    )
-
-    image.save(
-        output,
-        "JPEG",
-        quality=92,
-        optimize=True,
-    )
-
-    if not output.exists() or output.stat().st_size == 0:
-        raise SystemExit(
-            f"ERROR: Thumbnail was not created: {output}"
-        )
+    if destination.stat().st_size < 1000:
+        raise RuntimeError(f"Thumbnail file is unexpectedly small: {destination}")
 
 
 def main():
-    print("======================================")
-    print("       GENERATING THUMBNAILS")
-    print("======================================")
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    print("===== KATHA LOK AI THUMBNAILS =====")
 
     topic = load_topic()
+    source = choose_source_image()
 
     print(f"Topic: {topic}")
+    print(f"Source scene image: {source}")
 
-    source = load_visual()
+    draw_thumbnail(source, topic, (1280, 720), LANDSCAPE)
+    draw_thumbnail(source, topic, (1080, 1920), VERTICAL)
 
-    print(f"Source visual: {source}")
-
-    create_thumbnail(
-        source,
-        topic,
-        (1280, 720),
-        THUMBNAIL_16_9,
-    )
-
-    create_thumbnail(
-        source,
-        topic,
-        (1080, 1920),
-        THUMBNAIL_VERTICAL,
-    )
-
-    manifest = {
+    result = {
         "status": "completed",
-        "source_visual": str(source),
         "topic": topic,
+        "source_visual": str(source),
         "thumbnails": [
             {
                 "type": "16:9",
                 "width": 1280,
                 "height": 720,
-                "path": str(THUMBNAIL_16_9),
+                "path": str(LANDSCAPE),
+                "size_bytes": LANDSCAPE.stat().st_size,
             },
             {
                 "type": "9:16",
                 "width": 1080,
                 "height": 1920,
-                "path": str(THUMBNAIL_VERTICAL),
+                "path": str(VERTICAL),
+                "size_bytes": VERTICAL.stat().st_size,
             },
         ],
     }
 
-    THUMBNAIL_MANIFEST.write_text(
-        json.dumps(
-            manifest,
-            ensure_ascii=False,
-            indent=2,
-        ) + "\n",
+    MANIFEST.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
-    print()
-    print("===== GENERATED THUMBNAILS =====")
-    print(f"16:9  : {THUMBNAIL_16_9}")
-    print(f"9:16  : {THUMBNAIL_VERTICAL}")
-    print(f"Manifest: {THUMBNAIL_MANIFEST}")
-    print()
+    print(f"Landscape thumbnail: {LANDSCAPE}")
+    print(f"Vertical thumbnail: {VERTICAL}")
+    print(f"Thumbnail manifest: {MANIFEST}")
     print("Thumbnail generation completed successfully.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1)
