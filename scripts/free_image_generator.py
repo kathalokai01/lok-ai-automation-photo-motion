@@ -34,6 +34,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "").strip()
 POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 
+# All configured providers are enabled by default.
+# Paid API providers may incur charges.
+ALLOW_BILLABLE_PROVIDERS = (
+    os.getenv("ALLOW_BILLABLE_PROVIDERS", "true").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
 GEMINI_MODEL = os.getenv(
     "GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"
 ).strip()
@@ -42,22 +49,20 @@ REPLICATE_MODEL = os.getenv(
     "REPLICATE_IMAGE_MODEL", "black-forest-labs/flux-schnell"
 ).strip()
 
-POLLINATIONS_MODELS = [
+POLLINATIONS_MODELS = list(dict.fromkeys(
     x.strip()
     for x in os.getenv("POLLINATIONS_FREE_IMAGE_MODELS", "").split(",")
     if x.strip()
-]
+))
 
-HF_SPACES = list(dict.fromkeys([
-    os.getenv("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo").strip(),
-    *[
-        x.strip()
-        for x in os.getenv("FREE_IMAGE_FALLBACK_SPACES", "").split(",")
-        if x.strip()
-    ],
-]))
-
-HF_SPACES = [x for x in HF_SPACES if x]
+HF_SPACES = list(dict.fromkeys(
+    x.strip()
+    for x in [
+        os.getenv("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo"),
+        *os.getenv("FREE_IMAGE_FALLBACK_SPACES", "").split(","),
+    ]
+    if x.strip()
+))
 
 MAX_ATTEMPTS = 2
 REQUEST_TIMEOUT = 150
@@ -103,11 +108,9 @@ def save_json(path, data):
 
 
 def get_jobs():
-    document = read_json(JOBS_FILE)
-
+    document = read_json(JOBS_FILE, {})
     if isinstance(document, list):
-        jobs = document
-        metadata = {}
+        jobs, metadata = document, {}
     elif isinstance(document, dict):
         jobs = (
             document.get("jobs")
@@ -126,7 +129,6 @@ def get_jobs():
     for i, job in enumerate(jobs, 1):
         if not isinstance(job, dict):
             raise RuntimeError(f"Job {i} must be an object.")
-
         number = int(job.get("global_scene", job.get("scene", i)))
         if number < 1 or number in seen:
             raise RuntimeError(f"Invalid or duplicate scene number: {number}")
@@ -152,7 +154,6 @@ def get_size(job):
 
     if not (256 <= width <= 2048 and 256 <= height <= 2048):
         raise RuntimeError(f"Invalid image dimensions: {width}x{height}")
-
     return width, height
 
 
@@ -167,7 +168,6 @@ def get_path(job, number):
     path = path.resolve()
     if not path.is_relative_to(ROOT.resolve()):
         raise RuntimeError(f"Scene {number}: image path outside repository.")
-
     return path
 
 
@@ -222,7 +222,8 @@ def prompt_for(job):
     )
     if not prompt:
         raise RuntimeError(
-            f"Scene {job.get('scene')} has no image prompt."
+            f"Scene {job.get('scene', job.get('global_scene'))} "
+            "has no image prompt."
         )
 
     negative = str(job.get("negative_prompt", "")).strip()
@@ -230,9 +231,6 @@ def prompt_for(job):
 
 
 def get_hash(job):
-    supplied = job.get("prompt_sha256")
-    if isinstance(supplied, str) and len(supplied) == 64:
-        return supplied.lower()
     return hashlib.sha256(
         prompt_for(job).encode("utf-8")
     ).hexdigest()
@@ -261,6 +259,12 @@ def is_access_or_quota_error(message):
     ))
 
 
+def check_image(destination, size):
+    if not valid_image(destination, size):
+        destination.unlink(missing_ok=True)
+        raise ValueError("Provider returned an invalid image.")
+
+
 # ---------------- Hugging Face Spaces ----------------
 
 def generate_hf(prompt, destination, size, seed, space):
@@ -273,15 +277,8 @@ def generate_hf(prompt, destination, size, seed, space):
 
     client = Client(space, **kwargs)
     width, height = size
-
-    # The endpoint and arguments depend on each Space's published API.
     result = client.predict(
-        prompt,
-        height,
-        width,
-        9,
-        seed,
-        False,
+        prompt, height, width, 9, seed, False,
         api_name="/generate_image",
     )
 
@@ -315,19 +312,11 @@ def generate_hf(prompt, destination, size, seed, space):
             return
 
     raise ValueError(
-        f"Space {space} returned no usable image; verify its API schema."
+        f"Space {space} returned no usable image; its API schema may differ."
     )
 
 
 # ---------------- Pollinations ----------------
-
-def pollinations_zero_price_models():
-    # Only use explicitly configured model names; never guess free pricing.
-    if not POLLINATIONS_API_KEY or not POLLINATIONS_MODELS:
-        return []
-
-    return list(dict.fromkeys(POLLINATIONS_MODELS))
-
 
 def generate_pollinations(prompt, destination, size, seed, model):
     if not POLLINATIONS_API_KEY:
@@ -351,7 +340,6 @@ def generate_pollinations(prompt, destination, size, seed, model):
 
     if not response.headers.get("content-type", "").lower().startswith("image/"):
         raise ValueError("Pollinations returned non-image content.")
-
     save_image_bytes(response.content, destination, size)
 
 
@@ -360,6 +348,8 @@ def generate_pollinations(prompt, destination, size, seed, model):
 def generate_gemini(prompt, destination, size):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
+    if not ALLOW_BILLABLE_PROVIDERS:
+        raise RuntimeError("Billable providers disabled by configuration.")
 
     width, height = size
     aspect = "9:16" if height > width else "16:9"
@@ -385,17 +375,14 @@ def generate_gemini(prompt, destination, size):
     response.raise_for_status()
     data = response.json()
 
-    # Current Interactions responses can expose output_image directly.
     image_item = data.get("output_image")
     if isinstance(image_item, dict) and image_item.get("data"):
         save_image_bytes(
             base64.b64decode(image_item["data"], validate=True),
-            destination,
-            size,
+            destination, size,
         )
         return
 
-    # Also inspect output blocks if the response uses that representation.
     for item in data.get("output", []):
         if not isinstance(item, dict):
             continue
@@ -403,14 +390,11 @@ def generate_gemini(prompt, destination, size):
         if item.get("type") == "image" and encoded:
             save_image_bytes(
                 base64.b64decode(encoded, validate=True),
-                destination,
-                size,
+                destination, size,
             )
             return
 
-    raise ValueError(
-        "Gemini response contained no image bytes; inspect model/API response."
-    )
+    raise ValueError("Gemini response contained no image bytes.")
 
 
 # ---------------- Replicate ----------------
@@ -418,12 +402,12 @@ def generate_gemini(prompt, destination, size):
 def generate_replicate(prompt, destination, size):
     if not REPLICATE_API_TOKEN:
         raise RuntimeError("REPLICATE_API_TOKEN is not configured.")
+    if not ALLOW_BILLABLE_PROVIDERS:
+        raise RuntimeError("Billable providers disabled by configuration.")
 
     parts = REPLICATE_MODEL.split("/", 1)
     if len(parts) != 2 or not all(parts):
-        raise RuntimeError(
-            "REPLICATE_IMAGE_MODEL must be owner/model-name."
-        )
+        raise RuntimeError("REPLICATE_IMAGE_MODEL must be owner/model-name.")
 
     owner, model = parts
     width, height = size
@@ -458,7 +442,10 @@ def generate_replicate(prompt, destination, size):
             prediction_id = prediction.get("id")
             if not prediction_id:
                 raise ValueError("Replicate returned no prediction ID.")
-            url = f"https://api.replicate.com/v1/predictions/{quote(str(prediction_id))}"
+            url = (
+                "https://api.replicate.com/v1/predictions/"
+                + quote(str(prediction_id))
+            )
 
         check = SESSION.get(
             url,
@@ -477,6 +464,8 @@ def generate_replicate(prompt, destination, size):
     output = prediction.get("output")
     if isinstance(output, str):
         output = [output]
+    elif isinstance(output, dict):
+        output = list(output.values())
 
     if not isinstance(output, list):
         raise ValueError("Replicate output was not a list.")
@@ -490,10 +479,7 @@ def generate_replicate(prompt, destination, size):
         None,
     )
     if not image_url:
-        raise ValueError(
-            "Replicate output contained no image URL. "
-            "The selected model may have a different output schema."
-        )
+        raise ValueError("Replicate output contained no image URL.")
 
     image_response = SESSION.get(image_url, timeout=REQUEST_TIMEOUT)
     image_response.raise_for_status()
@@ -547,10 +533,11 @@ def main():
         records.append(record)
 
     manifest = {
-        "version": "photo-motion-5.0",
+        "version": "photo-motion-6.0",
         "policy": (
-            "Hugging Face, configured Pollinations models, Gemini Image, "
-            "then Replicate. Gemini and Replicate may incur charges."
+            "Configured Hugging Face Spaces, Pollinations models, "
+            "Gemini Image, then Replicate. Paid providers are enabled "
+            "unless ALLOW_BILLABLE_PROVIDERS=false."
         ),
         "total_scenes": len(records),
         "scenes": records,
@@ -569,6 +556,11 @@ def main():
 
         rows = []
         for job, record in zip(jobs, records):
+            try:
+                duration = float(job.get("duration", 5.0))
+            except (TypeError, ValueError):
+                duration = 5.0
+
             rows.append({
                 "scene": record["scene"],
                 "global_scene": record["scene"],
@@ -576,14 +568,14 @@ def main():
                 "local_scene": job.get("local_scene", record["scene"]),
                 "image": record["file"],
                 "image_path": record["file"],
-                "duration": float(job.get("duration", 5.0)),
+                "duration": duration,
                 "status": record["status"],
                 "provider": record.get("provider"),
                 "prompt_sha256": record["prompt_sha256"],
             })
 
         save_json(IMAGE_MANIFEST, {
-            "version": "photo-motion-5.0",
+            "version": "photo-motion-6.0",
             "format": mode,
             "total_scenes": len(rows),
             "images_ready": sum(
@@ -600,15 +592,17 @@ def main():
     log("Total scenes:", len(jobs))
     log("Already ready:", len(jobs) - len(pending))
     log("Pending:", len(pending))
+    log("Configured HF Spaces:", HF_SPACES)
+    log("Configured Pollinations models:", POLLINATIONS_MODELS)
     log("Gemini configured:", bool(GEMINI_API_KEY))
     log("Replicate configured:", bool(REPLICATE_API_TOKEN))
+    log("Billable providers enabled:", ALLOW_BILLABLE_PROVIDERS)
     log("=" * 60)
 
     if not pending:
         log("All scene images are ready; no provider calls required.")
         return
 
-    pollinations = pollinations_zero_price_models()
     blocked_hf = set()
     blocked_pollinations = set()
     blocked_gemini = False
@@ -620,71 +614,72 @@ def main():
         success = False
         last_error = ""
 
-        # First try Hugging Face Spaces.
+        providers = []
+
         for space in HF_SPACES:
-            if space in blocked_hf:
-                continue
+            if space not in blocked_hf:
+                providers.append((
+                    f"Hugging Face: {space}",
+                    lambda space=space: generate_hf(
+                        prompt, destination, size, seed, space
+                    ),
+                    lambda: blocked_hf.add(space),
+                ))
 
-            for attempt in range(1, MAX_ATTEMPTS + 1):
-                try:
-                    log(f"Scene {record['scene']}: Hugging Face {space}, attempt {attempt}")
-                    generate_hf(prompt, destination, size, seed, space)
+        for model in POLLINATIONS_MODELS:
+            if model not in blocked_pollinations:
+                providers.append((
+                    f"Pollinations: {model}",
+                    lambda model=model: generate_pollinations(
+                        prompt, destination, size, seed, model
+                    ),
+                    lambda model=model: blocked_pollinations.add(model),
+                ))
 
-                    if not valid_image(destination, size):
-                        raise ValueError("Image validation failed.")
+        if GEMINI_API_KEY and not blocked_gemini:
+            providers.append((
+                f"Gemini Image: {GEMINI_MODEL}",
+                lambda: generate_gemini(prompt, destination, size),
+                lambda: None,
+            ))
 
-                    record.update(
-                        status="generated",
-                        provider=f"Hugging Face: {space}",
-                    )
-                    record["attempts"].append({
-                        "provider": f"Hugging Face: {space}",
-                        "status": "success",
-                        "attempt": attempt,
-                    })
-                    success = True
-                    checkpoint()
-                    break
+        if REPLICATE_API_TOKEN and not blocked_replicate:
+            providers.append((
+                f"Replicate: {REPLICATE_MODEL}",
+                lambda: generate_replicate(prompt, destination, size),
+                lambda: None,
+            ))
 
-                except Exception as exc:
-                    last_error = f"{type(exc).__name__}: {exc}"
-                    log("HF FAILED:", last_error[:250])
-                    record["attempts"].append({
-                        "provider": f"Hugging Face: {space}",
-                        "status": "failed",
-                        "attempt": attempt,
-                        "error": last_error[:600],
-                    })
-
-                    if is_access_or_quota_error(last_error):
-                        blocked_hf.add(space)
-                        break
-                    if attempt < MAX_ATTEMPTS:
-                        time.sleep(2)
-
+        for provider_name, generate, block_provider in providers:
             if success:
                 break
 
-        # Pollinations is only attempted for explicitly configured models.
-        if not success:
-            for model in pollinations:
-                if model in blocked_pollinations:
-                    continue
+            if (
+                provider_name.startswith(("Gemini Image:", "Replicate:"))
+                and not ALLOW_BILLABLE_PROVIDERS
+            ):
+                log("SKIPPED (billable providers disabled):", provider_name)
+                continue
+
+            attempts = MAX_ATTEMPTS if provider_name.startswith("Hugging Face:") else 1
+
+            for attempt in range(1, attempts + 1):
                 try:
-                    log(f"Scene {record['scene']}: Pollinations {model}")
-                    generate_pollinations(
-                        prompt, destination, size, seed, model
+                    log(
+                        f"Scene {record['scene']}: "
+                        f"{provider_name}, attempt {attempt}"
                     )
-                    if not valid_image(destination, size):
-                        raise ValueError("Image validation failed.")
+                    generate()
+                    check_image(destination, size)
 
                     record.update(
                         status="generated",
-                        provider=f"Pollinations: {model}",
+                        provider=provider_name,
                     )
                     record["attempts"].append({
-                        "provider": f"Pollinations: {model}",
+                        "provider": provider_name,
                         "status": "success",
+                        "attempt": attempt,
                     })
                     success = True
                     checkpoint()
@@ -692,76 +687,24 @@ def main():
 
                 except Exception as exc:
                     last_error = f"{type(exc).__name__}: {exc}"
-                    log("POLLINATIONS FAILED:", last_error[:250])
+                    log("PROVIDER FAILED:", provider_name, last_error[:250])
                     record["attempts"].append({
-                        "provider": f"Pollinations: {model}",
+                        "provider": provider_name,
                         "status": "failed",
+                        "attempt": attempt,
                         "error": last_error[:600],
                     })
+
                     if is_access_or_quota_error(last_error):
-                        blocked_pollinations.add(model)
+                        block_provider()
+                        if provider_name.startswith("Gemini Image:"):
+                            blocked_gemini = True
+                        elif provider_name.startswith("Replicate:"):
+                            blocked_replicate = True
+                        break
 
-        # Gemini Image is the next fallback.
-        if not success and GEMINI_API_KEY and not blocked_gemini:
-            try:
-                log(f"Scene {record['scene']}: Gemini Image {GEMINI_MODEL}")
-                generate_gemini(prompt, destination, size)
-
-                if not valid_image(destination, size):
-                    raise ValueError("Gemini image validation failed.")
-
-                record.update(
-                    status="generated",
-                    provider=f"Gemini Image: {GEMINI_MODEL}",
-                )
-                record["attempts"].append({
-                    "provider": f"Gemini Image: {GEMINI_MODEL}",
-                    "status": "success",
-                })
-                success = True
-                checkpoint()
-
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                log("GEMINI FAILED:", last_error[:250])
-                record["attempts"].append({
-                    "provider": f"Gemini Image: {GEMINI_MODEL}",
-                    "status": "failed",
-                    "error": last_error[:600],
-                })
-                if is_access_or_quota_error(last_error):
-                    blocked_gemini = True
-
-        # Replicate is the final fallback.
-        if not success and REPLICATE_API_TOKEN and not blocked_replicate:
-            try:
-                log(f"Scene {record['scene']}: Replicate {REPLICATE_MODEL}")
-                generate_replicate(prompt, destination, size)
-
-                if not valid_image(destination, size):
-                    raise ValueError("Replicate image validation failed.")
-
-                record.update(
-                    status="generated",
-                    provider=f"Replicate: {REPLICATE_MODEL}",
-                )
-                record["attempts"].append({
-                    "provider": f"Replicate: {REPLICATE_MODEL}",
-                    "status": "success",
-                })
-                success = True
-                checkpoint()
-
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                log("REPLICATE FAILED:", last_error[:250])
-                record["attempts"].append({
-                    "provider": f"Replicate: {REPLICATE_MODEL}",
-                    "status": "failed",
-                    "error": last_error[:600],
-                })
-                if is_access_or_quota_error(last_error):
-                    blocked_replicate = True
+                    if attempt < attempts:
+                        time.sleep(2)
 
         if not success:
             record["status"] = "failed"
