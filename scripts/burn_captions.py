@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Validate scene timing and burn readable Hindi/English captions."""
+"""Validate scene timing and burn compact, dynamically contrasted captions."""
 
 from __future__ import annotations
 
@@ -19,19 +19,35 @@ CAPTIONS = OUTPUT / "captions" / "captions.json"
 VISUAL_JOBS = OUTPUT / "visuals" / "visual_jobs.json"
 MOTION_MANIFEST = OUTPUT / "photo_motion" / "photo_motion_manifest.json"
 SRT = OUTPUT / "captions" / "final_captions.srt"
+ASS = OUTPUT / "captions" / "final_captions.ass"
 TEMP_VIDEO = OUTPUT / "videos" / "katha_lok_ai_captioned.tmp.mp4"
 
-# Readability controls.
+# Caption readability.
 MAX_LINE_CHARS = 30
 MAX_LINES = 2
-MAX_CHARS_PER_CUE = MAX_LINE_CHARS * MAX_LINES
-MIN_CUE_SECONDS = 0.65
-
-# FFmpeg/libass subtitle styling.
 FONT_NAME = "Noto Sans Devanagari"
 FONT_SIZE = 14
-OUTLINE_SIZE = 1
+OUTLINE_SIZE = 2
 BOTTOM_MARGIN = 80
+
+# RGB colours considered for each caption cue.
+# The best colour is selected by contrast against the sampled video area.
+PALETTE = {
+    "white": (255, 255, 255),
+    "black": (0, 0, 0),
+    "yellow": (255, 225, 0),
+    "cyan": (0, 240, 255),
+    "lime": (130, 255, 0),
+    "orange": (255, 145, 0),
+    "magenta": (255, 50, 210),
+    "deep_blue": (35, 95, 255),
+    "violet": (190, 110, 255),
+    "pink": (255, 115, 160),
+    "green": (0, 220, 120),
+}
+
+# A safe fallback if frame sampling fails.
+FALLBACK_RGB = (45, 45, 45)
 
 
 def read_json(path):
@@ -46,17 +62,14 @@ def read_json(path):
 
 def run(command):
     print("$", " ".join(map(str, command)), flush=True)
-
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
-
     if result.stdout:
         print(result.stdout, flush=True)
-
     if result.returncode != 0:
         raise RuntimeError(
             f"Command failed with exit code {result.returncode}"
@@ -80,10 +93,8 @@ def extract_list(data, label, keys):
 
     if not isinstance(rows, list) or not rows:
         raise RuntimeError(f"{label} contains no usable entries.")
-
     if any(not isinstance(row, dict) for row in rows):
         raise RuntimeError(f"{label} contains a non-object entry.")
-
     return rows
 
 
@@ -95,24 +106,19 @@ def positive_int(value, label):
 
     if result < 1:
         raise RuntimeError(f"{label} must be positive.")
-
     return result
 
 
 def scene_key(row, index):
-    """Return part, local scene, and global scene identifiers."""
     part = positive_int(row.get("part", 1), "part")
-
     local = positive_int(
         row.get("local_scene", row.get("scene", index)),
         "local scene",
     )
-
     global_scene = positive_int(
         row.get("global_scene", row.get("scene", index)),
         "global scene",
     )
-
     return part, local, global_scene
 
 
@@ -127,12 +133,10 @@ def extract_captions(data):
         raise RuntimeError("Captions are not marked completed.")
 
     rows = data.get("captions")
-
     if not isinstance(rows, list) or not rows:
         raise RuntimeError("captions.json has no captions.")
 
     result = {}
-
     for row in rows:
         if not isinstance(row, dict):
             raise RuntimeError("Invalid caption entry.")
@@ -140,19 +144,16 @@ def extract_captions(data):
         part = positive_int(row.get("part"), "caption part")
         local = positive_int(row.get("scene"), "caption scene")
         text = clean_text(row.get("text"))
-
         if not text:
             raise RuntimeError(
                 f"Empty caption at Part {part}, Scene {local}."
             )
 
         key = (part, local)
-
         if key in result:
             raise RuntimeError(
                 f"Duplicate caption for Part {part}, Scene {local}."
             )
-
         result[key] = text
 
     return result
@@ -164,12 +165,10 @@ def extract_motion(data):
         "Photo Motion manifest",
         ("scenes", "clips", "jobs", "items"),
     )
-
     result = {}
 
     for index, row in enumerate(rows, 1):
         part, local, global_scene = scene_key(row, index)
-
         try:
             duration = float(row["duration"])
         except (KeyError, TypeError, ValueError) as exc:
@@ -183,7 +182,6 @@ def extract_motion(data):
             )
 
         key = (part, local)
-
         if key in result:
             raise RuntimeError(
                 f"Duplicate motion scene: Part {part}, Scene {local}."
@@ -203,7 +201,6 @@ def build_timeline(jobs_data, motion_data, captions):
         "Visual jobs",
         ("jobs", "visual_jobs", "scenes"),
     )
-
     scenes = []
     seen_keys = set()
     seen_global = set()
@@ -214,7 +211,6 @@ def build_timeline(jobs_data, motion_data, captions):
 
         if key in seen_keys or global_scene in seen_global:
             raise RuntimeError(f"Duplicate visual scene: {job}")
-
         seen_keys.add(key)
         seen_global.add(global_scene)
 
@@ -222,14 +218,12 @@ def build_timeline(jobs_data, motion_data, captions):
             raise RuntimeError(
                 f"Caption missing for Part {part}, Scene {local}."
             )
-
         if key not in motion_data:
             raise RuntimeError(
                 f"Motion clip missing for Part {part}, Scene {local}."
             )
 
         motion = motion_data[key]
-
         if motion["global_scene"] != global_scene:
             raise RuntimeError(
                 f"Scene numbering mismatch for Part {part}, "
@@ -246,7 +240,6 @@ def build_timeline(jobs_data, motion_data, captions):
         })
 
     scenes.sort(key=lambda row: row["global_scene"])
-
     actual = [row["global_scene"] for row in scenes]
     expected = list(range(1, len(scenes) + 1))
 
@@ -294,19 +287,12 @@ def probe(ffprobe, path):
         duration = float(data["format"]["duration"])
         streams = data.get("streams", [])
     except (ValueError, TypeError, KeyError) as exc:
-        raise RuntimeError(
-            f"Cannot inspect {path.name}: {exc}"
-        ) from exc
+        raise RuntimeError(f"Cannot inspect {path.name}: {exc}") from exc
 
     if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError(f"Invalid duration in {path.name}.")
-
-    if not any(
-        row.get("codec_type") == "video"
-        for row in streams
-    ):
+    if not any(row.get("codec_type") == "video" for row in streams):
         raise RuntimeError(f"No video stream in {path.name}.")
-
     return duration
 
 
@@ -315,30 +301,33 @@ def srt_time(seconds):
     hours, ms = divmod(ms, 3_600_000)
     minutes, ms = divmod(ms, 60_000)
     secs, ms = divmod(ms, 1000)
-
     return f"{hours:02}:{minutes:02}:{secs:02},{ms:03}"
 
 
+def ass_time(seconds):
+    cs = max(0, round(seconds * 100))
+    hours, cs = divmod(cs, 360000)
+    minutes, cs = divmod(cs, 6000)
+    secs, cs = divmod(cs, 100)
+    return f"{hours}:{minutes:02}:{secs:02}.{cs:02}"
+
+
 def wrap_words(text, max_chars=MAX_LINE_CHARS):
-    """Wrap words into lines without splitting words unnecessarily."""
     words = clean_text(text).split()
     lines = []
     current = ""
 
     for word in words:
-        # Extremely long tokens are split to avoid covering the screen.
         if len(word) > max_chars:
             if current:
                 lines.append(current)
                 current = ""
-
-            for start in range(0, len(word), max_chars):
-                lines.append(word[start:start + max_chars])
-
+            # Avoid splitting ordinary Hindi words; exceptionally long
+            # tokens are left intact and wrapped by the subtitle renderer.
+            lines.append(word)
             continue
 
         candidate = f"{current} {word}".strip()
-
         if len(candidate) <= max_chars:
             current = candidate
         else:
@@ -348,29 +337,20 @@ def wrap_words(text, max_chars=MAX_LINE_CHARS):
 
     if current:
         lines.append(current)
-
     return lines
 
 
 def split_into_cues(text):
-    """
-    Split a long scene caption into short readable cues.
-    Each cue has at most two wrapped lines.
-    """
     lines = wrap_words(text)
     cues = []
-
     for start in range(0, len(lines), MAX_LINES):
-        cue_lines = lines[start:start + MAX_LINES]
-        cue = "\n".join(cue_lines).strip()
-
+        cue = "\n".join(lines[start:start + MAX_LINES]).strip()
         if cue:
             cues.append(cue)
-
     return cues
 
 
-def make_srt(scenes, video_duration):
+def make_cue_timeline(scenes, video_duration):
     timeline = sum(row["duration"] for row in scenes)
     tolerance = max(2.0, video_duration * 0.03)
 
@@ -383,62 +363,201 @@ def make_srt(scenes, video_duration):
 
     entries = []
     cursor = 0.0
-    cue_number = 1
 
     for scene in scenes:
-        scene_start = cursor
-        scene_end = min(
-            cursor + scene["duration"],
-            video_duration,
-        )
+        start = cursor
+        end = min(cursor + scene["duration"], video_duration)
         cursor += scene["duration"]
-
-        available = scene_end - scene_start
+        available = end - start
 
         if available <= 0:
             continue
 
         cues = split_into_cues(scene["text"])
-
         if not cues:
             continue
 
-        # Allocate each cue a share of its scene's time based on word count.
         weights = [
             max(1, len(cue.replace("\n", " ").split()))
             for cue in cues
         ]
         total_weight = sum(weights)
+        cue_cursor = start
 
-        cue_cursor = scene_start
-
-        for cue_index, (cue, weight) in enumerate(zip(cues, weights)):
-            if cue_index == len(cues) - 1:
-                cue_end = scene_end
-            else:
-                cue_end = cue_cursor + available * weight / total_weight
-
-            if cue_end <= cue_cursor:
-                continue
-
-            entries.append(
-                f"{cue_number}\n"
-                f"{srt_time(cue_cursor)} --> {srt_time(cue_end)}\n"
-                f"{cue}\n"
+        for index, (cue, weight) in enumerate(zip(cues, weights)):
+            cue_end = (
+                end if index == len(cues) - 1
+                else cue_cursor + available * weight / total_weight
             )
-
-            cue_number += 1
+            if cue_end > cue_cursor:
+                entries.append({
+                    "start": cue_cursor,
+                    "end": cue_end,
+                    "text": cue,
+                })
             cue_cursor = cue_end
 
     if not entries:
         raise RuntimeError("No valid subtitle intervals were generated.")
+    return entries
 
-    return "\n".join(entries) + "\n"
+
+def make_srt(entries):
+    blocks = []
+    for number, cue in enumerate(entries, 1):
+        blocks.append(
+            f"{number}\n"
+            f"{srt_time(cue['start'])} --> {srt_time(cue['end'])}\n"
+            f"{cue['text']}\n"
+        )
+    return "\n".join(blocks) + "\n"
+
+
+def linear_channel(value):
+    value = value / 255.0
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
+
+
+def luminance(rgb):
+    r, g, b = (linear_channel(v) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(a, b):
+    high = max(luminance(a), luminance(b))
+    low = min(luminance(a), luminance(b))
+    return (high + 0.05) / (low + 0.05)
+
+
+def sample_background_rgb(ffmpeg, video, seconds):
+    """Sample the lower subtitle area, returning its average RGB colour."""
+    timestamp = max(0.0, float(seconds))
+    video_filter = (
+        "crop=iw:ih*0.30:0:ih*0.65,"
+        "scale=1:1:flags=area,format=rgb24"
+    )
+
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-ss", f"{timestamp:.3f}",
+        "-i", str(video),
+        "-vf", video_filter,
+        "-frames:v", "1",
+        "-f", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "pipe:1",
+    ]
+
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if result.returncode == 0 and len(result.stdout) >= 3:
+            return tuple(result.stdout[:3])
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    print(
+        f"WARNING: Could not sample frame at {timestamp:.2f}s; "
+        "using fallback contrast colour.",
+        flush=True,
+    )
+    return FALLBACK_RGB
+
+
+def choose_caption_colour(background_rgb):
+    """Choose the palette colour with the highest measured contrast."""
+    name, rgb = max(
+        PALETTE.items(),
+        key=lambda item: contrast_ratio(item[1], background_rgb),
+    )
+    ratio = contrast_ratio(rgb, background_rgb)
+
+    # Pick the outline that separates the text colour from its surroundings.
+    black = (0, 0, 0)
+    white = (255, 255, 255)
+    outline = (
+        black
+        if contrast_ratio(rgb, black) >= contrast_ratio(rgb, white)
+        else white
+    )
+    return name, rgb, outline, ratio
+
+
+def ass_colour(rgb):
+    """ASS colour format is &HAABBGGRR&."""
+    r, g, b = rgb
+    return f"&H00{b:02X}{g:02X}{r:02X}&"
+
+
+def ass_escape(text):
+    # Keep user/story text from being interpreted as ASS formatting codes.
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+        .replace("\n", r"\N")
+    )
+
+
+def write_ass(ffmpeg, video, entries, path):
+    header = f"""[Script Info]
+Title: Dynamic Contrast Captions
+ScriptType: v4.00+
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+PlayResX: 1080
+PlayResY: 1920
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,{FONT_NAME},{FONT_SIZE},&H00FFFFFF,&H0000FFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,{OUTLINE_SIZE},0,2,45,45,{BOTTOM_MARGIN},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    lines = [header]
+    selected_colours = []
+
+    for cue in entries:
+        midpoint = (cue["start"] + cue["end"]) / 2
+        background = sample_background_rgb(ffmpeg, video, midpoint)
+        name, text_rgb, outline_rgb, ratio = choose_caption_colour(background)
+
+        selected_colours.append(name)
+        override = (
+            f"{{\\1c{ass_colour(text_rgb)}"
+            f"\\3c{ass_colour(outline_rgb)}"
+            f"\\bord{OUTLINE_SIZE}}}"
+        )
+        text = override + ass_escape(cue["text"])
+
+        lines.append(
+            f"Dialogue: 0,{ass_time(cue['start'])},"
+            f"{ass_time(cue['end'])},Default,,0,0,0,,{text}\n"
+        )
+
+        print(
+            f"Caption colour: {name}; contrast={ratio:.2f}:1; "
+            f"time={midpoint:.2f}s",
+            flush=True,
+        )
+
+    path.write_text("".join(lines), encoding="utf-8")
+    return selected_colours
 
 
 def escape_filter_path(path):
     value = str(path.resolve())
-
     for old, new in (
         ("\\", "\\\\"),
         (":", "\\:"),
@@ -448,7 +567,6 @@ def escape_filter_path(path):
         ("]", "\\]"),
     ):
         value = value.replace(old, new)
-
     return value
 
 
@@ -462,9 +580,7 @@ def get_format_alias():
         ).splitlines():
             if "=" not in line:
                 continue
-
             key, value = line.split("=", 1)
-
             if key.strip().upper() == "FORMAT":
                 mode = (
                     value.split("#", 1)[0]
@@ -475,66 +591,41 @@ def get_format_alias():
                 break
 
     full_modes = {
-        "full",
-        "long",
-        "landscape",
-        "youtube",
-        "youtube_full",
-        "youtube-long",
+        "full", "long", "landscape", "youtube",
+        "youtube_full", "youtube-long",
     }
-
     if mode in full_modes:
         return OUTPUT / "videos" / "katha_lok_ai_full.mp4"
-
     return OUTPUT / "videos" / "katha_lok_ai_short.mp4"
 
 
 def main():
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
-
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and ffprobe must be installed.")
 
-    for path in (
-        VIDEO,
-        CAPTIONS,
-        VISUAL_JOBS,
-        MOTION_MANIFEST,
-    ):
+    for path in (VIDEO, CAPTIONS, VISUAL_JOBS, MOTION_MANIFEST):
         if not path.is_file():
             raise RuntimeError(f"Required input missing: {path}")
-
     if VIDEO.stat().st_size < 1000:
         raise RuntimeError("Final video is missing or too small.")
 
     caption_data = read_json(CAPTIONS)
-
     scenes = build_timeline(
         read_json(VISUAL_JOBS),
         extract_motion(read_json(MOTION_MANIFEST)),
         extract_captions(caption_data),
     )
-
     video_duration = probe(ffprobe, VIDEO)
+    entries = make_cue_timeline(scenes, video_duration)
 
     SRT.parent.mkdir(parents=True, exist_ok=True)
-    SRT.write_text(
-        make_srt(scenes, video_duration),
-        encoding="utf-8",
-    )
-
-    subtitle_filter = (
-        f"subtitles=filename='{escape_filter_path(SRT)}':"
-        f"force_style='FontName={FONT_NAME},"
-        f"FontSize={FONT_SIZE},"
-        f"Outline={OUTLINE_SIZE},"
-        "Shadow=0,"
-        "Alignment=2,"
-        f"MarginV={BOTTOM_MARGIN}'"
-    )
+    SRT.write_text(make_srt(entries), encoding="utf-8")
+    colours = write_ass(ffmpeg, VIDEO, entries, ASS)
 
     TEMP_VIDEO.unlink(missing_ok=True)
+    subtitle_filter = f"ass=filename='{escape_filter_path(ASS)}'"
 
     run([
         ffmpeg,
@@ -554,19 +645,14 @@ def main():
     ])
 
     if not TEMP_VIDEO.is_file() or TEMP_VIDEO.stat().st_size < 1000:
-        raise RuntimeError(
-            "Captioned MP4 was not created correctly."
-        )
+        raise RuntimeError("Captioned MP4 was not created correctly.")
 
     probe(ffprobe, TEMP_VIDEO)
     TEMP_VIDEO.replace(VIDEO)
 
-    # Synchronize the mode-specific alias with the captioned video.
     alias = get_format_alias()
-
     if alias != VIDEO and alias.exists():
         shutil.copy2(VIDEO, alias)
-
         if alias.stat().st_size != VIDEO.stat().st_size:
             raise RuntimeError(
                 "Captioned format alias failed verification."
@@ -576,15 +662,14 @@ def main():
     print("CAPTION BURN-IN: SUCCESS")
     print("Caption mode:", caption_data.get("mode", "unknown"))
     print("Scenes:", len(scenes))
-    print("Caption cues:", sum(
-        len(split_into_cues(scene["text"]))
-        for scene in scenes
-    ))
+    print("Caption cues:", len(entries))
+    print("Distinct colours used:", ", ".join(sorted(set(colours))))
     print("Font size:", FONT_SIZE)
     print("Maximum lines per cue:", MAX_LINES)
     print("Duration:", f"{video_duration:.2f}s")
     print("Final MP4:", VIDEO.relative_to(ROOT))
-    print("Subtitle file:", SRT.relative_to(ROOT))
+    print("SRT subtitles:", SRT.relative_to(ROOT))
+    print("ASS dynamic-colour subtitles:", ASS.relative_to(ROOT))
     print("=" * 55)
 
 
