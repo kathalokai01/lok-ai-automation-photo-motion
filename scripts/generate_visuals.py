@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Create validated, resumable-compatible photo-motion image jobs."""
+"""Create photo-motion image jobs while preserving valid image checkpoints."""
 
 from __future__ import annotations
 
@@ -22,7 +21,8 @@ VISUAL_DIR = ROOT / "output" / "visuals"
 JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUAL_DIR / "image_manifest.json"
 
-VERSION = "photo-motion-4.0"
+VERSION = "photo-motion-4.1"
+MIN_IMAGE_BYTES = 5000
 
 DESCRIPTION_KEYS = (
     "visual_prompt",
@@ -82,6 +82,7 @@ def extract_scenes(data):
         scenes = data
     elif isinstance(data, dict):
         scenes = None
+
         for key in ("scenes", "scene_list", "items", "data"):
             if isinstance(data.get(key), list):
                 scenes = data[key]
@@ -111,24 +112,29 @@ def extract_scenes(data):
 def get_text(scene, keys):
     for key in keys:
         value = scene.get(key)
+
         if isinstance(value, str) and value.strip():
             return value.strip()
+
     return ""
 
 
 def positive_number(value):
     try:
         result = float(value)
+
         if math.isfinite(result) and result > 0:
             return result
     except (TypeError, ValueError):
         pass
+
     return None
 
 
 def scene_duration(scene, config):
     for key in DURATION_KEYS:
         value = positive_number(scene.get(key))
+
         if value is not None and 0.5 <= value <= 3600:
             return round(value, 3)
 
@@ -175,7 +181,6 @@ def load_character_bible():
         separators=(",", ":"),
     )
 
-    # Keep prompts within reasonable provider request sizes.
     return serialized[:12000]
 
 
@@ -183,9 +188,12 @@ def validate_scene_identity(scene, index, seen_pairs):
     part = scene.get("part", 1)
     local_scene = scene.get("scene", index)
 
-    if isinstance(part, (dict, list)) or isinstance(local_scene, (dict, list)):
+    if isinstance(part, (dict, list)) or isinstance(
+        local_scene, (dict, list)
+    ):
         raise RuntimeError(
-            f"Scene {index}: part and scene identifiers must be scalar values."
+            f"Scene {index}: part and scene identifiers "
+            "must be scalar values."
         )
 
     pair = (str(part), str(local_scene))
@@ -226,17 +234,70 @@ def build_prompt(mode, dimensions, part, local_scene, description, bible):
     )
 
 
+def read_previous_image_manifest():
+    """Load previous scene records without trusting them blindly."""
+    data = read_json(MANIFEST_FILE, required=False)
+
+    if isinstance(data, dict):
+        rows = data.get("scenes", [])
+    elif isinstance(data, list):
+        rows = data
+    else:
+        rows = []
+
+    if not isinstance(rows, list):
+        return {}
+
+    previous = {}
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        try:
+            number = int(row.get("global_scene", row.get("scene")))
+        except (TypeError, ValueError):
+            continue
+
+        if number > 0:
+            previous[number] = row
+
+    return previous
+
+
+def valid_existing_image(path, expected_dimensions):
+    """Check image bytes, decodeability and exact expected dimensions."""
+    try:
+        from PIL import Image
+
+        if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
+            return False
+
+        with Image.open(path) as image:
+            image.verify()
+
+        with Image.open(path) as image:
+            return image.size == expected_dimensions
+
+    except Exception:
+        return False
+
+
 def main():
     if not INPUT_FILE.is_file():
         raise RuntimeError("Input/topic.txt is missing.")
 
     config = load_input_config(INPUT_FILE)
-
     mode, dimensions = get_format_and_size(config)
+    width, height = map(int, dimensions.split("x"))
+
     scenes = extract_scenes(read_json(SCENES_FILE))
     bible = load_character_bible()
 
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Preserve checkpoint metadata from the previous run.
+    previous_rows = read_previous_image_manifest()
 
     jobs = []
     manifest_scenes = []
@@ -252,11 +313,12 @@ def main():
         if not description:
             raise RuntimeError(
                 f"Scene {index} has no usable visual description. "
-                "Fix scenes.json instead of silently generating an "
-                "unrelated image."
+                "Fix scenes.json instead of silently generating "
+                "an unrelated image."
             )
 
         duration = scene_duration(scene, config)
+
         image_path = (
             Path("output")
             / "visuals"
@@ -276,6 +338,13 @@ def main():
             prompt.encode("utf-8")
         ).hexdigest()
 
+        negative_prompt = (
+            "cartoon, anime, illustration, painting, CGI, "
+            "plastic skin, distorted face, bad anatomy, "
+            "extra limbs, duplicated people, blurry face, "
+            "unrealistic eyes, text, subtitles, watermark, logo"
+        )
+
         job = {
             "scene": index,
             "global_scene": index,
@@ -285,12 +354,7 @@ def main():
             "image_path": image_path,
             "prompt": prompt,
             "prompt_sha256": prompt_hash,
-            "negative_prompt": (
-                "cartoon, anime, illustration, painting, CGI, "
-                "plastic skin, distorted face, bad anatomy, "
-                "extra limbs, duplicated people, blurry face, "
-                "unrealistic eyes, text, subtitles, watermark, logo"
-            ),
+            "negative_prompt": negative_prompt,
             "image_size": dimensions,
             "duration": duration,
             "motion_engine": "photo_motion",
@@ -301,6 +365,26 @@ def main():
 
         jobs.append(job)
 
+        destination = ROOT / image_path
+        old = previous_rows.get(index, {})
+
+        # Retain prior status/provider only when the prompt is unchanged
+        # and the image on disk is valid for the current target dimensions.
+        same_prompt = old.get("prompt_sha256") == prompt_hash
+        image_is_valid = valid_existing_image(
+            destination, (width, height)
+        )
+
+        if same_prompt and image_is_valid:
+            status = old.get("status", "existing")
+            provider = old.get("provider") or "previous run"
+
+            if status not in ("generated", "existing", "reused"):
+                status = "existing"
+        else:
+            status = "image_required"
+            provider = None
+
         manifest_scenes.append({
             "scene": index,
             "global_scene": index,
@@ -309,8 +393,8 @@ def main():
             "image": image_path,
             "image_path": image_path,
             "duration": duration,
-            "status": "image_required",
-            "provider": None,
+            "status": status,
+            "provider": provider,
             "prompt_sha256": prompt_hash,
         })
 
@@ -321,6 +405,11 @@ def main():
 
     if len(jobs) != len(manifest_scenes):
         raise RuntimeError("Image jobs and manifest counts do not match.")
+
+    images_ready = sum(
+        row["status"] in ("generated", "existing", "reused")
+        for row in manifest_scenes
+    )
 
     jobs_document = {
         "version": VERSION,
@@ -337,12 +426,12 @@ def main():
         "version": VERSION,
         "format": mode,
         "total_scenes": len(manifest_scenes),
-        "images_ready": 0,
+        "images_ready": images_ready,
         "images_required": len(manifest_scenes),
         "scenes": manifest_scenes,
     }
 
-    # Write the jobs first. The image generator consumes this file.
+    # The image generator consumes these files next.
     write_json(JOBS_FILE, jobs_document)
     write_json(MANIFEST_FILE, manifest_document)
 
@@ -351,6 +440,8 @@ def main():
     log("Format:", mode)
     log("Image dimensions:", dimensions)
     log("Scenes:", len(jobs))
+    log("Valid images retained:", images_ready)
+    log("Images still required:", len(jobs) - images_ready)
     log("Character Bible:", "available" if bible else "not available")
     log("Scene numbering: validated")
     log("Jobs:", JOBS_FILE.relative_to(ROOT))
