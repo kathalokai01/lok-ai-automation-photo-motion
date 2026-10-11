@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Render validated photo-motion clips with resumable scene checkpoints."""
 
@@ -272,7 +271,9 @@ def read_depth_maps():
             number = int(raw_number)
 
             path = safe_path(
-                entry.get("depth_map") or entry.get("path") or entry.get("file"),
+                entry.get("depth_map")
+                or entry.get("path")
+                or entry.get("file"),
                 f"depth map for scene {number}",
             )
         except (TypeError, ValueError, RuntimeError):
@@ -506,7 +507,22 @@ def write_manifest(entries):
 
 
 def cache_signature(item, effect, depth_info, frames, width, height, fps, mode):
+    """Build a cache key from inputs and the renderer implementation."""
+
+    motion_script = Path(__file__).resolve()
+    motion_code_hash = sha256_file(motion_script)
+
+    parallax_script = ROOT / "scripts" / "depth_parallax.py"
+    parallax_code_hash = (
+        sha256_file(parallax_script)
+        if effect == "parallax" and parallax_script.is_file()
+        else None
+    )
+
     payload = {
+        "cache_version": "photo-motion-code-hash-v1",
+        "motion_code_sha256": motion_code_hash,
+        "parallax_code_sha256": parallax_code_hash,
         "image_sha256": item["image_sha256"],
         "effect": effect,
         "depth_sha256": (
@@ -591,8 +607,6 @@ def main():
 
     current_numbers = {item["number"] for item in prepared}
 
-    # Preserve existing records for current scenes. Every reuse is still
-    # guarded by the cache signature and video validation below.
     manifest_by_scene = {
         number: dict(entry)
         for number, entry in previous.items()
@@ -605,7 +619,7 @@ def main():
             for number in sorted(manifest_by_scene)
         ])
 
-    # Drop records for scenes that are no longer in the current job list.
+    # Remove obsolete scene records, while retaining current checkpoints.
     save_current_manifest()
 
     generated_count = 0
@@ -630,7 +644,6 @@ def main():
         selected_effect = EFFECTS[index % len(EFFECTS)]
         depth_info = depth_maps.get(number)
 
-        # A depth map is usable only for its exact source image.
         if (
             depth_info is not None
             and depth_info["image_sha256"] != item["image_sha256"]
@@ -732,7 +745,7 @@ def main():
                 expected_duration,
             )
 
-            # Replace the published clip only after successful validation.
+            # Publish only after the new clip passes validation.
             temporary_target.replace(item["target"])
 
         except Exception:
@@ -772,7 +785,7 @@ def main():
         if true_parallax:
             parallax_count += 1
 
-        # Save all current scene records after each completed scene.
+        # Persist checkpoints after every completed scene.
         save_current_manifest()
 
         log(
