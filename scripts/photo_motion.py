@@ -281,8 +281,8 @@ def read_depth_maps():
         if number < 1 or not path.is_file() or path.stat().st_size < 100:
             continue
 
-        # A depth map must be traceable to its source image.
         source_hash = entry.get("image_sha256")
+
         if not isinstance(source_hash, str) or len(source_hash) != 64:
             log(
                 f"NOTICE: Scene {number} depth map has no source hash; "
@@ -481,7 +481,7 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
     if not math.isfinite(actual_duration) or actual_duration <= 0:
         raise RuntimeError(f"Invalid video duration for {path.name}.")
 
-    tolerance = max(0.15, 2.0 / max(1, 24))
+    tolerance = max(0.15, 2.0 / 24)
 
     if abs(actual_duration - expected_duration) > tolerance:
         raise RuntimeError(
@@ -589,7 +589,25 @@ def main():
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    manifest = []
+    current_numbers = {item["number"] for item in prepared}
+
+    # Preserve existing records for current scenes. Every reuse is still
+    # guarded by the cache signature and video validation below.
+    manifest_by_scene = {
+        number: dict(entry)
+        for number, entry in previous.items()
+        if number in current_numbers and isinstance(entry, dict)
+    }
+
+    def save_current_manifest():
+        write_manifest([
+            manifest_by_scene[number]
+            for number in sorted(manifest_by_scene)
+        ])
+
+    # Drop records for scenes that are no longer in the current job list.
+    save_current_manifest()
+
     generated_count = 0
     reused_count = 0
     parallax_count = 0
@@ -601,6 +619,7 @@ def main():
     log("FPS:", fps)
     log("Scenes:", len(prepared))
     log("Resume enabled: yes")
+    log("Checkpoint preservation: enabled")
     log("=" * 60)
 
     for index, item in enumerate(prepared):
@@ -611,7 +630,7 @@ def main():
         selected_effect = EFFECTS[index % len(EFFECTS)]
         depth_info = depth_maps.get(number)
 
-        # A depth map is only safe when it belongs to this exact image.
+        # A depth map is usable only for its exact source image.
         if (
             depth_info is not None
             and depth_info["image_sha256"] != item["image_sha256"]
@@ -661,9 +680,9 @@ def main():
 
         if cached is not None:
             log("Reusing validated scene clip:", cached["video"])
-            manifest.append(cached)
+            manifest_by_scene[number] = cached
             reused_count += 1
-            write_manifest(manifest)
+            save_current_manifest()
             continue
 
         temporary_target = item["target"].with_name(
@@ -713,7 +732,7 @@ def main():
                 expected_duration,
             )
 
-            # Only replace the final clip after validation succeeds.
+            # Replace the published clip only after successful validation.
             temporary_target.replace(item["target"])
 
         except Exception:
@@ -747,14 +766,14 @@ def main():
             "status": "generated",
         }
 
-        manifest.append(entry)
+        manifest_by_scene[number] = entry
         generated_count += 1
 
         if true_parallax:
             parallax_count += 1
 
-        # Keep completed scene metadata after every successful scene.
-        write_manifest(manifest)
+        # Save all current scene records after each completed scene.
+        save_current_manifest()
 
         log(
             "Saved:",
@@ -763,17 +782,54 @@ def main():
             entry["size_bytes"],
         )
 
-    if len(manifest) != len(prepared):
+    final_manifest = [
+        manifest_by_scene[number]
+        for number in sorted(manifest_by_scene)
+    ]
+
+    if len(final_manifest) != len(prepared):
         raise RuntimeError(
-            f"Clip count mismatch: jobs={len(prepared)}, clips={len(manifest)}"
+            f"Clip count mismatch: jobs={len(prepared)}, "
+            f"clips={len(final_manifest)}"
         )
+
+    # Validate every final clip before declaring success.
+    for item in prepared:
+        number = item["number"]
+        entry = manifest_by_scene.get(number)
+
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"Missing clip manifest for scene {number}.")
+
+        if entry.get("image_sha256") != item["image_sha256"]:
+            raise RuntimeError(
+                f"Source-image checkpoint mismatch for scene {number}."
+            )
+
+        expected_frames = max(1, round(item["duration"] * fps))
+        expected_duration = expected_frames / fps
+
+        probe_clip(
+            item["target"],
+            ffprobe,
+            width,
+            height,
+            expected_duration,
+        )
+
+        if entry.get("cache_signature") is None:
+            raise RuntimeError(
+                f"Missing cache signature for scene {number}."
+            )
+
+    save_current_manifest()
 
     log("=" * 60)
     log("PHOTO MOTION GENERATION SUCCESS")
     log("Format:", mode)
     log("Resolution:", f"{width}x{height}")
     log("FPS:", fps)
-    log("Total scenes:", len(manifest))
+    log("Total scenes:", len(final_manifest))
     log("New clips:", generated_count)
     log("Reused clips:", reused_count)
     log("New true-parallax clips:", parallax_count)
