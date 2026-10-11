@@ -340,6 +340,14 @@ def generate_depth(estimator, item, output_path, Image, ImageOps):
         ) from exc
 
 
+def save_manifest(manifest_by_scene):
+    entries = [
+        manifest_by_scene[number]
+        for number in sorted(manifest_by_scene)
+    ]
+    atomic_json(MANIFEST_FILE, entries)
+
+
 def main():
     input_file = ROOT / "Input" / "topic.txt"
 
@@ -362,7 +370,19 @@ def main():
     DEPTH_DIR.mkdir(parents=True, exist_ok=True)
 
     previous = read_previous_manifest()
-    manifest = []
+    current_numbers = {item["scene"] for item in prepared}
+
+    # Preserve old records for current scenes until each is checked.
+    # A preserved record is never trusted without reusable_depth validation.
+    manifest_by_scene = {
+        number: dict(entry)
+        for number, entry in previous.items()
+        if number in current_numbers and isinstance(entry, dict)
+    }
+
+    # Save the filtered manifest first. Removed scenes are not retained.
+    save_manifest(manifest_by_scene)
+
     estimator = None
     reused_count = 0
     generated_count = 0
@@ -373,6 +393,7 @@ def main():
     log("Scenes:", len(prepared))
     log("Device: CPU")
     log("Resume enabled: yes")
+    log("Checkpoint preservation: enabled")
     log("Output:", DEPTH_DIR.relative_to(ROOT))
     log("=" * 60)
 
@@ -382,7 +403,7 @@ def main():
 
         log(f"[{index}/{len(prepared)}] Scene {number}")
 
-        # Reuse only a validated map made from the exact same source image.
+        # Always validate the old record against the current source image.
         entry = reusable_depth(item, previous, Image)
 
         if entry is not None:
@@ -409,10 +430,9 @@ def main():
             )
             generated_count += 1
 
-        manifest.append(entry)
-
-        # Save every completed scene so a later failure can resume safely.
-        atomic_json(MANIFEST_FILE, manifest)
+        # Update only this scene; do not erase later scenes' checkpoints.
+        manifest_by_scene[number] = entry
+        save_manifest(manifest_by_scene)
 
         log(
             "Saved:",
@@ -423,11 +443,27 @@ def main():
             entry["size_bytes"],
         )
 
-    if len(manifest) != len(prepared):
+    final_manifest = [
+        manifest_by_scene[number]
+        for number in sorted(manifest_by_scene)
+    ]
+
+    if len(final_manifest) != len(prepared):
         raise RuntimeError(
             f"Depth map count mismatch: expected {len(prepared)}, "
-            f"completed {len(manifest)}"
+            f"completed {len(final_manifest)}"
         )
+
+    # Final validation: every manifest entry must point to a usable map
+    # generated from the currently selected source image.
+    for item in prepared:
+        number = item["scene"]
+        validated = reusable_depth(item, manifest_by_scene, Image)
+
+        if validated is None:
+            raise RuntimeError(
+                f"Final depth-map validation failed for scene {number}."
+            )
 
     log("=" * 60)
     log("DEPTH MAP GENERATION COMPLETE")
