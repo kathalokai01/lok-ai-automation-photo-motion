@@ -1,5 +1,3 @@
-
-
 #!/usr/bin/env python3
 """Centralized configuration parser for Input/topic.txt."""
 
@@ -10,6 +8,19 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+
+# Every supported provider is included in the fallback list.
+# The three providers selected in Input/topic.txt always come first.
+ALL_TTS_PROVIDERS = [
+    "fish_audio",
+    "gemini_tts",
+    "edge_tts",
+    "piper",
+    "elevenlabs",
+    "cartesia",
+    "finevoice",
+    "minimax",
+]
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "FORMAT": "full",
@@ -24,17 +35,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "SCENE_DURATION": "auto",
     "CAPTIONS": "hindi",
 
-    # TTS provider priority
+    # Main TTS models: change these in Input/topic.txt per story.
     "TTS_MAIN_1": "fish_audio",
     "TTS_MAIN_2": "gemini_tts",
     "TTS_MAIN_3": "edge_tts",
+
+    # Remaining providers follow this canonical order.
     "TTS_FALLBACK_ENABLED": True,
     "TTS_FALLBACK_ORDER": (
-        "piper,elevenlabs,cartesia,finevoice,minimax"
+        "fish_audio,gemini_tts,edge_tts,piper,"
+        "elevenlabs,cartesia,finevoice,minimax"
     ),
+
+    # Paid or uncertain-cost cloud providers remain disabled by default.
     "TTS_ALLOW_PAID": False,
 
-    # Chunking and resumability
+    # Chunking and resumability.
     "TTS_CHUNK_MAX_CHARS": 700,
     "TTS_CHUNK_MIN_CHARS": 150,
     "TTS_CHUNK_CHECKPOINT": True,
@@ -139,23 +155,26 @@ def _parse_scalar(key: str, value: str) -> Any:
     parsed = _unquote(value)
 
     if key in BOOL_KEYS:
-        lowered = parsed.lower()
+        lowered = str(parsed).lower()
+
         if lowered in {"true", "yes", "on", "1"}:
             return True
+
         if lowered in {"false", "no", "off", "0"}:
             return False
+
         raise ValueError(f"{key} must be true or false.")
 
     if key in INT_KEYS:
         try:
             return int(parsed)
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError(f"{key} must be an integer.") from exc
 
     if key in FLOAT_KEYS:
         try:
             return float(parsed)
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError(f"{key} must be a number.") from exc
 
     return parsed
@@ -166,8 +185,10 @@ def _find_assignment(line: str) -> Optional[tuple[str, str]]:
         r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$",
         line,
     )
+
     if not match:
         return None
+
     return match.group(1), match.group(2).strip()
 
 
@@ -183,8 +204,10 @@ def _read_multiline_value(
 
     if opening in remainder:
         first, _ = remainder.split(opening, 1)
+
         if first:
             content.append(first)
+
         return "\n".join(content).strip(), start_index + 1
 
     if remainder:
@@ -198,8 +221,10 @@ def _read_multiline_value(
 
         if position >= 0:
             before = current[:position]
+
             if before:
                 content.append(before)
+
             return "\n".join(content).strip(), index + 1
 
         content.append(current)
@@ -217,9 +242,14 @@ def load_input_config(
     file_path = Path(path)
 
     if not file_path.is_file():
-        raise FileNotFoundError(f"Input config not found: {file_path}")
+        raise FileNotFoundError(
+            f"Input config not found: {file_path}"
+        )
 
-    lines = file_path.read_text(encoding="utf-8-sig").splitlines()
+    lines = file_path.read_text(
+        encoding="utf-8-sig"
+    ).splitlines()
+
     index = 0
 
     while index < len(lines):
@@ -231,6 +261,7 @@ def load_input_config(
             continue
 
         assignment = _find_assignment(raw)
+
         if assignment is None:
             index += 1
             continue
@@ -289,7 +320,11 @@ def get_format(config: Dict[str, Any]) -> str:
     return normalize_format(config)
 
 
-def _positive_int(config: Dict[str, Any], key: str, default: int) -> int:
+def _positive_int(
+    config: Dict[str, Any],
+    key: str,
+    default: int,
+) -> int:
     try:
         value = int(config.get(key, default))
     except (TypeError, ValueError) as exc:
@@ -315,8 +350,10 @@ def get_fps(config: Dict[str, Any]) -> int:
 
 def get_max_retries(config: Dict[str, Any]) -> int:
     value = int(config.get("MAX_RETRIES", 3))
+
     if value < 0:
         raise ValueError("MAX_RETRIES cannot be negative.")
+
     return value
 
 
@@ -336,54 +373,104 @@ def has_story_input(config: Dict[str, Any]) -> bool:
     return bool(get_title_source(config))
 
 
-def get_tts_provider_order(config: Dict[str, Any]) -> List[str]:
-    """Return unique providers in the configured priority order."""
+def get_tts_provider_order(
+    config: Dict[str, Any],
+) -> List[str]:
+    """
+    Order providers as:
+    1. User-selected model 1
+    2. User-selected model 2
+    3. User-selected model 3
+    4. Remaining providers in TTS_FALLBACK_ORDER
+
+    Duplicate providers are removed while preserving order.
+    """
     main = [
-        str(config.get("TTS_MAIN_1", "fish_audio")).strip().lower(),
-        str(config.get("TTS_MAIN_2", "gemini_tts")).strip().lower(),
-        str(config.get("TTS_MAIN_3", "edge_tts")).strip().lower(),
+        str(config.get("TTS_MAIN_1", "")).strip().lower(),
+        str(config.get("TTS_MAIN_2", "")).strip().lower(),
+        str(config.get("TTS_MAIN_3", "")).strip().lower(),
     ]
 
-    fallback_enabled = bool(config.get("TTS_FALLBACK_ENABLED", True))
-    fallback_raw = str(config.get("TTS_FALLBACK_ORDER", ""))
+    if len(main) != 3 or any(not item for item in main):
+        raise ValueError(
+            "TTS_MAIN_1, TTS_MAIN_2 and TTS_MAIN_3 "
+            "must all contain provider names."
+        )
 
-    fallback = (
-        [item.strip().lower() for item in fallback_raw.split(",") if item.strip()]
-        if fallback_enabled else []
+    if len(set(main)) != 3:
+        raise ValueError(
+            "The three main TTS providers must be different. "
+            "Choose three distinct provider names."
+        )
+
+    allowed = set(ALL_TTS_PROVIDERS)
+
+    for provider in main:
+        if provider not in allowed:
+            raise ValueError(
+                f"Unsupported TTS provider: {provider}. "
+                f"Allowed: {', '.join(ALL_TTS_PROVIDERS)}"
+            )
+
+    fallback_enabled = bool(
+        config.get("TTS_FALLBACK_ENABLED", True)
     )
 
-    allowed = {
-        "fish_audio", "gemini_tts", "edge_tts", "piper",
-        "elevenlabs", "cartesia", "finevoice", "minimax",
-    }
+    fallback_raw = str(
+        config.get(
+            "TTS_FALLBACK_ORDER",
+            ",".join(ALL_TTS_PROVIDERS),
+        )
+    )
 
+    fallback = []
+
+    if fallback_enabled:
+        fallback = [
+            item.strip().lower()
+            for item in fallback_raw.split(",")
+            if item.strip()
+        ]
+
+    for provider in fallback:
+        if provider not in allowed:
+            raise ValueError(
+                f"Unsupported TTS fallback provider: {provider}"
+            )
+
+    # Keep the three chosen models first.
+    # Then append configured fallbacks without duplicates.
     result: List[str] = []
 
     for provider in main + fallback:
-        if provider not in allowed:
-            raise ValueError(f"Unsupported TTS provider: {provider}")
         if provider not in result:
             result.append(provider)
-
-    if len(main) != 3 or any(not item for item in main):
-        raise ValueError("All three main TTS providers must be configured.")
 
     return result
 
 
-def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
+def validate_config(
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
     normalize_format(config)
+
     config["PARTS"] = get_parts(config)
     config["SCENES"] = get_scenes(config)
     config["FPS"] = get_fps(config)
     config["MAX_RETRIES"] = get_max_retries(config)
 
     if not has_story_input(config):
-        raise ValueError("Either TOPIC or STORY_TEXT must be provided.")
+        raise ValueError(
+            "Either TOPIC or STORY_TEXT must be provided."
+        )
 
-    voice = str(config.get("VOICE", "male")).strip().lower()
+    voice = str(
+        config.get("VOICE", "male")
+    ).strip().lower()
+
     if voice not in {"male", "female"}:
         raise ValueError("VOICE must be 'male' or 'female'.")
+
     config["VOICE"] = voice
 
     for key in (
@@ -391,21 +478,34 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "TTS_CHUNK_MIN_CHARS",
         "TTS_MAX_PROVIDER_ATTEMPTS",
     ):
-        config[key] = _positive_int(config, key, DEFAULT_CONFIG[key])
+        config[key] = _positive_int(
+            config, key, DEFAULT_CONFIG[key]
+        )
 
-    if config["TTS_CHUNK_MIN_CHARS"] > config["TTS_CHUNK_MAX_CHARS"]:
+    if (
+        config["TTS_CHUNK_MIN_CHARS"]
+        > config["TTS_CHUNK_MAX_CHARS"]
+    ):
         raise ValueError(
-            "TTS_CHUNK_MIN_CHARS cannot exceed TTS_CHUNK_MAX_CHARS."
+            "TTS_CHUNK_MIN_CHARS cannot exceed "
+            "TTS_CHUNK_MAX_CHARS."
         )
 
     if config["TTS_MAX_PROVIDER_ATTEMPTS"] > 3:
-        raise ValueError("TTS_MAX_PROVIDER_ATTEMPTS cannot exceed 3.")
+        raise ValueError(
+            "TTS_MAX_PROVIDER_ATTEMPTS cannot exceed 3."
+        )
 
-    config["TTS_PROVIDER_ORDER"] = get_tts_provider_order(config)
+    config["TTS_ALLOW_PAID"] = bool(
+        config.get("TTS_ALLOW_PAID", False)
+    )
 
-    config["TTS_ALLOW_PAID"] = bool(config.get("TTS_ALLOW_PAID", False))
     config["TTS_FALLBACK_ENABLED"] = bool(
         config.get("TTS_FALLBACK_ENABLED", True)
+    )
+
+    config["TTS_PROVIDER_ORDER"] = get_tts_provider_order(
+        config
     )
 
     failure_policy = str(
@@ -413,21 +513,33 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     ).strip().lower()
 
     if failure_policy not in {
-        "retry_then_checkpoint", "skip", "stop"
+        "retry_then_checkpoint",
+        "skip",
+        "stop",
     }:
         raise ValueError(
-            "FAILURE_POLICY must be retry_then_checkpoint, skip, or stop."
+            "FAILURE_POLICY must be "
+            "retry_then_checkpoint, skip, or stop."
         )
 
     config["FAILURE_POLICY"] = failure_policy
-    config["CAPTIONS"] = str(config.get("CAPTIONS", "hindi")).strip().lower()
-    config["QUALITY"] = str(config.get("QUALITY", "high")).strip().lower()
+
+    config["CAPTIONS"] = str(
+        config.get("CAPTIONS", "hindi")
+    ).strip().lower()
+
+    config["QUALITY"] = str(
+        config.get("QUALITY", "high")
+    ).strip().lower()
+
     config["VISUAL_STYLE"] = str(
         config.get("VISUAL_STYLE", "cinematic_realistic")
     ).strip()
+
     config["STORY_LENGTH"] = str(
         config.get("STORY_LENGTH", "auto")
     ).strip()
+
     config["SCENE_DURATION"] = str(
         config.get("SCENE_DURATION", "auto")
     ).strip()
@@ -441,7 +553,9 @@ def load_and_validate(
     return validate_config(load_input_config(path))
 
 
-def get_config_summary(config: Dict[str, Any]) -> Dict[str, Any]:
+def get_config_summary(
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
     return {
         "FORMAT": get_format(config),
         "TOPIC": get_topic(config),
@@ -456,7 +570,9 @@ def get_config_summary(config: Dict[str, Any]) -> Dict[str, Any]:
         "STORY_LENGTH": str(config.get("STORY_LENGTH", "")),
         "SCENE_DURATION": str(config.get("SCENE_DURATION", "")),
         "FAILURE_POLICY": str(config.get("FAILURE_POLICY", "")),
-        "RESUME_ENABLED": bool(config.get("RESUME_ENABLED", True)),
+        "RESUME_ENABLED": bool(
+            config.get("RESUME_ENABLED", True)
+        ),
         "SAVE_CHECKPOINT_AFTER_EACH_SCENE": bool(
             config.get("SAVE_CHECKPOINT_AFTER_EACH_SCENE", True)
         ),
@@ -464,13 +580,21 @@ def get_config_summary(config: Dict[str, Any]) -> Dict[str, Any]:
             config.get("SKIP_COMPLETED_SCENES", True)
         ),
         "TTS_PROVIDER_ORDER": get_tts_provider_order(config),
-        "TTS_ALLOW_PAID": bool(config.get("TTS_ALLOW_PAID", False)),
-        "TTS_CHUNK_MAX_CHARS": int(config.get("TTS_CHUNK_MAX_CHARS", 700)),
-        "TTS_CHUNK_CHECKPOINT": bool(config.get("TTS_CHUNK_CHECKPOINT", True)),
+        "TTS_ALLOW_PAID": bool(
+            config.get("TTS_ALLOW_PAID", False)
+        ),
+        "TTS_CHUNK_MAX_CHARS": int(
+            config.get("TTS_CHUNK_MAX_CHARS", 700)
+        ),
+        "TTS_CHUNK_CHECKPOINT": bool(
+            config.get("TTS_CHUNK_CHECKPOINT", True)
+        ),
     }
 
 
-def print_config_summary(config: Dict[str, Any]) -> None:
+def print_config_summary(
+    config: Dict[str, Any],
+) -> None:
     print("==============================================")
     print("INPUT CONFIG")
     print("==============================================")
@@ -484,12 +608,18 @@ def print_config_summary(config: Dict[str, Any]) -> None:
 if __name__ == "__main__":
     import sys
 
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "Input/topic.txt"
+    config_path = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else "Input/topic.txt"
+    )
 
     try:
         config = load_and_validate(config_path)
         print_config_summary(config)
         print("INPUT CONFIG VALIDATION: OK")
     except Exception as exc:
-        print(f"INPUT CONFIG VALIDATION: FAILED: {exc}")
+        print(
+            f"INPUT CONFIG VALIDATION: FAILED: {exc}"
+        )
         raise
