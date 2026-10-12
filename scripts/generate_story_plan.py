@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Create a validated, deterministic story/part/scene plan."""
 
 import json
 from pathlib import Path
@@ -29,47 +30,54 @@ def as_bool(config, key, default=True):
     if text in {"false", "no", "off", "0"}:
         return False
 
-    return bool(default)
+    return default
 
 
 def as_text(config, key, default=""):
     value = config.get(key, default)
+    return str(default if value is None else value).strip()
 
-    if value is None:
-        return str(default)
 
-    return str(value).strip()
+def positive_int(value, name):
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer.") from exc
+
+    if result < 1:
+        raise ValueError(f"{name} must be greater than zero.")
+
+    return result
 
 
 def main():
-    # LOAD AND VALIDATE INPUT
     config = load_and_validate()
 
     format_type = get_format(config)
     topic = get_topic(config)
     story_text = get_story_text(config)
 
-    parts = get_parts(config)
-    scenes_per_part = get_scenes(config)
+    parts_count = positive_int(get_parts(config), "PARTS")
+    scenes_per_part = positive_int(get_scenes(config), "SCENES")
+    total_scenes = parts_count * scenes_per_part
 
     story_length = as_text(config, "STORY_LENGTH", "auto")
     scene_duration = as_text(config, "SCENE_DURATION", "auto")
     audience = as_text(config, "AUDIENCE", "adult")
     caption_mode = as_text(config, "CAPTIONS", "hindi").lower()
 
-    # STORY STRUCTURE
     part_hook = as_bool(config, "PART_HOOK", True)
     part_suspense = as_bool(config, "PART_SUSPENSE", True)
     final_resolution = as_bool(config, "FINAL_RESOLUTION", True)
 
-    # CHARACTER AND WORLD CONTINUITY
     character_bible = as_bool(config, "CHARACTER_BIBLE", True)
     character_consistency = as_bool(config, "CHARACTER_CONSISTENCY", True)
     world_consistency = as_bool(config, "WORLD_CONSISTENCY", True)
     scene_continuity = as_bool(config, "SCENE_CONTINUITY", True)
 
-    # VISUAL SETTINGS
-    visual_style = as_text(config, "VISUAL_STYLE", "cinematic_realistic")
+    visual_style = as_text(
+        config, "VISUAL_STYLE", "cinematic_realistic"
+    )
     realism = as_text(config, "REALISM", "high")
     camera_style = as_text(config, "CAMERA_STYLE", "cinematic")
     cinematic_camera = as_bool(config, "CINEMATIC_CAMERA", True)
@@ -79,26 +87,18 @@ def main():
     quality = as_text(config, "QUALITY", "high")
     natural_motion = as_bool(config, "NATURAL_MOTION", True)
 
-    # NEGATIVE PROMPTS
     negative_prompt_enabled = as_bool(config, "NEGATIVE_PROMPT", True)
     avoid_cartoon = as_bool(config, "AVOID_CARTOON_LOOK", True)
     avoid_neon = as_bool(config, "AVOID_NEON", True)
     avoid_glitch = as_bool(config, "AVOID_GLITCH_EFFECTS", True)
 
-    # AUDIO
     music_enabled = as_bool(config, "MUSIC", True)
     music_style = as_text(config, "MUSIC_STYLE", "cinematic")
     sfx_enabled = as_bool(config, "SFX", True)
     ambient_enabled = as_bool(config, "AMBIENT_SOUND", True)
     transitions = as_text(config, "TRANSITIONS", "cinematic")
+    fps = positive_int(config.get("FPS", 24), "FPS")
 
-    try:
-        fps = int(config.get("FPS", 24))
-    except (TypeError, ValueError):
-        fps = 24
-
-    # EVERY STORY STARTS WITH A HOOK.
-    # FINAL SCENE RESERVES A SUSPENSE BEAT.
     scene_roles_full = [
         "opening hook: begin inside a mysterious, emotional, dangerous, or surprising moment",
         "essential setup after the hook",
@@ -110,7 +110,7 @@ def main():
         "show consequences and emotional impact",
         "prepare the climax and reveal what is at risk",
         "resolve the main conflict with a satisfying payoff",
-        "final suspense hook: after resolving the main conflict, reveal a new question, threat, or unexpected clue",
+        "final suspense hook: reveal a new question, threat, or unexpected clue",
     ]
 
     scene_roles_short = [
@@ -127,11 +127,7 @@ def main():
         "final suspense hook: end on a new unanswered question, reveal, or imminent threat",
     ]
 
-    scene_roles = (
-        scene_roles_short
-        if format_type == "short"
-        else scene_roles_full
-    )
+    roles = scene_roles_short if format_type == "short" else scene_roles_full
 
     plan = {
         "status": "planned",
@@ -142,17 +138,19 @@ def main():
         "audience": audience,
         "story_length": story_length,
         "scene_duration": scene_duration,
-        "parts_count": parts,
+        "parts_count": parts_count,
         "scenes_per_part": scenes_per_part,
-        "total_scenes": parts * scenes_per_part,
+        "total_scenes": total_scenes,
         "caption_mode": caption_mode,
+        "mapping_version": 2,
+        "scene_order": "part_then_scene",
         "parts": [],
         "generation_notes": {
             "part_hook": part_hook,
             "part_suspense": part_suspense,
             "final_resolution": final_resolution,
             "opening_hook_required": True,
-            "final_scene_suspense_required": True,
+            "final_scene_suspense_required": part_suspense,
             "resolve_main_conflict_before_final_suspense": True,
             "character_bible": character_bible,
             "character_consistency": character_consistency,
@@ -180,47 +178,45 @@ def main():
         },
     }
 
-    # BUILD PARTS AND SCENES
-    for part_no in range(1, parts + 1):
+    global_scene_number = 0
+
+    for part_no in range(1, parts_count + 1):
         part = {
             "part": part_no,
+            "part_id": f"part_{part_no:02d}",
             "hook_required": part_hook,
-            # Suspense is enabled for the final part too.
             "suspense_required": part_suspense,
             "final_resolution": (
-                final_resolution and part_no == parts
+                final_resolution and part_no == parts_count
             ),
             "final_suspense_required": (
-                part_suspense and part_no == parts
+                part_suspense and part_no == parts_count
             ),
+            "expected_scene_count": scenes_per_part,
             "scenes": [],
         }
 
         for scene_no in range(1, scenes_per_part + 1):
-            role = scene_roles[
-                min(scene_no - 1, len(scene_roles) - 1)
-            ]
-
-            is_first_scene = scene_no == 1
-            is_final_scene = scene_no == scenes_per_part
+            global_scene_number += 1
+            role = roles[min(scene_no - 1, len(roles) - 1)]
+            is_first = scene_no == 1
+            is_last = scene_no == scenes_per_part
+            is_final_story_scene = (
+                part_no == parts_count and is_last
+            )
 
             scene = {
                 "scene": scene_no,
+                "scene_id": f"part_{part_no:02d}_scene_{scene_no:02d}",
+                "global_scene_number": global_scene_number,
+                "part": part_no,
                 "status": "pending",
                 "role": role,
-                "opening_hook_required": (
-                    part_hook and is_first_scene
-                ),
-                "suspense_required": (
-                    part_suspense and is_final_scene
-                ),
-                "final_story_scene": (
-                    part_no == parts and is_final_scene
-                ),
+                "opening_hook_required": part_hook and is_first,
+                "suspense_required": part_suspense and is_last,
+                "final_story_scene": is_final_story_scene,
                 "resolve_main_conflict_before_suspense": (
-                    final_resolution
-                    and part_no == parts
-                    and is_final_scene
+                    final_resolution and is_final_story_scene
                 ),
                 "narration": "",
                 "visual_prompt": "",
@@ -241,9 +237,65 @@ def main():
 
             part["scenes"].append(scene)
 
+        if len(part["scenes"]) != scenes_per_part:
+            raise RuntimeError(
+                f"Part {part_no} scene count mismatch."
+            )
+
         plan["parts"].append(part)
 
-    # WRITE PLAN
+    # Validate all part/scene IDs before writing.
+    seen_ids = set()
+    seen_global_numbers = set()
+
+    for expected_part, part in enumerate(plan["parts"], start=1):
+        if part["part"] != expected_part:
+            raise RuntimeError("Part ordering validation failed.")
+
+        if len(part["scenes"]) != scenes_per_part:
+            raise RuntimeError(
+                f"Part {expected_part} does not have exactly "
+                f"{scenes_per_part} scenes."
+            )
+
+        for expected_scene, scene in enumerate(
+            part["scenes"], start=1
+        ):
+            expected_id = (
+                f"part_{expected_part:02d}_scene_{expected_scene:02d}"
+            )
+
+            if scene["part"] != expected_part:
+                raise RuntimeError(
+                    f"Wrong part mapping for {expected_id}."
+                )
+
+            if scene["scene"] != expected_scene:
+                raise RuntimeError(
+                    f"Wrong scene order for {expected_id}."
+                )
+
+            if scene["scene_id"] != expected_id:
+                raise RuntimeError(
+                    f"Invalid scene ID: {scene['scene_id']}."
+                )
+
+            if scene["scene_id"] in seen_ids:
+                raise RuntimeError(
+                    f"Duplicate scene ID: {scene['scene_id']}."
+                )
+
+            if scene["global_scene_number"] in seen_global_numbers:
+                raise RuntimeError("Duplicate global scene number.")
+
+            seen_ids.add(scene["scene_id"])
+            seen_global_numbers.add(scene["global_scene_number"])
+
+    if len(seen_ids) != total_scenes:
+        raise RuntimeError(
+            f"Expected {total_scenes} scenes, found {len(seen_ids)}."
+        )
+
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(
         json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
@@ -251,24 +303,18 @@ def main():
     )
 
     print("=" * 60)
-    print("STORY PLAN CREATED")
+    print("STORY PLAN CREATED AND VALIDATED")
     print("=" * 60)
-    print(f"Output           : {OUT}")
-    print(f"Format           : {format_type}")
-    print(f"Topic            : {topic}")
-    print(f"Story text       : {'provided' if story_text else 'not provided'}")
-    print(f"Audience         : {audience}")
-    print(f"Story length     : {story_length}")
-    print(f"Scene duration   : {scene_duration}")
-    print(f"Parts            : {parts}")
-    print(f"Scenes per part  : {scenes_per_part}")
-    print(f"Total scenes     : {parts * scenes_per_part}")
-    print(f"Opening hook     : {part_hook}")
-    print(f"Part suspense    : {part_suspense}")
-    print(f"Final suspense   : {part_suspense}")
-    print(f"Final resolution : {final_resolution}")
-    print(f"Visual style     : {visual_style}")
-    print(f"Realism          : {realism}")
+    print(f"Output            : {OUT}")
+    print(f"Format            : {format_type}")
+    print(f"Topic             : {topic or '(using story text)'}")
+    print(f"Story text        : {'provided' if story_text else 'not provided'}")
+    print(f"Parts             : {parts_count}")
+    print(f"Scenes per part   : {scenes_per_part}")
+    print(f"Expected total    : {total_scenes}")
+    print(f"Validated IDs     : {len(seen_ids)}")
+    print(f"Mapping version   : {plan['mapping_version']}")
+    print("Part/scene mapping: PASS")
     print("=" * 60)
 
 
