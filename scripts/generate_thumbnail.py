@@ -1,7 +1,10 @@
 
 #!/usr/bin/env python3
-"""Generate validated landscape and vertical Katha Lok AI thumbnails."""
+"""Generate one validated, topic-based thumbnail for the requested format."""
 
+from __future__ import annotations
+
+import hashlib
 import json
 import re
 import sys
@@ -10,6 +13,10 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from input_config import load_and_validate, get_format, get_title_source
+
 OUTPUT = ROOT / "output"
 TOPIC_FILE = ROOT / "Input" / "topic.txt"
 VISUAL_JOBS = OUTPUT / "visuals" / "visual_jobs.json"
@@ -17,72 +24,55 @@ IMAGE_MANIFEST = OUTPUT / "visuals" / "image_manifest.json"
 TITLE_FILE = OUTPUT / "story" / "final_title.txt"
 
 THUMB_DIR = OUTPUT / "thumbnail"
-LANDSCAPE = THUMB_DIR / "thumbnail_1280x720.jpg"
-VERTICAL = THUMB_DIR / "thumbnail_1080x1920.jpg"
+THUMBNAIL = OUTPUT / "thumbnail.jpg"
 MANIFEST = THUMB_DIR / "thumbnail_manifest.json"
-
-# Also create the common paths checked by the workflow.
-LANDSCAPE_ALIASES = [
-    OUTPUT / "thumbnail.jpg",
-    OUTPUT / "thumbnail_16_9.jpg",
-]
-VERTICAL_ALIASES = [
-    OUTPUT / "thumbnail_vertical.jpg",
-]
-
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def fail(message):
+    raise RuntimeError(message)
 
 
 def read_json(path):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        print(f"WARNING: Could not read {path}: {exc}")
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
         return None
 
 
-def load_topic():
-    if not TOPIC_FILE.is_file():
-        raise RuntimeError(f"Missing input file: {TOPIC_FILE}")
-
-    for line in TOPIC_FILE.read_text(encoding="utf-8-sig").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-
-        if "=" in line:
-            key, value = line.split("=", 1)
-            if key.strip().upper() not in {"TOPIC", "TITLE", "STORY_TOPIC"}:
-                continue
-            value = value.split("#", 1)[0].strip().strip("'\"")
-        else:
-            value = line.strip().strip("'\"")
-
-        if value:
-            return re.sub(r"\s+", " ", value)[:300]
-
-    raise RuntimeError("No topic found in Input/topic.txt")
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def load_title(topic):
+def clean_text(value, limit=300):
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def load_title(config):
     if TITLE_FILE.is_file():
-        try:
-            title = TITLE_FILE.read_text(encoding="utf-8-sig").strip()
-            if title:
-                return re.sub(r"\s+", " ", title.splitlines()[0])[:160]
-        except OSError as exc:
-            print(f"WARNING: Could not read story title: {exc}")
-    return topic
+        title = clean_text(
+            TITLE_FILE.read_text(encoding="utf-8-sig").splitlines()[0],
+            160,
+        )
+        if title:
+            return title
+
+    return clean_text(get_title_source(config), 160)
 
 
-def get_rows(data):
+def rows_from(data):
     if isinstance(data, list):
         return data
+
     if isinstance(data, dict):
         for key in ("scenes", "jobs", "visuals", "items"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return value
+            if isinstance(data.get(key), list):
+                return data[key]
+
     return []
 
 
@@ -112,56 +102,50 @@ def resolve_image(value):
 
 
 def choose_source_image():
+    candidates = []
+
     for manifest_path in (IMAGE_MANIFEST, VISUAL_JOBS):
         data = read_json(manifest_path)
-        candidates = []
 
-        for row in get_rows(data):
+        for row in rows_from(data):
             if not isinstance(row, dict):
                 continue
 
             status = str(row.get("status", "")).lower()
             if status and status not in {
                 "completed", "complete", "success", "done",
-                "generated", "ready"
+                "generated", "ready", "reused"
             }:
                 continue
 
+            image_path = None
             for key in ("image_path", "image", "asset_path", "image_file"):
-                candidate = resolve_image(row.get(key))
-                if candidate:
-                    candidates.append(candidate)
+                image_path = resolve_image(row.get(key))
+                if image_path:
                     break
 
-        for path in candidates:
-            try:
-                with Image.open(path) as image:
-                    image.verify()
-                with Image.open(path) as image:
-                    if image.width >= 64 and image.height >= 64:
-                        return path
-            except Exception as exc:
-                print(f"WARNING: Skipping invalid image {path}: {exc}")
+            if image_path and image_path not in candidates:
+                candidates.append(image_path)
 
-    # Fallback to numbered scene images only.
     visual_dir = OUTPUT / "visuals"
     if visual_dir.is_dir():
         for path in sorted(visual_dir.glob("scene_*")):
             candidate = resolve_image(str(path))
-            if not candidate:
-                continue
-            try:
-                with Image.open(candidate) as image:
-                    image.verify()
-                with Image.open(candidate) as image:
-                    if image.width >= 64 and image.height >= 64:
-                        return candidate
-            except Exception:
-                continue
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
 
-    raise RuntimeError(
-        "No valid scene image found. Check image_manifest.json and visual_jobs.json."
-    )
+    for path in candidates:
+        try:
+            with Image.open(path) as image:
+                image.verify()
+
+            with Image.open(path) as image:
+                if image.width >= 64 and image.height >= 64:
+                    return path
+        except Exception as exc:
+            print(f"WARNING: Skipping invalid image {path.name}: {exc}")
+
+    fail("No valid generated scene image is available for the thumbnail.")
 
 
 def find_font(size):
@@ -172,19 +156,19 @@ def find_font(size):
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     ]
-    for filename in candidates:
+
+    for path in candidates:
         try:
-            return ImageFont.truetype(filename, size=size)
+            return ImageFont.truetype(path, size=size)
         except OSError:
-            continue
-    try:
-        return ImageFont.truetype("DejaVuSans.ttf", size=size)
-    except OSError:
-        return ImageFont.load_default()
+            pass
+
+    return ImageFont.load_default()
 
 
 def crop_to_ratio(image, ratio):
     width, height = image.size
+
     if width / height > ratio:
         new_width = max(1, round(height * ratio))
         left = (width - new_width) // 2
@@ -196,15 +180,17 @@ def crop_to_ratio(image, ratio):
 
 
 def wrap_text(draw, text, font, max_width):
-    words = text.split()
     lines = []
     current = ""
 
-    for word in words:
-        proposed = word if not current else current + " " + word
-        bounds = draw.textbbox((0, 0), proposed, font=font, stroke_width=2)
+    for word in text.split():
+        candidate = word if not current else current + " " + word
+        bounds = draw.textbbox(
+            (0, 0), candidate, font=font, stroke_width=2
+        )
+
         if bounds[2] - bounds[0] <= max_width:
-            current = proposed
+            current = candidate
         else:
             if current:
                 lines.append(current)
@@ -212,168 +198,167 @@ def wrap_text(draw, text, font, max_width):
 
     if current:
         lines.append(current)
+
     return lines or ["Katha Lok AI"]
 
 
-def render_thumbnail(source, title, size, destination):
+def render_thumbnail(source, title, mode, destination):
+    size = (1080, 1920) if mode == "short" else (1280, 720)
+    ratio = size[0] / size[1]
+
     with Image.open(source) as original:
         image = original.convert("RGB")
 
-    image = crop_to_ratio(image, size[0] / size[1])
-    image = image.resize(size, Image.Resampling.LANCZOS)
+    image = crop_to_ratio(image, ratio).resize(
+        size, Image.Resampling.LANCZOS
+    )
 
     width, height = size
-    panel_height = int(height * (0.42 if width > height else 0.31))
+    panel_height = int(height * (0.34 if mode == "short" else 0.43))
 
-    overlay = Image.new("RGBA", (width, panel_height), (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
+    base = image.convert("RGBA")
+    overlay = Image.new("RGBA", (width, panel_height))
+    draw_overlay = ImageDraw.Draw(overlay)
 
     for y in range(panel_height):
-        alpha = int(210 * (1 - y / max(1, panel_height)))
-        overlay_draw.line(
+        alpha = int(220 * (1 - y / max(1, panel_height)))
+        draw_overlay.line(
             (0, y, width, y),
             fill=(0, 0, 0, alpha),
         )
 
-    base = image.convert("RGBA")
     base.alpha_composite(overlay, (0, 0))
     image = base.convert("RGB")
     draw = ImageDraw.Draw(image)
 
-    font_size = max(26, width // (15 if height > width else 18))
-    font = find_font(font_size)
-    max_text_width = int(width * 0.86)
-    lines = wrap_text(draw, title, font, max_text_width)
+    font_size = max(26, width // (17 if mode == "short" else 18))
+    max_width = int(width * 0.86)
 
-    while len(lines) > 4 and font_size > 20:
-        font_size -= 2
+    while True:
         font = find_font(font_size)
-        lines = wrap_text(draw, title, font, max_text_width)
+        lines = wrap_text(draw, title, font, max_width)
+        if len(lines) <= 4 or font_size <= 22:
+            break
+        font_size -= 2
 
     if len(lines) > 4:
         lines = lines[:4]
         lines[-1] = lines[-1].rstrip() + "…"
 
-    spacing = max(4, font_size // 6)
-    heights = []
-    for line in lines:
-        box = draw.textbbox((0, 0), line, font=font, stroke_width=2)
-        heights.append(max(1, box[3] - box[1]))
+    spacing = max(5, font_size // 6)
+    line_sizes = []
 
-    total_height = sum(heights) + spacing * max(0, len(lines) - 1)
+    for line in lines:
+        bounds = draw.textbbox((0, 0), line, font=font, stroke_width=2)
+        line_sizes.append(max(1, bounds[3] - bounds[1]))
+
+    total_height = sum(line_sizes) + spacing * (len(lines) - 1)
     y = max(12, (panel_height - total_height) // 2)
 
-    for line, line_height in zip(lines, heights):
+    for line, line_height in zip(lines, line_sizes):
         bounds = draw.textbbox((0, 0), line, font=font, stroke_width=2)
         text_width = bounds[2] - bounds[0]
         x = max(8, (width - text_width) // 2)
 
         draw.text(
-            (x + 3, y + 3),
-            line,
-            font=font,
-            fill="black",
-            stroke_width=5,
-            stroke_fill="black",
+            (x + 3, y + 3), line, font=font,
+            fill="black", stroke_width=5, stroke_fill="black",
         )
         draw.text(
-            (x, y),
-            line,
-            font=font,
-            fill="white",
-            stroke_width=2,
-            stroke_fill="black",
+            (x, y), line, font=font,
+            fill="white", stroke_width=2, stroke_fill="black",
         )
         y += line_height + spacing
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    image.save(destination, "JPEG", quality=92, optimize=True)
+    temp = destination.with_name(destination.stem + ".tmp.jpg")
 
-    with Image.open(destination) as check:
-        check.verify()
+    try:
+        image.save(temp, "JPEG", quality=92, optimize=True)
 
-    if destination.stat().st_size < 1000:
-        raise RuntimeError(f"Thumbnail is unexpectedly small: {destination}")
+        with Image.open(temp) as check:
+            check.verify()
 
-    with Image.open(destination) as check:
-        if check.size != size:
-            raise RuntimeError(
-                f"Wrong thumbnail dimensions in {destination}: {check.size}"
-            )
+        with Image.open(temp) as check:
+            if check.size != size:
+                fail(f"Thumbnail dimensions incorrect: {check.size}")
 
+        if temp.stat().st_size < 1000:
+            fail("Generated thumbnail is unexpectedly small.")
 
-def copy_alias(source, destination):
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with Image.open(source) as image:
-        image.convert("RGB").save(
-            destination, "JPEG", quality=92, optimize=True
-        )
-
-    with Image.open(destination) as check:
-        check.verify()
-
-    if destination.stat().st_size < 1000:
-        raise RuntimeError(f"Thumbnail alias is invalid: {destination}")
+        temp.replace(destination)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def main():
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    config = load_and_validate(TOPIC_FILE)
+    mode = get_format(config)
+    title = load_title(config)
 
-    topic = load_topic()
-    title = load_title(topic)
+    if not title:
+        fail("A topic-based title is required.")
+
     source = choose_source_image()
+    source_hash = sha256_file(source)
+    title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()
+    size = (1080, 1920) if mode == "short" else (1280, 720)
 
-    print("===== KATHA LOK AI THUMBNAILS =====")
-    print("Topic:", topic)
-    print("Thumbnail title:", title)
-    print("Source image:", source)
+    previous = read_json(MANIFEST)
+    can_reuse = (
+        isinstance(previous, dict)
+        and previous.get("status") == "completed"
+        and previous.get("format") == mode
+        and previous.get("title_sha256") == title_hash
+        and previous.get("source_sha256") == source_hash
+        and previous.get("path") == str(THUMBNAIL.relative_to(ROOT))
+        and THUMBNAIL.is_file()
+    )
 
-    render_thumbnail(source, title, (1280, 720), LANDSCAPE)
-    render_thumbnail(source, title, (1080, 1920), VERTICAL)
+    if can_reuse:
+        try:
+            with Image.open(THUMBNAIL) as image:
+                image.verify()
+            with Image.open(THUMBNAIL) as image:
+                can_reuse = image.size == size
+        except Exception:
+            can_reuse = False
 
-    for alias in LANDSCAPE_ALIASES:
-        copy_alias(LANDSCAPE, alias)
-    for alias in VERTICAL_ALIASES:
-        copy_alias(VERTICAL, alias)
+    if can_reuse:
+        print("Reusing validated thumbnail; no regeneration needed.")
+    else:
+        render_thumbnail(source, title, mode, THUMBNAIL)
+
+    with Image.open(THUMBNAIL) as image:
+        image.verify()
 
     result = {
         "status": "completed",
-        "topic": topic,
+        "format": mode,
         "title": title,
+        "title_sha256": title_hash,
         "source_visual": str(source.relative_to(ROOT)),
-        "thumbnails": [
-            {
-                "type": "16:9",
-                "width": 1280,
-                "height": 720,
-                "path": str(LANDSCAPE.relative_to(ROOT)),
-                "size_bytes": LANDSCAPE.stat().st_size,
-            },
-            {
-                "type": "9:16",
-                "width": 1080,
-                "height": 1920,
-                "path": str(VERTICAL.relative_to(ROOT)),
-                "size_bytes": VERTICAL.stat().st_size,
-            },
-        ],
-        "workflow_aliases": [
-            str(path.relative_to(ROOT))
-            for path in LANDSCAPE_ALIASES + VERTICAL_ALIASES
-        ],
+        "source_sha256": source_hash,
+        "path": str(THUMBNAIL.relative_to(ROOT)),
+        "width": size[0],
+        "height": size[1],
+        "size_bytes": THUMBNAIL.stat().st_size,
+        "reused": bool(can_reuse),
     }
 
-    MANIFEST.write_text(
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    temp_manifest = MANIFEST.with_suffix(".json.tmp")
+    temp_manifest.write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    temp_manifest.replace(MANIFEST)
 
-    print("Landscape thumbnail:", LANDSCAPE)
-    print("Vertical thumbnail:", VERTICAL)
-    print("Workflow-compatible aliases created.")
-    print("Manifest:", MANIFEST)
     print("THUMBNAIL GENERATION SUCCESS")
+    print("Format:", mode)
+    print("Dimensions:", f"{size[0]}x{size[1]}")
+    print("Thumbnail:", THUMBNAIL.relative_to(ROOT))
+    print("Manifest:", MANIFEST.relative_to(ROOT))
 
 
 if __name__ == "__main__":
