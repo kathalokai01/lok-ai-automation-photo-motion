@@ -2,60 +2,96 @@
 # VIDEO FORMAT & AUDIENCE
 # ============================================================
 
-FORMAT = "short"                  # short = 9:16 vertical ~1 min | full = 16:9 long-form video
-AUDIENCE = "adult"                # adult = बड़ों के लिए | kids = बच्चों के लिए
+FORMAT = "short"                  # short = vertical | full = long-form
+AUDIENCE = "adult"                # adult | kids
 
 
 # ============================================================
 # VOICE / NARRATION
 # ============================================================
 
-VOICE = "male"                    # male = पुरुष voice | female = महिला voice
-SPEED = "+0%"                     # -10% = धीमी | 0% = normal | +10% = तेज
+VOICE = "male"                    # male | female
+SPEED = "+0%"                     # -10% slow | 0% normal | +10% fast
+
+
+# ============================================================
+# TTS MODEL SELECTION — CHANGE THESE THREE FOR EACH NEW STORY
+# ============================================================
+
+TTS_MAIN_1 = "fish_audio"
+TTS_MAIN_2 = "gemini_tts"
+TTS_MAIN_3 = "edge_tts"
+
+# पहले ऊपर चुने गए तीनों मॉडल चलेंगे।
+# फिर नीचे की सूची से बाकी मॉडल उसी क्रम में चलेंगे।
+# ऊपर चुने मॉडल दोबारा नहीं चलाए जाएँगे।
+
+TTS_FALLBACK_ENABLED = true
+
+TTS_FALLBACK_ORDER = "fish_audio,gemini_tts,edge_tts,piper,elevenlabs,cartesia,finevoice,minimax"
+
+
+# सभी TTS model = fish_audio,gemini_tts,edge_tts,piper,elevenlabs,cartesia,finevoice,minimax. 
+
+# false = paid/अनिश्चित लागत वाले cloud TTS APIs बंद
+# true करने से पहले संभावित शुल्क की अनुमति स्वयं दें।
+TTS_ALLOW_PAID = false
+
+# लंबी narration को छोटे audio chunks में बाँटना
+TTS_CHUNK_MAX_CHARS = 500
+TTS_CHUNK_MIN_CHARS = 150
+
+# प्रत्येक सफल chunk के बाद checkpoint
+TTS_CHUNK_CHECKPOINT = true
+TTS_VALIDATE_AUDIO = true
+
+# प्रति provider अधिकतम attempts
+TTS_MAX_PROVIDER_ATTEMPTS = 1
 
 
 # ============================================================
 # STORY INPUT
 # ============================================================
 
-TOPIC = ""        # नया story topic; STORY_TEXT खाली होने पर इसी से कहानी बनेगी
+TOPIC = ""        # TOPIC भरें तो उसी विषय पर कहानी बनेगी
 
-STORY_TEXT = """ 
+STORY_TEXT = """
 आत्माराम – ईमान की कीमत
 
 एक छोटा सा गाँव था, जहाँ की तंग गलियों और मिट्टी के घरों में ज़िंदगी बहुत धीमी रफ़्तार से चलती थी। इसी गाँव में आत्माराम रहता था। वह एक ऐसा युवक था, जिसकी जेबें हमेशा खाली रहती थीं, लेकिन उसका चरित्र पहाड़ों से भी ज़्यादा मजबूत था। गाँव के लोग उसकी ईमानदारी की मिसाल देते थे। आत्माराम मेहनत मजदूरी करता, जो कुछ भी रूखा-सूखा मिलता, उसे भगवान का आशीर्वाद मानकर स्वीकार कर लेता। लेकिन गरीबी एक ऐसी परछाई है, जो इंसान का पीछा कभी नहीं छोड़ती।
+
 एक शाम, जब आसमान में काले बादल छाए थे और रिमझिम बारिश हो रही थी, आत्माराम को एक ऐसा काम मिला जिसने उसकी पूरी दुनिया हिलाकर रख दी। गाँव के एक रसूखदार और चालाक ठेकेदार ने उसे एक काम सौंपा। काम बहुत आसान था—बस एक सरकारी ज़मीन के कागज़ात पर झूठी गवाही देनी थी और एक गलत जगह अंगूठा लगाना था। इस छोटे से काम के बदले ठेकेदार ने उसके सामने नोटों की एक गड्डी रख दी। इतनी बड़ी रकम, जिससे आत्माराम की गरीबी एक झटके में दूर हो सकती थी। आत्माराम के मन में पहली बार लालच ने दस्तक दी। बिना मेहनत के इतना सारा पैसा देखकर उसका हाथ काँपने लगा।
+
 रात गहरी हो चुकी थी, लेकिन आत्माराम की आँखों से नींद कोसों दूर थी। वह अपने कच्चे घर की खाट पर लेटा हुआ था। कमरे में जलती हुई मोमबत्ती की लौ हवा के झोंकों से काँप रही थी, ठीक उसी तरह जैसे आत्माराम का मन डोल रहा था। उसके दिमाग में एक भयंकर युद्ध चल रहा था। एक तरफ वह पैसा था जो उसकी माँ की बीमारी और घर की तंगहाली को दूर कर सकता था, और दूसरी तरफ उसका ज़मीर था। तभी अचानक उसके कानों में अपने स्वर्गीय पिता की आवाज़ गूंज उठी, जो हमेशा कहा करते थे—"बेटा, ईमानदारी से कमाया हुआ थोड़ा भी बहुत होता है, लेकिन बेईमानी का समंदर भी इंसान को डुबो देता है।" उसकी आत्मा और लालच के बीच रात भर यह मानसिक युद्ध चलता रहा।
+
 सुबह की पहली किरण के साथ ही आत्माराम ने एक बड़ा फैसला ले लिया था। वह सीधे उस अंधेरे और संदेहास्पद ठिकाने पर पहुँचा जहाँ ठेकेदार अपने कुछ गुर्गों के साथ बैठा हुआ था। ठेकेदार ने मुस्कुराते हुए फिर से पैसों की गड्डी आगे बढ़ाई और कहा, "लो आत्माराम, साइन करो और अपनी किस्मत बदलो।"
+
 आत्माराम ने उन नोटों को देखा, फिर एक गहरी सांस ली। उसने अपने हाथ पीछे खींच लिए और बहुत ही शांत लेकिन मजबूत आवाज़ में कहा, "मैं यह काम नहीं कर सकता। यह पैसा मेरी गरीबी तो मिटा सकता है, लेकिन मेरे पिता के दिए संस्कारों को हमेशा के लिए दफ़्न कर देगा।" वहाँ मौजूद सभी लोग हैरान रह गए। आत्माराम ने पैसे को नहीं, अपने जमीर को चुना और उस बेईमानी के दरवाज़े को हमेशा के लिए बंद करके वहाँ से बाहर निकल आया।
-अब आत्माराम के पास वह बड़ी रकम तो नहीं थी, और उसकी चुनौतियाँ भी जस की तस थीं। लेकिन जब वह उस रात अपनी खाट पर सोया, तो उसकी आँखों में एक अजीब सा सुकून था। वह चैन की नींद सोया, क्योंकि उसने अपनी गरीबी के बदले खुद को नहीं बेचा था। उसने साबित कर दिया था कि इंसान कितना भी गरीब क्यों न हो, उसका ईमान उसकी सबसे बड़ी दौलत होती है। """                              
+
+अब आत्माराम के पास वह बड़ी रकम तो नहीं थी, और उसकी चुनौतियाँ भी जस की तस थीं। लेकिन जब वह उस रात अपनी खाट पर सोया, तो उसकी आँखों में एक अजीब सा सुकून था। वह चैन की नींद सोया, क्योंकि उसने अपनी गरीबी के बदले खुद को नहीं बेचा था। उसने साबित कर दिया था कि इंसान कितना भी गरीब क्यों न हो, उसका ईमान उसकी सबसे बड़ी दौलत होती है।
+"""
 
 
- # अपनी कहानी डालें; खाली = TOPIC से नई कहानी generate होगी
+# ============================================================
+# STORY STRUCTURE
+# ============================================================
 
-PARTS = 4                          # 1 = single video | 2/3/4... = अलग-अलग video parts
-SCENES = 11                        # हर part में scenes की संख्या
+PARTS = 4
+SCENES = 11
 
-STORY_LENGTH = "auto"              # auto = format/scenes के अनुसार | short | medium | long
-SCENE_DURATION = "auto"            # auto = narration/story के अनुसार | fixed = लगभग समान duration
+STORY_LENGTH = "auto"              # auto | short | medium | long
+SCENE_DURATION = "auto"            # auto | fixed
+
+PART_HOOK = true
+PART_SUSPENSE = true
+FINAL_RESOLUTION = true
 
 
 # ============================================================
 # CAPTIONS
 # ============================================================
 
-CAPTIONS = "hindi"
-
-
-# Allowed modes: hindi, english, hinglish
-
- ============================================================
-# STORY STRUCTURE
-# ============================================================
-
-PART_HOOK = true                   # हर part की शुरुआत में strong hook
-PART_SUSPENSE = true               # अंतिम part को छोड़कर हर part के अंत में suspense/cliffhanger
-FINAL_RESOLUTION = true             # अंतिम part में complete story resolution
+CAPTIONS = "hindi"                 # hindi | english | hinglish
 
 
 # ============================================================
@@ -63,48 +99,31 @@ FINAL_RESOLUTION = true             # अंतिम part में complete st
 # ============================================================
 
 VISUAL_STYLE = "cinematic_realistic"
-# cinematic_realistic = realistic movie-style cinematic look
-# realistic_3d = realistic 3D animation
-# cinematic_2d = detailed cinematic 2D animation
-# indian_folk = Indian folk-art inspired animation
-# storybook = illustrated storybook / fairy-tale style
-# historical = historical-period cinematic style
-# fantasy = cinematic fantasy world
-# dark_fantasy = dark and mysterious fantasy
-# anime_cinematic = cinematic anime style
-# clay_animation = stop-motion clay animation
-# watercolor = watercolor animation
-# comic_cinematic = cinematic comic-book style
-# minimalist = clean/simple artistic style
+# cinematic_realistic | realistic_3d | cinematic_2d
+# indian_folk | storybook | historical | fantasy
+# dark_fantasy | anime_cinematic | clay_animation
+# watercolor | comic_cinematic | minimalist
 
-REALISM = "high"
-# high = maximum practical realism
-# medium = realistic + slightly stylized
-# low = clearly artistic/animated
+REALISM = "high"                   # high | medium | low
 
 
 # ============================================================
 # CHARACTER & WORLD CONSISTENCY
 # ============================================================
 
-CHARACTER_BIBLE = true              # characters की appearance, age, clothing, personality पहले define करना
-CHARACTER_CONSISTENCY = true        # face, hair, clothes, age और identity scenes में consistent रखना
-WORLD_CONSISTENCY = true            # locations, architecture, environment और time-period consistent रखना
-SCENE_CONTINUITY = true             # previous scene की location/action/time से next scene connect करना
+CHARACTER_BIBLE = true
+CHARACTER_CONSISTENCY = true
+WORLD_CONSISTENCY = true
+SCENE_CONTINUITY = true
 
 
 # ============================================================
 # CAMERA
 # ============================================================
 
-CINEMATIC_CAMERA = true             # movie-style framing, camera movement और depth effects
-
+CINEMATIC_CAMERA = true
 CAMERA_STYLE = "cinematic"
-# cinematic = film-style camera movement
-# dynamic = energetic/fast camera movement
-# slow = slow dramatic movement
-# documentary = natural observational camera
-# static = mostly fixed shots
+# cinematic | dynamic | slow | documentary | static
 
 
 # ============================================================
@@ -112,13 +131,7 @@ CAMERA_STYLE = "cinematic"
 # ============================================================
 
 LIGHTING = "cinematic"
-# cinematic = controlled film-style lighting
-# natural = realistic natural light
-# warm = warm emotional lighting
-# dark = low-key dark lighting
-# dramatic = strong contrast/shadows
-# soft = soft gentle lighting
-# night = realistic night lighting
+# cinematic | natural | warm | dark | dramatic | soft | night
 
 
 # ============================================================
@@ -126,71 +139,51 @@ LIGHTING = "cinematic"
 # ============================================================
 
 MOOD = "dramatic"
-# dramatic = serious/intense
-# emotional = emotional/heart-touching
-# mysterious = mysterious
-# suspense = tension/curiosity
-# horror = frightening atmosphere
-# joyful = happy/positive
-# inspirational = inspirational
-# peaceful = calm
+# dramatic | emotional | mysterious | suspense
+# horror | joyful | inspirational | peaceful
 
 
 # ============================================================
 # VISUAL QUALITY / CLEAN OUTPUT
 # ============================================================
 
-QUALITY = "high"
-# draft = fast testing
-# standard = normal production
-# high = maximum practical quality
+QUALITY = "high"                  # draft | standard | high
+FPS = 24
 
-FPS = 24                             # 24 = cinematic | 30 = smoother/general video
-
-NEGATIVE_PROMPT = true               # distorted faces, extra fingers, duplicate people, text, watermark आदि avoid करना
-
-AVOID_CARTOON_LOOK = true            # unnecessary cartoon appearance avoid करना
-AVOID_NEON = true                    # neon/glowing cyberpunk appearance avoid करना
-AVOID_GLITCH_EFFECTS = true          # unnecessary glitch effects avoid करना
-NATURAL_MOTION = true                # natural character/camera movement prioritize करना
-REALISTIC_LIGHTING = true            # believable light और shadows
+NEGATIVE_PROMPT = true
+AVOID_CARTOON_LOOK = true
+AVOID_NEON = true
+AVOID_GLITCH_EFFECTS = true
+NATURAL_MOTION = true
+REALISTIC_LIGHTING = true
 
 
 # ============================================================
 # MUSIC & SOUND
 # ============================================================
 
-MUSIC = true                         # cinematic background music
-
+MUSIC = true
 MUSIC_STYLE = "cinematic"
-# cinematic = movie-style score
-# emotional = emotional music
-# suspense = suspense/tension music
-# devotional = devotional atmosphere
-# folk = traditional/folk-inspired
-# fantasy = fantasy score
-# none = no music
+# cinematic | emotional | suspense | devotional
+# folk | fantasy | none
 
-SFX = true                           # actions/events के matching sound effects
-AMBIENT_SOUND = true                 # environment sounds: wind, rain, village, forest आदि
+SFX = true
+AMBIENT_SOUND = true
 
 
 # ============================================================
 # EDITING
 # ============================================================
 
-TRANSITIONS = "cinematic"
-# cinematic = context के अनुसार cut/fade/dissolve
-# clean = mostly clean cuts
-# none = direct cuts
+TRANSITIONS = "cinematic"         # cinematic | clean | none
 
 
 # ============================================================
 # BRANDING
 # ============================================================
 
-WATERMARK = false                    # false = automatic watermark नहीं
-LOGO = false                         # false = automatic logo नहीं
+WATERMARK = false
+LOGO = false
 
 
 # ============================================================
@@ -198,19 +191,11 @@ LOGO = false                         # false = automatic logo नहीं
 # ============================================================
 
 RESUME_ENABLED = true
-# true = failure के बाद last completed point से continue
-# false = fresh run
 
 MAX_RETRIES = 3
-# एक failed scene को अधिकतम कितनी बार retry करना है
 
 SAVE_CHECKPOINT_AFTER_EACH_SCENE = true
-# हर successful scene के बाद progress save करना
-
 SKIP_COMPLETED_SCENES = true
-# पहले से successfully generated scenes दोबारा नहीं बनाना
 
 FAILURE_POLICY = "retry_then_checkpoint"
-# retry_then_checkpoint = retry → फिर भी fail हो तो checkpoint save करके stop
-# skip = failed scene छोड़कर आगे बढ़ना
-# stop = पहली failure पर workflow रोकना
+# retry_then_checkpoint | skip | stop
