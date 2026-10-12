@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create photo-motion image jobs while preserving valid image checkpoints."""
+"""Prepare resumable photo-motion image jobs with consistent prompt hashes."""
 
 from __future__ import annotations
 
@@ -21,8 +21,24 @@ VISUAL_DIR = ROOT / "output" / "visuals"
 JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUAL_DIR / "image_manifest.json"
 
-VERSION = "photo-motion-4.1"
+VERSION = "photo-motion-5.0"
 MIN_IMAGE_BYTES = 5000
+
+# Keep this text identical to free_image_generator.py.
+QUALITY = (
+    "Photorealistic live-action cinematic photography. Realistic Indian "
+    "people, clothing, locations and architecture. Natural skin texture, "
+    "believable anatomy, realistic eyes, natural lighting and shadows. "
+    "Keep recurring character identity, age, hairstyle and clothing "
+    "consistent. No cartoon, anime, illustration, CGI, text, logo or "
+    "watermark."
+)
+
+NEGATIVE_PROMPT = (
+    "cartoon, anime, illustration, painting, CGI, plastic skin, "
+    "distorted face, bad anatomy, extra limbs, duplicated people, "
+    "blurry face, unrealistic eyes, text, subtitles, watermark, logo"
+)
 
 DESCRIPTION_KEYS = (
     "visual_prompt",
@@ -50,17 +66,13 @@ def log(*items):
 def read_json(path, required=True):
     if not path.is_file():
         if required:
-            raise RuntimeError(
-                f"Required file is missing: {path.relative_to(ROOT)}"
-            )
+            raise RuntimeError(f"Required file is missing: {path}")
         return None
 
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise RuntimeError(
-            f"Cannot read {path.relative_to(ROOT)}: {exc}"
-        ) from exc
+        raise RuntimeError(f"Cannot read {path}: {exc}") from exc
 
 
 def write_json(path, data):
@@ -81,30 +93,27 @@ def extract_scenes(data):
     if isinstance(data, list):
         scenes = data
     elif isinstance(data, dict):
-        scenes = None
-
-        for key in ("scenes", "scene_list", "items", "data"):
-            if isinstance(data.get(key), list):
-                scenes = data[key]
-                break
-
+        scenes = next(
+            (
+                data[key]
+                for key in ("scenes", "scene_list", "items", "data")
+                if isinstance(data.get(key), list)
+            ),
+            None,
+        )
         if scenes is None:
             raise RuntimeError(
-                "scenes.json must contain a list under "
-                "'scenes', 'scene_list', 'items', or 'data'."
+                "scenes.json must contain a list under scenes, "
+                "scene_list, items or data."
             )
     else:
-        raise RuntimeError(
-            "scenes.json must contain a JSON object or list."
-        )
+        raise RuntimeError("scenes.json must be a JSON object or list.")
 
     if not scenes:
         raise RuntimeError("scenes.json contains no scenes.")
 
     if any(not isinstance(scene, dict) for scene in scenes):
-        raise RuntimeError(
-            "Every entry in scenes.json must be a JSON object."
-        )
+        raise RuntimeError("Every scene must be a JSON object.")
 
     return scenes
 
@@ -112,34 +121,28 @@ def extract_scenes(data):
 def get_text(scene, keys):
     for key in keys:
         value = scene.get(key)
-
         if isinstance(value, str) and value.strip():
             return value.strip()
-
     return ""
 
 
 def positive_number(value):
     try:
-        result = float(value)
-
-        if math.isfinite(result) and result > 0:
-            return result
+        number = float(value)
+        if math.isfinite(number) and number > 0:
+            return number
     except (TypeError, ValueError):
         pass
-
     return None
 
 
 def scene_duration(scene, config):
     for key in DURATION_KEYS:
         value = positive_number(scene.get(key))
-
         if value is not None and 0.5 <= value <= 3600:
             return round(value, 3)
 
     configured = positive_number(config.get("SCENE_DURATION"))
-
     if configured is not None and 0.5 <= configured <= 3600:
         return round(configured, 3)
 
@@ -163,41 +166,26 @@ def get_format_and_size(config):
 def load_character_bible():
     data = read_json(BIBLE_FILE, required=False)
 
-    if data is None:
-        log("NOTICE: Character Bible not found; continuing without it.")
+    if data is None or data == {} or data == []:
+        log("NOTICE: Character Bible unavailable.")
         return ""
 
     if not isinstance(data, (dict, list)):
-        raise RuntimeError(
-            "character_bible.json must contain an object or list."
-        )
+        raise RuntimeError("character_bible.json must be an object or list.")
 
-    if not data:
-        return ""
-
-    serialized = json.dumps(
-        data,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-
-    return serialized[:12000]
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))[:12000]
 
 
 def validate_scene_identity(scene, index, seen_pairs):
     part = scene.get("part", 1)
     local_scene = scene.get("scene", index)
 
-    if isinstance(part, (dict, list)) or isinstance(
-        local_scene, (dict, list)
-    ):
+    if isinstance(part, (dict, list)) or isinstance(local_scene, (dict, list)):
         raise RuntimeError(
-            f"Scene {index}: part and scene identifiers "
-            "must be scalar values."
+            f"Scene {index}: part and scene identifiers must be scalar."
         )
 
     pair = (str(part), str(local_scene))
-
     if pair in seen_pairs:
         raise RuntimeError(
             f"Duplicate part/scene pair: part={part}, scene={local_scene}"
@@ -209,17 +197,16 @@ def validate_scene_identity(scene, index, seen_pairs):
 
 def build_prompt(mode, dimensions, part, local_scene, description, bible):
     continuity = ""
-
     if bible:
         continuity = (
-            "\nCharacter continuity reference (keep identity, age, "
-            "face, hairstyle and clothing consistent): "
+            "\nCharacter continuity reference: preserve identity, age, "
+            "face, hairstyle, clothing and physical appearance. "
             + bible
         )
 
     return (
         "Create one photorealistic live-action cinematic photograph "
-        "for an Indian story. Show a believable real-world moment, "
+        "for an Indian story. Show one believable real-world moment, "
         "not a collage, poster, drawing, animation or slideshow frame. "
         "Use realistic Indian people, clothing, locations, architecture "
         "and everyday details when relevant. Natural skin texture, "
@@ -234,8 +221,15 @@ def build_prompt(mode, dimensions, part, local_scene, description, bible):
     )
 
 
+def generation_prompt_hash(prompt, negative_prompt):
+    """Must match free_image_generator.py prompt_for() and get_hash()."""
+    complete_prompt = (
+        f"{prompt}\n\nQuality: {QUALITY}\n\nAvoid: {negative_prompt}"
+    )
+    return hashlib.sha256(complete_prompt.encode("utf-8")).hexdigest()
+
+
 def read_previous_image_manifest():
-    """Load previous scene records without trusting them blindly."""
     data = read_json(MANIFEST_FILE, required=False)
 
     if isinstance(data, dict):
@@ -245,20 +239,17 @@ def read_previous_image_manifest():
     else:
         rows = []
 
-    if not isinstance(rows, list):
-        return {}
-
     previous = {}
+    if not isinstance(rows, list):
+        return previous
 
     for row in rows:
         if not isinstance(row, dict):
             continue
-
         try:
             number = int(row.get("global_scene", row.get("scene")))
         except (TypeError, ValueError):
             continue
-
         if number > 0:
             previous[number] = row
 
@@ -266,7 +257,6 @@ def read_previous_image_manifest():
 
 
 def valid_existing_image(path, expected_dimensions):
-    """Check image bytes, decodeability and exact expected dimensions."""
     try:
         from PIL import Image
 
@@ -296,7 +286,7 @@ def main():
 
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Preserve checkpoint metadata from the previous run.
+    # Read the previous manifest before replacing it.
     previous_rows = read_previous_image_manifest()
 
     jobs = []
@@ -309,41 +299,19 @@ def main():
         )
 
         description = get_text(scene, DESCRIPTION_KEYS)
-
         if not description:
             raise RuntimeError(
-                f"Scene {index} has no usable visual description. "
-                "Fix scenes.json instead of silently generating "
-                "an unrelated image."
+                f"Scene {index} has no visual description. "
+                "Fix scenes.json rather than generating an unrelated image."
             )
 
         duration = scene_duration(scene, config)
-
-        image_path = (
-            Path("output")
-            / "visuals"
-            / f"scene_{index:02d}.png"
-        ).as_posix()
+        image_path = f"output/visuals/scene_{index:02d}.png"
 
         prompt = build_prompt(
-            mode,
-            dimensions,
-            part,
-            local_scene,
-            description,
-            bible,
+            mode, dimensions, part, local_scene, description, bible
         )
-
-        prompt_hash = hashlib.sha256(
-            prompt.encode("utf-8")
-        ).hexdigest()
-
-        negative_prompt = (
-            "cartoon, anime, illustration, painting, CGI, "
-            "plastic skin, distorted face, bad anatomy, "
-            "extra limbs, duplicated people, blurry face, "
-            "unrealistic eyes, text, subtitles, watermark, logo"
-        )
+        prompt_hash = generation_prompt_hash(prompt, NEGATIVE_PROMPT)
 
         job = {
             "scene": index,
@@ -354,22 +322,17 @@ def main():
             "image_path": image_path,
             "prompt": prompt,
             "prompt_sha256": prompt_hash,
-            "negative_prompt": negative_prompt,
+            "negative_prompt": NEGATIVE_PROMPT,
             "image_size": dimensions,
             "duration": duration,
             "motion_engine": "photo_motion",
-            "output_video": (
-                f"output/photo_motion/scene_{index:04d}.mp4"
-            ),
+            "output_video": f"output/photo_motion/scene_{index:04d}.mp4",
         }
-
         jobs.append(job)
 
         destination = ROOT / image_path
         old = previous_rows.get(index, {})
 
-        # Retain prior status/provider only when the prompt is unchanged
-        # and the image on disk is valid for the current target dimensions.
         same_prompt = old.get("prompt_sha256") == prompt_hash
         image_is_valid = valid_existing_image(
             destination, (width, height)
@@ -378,7 +341,6 @@ def main():
         if same_prompt and image_is_valid:
             status = old.get("status", "existing")
             provider = old.get("provider") or "previous run"
-
             if status not in ("generated", "existing", "reused"):
                 status = "existing"
         else:
@@ -398,13 +360,12 @@ def main():
             "prompt_sha256": prompt_hash,
         })
 
-    expected_numbers = list(range(1, len(jobs) + 1))
-
-    if [job["global_scene"] for job in jobs] != expected_numbers:
-        raise RuntimeError("Global scene numbering validation failed.")
-
     if len(jobs) != len(manifest_scenes):
-        raise RuntimeError("Image jobs and manifest counts do not match.")
+        raise RuntimeError("Image job and manifest counts do not match.")
+
+    expected = list(range(1, len(jobs) + 1))
+    if [job["global_scene"] for job in jobs] != expected:
+        raise RuntimeError("Global scene numbering validation failed.")
 
     images_ready = sum(
         row["status"] in ("generated", "existing", "reused")
@@ -431,7 +392,6 @@ def main():
         "scenes": manifest_scenes,
     }
 
-    # The image generator consumes these files next.
     write_json(JOBS_FILE, jobs_document)
     write_json(MANIFEST_FILE, manifest_document)
 
@@ -440,10 +400,10 @@ def main():
     log("Format:", mode)
     log("Image dimensions:", dimensions)
     log("Scenes:", len(jobs))
-    log("Valid images retained:", images_ready)
-    log("Images still required:", len(jobs) - images_ready)
+    log("Valid matching images retained:", images_ready)
+    log("Images requiring generation:", len(jobs) - images_ready)
     log("Character Bible:", "available" if bible else "not available")
-    log("Scene numbering: validated")
+    log("Prompt hashes: aligned with free_image_generator.py")
     log("Jobs:", JOBS_FILE.relative_to(ROOT))
     log("Manifest:", MANIFEST_FILE.relative_to(ROOT))
     log("=" * 60)
@@ -456,8 +416,5 @@ if __name__ == "__main__":
         print("VISUAL JOB PREPARATION CANCELLED", file=sys.stderr)
         sys.exit(130)
     except Exception as exc:
-        print(
-            f"VISUAL JOB PREPARATION FAILED: {exc}",
-            file=sys.stderr,
-        )
+        print(f"VISUAL JOB PREPARATION FAILED: {exc}", file=sys.stderr)
         sys.exit(1)
