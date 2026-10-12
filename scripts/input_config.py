@@ -51,7 +51,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "TTS_ALLOW_PAID": False,
 
     # Chunking and resumability.
-    "TTS_CHUNK_MAX_CHARS": 700,
+    "TTS_CHUNK_MAX_CHARS": 500,
     "TTS_CHUNK_MIN_CHARS": 150,
     "TTS_CHUNK_CHECKPOINT": True,
     "TTS_VALIDATE_AUDIO": True,
