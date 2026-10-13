@@ -49,14 +49,14 @@ jobs:
       POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
       REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
 
-      # Keep billable image providers disabled by default.
+      # Paid image providers remain disabled unless explicitly opted in.
       ALLOW_BILLABLE_PROVIDERS: "false"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Calculate current input and code fingerprints
+      - name: Calculate input and code fingerprints
         id: fingerprints
         shell: bash
         run: |
@@ -81,7 +81,7 @@ jobs:
           echo "Input fingerprint: $INPUT_HASH"
           echo "Code fingerprint: $CODE_HASH"
 
-      - name: Restore matching previous checkpoint
+      - name: Restore compatible checkpoint
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -125,9 +125,8 @@ jobs:
             INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
             CODE_FILE="$SAVED_OUTPUT/.resume-code.sha256"
 
-            # Old checkpoints without both fingerprints are not trusted.
             if [ ! -s "$INPUT_FILE" ] || [ ! -s "$CODE_FILE" ]; then
-              echo "Skipping legacy checkpoint from run $RUN_ID."
+              echo "Skipping checkpoint without both fingerprints: $RUN_ID"
               continue
             fi
 
@@ -136,18 +135,18 @@ jobs:
             fi
 
             if [ "$(cat "$CODE_FILE")" != "$CURRENT_CODE_HASH" ]; then
-              echo "Skipping checkpoint from different code version: $RUN_ID"
+              echo "Skipping checkpoint from another code version: $RUN_ID"
               continue
             fi
 
             cp -a "$SAVED_OUTPUT/." output/
-            echo "Matching input-and-code checkpoint restored from run $RUN_ID."
+            echo "Compatible checkpoint restored from run $RUN_ID."
             exit 0
           done
 
-          echo "No compatible checkpoint found; starting with current code."
+          echo "No compatible checkpoint found."
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -188,7 +187,6 @@ jobs:
           for file in \
             scripts/input_config.py \
             scripts/select_gemini_model.py \
-            scripts/test_gemini.py \
             scripts/generate_story_plan.py \
             scripts/generate_story.py \
             scripts/generate_ai_story.py \
@@ -215,15 +213,15 @@ jobs:
 
           python - <<'PY'
           from scripts.input_config import load_and_validate, print_config_summary
+
           config = load_and_validate("Input/topic.txt")
           print_config_summary(config)
           PY
 
+      # Do not make a separate test-generation request here.
+      # The selected model is used by the actual generation scripts.
       - name: Select Gemini model
         run: python scripts/select_gemini_model.py
-
-      - name: Test selected Gemini model
-        run: python scripts/test_gemini.py
 
       - name: Generate story plan
         run: python scripts/generate_story_plan.py
@@ -289,7 +287,9 @@ jobs:
                   continue
 
               key, value = line.split("=", 1)
-              values[key.strip().upper()] = value.split("#", 1)[0].strip().strip("'\"")
+              values[key.strip().upper()] = (
+                  value.split("#", 1)[0].strip().strip("'\"")
+              )
 
           def clean(value):
               return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -307,12 +307,11 @@ jobs:
 
           title = (title or topic or "Katha Lok AI Story")[:100]
 
-          # Keep the description concise. Never paste the full story here.
           description = (
               f"{title}\n\n"
-              f"Watch this Katha Lok AI story about "
-              f"{topic or title}. Enjoy the cinematic storytelling, "
-              "narration and scene-by-scene visuals.\n\n"
+              f"Watch this Katha Lok AI story about {topic or title}. "
+              "Enjoy the cinematic storytelling, narration and "
+              "scene-by-scene visuals.\n\n"
               "#KathaLokAI #HindiKahani"
           )
 
@@ -343,6 +342,7 @@ jobs:
               f"Tags:\n{', '.join(tags)}\n"
           )
 
+          output.mkdir(parents=True, exist_ok=True)
           (output / "youtube_metadata.txt").write_text(
               metadata, encoding="utf-8"
           )
