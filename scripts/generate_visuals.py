@@ -24,10 +24,9 @@ VISUAL_DIR = ROOT / "output" / "visuals"
 JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUAL_DIR / "image_manifest.json"
 
-VERSION = "photo-motion-7.0"
+VERSION = "photo-motion-8.0"
 MIN_IMAGE_BYTES = 5000
 
-# These strings MUST exactly match free_image_generator.py.
 QUALITY = (
     "Photorealistic live-action cinematic photography. Realistic Indian "
     "people, clothing, locations and architecture. Natural skin texture, "
@@ -47,14 +46,8 @@ NEGATIVE_PROMPT = (
 )
 
 DESCRIPTION_KEYS = (
-    "visual_prompt",
-    "image_prompt",
-    "visual_description",
-    "description",
-    "scene_description",
-    "prompt",
-    "action",
-    "text",
+    "visual_prompt", "image_prompt", "visual_description",
+    "description", "scene_description", "prompt", "action", "text",
 )
 
 DURATION_KEYS = ("duration", "scene_duration", "duration_seconds", "seconds")
@@ -104,7 +97,6 @@ def read_json(path, required=True):
         if required:
             raise RuntimeError(f"Required file is missing: {path}")
         return None
-
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
@@ -114,7 +106,6 @@ def read_json(path, required=True):
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-
     try:
         temporary.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -132,7 +123,6 @@ def clean_text(value, limit=1000):
 def read_title_file():
     if not TITLE_FILE.is_file():
         return ""
-
     try:
         for line in TITLE_FILE.read_text(encoding="utf-8-sig").splitlines():
             title = clean_text(line, 200)
@@ -140,68 +130,66 @@ def read_title_file():
                 return title
     except OSError as exc:
         log("WARNING: Could not read final title:", exc)
-
     return ""
 
 
 def first_story_line(story_text):
-    """Find a real story line, never a decorative config comment."""
     for line in str(story_text or "").splitlines():
         line = line.strip()
-
         if not line or line.startswith("#"):
             continue
-
         if re.match(r"^[A-Z_][A-Z0-9_]*\s*=", line):
             continue
-
         cleaned = clean_text(line, 250)
         if cleaned:
             return cleaned
-
     return ""
 
 
 def resolve_topic(config):
-    # TOPIC is authoritative when explicitly supplied.
     explicit = clean_text(config.get("TOPIC", ""), 250)
     if explicit:
         return explicit
 
-    # Prefer a title already generated for the current story.
+    story_text = str(config.get("STORY_TEXT", "")).strip()
+    if story_text:
+        first_line = first_story_line(story_text)
+        if first_line:
+            return first_line
+
+        # Do not silently use a title left by a previous story.
+        title_source = clean_text(get_title_source(config), 250)
+        if title_source:
+            return title_source
+
+    # Existing title is only a fallback when no new story input exists.
     saved_title = read_title_file()
     if saved_title:
         return saved_title
 
-    # When TOPIC is blank, derive a safe title from STORY_TEXT.
-    story_text = clean_text(config.get("STORY_TEXT", ""), 10000)
-    title = first_story_line(story_text)
-    if title:
-        return title
-
-    # Last-resort helper, while avoiding config comments as a title.
-    title_source = clean_text(get_title_source(config), 250)
-    return title_source or "Indian cinematic story"
+    return clean_text(get_title_source(config), 250) or "Indian cinematic story"
 
 
-def resolve_title(topic):
+def resolve_title(topic, config):
+    explicit = clean_text(config.get("TOPIC", ""), 250)
+    story_text = str(config.get("STORY_TEXT", "")).strip()
+
+    # If this run has fresh input, never let a stale title override it.
+    if explicit or story_text:
+        return explicit or topic
+
     return read_title_file() or topic
 
 
 def detect_category(text):
     normalized = str(text or "").casefold()
-
-    # Check more specific genres before broad emotional keywords.
     for category in (
         "horror", "mystery", "devotional",
         "historical", "emotional", "nature",
     ):
-        if any(
-            keyword.casefold() in normalized
-            for keyword in CATEGORY_KEYWORDS[category]
-        ):
+        if any(word.casefold() in normalized
+               for word in CATEGORY_KEYWORDS[category]):
             return category
-
     return "general"
 
 
@@ -209,36 +197,31 @@ def category_direction(category):
     directions = {
         "devotional": (
             "Use respectful Indian devotional visual language only when "
-            "the actual scene calls for it. Suitable temple architecture, "
-            "saffron, warm gold or celestial blue may be used when relevant. "
-            "Do not invent deities, halos or religious symbols."
+            "the actual scene calls for it. Do not invent deities or symbols."
         ),
         "horror": (
-            "Use restrained shadows, moonlight, mist and suspenseful framing. "
-            "Keep important faces and clues visible. Do not invent monsters, "
-            "ghosts or blood when absent from the scene."
+            "Use restrained shadows, moonlight and suspenseful framing. "
+            "Do not invent monsters or blood absent from the scene."
         ),
         "mystery": (
-            "Use cinematic suspense, controlled shadows, layered depth and "
-            "clear visual clues grounded in the scene. Do not invent plot events."
+            "Use cinematic suspense, controlled shadows and visual clues "
+            "grounded in the scene. Do not invent plot events."
         ),
         "historical": (
-            "Use period-appropriate architecture, fabrics, jewelry, tools "
-            "and materials. Avoid modern objects in historical scenes."
+            "Use period-appropriate architecture, fabrics, tools and "
+            "materials. Avoid modern objects in historical scenes."
         ),
         "emotional": (
-            "Emphasize believable expressions, natural body language, human "
-            "connection and lighting that suits the scene. Avoid exaggerated "
-            "or melodramatic expressions."
+            "Emphasize believable expressions, natural body language and "
+            "human connection. Avoid exaggerated expressions."
         ),
         "nature": (
-            "Use realistic landscapes, vegetation, weather and natural "
-            "materials consistent with the described location and season."
+            "Use realistic landscapes, vegetation, weather and materials "
+            "consistent with the described location and season."
         ),
         "general": (
             "Choose colors, lighting and composition according to the actual "
-            "story, characters, setting, time period and emotion. Do not "
-            "impose one fixed color scheme on every story."
+            "story, characters, setting, period and emotion."
         ),
     }
     return directions.get(category, directions["general"])
@@ -249,27 +232,21 @@ def extract_scenes(data):
         scenes = data
     elif isinstance(data, dict):
         scenes = next(
-            (
-                data[key]
-                for key in ("scenes", "scene_list", "items", "data")
-                if isinstance(data.get(key), list)
-            ),
+            (data[key] for key in ("scenes", "scene_list", "items", "data")
+             if isinstance(data.get(key), list)),
             None,
         )
         if scenes is None:
             raise RuntimeError(
-                "scenes.json must contain a list under scenes, "
-                "scene_list, items or data."
+                "scenes.json must contain scenes, scene_list, items or data."
             )
     else:
         raise RuntimeError("scenes.json must be a JSON object or list.")
 
     if not scenes:
         raise RuntimeError("scenes.json contains no scenes.")
-
     if any(not isinstance(scene, dict) for scene in scenes):
         raise RuntimeError("Every scene must be a JSON object.")
-
     return scenes
 
 
@@ -296,63 +273,42 @@ def scene_duration(scene, config):
         value = positive_number(scene.get(key))
         if value is not None and 0.5 <= value <= 3600:
             return round(value, 3)
-
     configured = positive_number(config.get("SCENE_DURATION"))
     if configured is not None and 0.5 <= configured <= 3600:
         return round(configured, 3)
-
     return 5.0
 
 
 def image_format_and_size(config):
     mode = str(get_format(config)).strip().lower()
-
-    if mode == "full":
-        return "full", "1280x720"
-
-    return "short", "720x1280"
+    return ("full", "1280x720") if mode == "full" else ("short", "720x1280")
 
 
 def load_character_bible():
     data = read_json(BIBLE_FILE, required=False)
-
     if data is None or data == {} or data == []:
         log("NOTICE: Character Bible unavailable.")
         return ""
-
     if not isinstance(data, (dict, list)):
         raise RuntimeError("character_bible.json must be an object or list.")
-
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))[:12000]
 
 
 def scene_mapping(scene, index, seen_pairs):
     part = scene.get("part", 1)
     local_scene = scene.get("scene", scene.get("local_scene", index))
-
     if isinstance(part, (dict, list)) or isinstance(local_scene, (dict, list)):
-        raise RuntimeError(
-            f"Scene {index}: part and scene identifiers must be scalar."
-        )
-
+        raise RuntimeError(f"Scene {index}: part and scene identifiers must be scalar.")
     try:
         part_number = int(part)
         local_number = int(local_scene)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"Scene {index}: part and scene identifiers must be integers."
-        ) from exc
-
+        raise RuntimeError(f"Scene {index}: part/scene identifiers must be integers.") from exc
     if part_number < 1 or local_number < 1:
         raise RuntimeError(f"Scene {index}: invalid part/scene mapping.")
-
     pair = (part_number, local_number)
     if pair in seen_pairs:
-        raise RuntimeError(
-            f"Duplicate part/scene mapping: part={part_number}, "
-            f"scene={local_number}"
-        )
-
+        raise RuntimeError(f"Duplicate part/scene mapping: {pair}")
     seen_pairs.add(pair)
     return part_number, local_number
 
@@ -363,68 +319,52 @@ def build_prompt(
 ):
     if mode == "short":
         framing = (
-            "Vertical 9:16 mobile-video composition. Keep faces and the "
-            "main action away from extreme edges. Use cinematic foreground, "
-            "subject and background depth."
+            "Vertical 9:16 mobile-video composition. Keep faces and action "
+            "away from extreme edges. Include cinematic foreground, subject "
+            "and background depth."
         )
     else:
         framing = (
-            "Horizontal 16:9 cinematic composition with a clear focal subject, "
-            "intentional negative space and balanced foreground, middle-ground "
-            "and background."
+            "Horizontal 16:9 cinematic composition with a clear focal subject "
+            "and balanced foreground, middle-ground and background."
         )
 
     continuity = ""
     if bible:
         continuity = (
-            "\nCHARACTER CONTINUITY: Use the character bible only for people "
-            "actually present in this scene. Preserve their recognizable face, "
-            "age, hairstyle, skin tone, build and clothing across scenes. Do "
-            "not put every character in every image.\nCHARACTER BIBLE: "
-            + bible
+            "\nCHARACTER CONTINUITY: Apply only to characters actually present. "
+            "Preserve face, age, hairstyle, skin tone, build and clothing. "
+            "Do not put every character in every image.\nCHARACTER BIBLE: " + bible
         )
 
     return (
         "Create one original photorealistic live-action cinematic image for "
         "an Indian story video.\n"
-        f"STORY TOPIC: {topic}\n"
-        f"STORY TITLE: {title}\n"
+        f"STORY TOPIC: {topic}\nSTORY TITLE: {title}\n"
         f"GENRE HINT: {category}\n"
         f"GENRE VISUAL DIRECTION: {category_direction(category)}\n"
         f"FORMAT: {mode}; target dimensions: {dimensions}.\n"
         f"PART: {part}; LOCAL SCENE: {local_scene}.\n"
         f"SCENE TO DEPICT: {description}\n"
         "The scene description is the source of truth. Depict its actual "
-        "characters, action, location, time, weather and emotional tone. "
-        "Use believable expressions, realistic lighting, atmospheric depth "
-        "and culturally appropriate Indian details when relevant. Make one "
-        "coherent photograph, not a collage, split screen, poster or "
-        "slideshow. Do not invent unrelated people, objects, costumes, "
-        "locations or plot events. Do not put title lettering, captions, "
-        "logos or watermarks in the image; the thumbnail renderer adds title "
-        f"text separately. {framing}"
-        f"{continuity}"
+        "characters, action, location, time, weather and emotion. Use "
+        "believable expressions, realistic lighting and culturally appropriate "
+        "Indian details when relevant. Create one coherent photograph, not a "
+        "collage, split screen, poster or slideshow. Do not invent unrelated "
+        "people, objects, costumes, locations or plot events. Do not include "
+        "title lettering, captions, logos or watermarks. "
+        f"{framing}{continuity}"
     )
 
 
 def prompt_fingerprint(prompt, negative_prompt):
-    # Must match free_image_generator.py's prompt_for() and get_hash().
-    complete_prompt = (
-        f"{prompt}\n\nQuality: {QUALITY}\n\nAvoid: {negative_prompt}"
-    )
+    complete_prompt = f"{prompt}\n\nQuality: {QUALITY}\n\nAvoid: {negative_prompt}"
     return hashlib.sha256(complete_prompt.encode("utf-8")).hexdigest()
 
 
 def previous_manifest_rows():
     data = read_json(MANIFEST_FILE, required=False)
-
-    if isinstance(data, dict):
-        rows = data.get("scenes", [])
-    elif isinstance(data, list):
-        rows = data
-    else:
-        rows = []
-
+    rows = data.get("scenes", []) if isinstance(data, dict) else data
     result = {}
     if isinstance(rows, list):
         for row in rows:
@@ -436,20 +376,16 @@ def previous_manifest_rows():
                     result[number] = row
             except (TypeError, ValueError):
                 continue
-
     return result
 
 
 def valid_existing_image(path, dimensions):
     try:
         from PIL import Image
-
         if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
             return False
-
         with Image.open(path) as image:
             image.verify()
-
         with Image.open(path) as image:
             return image.size == dimensions
     except Exception:
@@ -462,9 +398,8 @@ def main():
 
     config = load_and_validate(INPUT_FILE)
     topic = resolve_topic(config)
-    title = resolve_title(topic)
+    title = resolve_title(topic, config)
     category = detect_category(topic + " " + title)
-
     mode, dimensions = image_format_and_size(config)
     width, height = map(int, dimensions.split("x"))
 
@@ -473,24 +408,19 @@ def main():
     previous = previous_manifest_rows()
 
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
-
-    jobs = []
-    manifest_rows = []
-    seen_pairs = set()
+    jobs, manifest_rows, seen_pairs = [], [], set()
 
     for index, scene in enumerate(scenes, start=1):
         part, local_scene = scene_mapping(scene, index, seen_pairs)
         description = get_text(scene, DESCRIPTION_KEYS)
-
         if not description:
             raise RuntimeError(
                 f"Scene {index} has no visual description. "
-                "Fix scenes.json instead of generating an unrelated image."
+                "Fix scenes.json rather than generating an unrelated image."
             )
 
         duration = scene_duration(scene, config)
         image_path = f"output/visuals/scene_{index:02d}.png"
-
         prompt = build_prompt(
             mode, dimensions, topic, title, category, part, local_scene,
             description, bible,
@@ -524,8 +454,7 @@ def main():
                 status = "existing"
             provider = old.get("provider") or "previous run"
         else:
-            status = "image_required"
-            provider = None
+            status, provider = "image_required", None
 
         manifest_rows.append({
             "scene": index,
@@ -561,7 +490,6 @@ def main():
         "uses_colab": False,
         "jobs": jobs,
     }
-
     manifest_document = {
         "version": VERSION,
         "format": mode,
@@ -588,7 +516,6 @@ def main():
     log("Valid matching images retained:", ready)
     log("Images requiring generation:", len(jobs) - ready)
     log("Character Bible:", "available" if bible else "not available")
-    log("Prompt fingerprints aligned with free_image_generator.py")
     log("Jobs:", JOBS_FILE.relative_to(ROOT))
     log("Manifest:", MANIFEST_FILE.relative_to(ROOT))
     log("=" * 60)
