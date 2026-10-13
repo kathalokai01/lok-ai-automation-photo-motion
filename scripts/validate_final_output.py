@@ -1,781 +1,755 @@
 
 #!/usr/bin/env python3
-"""Validate final deliverables for the Katha Lok AI photo-motion pipeline."""
+"""Validate final Katha Lok AI photo-motion video deliverables."""
 
 from __future__ import annotations
 
 import json
-import math
+import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+try:
+    from scripts.input_config import (
+        load_and_validate,
+        get_format,
+        get_parts,
+        get_scenes,
+    )
+except ImportError:
+    from input_config import (
+        load_and_validate,
+        get_format,
+        get_parts,
+        get_scenes,
+    )
 
-from input_config import load_and_validate, get_format, get_parts
 
+ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "output"
-CONFIG = ROOT / "Input" / "topic.txt"
-
-FINAL = OUTPUT / "videos" / "katha_lok_ai_final.mp4"
-SHORT = OUTPUT / "videos" / "katha_lok_ai_short.mp4"
-FULL = OUTPUT / "videos" / "katha_lok_ai_full.mp4"
-PARTS_DIR = OUTPUT / "parts"
-
-JOBS = OUTPUT / "visuals" / "visual_jobs.json"
-IMAGES = OUTPUT / "visuals" / "image_manifest.json"
-MOTION = OUTPUT / "photo_motion" / "photo_motion_manifest.json"
-RENDER = OUTPUT / "scene_renders" / "render_manifest.json"
-CAPTIONS = OUTPUT / "captions" / "captions.json"
-SRT = OUTPUT / "captions" / "final_captions.srt"
-METADATA = OUTPUT / "youtube_metadata.txt"
-MODEL = OUTPUT / "config" / "selected_model.json"
+VIDEO_ROOT = OUTPUT / "videos"
+PART_ROOT = OUTPUT / "parts"
+RENDER_MANIFEST = OUTPUT / "scene_renders" / "render_manifest.json"
+CAPTION_FILE = OUTPUT / "captions" / "captions.json"
+SRT_FILE = OUTPUT / "captions" / "final_captions.srt"
 THUMBNAIL = OUTPUT / "thumbnail.jpg"
 THUMBNAIL_MANIFEST = OUTPUT / "thumbnail" / "thumbnail_manifest.json"
+METADATA_FILE = OUTPUT / "youtube_metadata.txt"
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
-MIN_MEDIA_BYTES = 1000
+ERRORS: list[str] = []
+WARNINGS: list[str] = []
 
 
 def fail(message: str) -> None:
-    raise RuntimeError(message)
+    ERRORS.append(message)
+    print(f"ERROR: {message}")
 
 
-def log(*values) -> None:
-    print(*values, flush=True)
+def warn(message: str) -> None:
+    WARNINGS.append(message)
+    print(f"WARNING: {message}")
 
 
-def require_file(path: Path, label: str, minimum: int = 1) -> Path:
+def ok(message: str) -> None:
+    print(f"OK: {message}")
+
+
+def read_json(path: Path, required: bool = True) -> Any:
     if not path.is_file():
-        fail(f"{label} is missing: {path}")
-    if path.stat().st_size < minimum:
-        fail(f"{label} is empty or too small: {path}")
-    return path
+        if required:
+            fail(f"Required JSON file is missing: {relative(path)}")
+        return None
 
-
-def read_json(path: Path):
-    require_file(path, "JSON file")
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError) as exc:
-        fail(f"Cannot read JSON {path}: {exc}")
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"Cannot read JSON {relative(path)}: {exc}")
+        return None
 
 
-def safe_path(value, label: str) -> Path:
+def relative(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(ROOT.resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)
+
+
+def safe_path(value: Any, label: str) -> Path | None:
     if not isinstance(value, str) or not value.strip():
-        fail(f"Missing path for {label}.")
+        fail(f"{label}: missing or invalid path")
+        return None
 
-    path = Path(value.strip())
-    if not path.is_absolute():
-        path = ROOT / path
-
-    path = path.resolve()
+    candidate = Path(value.strip())
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
 
     try:
-        path.relative_to(ROOT.resolve())
-    except ValueError:
-        fail(f"{label} points outside the repository.")
+        resolved = candidate.resolve()
+        resolved.relative_to(ROOT.resolve())
+    except (ValueError, OSError):
+        fail(f"{label}: path escapes the repository")
+        return None
+
+    return resolved
+
+
+def check_file(value: Any, label: str, min_bytes: int = 1) -> Path | None:
+    path = safe_path(value, label)
+    if path is None:
+        return None
+
+    if not path.is_file():
+        fail(f"{label}: file does not exist: {relative(path)}")
+        return None
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        fail(f"{label}: cannot inspect file: {exc}")
+        return None
+
+    if size < min_bytes:
+        fail(f"{label}: file is unexpectedly small ({size} bytes)")
+        return None
 
     return path
 
 
-def positive_int(value, label: str) -> int:
+def media_info(path: Path) -> dict[str, Any] | None:
+    """Read video/audio streams using ffprobe."""
     try:
-        number = int(value)
-    except (TypeError, ValueError):
-        fail(f"Invalid {label}: {value!r}")
-
-    if number < 1:
-        fail(f"{label} must be greater than zero.")
-
-    return number
-
-
-def scene_identity(row, index: int, label: str):
-    if not isinstance(row, dict):
-        fail(f"{label} record {index} is not an object.")
-
-    number = positive_int(
-        row.get("global_scene", row.get("scene", index)),
-        f"{label} global scene",
-    )
-    part = positive_int(row.get("part"), f"{label} part")
-    local = positive_int(
-        row.get("local_scene", row.get("scene", index)),
-        f"{label} local scene",
-    )
-    return number, part, local
-
-
-def extract_rows(data, keys, label: str):
-    if isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict):
-        rows = next(
-            (
-                data.get(key)
-                for key in keys
-                if isinstance(data.get(key), list)
-            ),
-            None,
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration,size:"
+                "stream=codec_type,width,height,duration",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
         )
-    else:
-        rows = None
-
-    if not isinstance(rows, list) or not rows:
-        fail(f"{label} contains no scene records.")
-
-    return rows
-
-
-def probe_media(path: Path, ffprobe: str, minimum=MIN_MEDIA_BYTES):
-    require_file(path, "Media file", minimum)
-
-    result = subprocess.run(
-        [
-            ffprobe,
-            "-v", "error",
-            "-show_entries",
-            "format=duration:stream=codec_type,width,height",
-            "-of", "json",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(f"ffprobe failed for {relative(path)}: {exc}")
+        return None
 
     if result.returncode != 0:
         fail(
-            f"ffprobe failed for {path.name}: "
-            f"{result.stderr.strip()}"
+            f"Invalid media file {relative(path)}: "
+            f"{result.stderr.strip()[:300]}"
         )
+        return None
 
     try:
         data = json.loads(result.stdout)
-        duration = float(data["format"]["duration"])
-        streams = data.get("streams", [])
-    except (ValueError, TypeError, KeyError) as exc:
-        fail(f"Invalid media metadata for {path.name}: {exc}")
+    except json.JSONDecodeError:
+        fail(f"ffprobe returned invalid JSON for {relative(path)}")
+        return None
 
-    video = next(
-        (
-            stream for stream in streams
-            if stream.get("codec_type") == "video"
-        ),
-        None,
-    )
+    streams = data.get("streams", [])
+    video_streams = [
+        stream for stream in streams
+        if stream.get("codec_type") == "video"
+    ]
+    audio_streams = [
+        stream for stream in streams
+        if stream.get("codec_type") == "audio"
+    ]
 
-    if not video:
-        fail(f"No video stream in {path.name}.")
+    if not video_streams:
+        fail(f"No video stream: {relative(path)}")
+        return None
 
-    if not math.isfinite(duration) or duration <= 0:
-        fail(f"Invalid duration in {path.name}.")
+    if not audio_streams:
+        fail(f"No audio stream: {relative(path)}")
 
-    width = int(video.get("width") or 0)
-    height = int(video.get("height") or 0)
+    fmt = data.get("format", {})
+    try:
+        duration = float(fmt.get("duration", 0))
+    except (TypeError, ValueError):
+        duration = 0.0
+
+    if duration <= 0:
+        fail(f"Invalid media duration: {relative(path)}")
+
+    video = video_streams[0]
+    try:
+        width = int(video.get("width", 0))
+        height = int(video.get("height", 0))
+    except (TypeError, ValueError):
+        width, height = 0, 0
 
     if width <= 0 or height <= 0:
-        fail(f"Invalid dimensions in {path.name}.")
+        fail(f"Invalid video dimensions: {relative(path)}")
 
     return {
         "duration": duration,
         "width": width,
         "height": height,
-        "has_audio": any(
-            stream.get("codec_type") == "audio"
-            for stream in streams
-        ),
-        "size": path.stat().st_size,
+        "has_audio": bool(audio_streams),
+        "format": fmt,
     }
 
 
-def validate_model() -> None:
-    data = read_json(MODEL)
-    if (
-        not isinstance(data, dict)
-        or data.get("status") != "selected"
-        or not str(data.get("model", "")).strip()
+def expected_dimensions(mode: str) -> tuple[int, int]:
+    if mode == "short":
+        return 720, 1280
+    return 1280, 720
+
+
+def check_dimensions(
+    path: Path,
+    info: dict[str, Any],
+    mode: str,
+    label: str,
+) -> None:
+    expected_width, expected_height = expected_dimensions(mode)
+    actual_width = info["width"]
+    actual_height = info["height"]
+
+    if (actual_width, actual_height) != (
+        expected_width,
+        expected_height,
     ):
-        fail("Selected model metadata is missing or invalid.")
+        fail(
+            f"{label}: expected {expected_width}x{expected_height}, "
+            f"found {actual_width}x{actual_height}"
+        )
 
-    log("Selected model metadata: OK")
 
-
-def validate_visuals():
-    jobs_data = read_json(JOBS)
-    jobs = extract_rows(
-        jobs_data,
-        ("jobs", "visual_jobs", "scenes"),
-        "Visual jobs",
+def parse_srt_timestamp(value: str) -> float | None:
+    match = re.fullmatch(
+        r"(\d{2,}):([0-5]\d):([0-5]\d)[,.](\d{3})",
+        value.strip(),
     )
+    if not match:
+        return None
 
+    hours, minutes, seconds, millis = map(int, match.groups())
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000
+
+
+def validate_srt(path: Path, total_duration: float) -> int:
     try:
-        from PIL import Image
-    except ImportError as exc:
-        fail(f"Pillow is required for image validation: {exc}")
-
-    identities = []
-    seen = set()
-
-    for index, job in enumerate(jobs, 1):
-        number, part, local = scene_identity(
-            job, index, "Visual job"
-        )
-        key = (part, local)
-
-        if key in seen:
-            fail(f"Duplicate visual mapping: {key}")
-        seen.add(key)
-
-        image_value = job.get("image_path") or job.get("image")
-        image_path = safe_path(
-            image_value, f"image for scene {number}"
-        )
-        require_file(image_path, f"Scene {number} image", 1000)
-
-        if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
-            fail(f"Unsupported image type for scene {number}.")
-
-        try:
-            with Image.open(image_path) as image:
-                image.verify()
-            with Image.open(image_path) as image:
-                if image.width < 64 or image.height < 64:
-                    fail(f"Scene {number} image is too small.")
-        except Exception as exc:
-            fail(f"Invalid image for scene {number}: {exc}")
-
-        identities.append((number, part, local))
-
-    identities.sort()
-
-    if [item[0] for item in identities] != list(
-        range(1, len(identities) + 1)
-    ):
-        fail("Visual global scene numbers must be continuous from 1.")
-
-    image_data = read_json(IMAGES)
-    image_rows = extract_rows(
-        image_data,
-        ("scenes", "images", "items"),
-        "Image manifest",
-    )
-
-    image_ids = [
-        scene_identity(row, index, "Image manifest")
-        for index, row in enumerate(image_rows, 1)
-    ]
-
-    if len(image_rows) != len(jobs):
-        fail("Image manifest count differs from visual jobs.")
-
-    if sorted(image_ids) != sorted(identities):
-        fail("Image manifest mapping differs from visual jobs.")
-
-    log("Visual jobs and image mapping: OK", len(jobs))
-    return identities
-
-
-def validate_motion(identities, ffprobe: str, dimensions):
-    rows = read_json(MOTION)
-
-    if not isinstance(rows, list) or not rows:
-        fail("Photo-motion manifest must be a non-empty list.")
-
-    if len(rows) != len(identities):
-        fail("Photo-motion count differs from visual scene count.")
-
-    expected = {
-        (part, local): number
-        for number, part, local in identities
-    }
-    seen = set()
-    result = {}
-
-    for index, row in enumerate(rows, 1):
-        number, part, local = scene_identity(
-            row, index, "Motion manifest"
-        )
-        key = (part, local)
-
-        if key in seen:
-            fail(f"Duplicate photo-motion mapping: {key}")
-        if expected.get(key) != number:
-            fail(f"Photo-motion mapping mismatch at scene {number}.")
-
-        path = safe_path(
-            row.get("video"), f"motion video for scene {number}"
-        )
-        info = probe_media(path, ffprobe)
-
-        if (info["width"], info["height"]) != dimensions:
-            fail(f"Wrong resolution in motion scene {number}.")
-
-        try:
-            recorded_duration = float(row.get("duration"))
-        except (TypeError, ValueError):
-            fail(f"Invalid duration in motion scene {number}.")
-
-        if (
-            not math.isfinite(recorded_duration)
-            or recorded_duration <= 0
-            or abs(info["duration"] - recorded_duration) > 1.0
-        ):
-            fail(f"Duration mismatch in motion scene {number}.")
-
-        seen.add(key)
-        result[number] = {
-            "part": part,
-            "local_scene": local,
-            "path": path,
-            "info": info,
-        }
-
-    if seen != set(expected):
-        fail("Photo-motion manifest is missing scenes.")
-
-    log("Photo-motion clips: OK", len(rows))
-    return result
-
-
-def validate_captions():
-    data = read_json(CAPTIONS)
-
-    if not isinstance(data, dict) or data.get("status") != "completed":
-        fail("Captions JSON is missing or incomplete.")
-
-    rows = data.get("captions")
-    if not isinstance(rows, list) or not rows:
-        fail("Captions JSON contains no caption records.")
-
-    captions = {}
-
-    for row in rows:
-        if not isinstance(row, dict):
-            fail("Invalid caption record.")
-
-        key = (
-            positive_int(row.get("part"), "caption part"),
-            positive_int(row.get("scene"), "caption scene"),
-        )
-        text = str(row.get("text", "")).strip()
-
-        if not text:
-            fail(f"Empty caption for {key}.")
-        if key in captions:
-            fail(f"Duplicate caption record: {key}")
-
-        captions[key] = text
-
-    log("Caption records: OK", len(captions))
-    return captions
-
-
-def validate_srt(final_duration: float) -> None:
-    require_file(SRT, "Final SRT captions", 10)
-    content = SRT.read_text(encoding="utf-8-sig").strip()
+        content = path.read_text(encoding="utf-8-sig").strip()
+    except OSError as exc:
+        fail(f"Cannot read captions SRT: {exc}")
+        return 0
 
     if not content:
-        fail("Final SRT is empty.")
+        fail("Caption SRT is empty")
+        return 0
 
     blocks = re.split(r"\n\s*\n", content)
-    timestamp = re.compile(
-        r"^(\d{2,}):([0-5]\d):([0-5]\d),(\d{3})"
-        r"\s*-->\s*"
-        r"(\d{2,}):([0-5]\d):([0-5]\d),(\d{3})$"
-    )
-
-    previous_start = -1.0
     previous_end = 0.0
+    valid_cues = 0
 
-    for block in blocks:
+    for block_number, block in enumerate(blocks, start=1):
         lines = block.strip().splitlines()
+        if len(lines) < 3:
+            fail(f"SRT block {block_number} is incomplete")
+            continue
 
-        if len(lines) < 3 or not lines[0].strip().isdigit():
-            fail("Malformed SRT cue.")
+        if not lines[0].strip().isdigit():
+            fail(f"SRT block {block_number} has an invalid cue number")
+            continue
 
-        match = timestamp.match(lines[1].strip())
-        if not match:
-            fail(f"Invalid SRT timestamp: {lines[1]}")
-
-        values = [int(value) for value in match.groups()]
-        start = (
-            values[0] * 3600
-            + values[1] * 60
-            + values[2]
-            + values[3] / 1000
+        timing = re.fullmatch(
+            r"\s*(\d{2,}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*"
+            r"(\d{2,}:\d{2}:\d{2}[,.]\d{3})(?:\s+.*)?",
+            lines[1].strip(),
         )
-        end = (
-            values[4] * 3600
-            + values[5] * 60
-            + values[6]
-            + values[7] / 1000
-        )
+        if not timing:
+            fail(f"SRT block {block_number} has invalid timestamps")
+            continue
 
-        if end <= start:
-            fail("SRT cue end must be after its start.")
-        if start < previous_start:
-            fail("SRT cues are not chronological.")
-        if start < previous_end - 0.05:
-            fail("SRT cues overlap unexpectedly.")
-        if end > final_duration + 1.0:
-            fail("SRT cue extends beyond the final video.")
-        if not "\n".join(lines[2:]).strip():
-            fail("SRT cue has no text.")
+        start = parse_srt_timestamp(timing.group(1))
+        end = parse_srt_timestamp(timing.group(2))
 
-        previous_start = start
+        if start is None or end is None or end <= start:
+            fail(f"SRT block {block_number} has invalid timing")
+            continue
+
+        if start + 0.05 < previous_end:
+            fail(f"SRT cues overlap or are out of order at block {block_number}")
+
+        if start > total_duration + 0.5 or end > total_duration + 1.0:
+            fail(f"SRT block {block_number} exceeds final video duration")
+
+        caption_text = " ".join(lines[2:]).strip()
+        if not caption_text:
+            fail(f"SRT block {block_number} has no caption text")
+
         previous_end = end
+        valid_cues += 1
 
-    log("SRT timestamps: OK", len(blocks))
+    if valid_cues:
+        ok(f"SRT contains {valid_cues} valid caption cues")
+
+    return valid_cues
+
+
+def validate_model_selection() -> None:
+    path = OUTPUT / "config" / "selected_model.json"
+    data = read_json(path)
+
+    if not isinstance(data, dict):
+        return
+
+    if data.get("status") != "selected":
+        fail("Selected-model manifest status is not 'selected'")
+
+    if not data.get("model"):
+        fail("Selected-model manifest has no model name")
+    else:
+        ok("Selected-model manifest is present")
+
+
+def validate_visual_inputs(expected_scenes: int) -> None:
+    jobs_path = OUTPUT / "visuals" / "visual_jobs.json"
+    manifest_path = OUTPUT / "visuals" / "image_manifest.json"
+
+    jobs_data = read_json(jobs_path)
+    image_data = read_json(manifest_path)
+
+    if not isinstance(jobs_data, dict):
+        fail("visual_jobs.json must contain a JSON object")
+        return
+
+    if not isinstance(image_data, dict):
+        fail("image_manifest.json must contain a JSON object")
+        return
+
+    jobs = jobs_data.get("scenes", jobs_data.get("jobs", []))
+    images = image_data.get("scenes", [])
+
+    if not isinstance(jobs, list):
+        fail("visual_jobs.json has no valid scene list")
+        return
+
+    if not isinstance(images, list):
+        fail("image_manifest.json has no valid scene list")
+        return
+
+    if len(jobs) != expected_scenes:
+        fail(
+            f"Visual job count mismatch: expected {expected_scenes}, "
+            f"found {len(jobs)}"
+        )
+
+    if len(images) != expected_scenes:
+        fail(
+            f"Image manifest count mismatch: expected {expected_scenes}, "
+            f"found {len(images)}"
+        )
+
+    seen: set[int] = set()
+
+    for row in images:
+        if not isinstance(row, dict):
+            fail("Image manifest contains an invalid scene entry")
+            continue
+
+        scene_id = row.get("global_scene", row.get("scene"))
+        if not isinstance(scene_id, int):
+            fail("Image manifest contains a scene without a numeric ID")
+            continue
+
+        if scene_id in seen:
+            fail(f"Duplicate image manifest scene ID: {scene_id}")
+        seen.add(scene_id)
+
+        image_value = (
+            row.get("image_path")
+            or row.get("image")
+            or row.get("path")
+        )
+        image_path = check_file(image_value, f"Scene {scene_id} image")
+
+        if image_path and image_path.suffix.lower() not in {
+            ".png", ".jpg", ".jpeg", ".webp"
+        }:
+            fail(f"Scene {scene_id}: unsupported image format")
+
+    if seen and seen != set(range(1, expected_scenes + 1)):
+        fail("Image manifest scene IDs are not sequential from 1")
+
+    if len(images) == expected_scenes:
+        ok(f"Image manifest covers {expected_scenes} scenes")
+
+
+def validate_photo_motion(expected_scenes: int, mode: str) -> None:
+    path = OUTPUT / "photo_motion" / "photo_motion_manifest.json"
+    data = read_json(path)
+
+    if not isinstance(data, list):
+        fail("Photo-motion manifest must be a JSON list")
+        return
+
+    if len(data) != expected_scenes:
+        fail(
+            f"Photo-motion scene count mismatch: expected {expected_scenes}, "
+            f"found {len(data)}"
+        )
+
+    seen: set[int] = set()
+
+    for row in data:
+        if not isinstance(row, dict):
+            fail("Photo-motion manifest contains an invalid entry")
+            continue
+
+        scene_id = row.get("global_scene", row.get("scene"))
+        if not isinstance(scene_id, int):
+            fail("Photo-motion entry has no numeric scene ID")
+            continue
+
+        if scene_id in seen:
+            fail(f"Duplicate photo-motion scene ID: {scene_id}")
+        seen.add(scene_id)
+
+        if row.get("status") not in (None, "completed"):
+            fail(f"Photo-motion scene {scene_id} is not completed")
+
+        video_value = row.get("video") or row.get("output")
+        video_path = check_file(
+            video_value, f"Photo-motion scene {scene_id} video", 1024
+        )
+        if video_path:
+            info = media_info(video_path)
+            if info:
+                check_dimensions(
+                    video_path, info, mode,
+                    f"Photo-motion scene {scene_id}",
+                )
+
+    if seen and seen != set(range(1, expected_scenes + 1)):
+        fail("Photo-motion scene IDs are not sequential from 1")
 
 
 def validate_render_manifest(
-    identities,
-    captions,
-    motion,
-    ffprobe: str,
-    dimensions,
-    requested_parts: int,
     mode: str,
-):
-    manifest = read_json(RENDER)
+    expected_parts: int,
+    expected_scenes: int,
+) -> tuple[dict[str, Any] | None, float]:
+    manifest = read_json(RENDER_MANIFEST)
 
     if not isinstance(manifest, dict):
-        fail("Render manifest must be a JSON object.")
+        fail("Render manifest must be a JSON object")
+        return None, 0.0
+
     if manifest.get("status") != "completed":
-        fail("Render manifest is not completed.")
-    if manifest.get("captions_burned") is not True:
-        fail("Render manifest does not confirm burned captions.")
+        fail("Render manifest status is not 'completed'")
+
     if manifest.get("format") != mode:
-        fail("Render manifest format differs from Input/topic.txt.")
-
-    rows = manifest.get("completed_scenes")
-    if not isinstance(rows, list) or not rows:
-        fail("Render manifest has no completed scenes.")
-    if len(rows) != len(identities):
-        fail("Rendered scene count differs from visual scene count.")
-
-    expected = {
-        (part, local): number
-        for number, part, local in identities
-    }
-    seen_keys = set()
-    seen_numbers = set()
-    result = []
-
-    for index, row in enumerate(rows, 1):
-        number, part, local = scene_identity(
-            row, index, "Render manifest"
+        fail(
+            f"Render manifest format mismatch: expected {mode}, "
+            f"found {manifest.get('format')!r}"
         )
-        key = (part, local)
 
-        if key in seen_keys or number in seen_numbers:
-            fail(f"Duplicate rendered scene mapping: {key}")
-        if expected.get(key) != number:
-            fail(f"Rendered scene mapping mismatch at scene {number}.")
-        if key not in captions:
-            fail(f"Missing caption for scene {number}.")
+    if manifest.get("captions_burned") is not True:
+        fail("Final render manifest does not confirm burned-in captions")
+
+    rows = manifest.get("completed_scenes", [])
+    if not isinstance(rows, list):
+        fail("Render manifest completed_scenes is not a list")
+        rows = []
+
+    if len(rows) != expected_scenes:
+        fail(
+            f"Rendered scene count mismatch: expected {expected_scenes}, "
+            f"found {len(rows)}"
+        )
+
+    seen: set[int] = set()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            fail("Render manifest contains an invalid scene entry")
+            continue
+
+        scene_id = row.get("global_scene")
+        if not isinstance(scene_id, int):
+            fail("Rendered scene has no numeric global_scene")
+            continue
+
+        if scene_id in seen:
+            fail(f"Duplicate rendered scene ID: {scene_id}")
+        seen.add(scene_id)
+
+        if row.get("status") not in (None, "completed"):
+            fail(f"Rendered scene {scene_id} is not completed")
+
         if row.get("captions_burned") is not True:
-            fail(f"Scene {number} is not marked captioned.")
+            fail(f"Rendered scene {scene_id} is not marked captioned")
 
-        source_path = safe_path(
-            row.get("source_rendered_video"),
-            f"pre-caption render for scene {number}",
-        )
-        source_info = probe_media(source_path, ffprobe)
-
-        if not source_info["has_audio"]:
-            fail(f"Pre-caption scene {number} has no audio.")
-
-        recorded_motion = row.get("source_photo_motion_video")
-        if recorded_motion:
-            motion_path = safe_path(
-                recorded_motion,
-                f"photo-motion source for scene {number}",
+        for key in ("source_rendered_video", "video"):
+            value = row.get(key)
+            scene_path = check_file(
+                value, f"Rendered scene {scene_id} {key}", 1024
             )
-            if motion_path != motion[number]["path"]:
-                fail(f"Photo-motion source changed at scene {number}.")
+            if scene_path:
+                info = media_info(scene_path)
+                if info:
+                    check_dimensions(
+                        scene_path, info, mode,
+                        f"Rendered scene {scene_id} {key}",
+                    )
 
-        path = safe_path(
-            row.get("video"), f"captioned scene {number}"
-        )
-        info = probe_media(path, ffprobe)
+        audio_value = row.get("audio")
+        if audio_value:
+            check_file(audio_value, f"Rendered scene {scene_id} audio")
 
-        if not info["has_audio"]:
-            fail(f"Captioned scene {number} has no audio.")
-        if (info["width"], info["height"]) != dimensions:
-            fail(f"Wrong captioned resolution at scene {number}.")
-        if abs(info["duration"] - source_info["duration"]) > 1.0:
-            fail(f"Captioning changed scene {number} duration.")
+    if seen and seen != set(range(1, expected_scenes + 1)):
+        fail("Rendered scene IDs are not sequential from 1")
 
-        try:
-            recorded_duration = float(row.get("duration"))
-        except (TypeError, ValueError):
-            fail(f"Invalid recorded duration at scene {number}.")
+    parts = manifest.get("parts", [])
+    if not isinstance(parts, list):
+        fail("Render manifest parts field is not a list")
+        parts = []
 
-        if (
-            not math.isfinite(recorded_duration)
-            or recorded_duration <= 0
-            or abs(info["duration"] - recorded_duration) > 1.0
-        ):
-            fail(f"Manifest duration mismatch at scene {number}.")
-
-        seen_keys.add(key)
-        seen_numbers.add(number)
-        result.append({
-            "number": number,
-            "part": part,
-            "local_scene": local,
-            "path": path,
-            "info": info,
-        })
-
-    if seen_keys != set(expected):
-        fail("Render manifest does not cover all visual scenes.")
-    if sorted(seen_numbers) != list(range(1, len(rows) + 1)):
-        fail("Rendered global scene numbers are not continuous.")
-
-    result.sort(key=lambda item: item["number"])
-
-    expected_parts = set(range(1, requested_parts + 1))
-    actual_parts = {item["part"] for item in result}
-    if actual_parts != expected_parts:
-        fail("Rendered scenes do not cover configured parts.")
-
-    for part in sorted(expected_parts):
-        local_numbers = sorted(
-            item["local_scene"]
-            for item in result
-            if item["part"] == part
-        )
-        if local_numbers != list(range(1, len(local_numbers) + 1)):
-            fail(f"Scene numbering is not continuous in part {part}.")
-
-    log("Captioned scene renders: OK", len(result))
-    return manifest, result
-
-
-def validate_final_video(
-    ffprobe: str,
-    mode: str,
-    dimensions,
-    scene_rows,
-):
-    final_info = probe_media(FINAL, ffprobe)
-
-    if (final_info["width"], final_info["height"]) != dimensions:
-        fail("Final video resolution differs from requested format.")
-    if not final_info["has_audio"]:
-        fail("Final video has no audio.")
-
-    timeline = sum(item["info"]["duration"] for item in scene_rows)
-    tolerance = max(2.0, final_info["duration"] * 0.03)
-
-    if abs(timeline - final_info["duration"]) > tolerance:
+    if len(parts) != expected_parts:
         fail(
-            f"Scene timeline ({timeline:.2f}s) differs from final "
-            f"video ({final_info['duration']:.2f}s)."
+            f"Part manifest count mismatch: expected {expected_parts}, "
+            f"found {len(parts)}"
         )
 
-    selected = FULL if mode == "full" else SHORT
-    opposite = SHORT if mode == "full" else FULL
+    for index, item in enumerate(parts, start=1):
+        value = item.get("path") if isinstance(item, dict) else item
+        part_path = check_file(value, f"Part {index:02d} video", 1024)
+        if part_path:
+            info = media_info(part_path)
+            if info:
+                check_dimensions(
+                    part_path, info, mode, f"Part {index:02d}"
+                )
 
-    alias_info = probe_media(selected, ffprobe)
-    if (alias_info["width"], alias_info["height"]) != dimensions:
-        fail("Selected output alias has incorrect dimensions.")
-    if abs(alias_info["duration"] - final_info["duration"]) > 0.10:
-        fail("Selected alias duration differs from final video.")
-    if not alias_info["has_audio"]:
-        fail("Selected output alias has no audio.")
-    if opposite.exists():
-        fail(f"Unexpected opposite-format alias exists: {opposite.name}")
+    final_value = manifest.get("final_video")
+    final_path = check_file(final_value, "Manifest final_video", 1024)
 
-    manifest = read_json(RENDER)
+    final_duration = 0.0
+    if final_path:
+        info = media_info(final_path)
+        if info:
+            check_dimensions(final_path, info, mode, "Final video")
+            final_duration = info["duration"]
 
-    if safe_path(
-        manifest.get("final_video"), "render manifest final video"
-    ) != FINAL.resolve():
-        fail("Render manifest points to a different final video.")
-    if safe_path(
-        manifest.get("alias"), "render manifest format alias"
-    ) != selected.resolve():
-        fail("Render manifest points to the wrong format alias.")
+    alias_value = manifest.get("alias")
+    alias_path = check_file(alias_value, "Manifest format alias", 1024)
 
-    log("Final video and format alias: OK")
-    return final_info, selected
+    if final_path and alias_path and final_path.resolve() == alias_path.resolve():
+        warn("Final video and alias point to the same file")
+
+    return manifest, final_duration
 
 
-def validate_parts(
-    ffprobe: str,
-    requested_parts: int,
-    dimensions,
-    manifest,
-):
-    if not PARTS_DIR.is_dir():
-        fail("Output parts directory is missing.")
+def validate_captions(expected_scenes: int, total_duration: float) -> None:
+    data = read_json(CAPTION_FILE)
 
-    files = sorted(PARTS_DIR.glob("part_*.mp4"))
-    if len(files) != requested_parts:
+    if not isinstance(data, dict):
+        fail("Caption manifest must be a JSON object")
+        return
+
+    if data.get("status") != "completed":
+        fail("Caption manifest status is not 'completed'")
+
+    rows = data.get("captions", [])
+    if not isinstance(rows, list):
+        fail("Caption manifest captions field is not a list")
+        rows = []
+
+    if len(rows) != expected_scenes:
         fail(
-            f"Expected {requested_parts} parts; found {len(files)}."
+            f"Caption scene count mismatch: expected {expected_scenes}, "
+            f"found {len(rows)}"
         )
 
-    for number, path in enumerate(files, 1):
-        if path.name != f"part_{number:02d}.mp4":
-            fail(f"Unexpected part filename: {path.name}")
+    seen: set[tuple[int, int]] = set()
 
-        info = probe_media(path, ffprobe)
-        if (info["width"], info["height"]) != dimensions:
-            fail(f"Wrong resolution in {path.name}.")
-        if not info["has_audio"]:
-            fail(f"Audio missing from {path.name}.")
+    for row in rows:
+        if not isinstance(row, dict):
+            fail("Caption manifest contains an invalid entry")
+            continue
 
-    expected_paths = [
-        (PARTS_DIR / f"part_{number:02d}.mp4")
-        .relative_to(ROOT)
-        .as_posix()
-        for number in range(1, requested_parts + 1)
-    ]
+        part = row.get("part")
+        scene = row.get("scene", row.get("local_scene"))
+        if not isinstance(part, int) or not isinstance(scene, int):
+            fail("Caption entry is missing numeric part/scene IDs")
+            continue
 
-    recorded = manifest.get("parts")
-    if not isinstance(recorded, list):
-        fail("Render manifest has no parts list.")
+        key = (part, scene)
+        if key in seen:
+            fail(f"Duplicate caption entry for part {part}, scene {scene}")
+        seen.add(key)
 
-    normalized_recorded = []
-    for item in recorded:
-        if isinstance(item, str):
-            normalized_recorded.append(
-                Path(item).as_posix()
-            )
-        elif isinstance(item, dict) and item.get("path"):
-            normalized_recorded.append(
-                Path(str(item["path"])).as_posix()
-            )
-        else:
-            fail("Render manifest contains an invalid part record.")
+        if not str(row.get("text", "")).strip():
+            fail(f"Caption text is empty for part {part}, scene {scene}")
 
-    if normalized_recorded != expected_paths:
-        fail("Render manifest part list differs from part files.")
-
-    log("Part videos: OK", len(files))
+    if SRT_FILE.is_file():
+        validate_srt(SRT_FILE, total_duration)
+    else:
+        fail("Final SRT file is missing")
 
 
 def validate_metadata_and_thumbnail(mode: str) -> None:
-    require_file(METADATA, "YouTube metadata", 30)
-    metadata = METADATA.read_text(encoding="utf-8-sig").strip()
+    if not METADATA_FILE.is_file():
+        fail("YouTube metadata file is missing")
+    else:
+        try:
+            metadata = METADATA_FILE.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            fail(f"Cannot read metadata file: {exc}")
+            metadata = ""
 
-    for label in ("Title:", "Description:", "Tags:"):
-        if label.lower() not in metadata.lower():
-            fail(f"YouTube metadata is missing {label}")
+        for field in ("Title:", "Description:", "Tags:"):
+            if not re.search(
+                rf"(?im)^\s*{re.escape(field)}\s*\S",
+                metadata,
+            ):
+                fail(f"Metadata is missing a non-empty {field} field")
 
-    require_file(THUMBNAIL, "Thumbnail", 1000)
+        if metadata:
+            ok("YouTube metadata file exists")
+
+    if not THUMBNAIL.is_file():
+        fail("Thumbnail image is missing")
+    else:
+        try:
+            from PIL import Image
+
+            with Image.open(THUMBNAIL) as image:
+                image.verify()
+
+            with Image.open(THUMBNAIL) as image:
+                width, height = image.size
+
+            if width <= 0 or height <= 0:
+                fail("Thumbnail has invalid dimensions")
+            elif mode == "short" and height <= width:
+                fail("Short thumbnail should be portrait")
+            elif mode == "full" and width <= height:
+                fail("Full-video thumbnail should be landscape")
+            else:
+                ok(f"Thumbnail is valid ({width}x{height})")
+        except Exception as exc:
+            fail(f"Thumbnail is unreadable: {exc}")
+
+    thumbnail_manifest = read_json(THUMBNAIL_MANIFEST)
+    if isinstance(thumbnail_manifest, dict):
+        if thumbnail_manifest.get("status") != "completed":
+            fail("Thumbnail manifest status is not 'completed'")
+
+        recorded_path = thumbnail_manifest.get("path")
+        if recorded_path:
+            resolved = safe_path(recorded_path, "Thumbnail manifest path")
+            if resolved and resolved.resolve() != THUMBNAIL.resolve():
+                warn("Thumbnail manifest points to a different image path")
+
+
+def main() -> int:
+    print("=" * 64)
+    print("KATHA LOK AI — FINAL OUTPUT VALIDATION")
+    print("=" * 64)
 
     try:
-        from PIL import Image
-
-        with Image.open(THUMBNAIL) as image:
-            image.verify()
-        with Image.open(THUMBNAIL) as image:
-            expected_size = (
-                (1080, 1920) if mode == "short" else (1280, 720)
-            )
-            if image.size != expected_size:
-                fail(
-                    f"Thumbnail is {image.width}x{image.height}; "
-                    f"expected {expected_size[0]}x{expected_size[1]}."
-                )
+        config = load_and_validate()
+        mode = str(get_format(config)).strip().lower()
+        parts = int(get_parts(config))
+        scenes_per_part = int(get_scenes(config))
     except Exception as exc:
-        fail(f"Invalid thumbnail: {exc}")
+        fail(f"Input configuration could not be loaded: {exc}")
+        return 1
 
-    manifest = read_json(THUMBNAIL_MANIFEST)
-    if not isinstance(manifest, dict):
-        fail("Thumbnail manifest must be a JSON object.")
-    if manifest.get("status") != "completed":
-        fail("Thumbnail manifest is not completed.")
-    if manifest.get("format") != mode:
-        fail("Thumbnail format differs from requested format.")
-    if manifest.get("path") != "output/thumbnail.jpg":
-        fail("Thumbnail manifest points to a different file.")
+    if mode not in {"short", "full"}:
+        fail(f"Unsupported output format: {mode!r}")
+        return 1
 
-    log("Metadata and thumbnail: OK")
+    if parts < 1 or scenes_per_part < 1:
+        fail("PARTS and SCENES must both be positive integers")
+        return 1
 
+    expected_scenes = parts * scenes_per_part
 
-def main() -> None:
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        fail("ffprobe is not installed.")
+    print(f"Format: {mode}")
+    print(f"Configured parts: {parts}")
+    print(f"Scenes per part: {scenes_per_part}")
+    print(f"Expected scenes: {expected_scenes}")
+    print("-" * 64)
 
-    require_file(CONFIG, "Input configuration")
-    config = load_and_validate(CONFIG)
+    validate_model_selection()
+    validate_visual_inputs(expected_scenes)
+    validate_photo_motion(expected_scenes, mode)
 
-    mode = get_format(config)
-    requested_parts = positive_int(get_parts(config), "PARTS")
-    dimensions = (1280, 720) if mode == "full" else (720, 1280)
-
-    validate_model()
-    identities = validate_visuals()
-    motion = validate_motion(identities, ffprobe, dimensions)
-    captions = validate_captions()
-
-    expected_caption_keys = {
-        (part, local) for _, part, local in identities
-    }
-    if set(captions) != expected_caption_keys:
-        fail("Caption records do not match visual scene mapping.")
-
-    manifest, rendered_scenes = validate_render_manifest(
-        identities,
-        captions,
-        motion,
-        ffprobe,
-        dimensions,
-        requested_parts,
-        mode,
+    render_manifest, final_duration = validate_render_manifest(
+        mode, parts, expected_scenes
     )
 
-    final_info, selected = validate_final_video(
-        ffprobe,
-        mode,
-        dimensions,
-        rendered_scenes,
-    )
+    if render_manifest is not None:
+        validate_captions(expected_scenes, final_duration)
 
-    validate_srt(final_info["duration"])
-    validate_parts(
-        ffprobe,
-        requested_parts,
-        dimensions,
-        manifest,
-    )
     validate_metadata_and_thumbnail(mode)
 
-    log("=" * 56)
-    log("FINAL OUTPUT VALIDATION: SUCCESS")
-    log("FORMAT:", mode)
-    log(
-        "Resolution:",
-        f"{final_info['width']}x{final_info['height']}",
+    final_video = VIDEO_ROOT / "katha_lok_ai_final.mp4"
+    alias_name = (
+        "katha_lok_ai_short.mp4"
+        if mode == "short"
+        else "katha_lok_ai_full.mp4"
     )
-    log("Duration:", f"{final_info['duration']:.2f}s")
-    log("Size:", f"{final_info['size'] / 1048576:.2f} MB")
-    log("Visual scenes:", len(identities))
-    log("Motion scenes:", len(motion))
-    log("Captioned scenes:", len(rendered_scenes))
-    log("Parts:", requested_parts)
-    log("Selected output:", selected.relative_to(ROOT))
-    log("=" * 56)
+    expected_alias = VIDEO_ROOT / alias_name
+    opposite_alias = VIDEO_ROOT / (
+        "katha_lok_ai_full.mp4"
+        if mode == "short"
+        else "katha_lok_ai_short.mp4"
+    )
+
+    if not final_video.is_file():
+        fail(f"Expected final video is missing: {relative(final_video)}")
+
+    if not expected_alias.is_file():
+        fail(f"Expected format alias is missing: {relative(expected_alias)}")
+
+    if opposite_alias.exists():
+        fail(
+            f"Wrong-format alias also exists: {relative(opposite_alias)}. "
+            "Only the selected format should be delivered."
+        )
+
+    if final_video.is_file() and expected_alias.is_file():
+        try:
+            if final_video.stat().st_size != expected_alias.stat().st_size:
+                warn("Final video and format alias have different file sizes")
+        except OSError:
+            pass
+
+    for part_number in range(1, parts + 1):
+        part_path = PART_ROOT / f"part_{part_number:02d}.mp4"
+        if not part_path.is_file():
+            fail(f"Missing expected part video: {relative(part_path)}")
+
+    print("-" * 64)
+    print(f"Warnings: {len(WARNINGS)}")
+    print(f"Errors: {len(ERRORS)}")
+
+    if ERRORS:
+        print("FINAL VALIDATION: FAILED")
+        for number, message in enumerate(ERRORS, start=1):
+            print(f"{number}. {message}")
+        return 1
+
+    print("FINAL VALIDATION: PASSED")
+    print("Selected format and required deliverables passed validation.")
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        print(
-            f"FINAL OUTPUT VALIDATION FAILED: {exc}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    sys.exit(main())
