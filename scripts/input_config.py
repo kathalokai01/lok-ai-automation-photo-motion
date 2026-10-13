@@ -31,6 +31,16 @@ PROVIDER_ALIASES = {
     "mini max": "minimax",
 }
 
+CAPTION_FONTS = {
+    "noto sans devanagari": "Noto Sans Devanagari",
+    "noto": "Noto Sans Devanagari",
+    "noto sans": "Noto Sans Devanagari",
+    "mukta": "Mukta",
+    "hind": "Hind",
+    "tiro devanagari hindi": "Tiro Devanagari Hindi",
+    "tiro": "Tiro Devanagari Hindi",
+}
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "FORMAT": "full",
     "AUDIENCE": "adult",
@@ -43,6 +53,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "STORY_LENGTH": "auto",
     "SCENE_DURATION": "auto",
     "CAPTIONS": "hindi",
+    "CAPTION_FONT": "Hind",
+    "CAPTION_FONT_SIZE": 28,
     "TTS_MAIN_1": "fish_audio",
     "TTS_MAIN_2": "gemini_tts",
     "TTS_MAIN_3": "edge_tts",
@@ -93,6 +105,7 @@ BOOL_KEYS = {
     key for key, value in DEFAULT_CONFIG.items()
     if isinstance(value, bool)
 }
+
 INT_KEYS = {
     key for key, value in DEFAULT_CONFIG.items()
     if isinstance(value, int) and not isinstance(value, bool)
@@ -107,13 +120,16 @@ def _strip_inline_comment(value: str) -> str:
         if escaped:
             escaped = False
             continue
+
         if char == "\\":
             escaped = True
             continue
+
         if quote:
             if char == quote:
                 quote = None
             continue
+
         if char in ("'", '"'):
             quote = char
         elif char == "#":
@@ -124,6 +140,7 @@ def _strip_inline_comment(value: str) -> str:
 
 def _unquote(value: str) -> str:
     value = value.strip()
+
     if len(value) >= 2 and value[0] == value[-1]:
         if value[0] in ("'", '"'):
             try:
@@ -132,6 +149,7 @@ def _unquote(value: str) -> str:
                     return result
             except (ValueError, SyntaxError):
                 return value[1:-1]
+
     return value
 
 
@@ -140,10 +158,13 @@ def _parse_scalar(key: str, raw_value: str) -> Any:
 
     if key in BOOL_KEYS:
         lowered = str(value).strip().lower()
+
         if lowered in {"true", "yes", "on", "1"}:
             return True
+
         if lowered in {"false", "no", "off", "0"}:
             return False
+
         raise ValueError(f"{key} must be true or false.")
 
     if key in INT_KEYS:
@@ -160,8 +181,10 @@ def _find_assignment(line: str) -> tuple[str, str] | None:
         r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$",
         line,
     )
+
     if not match:
         return None
+
     return match.group(1), match.group(2)
 
 
@@ -177,10 +200,12 @@ def _read_multiline(
 
     if closing >= 0:
         trailing = remainder[closing + len(delimiter):].strip()
+
         if trailing and not trailing.startswith("#"):
             raise ValueError(
                 f"Unexpected text after closing multiline block for {key}."
             )
+
         return remainder[:closing].strip(), start + 1
 
     collected = [remainder] if remainder else []
@@ -191,14 +216,17 @@ def _read_multiline(
 
         if position >= 0:
             before = current[:position]
+
             if before:
                 collected.append(before)
 
             trailing = current[position + len(delimiter):].strip()
+
             if trailing and not trailing.startswith("#"):
                 raise ValueError(
                     f"Unexpected text after closing multiline block for {key}."
                 )
+
             return "\n".join(collected).strip(), index + 1
 
         collected.append(current)
@@ -229,6 +257,7 @@ def load_input_config(
             continue
 
         assignment = _find_assignment(raw)
+
         if assignment is None:
             index += 1
             continue
@@ -237,11 +266,13 @@ def load_input_config(
 
         if key == "STORY_TEXT":
             value = raw_value.strip()
+
             if value.startswith('"""'):
                 config[key], index = _read_multiline(
                     lines, index, key, '"""', value
                 )
                 continue
+
             if value.startswith("'''"):
                 config[key], index = _read_multiline(
                     lines, index, key, "'''", value
@@ -256,6 +287,7 @@ def load_input_config(
 
 def normalize_format(config: dict[str, Any]) -> str:
     value = str(config.get("FORMAT", "full")).strip().lower()
+
     aliases = {
         "short": "short",
         "shorts": "short",
@@ -309,8 +341,10 @@ def get_scenes(config: dict[str, Any]) -> int:
 
 def get_fps(config: dict[str, Any]) -> int:
     fps = _positive_int(config, "FPS", 24)
+
     if fps > 60:
         raise ValueError("FPS cannot exceed 60.")
+
     return fps
 
 
@@ -326,6 +360,54 @@ def get_max_retries(config: dict[str, Any]) -> int:
     return value
 
 
+def get_caption_font(config: dict[str, Any]) -> str:
+    raw = str(
+        config.get("CAPTION_FONT", "Hind")
+    ).strip().lower()
+
+    if raw not in CAPTION_FONTS:
+        allowed = ", ".join(
+            [
+                "Noto Sans Devanagari",
+                "Mukta",
+                "Hind",
+                "Tiro Devanagari Hindi",
+            ]
+        )
+        raise ValueError(
+            f"Unsupported CAPTION_FONT: {raw!r}. Allowed fonts: {allowed}"
+        )
+
+    canonical = CAPTION_FONTS[raw]
+    config["CAPTION_FONT"] = canonical
+    return canonical
+
+
+def get_caption_font_size(config: dict[str, Any]) -> int | str:
+    raw = str(
+        config.get("CAPTION_FONT_SIZE", 28)
+    ).strip().lower()
+
+    if raw == "auto":
+        config["CAPTION_FONT_SIZE"] = "auto"
+        return "auto"
+
+    try:
+        size = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "CAPTION_FONT_SIZE must be 'auto' or an integer from 16 to 64."
+        ) from exc
+
+    if not 16 <= size <= 64:
+        raise ValueError(
+            "CAPTION_FONT_SIZE must be 'auto' or between 16 and 64."
+        )
+
+    config["CAPTION_FONT_SIZE"] = size
+    return size
+
+
 def get_topic(config: dict[str, Any]) -> str:
     return str(config.get("TOPIC", "")).strip()
 
@@ -336,12 +418,15 @@ def get_story_text(config: dict[str, Any]) -> str:
 
 def get_title_source(config: dict[str, Any]) -> str:
     topic = get_topic(config)
+
     if topic:
         return topic
 
     story = get_story_text(config)
+
     for line in story.splitlines():
         cleaned = line.strip().strip("#").strip()
+
         if cleaned:
             return cleaned[:180]
 
@@ -355,10 +440,12 @@ def has_story_input(config: dict[str, Any]) -> bool:
 def normalize_provider(value: Any) -> str:
     provider = str(value or "").strip().lower().replace("-", "_")
     spaced = provider.replace("_", " ")
+
     provider = PROVIDER_ALIASES.get(
         spaced,
         PROVIDER_ALIASES.get(provider, provider),
     )
+
     return provider
 
 
@@ -379,6 +466,7 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
         raise ValueError("The three main TTS providers must be different.")
 
     allowed = set(ALL_TTS_PROVIDERS)
+
     for provider in main:
         if provider not in allowed:
             raise ValueError(
@@ -387,12 +475,14 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
             )
 
     fallback_enabled = config.get("TTS_FALLBACK_ENABLED", True)
+
     if isinstance(fallback_enabled, str):
         fallback_enabled = fallback_enabled.strip().lower() in {
             "true", "yes", "on", "1"
         }
 
     fallback: list[str] = []
+
     if fallback_enabled:
         raw_order = str(
             config.get(
@@ -400,17 +490,22 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
                 ",".join(ALL_TTS_PROVIDERS),
             )
         )
+
         for item in re.split(r"[,;]", raw_order):
             provider = normalize_provider(item)
+
             if not provider:
                 continue
+
             if provider not in allowed:
                 raise ValueError(
                     f"Unsupported TTS fallback provider: {provider}"
                 )
+
             fallback.append(provider)
 
     result: list[str] = []
+
     for provider in main + fallback:
         if provider not in result:
             result.append(provider)
@@ -426,12 +521,17 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     config["FPS"] = get_fps(config)
     config["MAX_RETRIES"] = get_max_retries(config)
 
+    get_caption_font(config)
+    get_caption_font_size(config)
+
     if not has_story_input(config):
         raise ValueError("Either TOPIC or STORY_TEXT must be provided.")
 
     voice = str(config.get("VOICE", "male")).strip().lower()
+
     if voice not in {"male", "female"}:
         raise ValueError("VOICE must be 'male' or 'female'.")
+
     config["VOICE"] = voice
 
     for key in (
@@ -449,7 +549,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if config["TTS_MAX_PROVIDER_ATTEMPTS"] > 3:
         raise ValueError("TTS_MAX_PROVIDER_ATTEMPTS cannot exceed 3.")
 
-    config["TTS_ALLOW_PAID"] = bool(config.get("TTS_ALLOW_PAID", False))
+    config["TTS_ALLOW_PAID"] = bool(
+        config.get("TTS_ALLOW_PAID", False)
+    )
     config["TTS_FALLBACK_ENABLED"] = bool(
         config.get("TTS_FALLBACK_ENABLED", True)
     )
@@ -458,18 +560,25 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     policy = str(
         config.get("FAILURE_POLICY", "retry_then_checkpoint")
     ).strip().lower()
+
     if policy not in {"retry_then_checkpoint", "skip", "stop"}:
         raise ValueError(
             "FAILURE_POLICY must be retry_then_checkpoint, skip, or stop."
         )
+
     config["FAILURE_POLICY"] = policy
 
-    captions = str(config.get("CAPTIONS", "hindi")).strip().lower()
+    captions = str(
+        config.get("CAPTIONS", "hindi")
+    ).strip().lower()
+
     if captions not in {"hindi", "english", "hinglish"}:
         raise ValueError("CAPTIONS must be hindi, english, or hinglish.")
-    config["CAPTIONS"] = captions
 
-    config["QUALITY"] = str(config.get("QUALITY", "high")).strip().lower()
+    config["CAPTIONS"] = captions
+    config["QUALITY"] = str(
+        config.get("QUALITY", "high")
+    ).strip().lower()
     config["VISUAL_STYLE"] = str(
         config.get("VISUAL_STYLE", "cinematic_realistic")
     ).strip()
@@ -501,6 +610,8 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "VOICE": str(config.get("VOICE", "")),
         "AUDIENCE": str(config.get("AUDIENCE", "")),
         "CAPTIONS": str(config.get("CAPTIONS", "")),
+        "CAPTION_FONT": get_caption_font(config),
+        "CAPTION_FONT_SIZE": get_caption_font_size(config),
         "STORY_LENGTH": str(config.get("STORY_LENGTH", "")),
         "SCENE_DURATION": str(config.get("SCENE_DURATION", "")),
         "FAILURE_POLICY": str(config.get("FAILURE_POLICY", "")),
@@ -526,8 +637,10 @@ def print_config_summary(config: dict[str, Any]) -> None:
     print("==============================================")
     print("INPUT CONFIG")
     print("==============================================")
+
     for key, value in get_config_summary(config).items():
         print(f"{key} = {value}")
+
     print("==============================================")
 
 
@@ -537,6 +650,7 @@ if __name__ == "__main__":
     config_path = (
         sys.argv[1] if len(sys.argv) > 1 else "Input/topic.txt"
     )
+
     try:
         parsed = load_and_validate(config_path)
         print_config_summary(parsed)
