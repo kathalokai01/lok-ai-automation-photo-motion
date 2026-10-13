@@ -53,15 +53,27 @@ def clean_text(value, limit=300):
 
 
 def load_title(config):
+    # Empty or whitespace-only title files must not crash the workflow.
     if TITLE_FILE.is_file():
-        title = clean_text(
-            TITLE_FILE.read_text(encoding="utf-8-sig").splitlines()[0],
-            160,
-        )
-        if title:
-            return title
+        try:
+            lines = TITLE_FILE.read_text(
+                encoding="utf-8-sig"
+            ).splitlines()
+        except OSError as exc:
+            print(f"WARNING: Cannot read generated title: {exc}")
+            lines = []
 
-    return clean_text(get_title_source(config), 160)
+        for line in lines:
+            title = clean_text(line, 160)
+            if title:
+                return title
+
+    # Prefer the configured topic, then the provided story text.
+    fallback = clean_text(get_title_source(config), 160)
+    if fallback:
+        return fallback
+
+    fail("No usable title found in final_title.txt or Input/topic.txt.")
 
 
 def rows_from(data):
@@ -118,14 +130,13 @@ def choose_source_image():
             }:
                 continue
 
-            image_path = None
-            for key in ("image_path", "image", "asset_path", "image_file"):
+            for key in (
+                "image_path", "image", "asset_path", "image_file"
+            ):
                 image_path = resolve_image(row.get(key))
-                if image_path:
+                if image_path and image_path not in candidates:
+                    candidates.append(image_path)
                     break
-
-            if image_path and image_path not in candidates:
-                candidates.append(image_path)
 
     visual_dir = OUTPUT / "visuals"
     if visual_dir.is_dir():
@@ -237,8 +248,10 @@ def render_thumbnail(source, title, mode, destination):
     while True:
         font = find_font(font_size)
         lines = wrap_text(draw, title, font, max_width)
+
         if len(lines) <= 4 or font_size <= 22:
             break
+
         font_size -= 2
 
     if len(lines) > 4:
@@ -249,24 +262,36 @@ def render_thumbnail(source, title, mode, destination):
     line_sizes = []
 
     for line in lines:
-        bounds = draw.textbbox((0, 0), line, font=font, stroke_width=2)
+        bounds = draw.textbbox(
+            (0, 0), line, font=font, stroke_width=2
+        )
         line_sizes.append(max(1, bounds[3] - bounds[1]))
 
     total_height = sum(line_sizes) + spacing * (len(lines) - 1)
     y = max(12, (panel_height - total_height) // 2)
 
     for line, line_height in zip(lines, line_sizes):
-        bounds = draw.textbbox((0, 0), line, font=font, stroke_width=2)
+        bounds = draw.textbbox(
+            (0, 0), line, font=font, stroke_width=2
+        )
         text_width = bounds[2] - bounds[0]
         x = max(8, (width - text_width) // 2)
 
         draw.text(
-            (x + 3, y + 3), line, font=font,
-            fill="black", stroke_width=5, stroke_fill="black",
+            (x + 3, y + 3),
+            line,
+            font=font,
+            fill="black",
+            stroke_width=5,
+            stroke_fill="black",
         )
         draw.text(
-            (x, y), line, font=font,
-            fill="white", stroke_width=2, stroke_fill="black",
+            (x, y),
+            line,
+            font=font,
+            fill="white",
+            stroke_width=2,
+            stroke_fill="black",
         )
         y += line_height + spacing
 
@@ -296,9 +321,6 @@ def main():
     mode = get_format(config)
     title = load_title(config)
 
-    if not title:
-        fail("A topic-based title is required.")
-
     source = choose_source_image()
     source_hash = sha256_file(source)
     title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()
@@ -311,7 +333,7 @@ def main():
         and previous.get("format") == mode
         and previous.get("title_sha256") == title_hash
         and previous.get("source_sha256") == source_hash
-        and previous.get("path") == str(THUMBNAIL.relative_to(ROOT))
+        and previous.get("path") == THUMBNAIL.relative_to(ROOT).as_posix()
         and THUMBNAIL.is_file()
     )
 
@@ -319,6 +341,7 @@ def main():
         try:
             with Image.open(THUMBNAIL) as image:
                 image.verify()
+
             with Image.open(THUMBNAIL) as image:
                 can_reuse = image.size == size
         except Exception:
@@ -348,11 +371,15 @@ def main():
 
     THUMB_DIR.mkdir(parents=True, exist_ok=True)
     temp_manifest = MANIFEST.with_suffix(".json.tmp")
-    temp_manifest.write_text(
-        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temp_manifest.replace(MANIFEST)
+
+    try:
+        temp_manifest.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp_manifest.replace(MANIFEST)
+    finally:
+        temp_manifest.unlink(missing_ok=True)
 
     print("THUMBNAIL GENERATION SUCCESS")
     print("Format:", mode)
