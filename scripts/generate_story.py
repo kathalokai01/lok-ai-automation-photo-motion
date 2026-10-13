@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and validate a deterministic Hindi story with resumable checkpoints."""
+"""Generate a Hindi story with strict validation and resumable checkpoints."""
 
 import hashlib
 import json
@@ -31,6 +31,7 @@ MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
 API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 MAX_RETRIES = 3
+RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 
 
 def read_json(path):
@@ -54,23 +55,29 @@ def selected_model():
     if not isinstance(data, dict) or data.get("status") != "selected":
         raise RuntimeError(
             "Selected Gemini model missing. "
-            "Run scripts/select_gemini_model.py first."
+            "Run scripts/select_gemini_model.py before generating a new story."
         )
+
     model = str(data.get("model", "")).strip()
     if not model or model.startswith("models/"):
         raise RuntimeError(f"Invalid Gemini model: {model!r}")
+
     return model
 
 
 def bool_value(config, key, default=True):
     value = config.get(key, default)
+
     if isinstance(value, bool):
         return value
+
     value = str(value).strip().lower()
+
     if value in {"true", "yes", "on", "1"}:
         return True
-    if value in {"false", "no", "off", "0"}:
+    if value in {"false", "no", "off", "0", ""}:
         return False
+
     return default
 
 
@@ -88,21 +95,22 @@ def clean_title(value):
     value = str(value or "").strip()
     value = re.sub(r"^['\"]+|['\"]+$", "", value)
     value = re.sub(
-        r"^(title|शीर्षक)\s*:\s*", "", value, flags=re.IGNORECASE
+        r"^(title|शीर्षक)\s*:\s*",
+        "",
+        value,
+        flags=re.IGNORECASE,
     )
     return re.sub(r"\s+", " ", value).strip()
 
 
 def load_plan(format_type, topic, parts_count, scenes_per_part):
     plan = read_json(PLAN_FILE)
-    if plan is None:
+
+    if not isinstance(plan, dict):
         raise RuntimeError(
             "Story plan missing or invalid. "
             "Run scripts/generate_story_plan.py first."
         )
-
-    if not isinstance(plan, dict):
-        raise RuntimeError("Story plan must be a JSON object.")
 
     if str(plan.get("format", "")).strip().lower() != format_type:
         raise RuntimeError("Story plan format does not match current input.")
@@ -111,14 +119,21 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
     if topic and plan_topic and plan_topic != topic:
         raise RuntimeError("Story plan topic does not match current input.")
 
-    if int(plan.get("parts_count", -1)) != parts_count:
+    try:
+        plan_parts = int(plan.get("parts_count", -1))
+        plan_scenes = int(plan.get("scenes_per_part", -1))
+        plan_total = int(plan.get("total_scenes", -1))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Story plan contains invalid scene counts.") from exc
+
+    if plan_parts != parts_count:
         raise RuntimeError("Story plan part count mismatch.")
 
-    if int(plan.get("scenes_per_part", -1)) != scenes_per_part:
+    if plan_scenes != scenes_per_part:
         raise RuntimeError("Story plan scene count mismatch.")
 
     expected_total = parts_count * scenes_per_part
-    if int(plan.get("total_scenes", -1)) != expected_total:
+    if plan_total != expected_total:
         raise RuntimeError("Story plan total scene count mismatch.")
 
     parts = plan.get("parts")
@@ -126,8 +141,19 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
         raise RuntimeError("Story plan has an invalid parts list.")
 
     global_number = 0
+
     for part_number, part in enumerate(parts, 1):
-        if not isinstance(part, dict) or int(part.get("part", -1)) != part_number:
+        if not isinstance(part, dict):
+            raise RuntimeError(f"Invalid story plan part {part_number}.")
+
+        try:
+            actual_part = int(part.get("part", -1))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid story plan part {part_number}."
+            ) from exc
+
+        if actual_part != part_number:
             raise RuntimeError(f"Invalid story plan part {part_number}.")
 
         scenes = part.get("scenes")
@@ -138,13 +164,23 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
 
         for scene_number, scene in enumerate(scenes, 1):
             global_number += 1
+
             if not isinstance(scene, dict):
                 raise RuntimeError("Story plan contains an invalid scene.")
 
             expected_id = (
                 f"part_{part_number:02d}_scene_{scene_number:02d}"
             )
-            if int(scene.get("scene", -1)) != scene_number:
+
+            try:
+                actual_scene = int(scene.get("scene", -1))
+                actual_global = int(scene.get("global_scene_number", -1))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Invalid scene numbering for {expected_id}."
+                ) from exc
+
+            if actual_scene != scene_number:
                 raise RuntimeError(
                     f"Invalid scene numbering in plan part {part_number}."
                 )
@@ -155,7 +191,7 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
                     "Regenerate the story plan before continuing."
                 )
 
-            if int(scene.get("global_scene_number", -1)) != global_number:
+            if actual_global != global_number:
                 raise RuntimeError(
                     f"Global scene order mismatch for {expected_id}."
                 )
@@ -164,18 +200,29 @@ def load_plan(format_type, topic, parts_count, scenes_per_part):
 
 
 def make_fingerprint(
-    config, plan, format_type, topic, story_text,
-    parts_count, scenes_per_part
+    config,
+    plan,
+    format_type,
+    topic,
+    story_text,
+    parts_count,
+    scenes_per_part,
 ):
     relevant_config = {
         key: config.get(key)
         for key in (
-            "FORMAT", "AUDIENCE", "STORY_LENGTH", "SCENE_DURATION",
-            "PART_HOOK", "PART_SUSPENSE", "FINAL_RESOLUTION",
+            "FORMAT",
+            "AUDIENCE",
+            "STORY_LENGTH",
+            "SCENE_DURATION",
+            "PART_HOOK",
+            "PART_SUSPENSE",
+            "FINAL_RESOLUTION",
         )
     }
+
     source = {
-        "version": 2,
+        "version": 3,
         "format": format_type,
         "topic": topic,
         "story_text": story_text,
@@ -184,15 +231,25 @@ def make_fingerprint(
         "config": relevant_config,
         "plan": plan,
     }
+
     encoded = json.dumps(
-        source, ensure_ascii=False, sort_keys=True, default=str
+        source,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
     ).encode("utf-8")
+
     return hashlib.sha256(encoded).hexdigest()
 
 
 def validate_story(
-    data, config, format_type, title, topic,
-    parts_count, scenes_per_part
+    data,
+    config,
+    format_type,
+    title,
+    topic,
+    parts_count,
+    scenes_per_part,
 ):
     if not isinstance(data, dict):
         raise RuntimeError("Story must be a JSON object.")
@@ -209,17 +266,29 @@ def validate_story(
 
     hook = str(data.get("hook", "")).strip()
     hook_minimum = 7 if format_type == "short" else 14
+
     if word_count(hook) < hook_minimum:
         raise RuntimeError("Opening hook is too short.")
 
     part_hook = bool_value(config, "PART_HOOK", True)
     part_suspense = bool_value(config, "PART_SUSPENSE", True)
+
     first_narration = ""
     global_number = 0
     all_ids = set()
 
     for part_number, part in enumerate(parts, 1):
-        if not isinstance(part, dict) or int(part.get("part", -1)) != part_number:
+        if not isinstance(part, dict):
+            raise RuntimeError(f"Invalid story part {part_number}.")
+
+        try:
+            actual_part = int(part.get("part", -1))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid story part {part_number}."
+            ) from exc
+
+        if actual_part != part_number:
             raise RuntimeError(f"Invalid story part {part_number}.")
 
         scenes = part.get("scenes")
@@ -240,7 +309,14 @@ def validate_story(
             if not isinstance(scene, dict):
                 raise RuntimeError("Invalid scene object.")
 
-            if int(scene.get("scene", -1)) != scene_number:
+            try:
+                actual_scene = int(scene.get("scene", -1))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Invalid scene numbering in part {part_number}."
+                ) from exc
+
+            if actual_scene != scene_number:
                 raise RuntimeError(
                     f"Invalid scene numbering in part {part_number}."
                 )
@@ -248,12 +324,17 @@ def validate_story(
             scene_id = (
                 f"part_{part_number:02d}_scene_{scene_number:02d}"
             )
+
             scene["part"] = part_number
             scene["scene_id"] = scene_id
             scene["global_scene_number"] = global_number
 
             for field in (
-                "purpose", "narration", "visual", "dialogue", "suspense"
+                "purpose",
+                "narration",
+                "visual",
+                "dialogue",
+                "suspense",
             ):
                 value = scene.get(field, "")
                 if not isinstance(value, str):
@@ -271,6 +352,7 @@ def validate_story(
 
             if scene_id in all_ids:
                 raise RuntimeError(f"Duplicate scene ID: {scene_id}")
+
             all_ids.add(scene_id)
 
             if part_number == 1 and scene_number == 1:
@@ -280,6 +362,7 @@ def validate_story(
                 part_number == 1 or part_hook
             ):
                 minimum = hook_minimum if part_number == 1 else 7
+
                 if word_count(scene["narration"]) < minimum:
                     raise RuntimeError(
                         f"Part {part_number} opening hook is too short."
@@ -294,9 +377,10 @@ def validate_story(
     if len(all_ids) != parts_count * scenes_per_part:
         raise RuntimeError("Total unique scene ID validation failed.")
 
-    if not normalize_text(first_narration).startswith(
-        normalize_text(hook)
-    ):
+    normalized_hook = normalize_text(hook)
+    normalized_narration = normalize_text(first_narration)
+
+    if not normalized_narration.startswith(normalized_hook):
         raise RuntimeError(
             "Part 1, Scene 1 narration must begin with the story hook."
         )
@@ -318,6 +402,7 @@ def validate_story(
         "part_suspense_required": part_suspense,
         "scene_order": "part_then_scene",
     }
+
     return data
 
 
@@ -330,8 +415,11 @@ def call_gemini(model, prompt):
         "https://generativelanguage.googleapis.com/"
         f"v1beta/models/{encoded_model}:generateContent"
     )
+
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [
+            {"role": "user", "parts": [{"text": prompt}]}
+        ],
         "generationConfig": {
             "temperature": 0.7,
             "topP": 0.9,
@@ -341,70 +429,130 @@ def call_gemini(model, prompt):
     }
 
     last_error = None
+
     for attempt in range(1, MAX_RETRIES + 1):
         request = urllib.request.Request(
             url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps(
+                payload,
+                ensure_ascii=False,
+            ).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": API_KEY,
             },
             method="POST",
         )
+
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
-                result = json.loads(response.read().decode("utf-8"))
-
-            candidates = result.get("candidates", [])
-            if not candidates:
-                raise RuntimeError(
-                    str(result.get("error", {}).get(
-                        "message", "Gemini returned no candidates."
-                    ))
-                )
-
-            candidate = candidates[0]
-            reason = str(candidate.get("finishReason", "")).upper()
-            if reason in {"MAX_TOKENS", "LENGTH"}:
-                raise RuntimeError("Gemini output was truncated.")
-
-            chunks = candidate.get("content", {}).get("parts", [])
-            response_text = "\n".join(
-                item.get("text", "")
-                for item in chunks
-                if isinstance(item, dict)
-                and isinstance(item.get("text"), str)
-            ).strip()
-
-            if not response_text:
-                raise RuntimeError("Gemini returned empty text.")
-
-            data = json.loads(response_text)
-            if not isinstance(data, dict):
-                raise RuntimeError("Gemini response must be a JSON object.")
-            return data
+                raw_response = response.read().decode("utf-8")
 
         except urllib.error.HTTPError as exc:
+            # Do not print the API key. Retry only known transient statuses.
             body = exc.read().decode("utf-8", errors="replace")
+            safe_body = body[:500]
             last_error = RuntimeError(
-                f"Gemini HTTP {exc.code}: {body[:800]}"
+                f"Gemini HTTP {exc.code}: {safe_body}"
             )
-            if exc.code not in {429, 500, 502, 503, 504}:
-                raise last_error from exc
-        except Exception as exc:
-            last_error = exc
 
-        if attempt < MAX_RETRIES:
-            delay = min(8 * (2 ** (attempt - 1)), 32)
-            print(f"Attempt {attempt} failed: {last_error}")
-            time.sleep(delay)
+            if exc.code not in RETRYABLE_HTTP_CODES:
+                raise last_error from exc
+
+            if attempt < MAX_RETRIES:
+                delay = min(8 * (2 ** (attempt - 1)), 32)
+                print(
+                    f"Temporary Gemini HTTP error {exc.code}; "
+                    f"retrying in {delay}s."
+                )
+                time.sleep(delay)
+                continue
+
+            break
+
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            last_error = RuntimeError(
+                f"Gemini network error: {type(exc).__name__}"
+            )
+
+            if attempt < MAX_RETRIES:
+                delay = min(8 * (2 ** (attempt - 1)), 32)
+                print(
+                    f"Temporary network error; retrying in {delay}s."
+                )
+                time.sleep(delay)
+                continue
+
+            break
+
+        # An HTTP-successful response means the request may already have
+        # consumed quota. Do not repeat it just because its body is invalid.
+        try:
+            result = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Gemini returned invalid response JSON. "
+                "Stopping to avoid spending more API requests."
+            ) from exc
+
+        candidates = result.get("candidates", [])
+        if not candidates:
+            error_info = result.get("error", {})
+            message = (
+                error_info.get("message", "Gemini returned no candidates.")
+                if isinstance(error_info, dict)
+                else "Gemini returned no candidates."
+            )
+            raise RuntimeError(str(message))
+
+        candidate = candidates[0]
+        reason = str(candidate.get("finishReason", "")).upper()
+
+        if reason in {"MAX_TOKENS", "LENGTH"}:
+            raise RuntimeError(
+                "Gemini output was truncated. "
+                "Stopping instead of automatically making another paid request."
+            )
+
+        chunks = candidate.get("content", {}).get("parts", [])
+        response_text = "\n".join(
+            item.get("text", "")
+            for item in chunks
+            if isinstance(item, dict)
+            and isinstance(item.get("text"), str)
+        ).strip()
+
+        if not response_text:
+            raise RuntimeError(
+                "Gemini returned empty text. "
+                "Stopping to avoid an unnecessary repeat request."
+            )
+
+        try:
+            data = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Gemini story was not valid JSON. "
+                "No automatic regeneration was attempted to conserve API usage."
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError("Gemini story response must be a JSON object.")
+
+        return data
 
     raise RuntimeError(f"Story generation failed: {last_error}")
 
 
 def build_prompt(
-    config, plan, title, topic, story_text,
-    format_type, parts_count, scenes_per_part
+    config,
+    plan,
+    title,
+    topic,
+    story_text,
+    format_type,
+    parts_count,
+    scenes_per_part,
 ):
     hook_minimum = 7 if format_type == "short" else 14
     plan_text = json.dumps(plan, ensure_ascii=False, indent=2)
@@ -416,9 +564,11 @@ def build_prompt(
     format_rule = (
         "Short video: fast escalation, little filler, strong payoff."
         if format_type == "short"
-        else "Full video: developed cinematic story with setup, character "
-             "development, escalating conflict, turning points, climax "
-             "and resolution."
+        else (
+            "Full video: developed cinematic story with setup, character "
+            "development, escalating conflict, turning points, climax "
+            "and resolution."
+        )
     )
 
     return f"""
@@ -458,6 +608,7 @@ Requirements:
 - Use realistic live-action visual descriptions, not cartoon or slideshow.
 - Every scene must advance the plot or reveal character.
 - The final part must resolve the central conflict.
+- Return JSON only. Do not add Markdown fences or commentary.
 
 Return ONLY valid JSON in this structure:
 {{
@@ -494,7 +645,6 @@ def main():
     print("=" * 60)
 
     config = load_and_validate()
-    model = selected_model()
 
     format_type = get_format(config)
     topic = get_topic(config)
@@ -513,11 +663,20 @@ def main():
         raise RuntimeError("Could not determine a story title.")
 
     plan = load_plan(
-        format_type, topic, parts_count, scenes_per_part
+        format_type,
+        topic,
+        parts_count,
+        scenes_per_part,
     )
+
     source_fingerprint = make_fingerprint(
-        config, plan, format_type, topic, story_text,
-        parts_count, scenes_per_part,
+        config,
+        plan,
+        format_type,
+        topic,
+        story_text,
+        parts_count,
+        scenes_per_part,
     )
 
     print(f"Format: {format_type}")
@@ -525,52 +684,94 @@ def main():
     print(f"Parts: {parts_count}")
     print(f"Scenes per part: {scenes_per_part}")
     print(f"Expected total scenes: {parts_count * scenes_per_part}")
-    print(f"Mapping version: {plan.get('mapping_version', 1)}")
     print(f"Input fingerprint: {source_fingerprint[:16]}...")
 
     saved_fingerprint = ""
     if FINGERPRINT_FILE.is_file():
-        saved_fingerprint = FINGERPRINT_FILE.read_text(
-            encoding="utf-8"
-        ).strip()
+        try:
+            saved_fingerprint = FINGERPRINT_FILE.read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError:
+            saved_fingerprint = ""
 
+    # Reuse a validated matching story before checking selected_model.json.
+    # This avoids unnecessary model-selection dependencies on resume.
     if (
         saved_fingerprint == source_fingerprint
         and OUTPUT_FILE.is_file()
     ):
+        saved_story = read_json(OUTPUT_FILE)
+
         try:
-            saved_story = read_json(OUTPUT_FILE)
             saved_story = validate_story(
-                saved_story, config, format_type, title, topic,
-                parts_count, scenes_per_part,
+                saved_story,
+                config,
+                format_type,
+                title,
+                topic,
+                parts_count,
+                scenes_per_part,
             )
+
             atomic_write(
                 OUTPUT_FILE,
-                json.dumps(saved_story, ensure_ascii=False, indent=2) + "\n",
+                json.dumps(
+                    saved_story,
+                    ensure_ascii=False,
+                    indent=2,
+                ) + "\n",
             )
             atomic_write(TITLE_FILE, title + "\n")
-            print("RESUME: Valid matching story reused.")
+
+            print("RESUME: Matching story passed validation.")
             print("Story-generation API request skipped.")
             return
+
         except Exception as exc:
-            print(f"Saved story failed validation; regenerating: {exc}")
+            print(
+                "Saved story is not reusable; a new story is required. "
+                f"Reason: {exc}"
+            )
     else:
-        print("No matching fingerprint; story must be generated.")
+        print("No matching story checkpoint; generation is required.")
+
+    # Only require a selected model when a new generation is actually needed.
+    model = selected_model()
 
     prompt = build_prompt(
-        config, plan, title, topic, story_text,
-        format_type, parts_count, scenes_per_part,
+        config,
+        plan,
+        title,
+        topic,
+        story_text,
+        format_type,
+        parts_count,
+        scenes_per_part,
     )
 
     data = call_gemini(model, prompt)
+
+    # If schema validation fails, stop. Do not silently call Gemini again.
     data = validate_story(
-        data, config, format_type, title, topic,
-        parts_count, scenes_per_part,
+        data,
+        config,
+        format_type,
+        title,
+        topic,
+        parts_count,
+        scenes_per_part,
     )
 
+    # Save story and title atomically. Write fingerprint last so an incomplete
+    # save can never be treated as a completed checkpoint.
     atomic_write(
         OUTPUT_FILE,
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
     )
     atomic_write(TITLE_FILE, title + "\n")
     atomic_write(FINGERPRINT_FILE, source_fingerprint + "\n")
