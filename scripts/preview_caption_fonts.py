@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a visual preview sheet for free Hindi caption fonts and sizes."""
+"""Create a shaped Hindi caption preview for four free fonts and three sizes."""
 
 from __future__ import annotations
 
@@ -9,10 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, features
 
-
-VERSION = 2
+VERSION = 3
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "output" / "captions"
@@ -54,159 +53,184 @@ FONT_DIRS = [
 ]
 
 MARGIN = 36
-HEADER_HEIGHT = 150
-FOOTER_HEIGHT = 82
+HEADER_HEIGHT = 160
+FOOTER_HEIGHT = 90
 CARD_WIDTH = 1080
 CARD_GAP = 18
 ROW_GAP = 14
 LABEL_HEIGHT = 42
-SAMPLE_GAP = 12
+SAMPLE_GAP = 16
 
 
 def find_font_file(option: dict) -> Path | None:
-    """Find the requested font without silently accepting a substitute."""
-    filename = option["filename"]
-
+    """Find the requested font file without silently substituting another."""
     for directory in FONT_DIRS:
-        candidate = directory / filename
+        candidate = directory / option["filename"]
         if candidate.is_file():
             return candidate
 
-    if not shutil.which("fc-match"):
+    fc_match = shutil.which("fc-match")
+    if not fc_match:
         return None
 
     try:
         result = subprocess.run(
             [
-                "fc-match",
+                fc_match,
                 "-f",
-                "%{file}\n",
+                "%{family}\n%{file}\n",
                 option["name"],
             ],
-            check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=15,
+            check=False,
         )
 
-        if result.returncode != 0 or not result.stdout.strip():
+        if result.returncode != 0:
             return None
 
-        candidate = Path(result.stdout.strip().splitlines()[0])
+        lines = result.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None
 
-        family_result = subprocess.run(
-            [
-                "fc-match",
-                "-f",
-                "%{family}\n",
-                option["name"],
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        matched_families = [
+            family.strip().casefold()
+            for family in lines[0].split(",")
+            if family.strip()
+        ]
+        expected = option["name"].casefold()
 
-        families = family_result.stdout.strip().lower()
-        requested = option["name"].lower()
-
-        if (
-            family_result.returncode == 0
-            and requested in families
-            and candidate.is_file()
+        if not any(
+            family == expected or family.startswith(expected + " ")
+            for family in matched_families
         ):
-            return candidate
+            return None
+
+        path = Path(lines[1].strip())
+        return path if path.is_file() else None
 
     except (OSError, subprocess.SubprocessError):
         return None
 
-    return None
+
+def require_hindi_shaping() -> None:
+    """Require Pillow's RAQM layout engine for correct complex-script shaping."""
+    try:
+        available = features.check_feature("raqm")
+    except (ValueError, AttributeError):
+        available = False
+
+    if not available:
+        raise RuntimeError(
+            "Pillow RAQM support is unavailable. Install a Pillow build "
+            "with libraqm support before creating the Hindi font preview."
+        )
 
 
 def load_font(path: Path, size: int) -> ImageFont.FreeTypeFont:
-    """Load a font and report a useful error if it cannot be rendered."""
     try:
-        return ImageFont.truetype(str(path), size=size)
-    except (OSError, ValueError) as exc:
+        return ImageFont.truetype(
+            str(path),
+            size=size,
+            layout_engine=ImageFont.Layout.RAQM,
+        )
+    except (OSError, ValueError, AttributeError) as exc:
         raise RuntimeError(
-            f"Could not load caption font: {path}"
+            f"Could not load font with Hindi shaping enabled: {path}"
         ) from exc
 
 
-def text_dimensions(
+def text_bbox(
     draw: ImageDraw.ImageDraw,
     text: str,
     font: ImageFont.FreeTypeFont,
-) -> tuple[int, int]:
-    box = draw.textbbox((0, 0), text, font=font)
-    return max(1, box[2] - box[0]), max(1, box[3] - box[1])
+) -> tuple[int, int, int, int]:
+    return draw.textbbox(
+        (0, 0),
+        text,
+        font=font,
+        direction="ltr",
+        language="hi",
+    )
+
+
+def text_height(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+) -> int:
+    box = text_bbox(draw, text, font)
+    return max(1, box[3] - box[1])
+
+
+def draw_hindi_text(
+    draw: ImageDraw.ImageDraw,
+    position: tuple[int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: str,
+) -> None:
+    draw.text(
+        position,
+        text,
+        font=font,
+        fill=fill,
+        direction="ltr",
+        language="hi",
+    )
 
 
 def build_preview() -> dict:
+    require_hindi_shaping()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     available_fonts = []
     missing_fonts = []
 
     for option in FONT_OPTIONS:
-        font_path = find_font_file(option)
-
-        if font_path is None:
+        path = find_font_file(option)
+        if path is None:
             missing_fonts.append(option["name"])
-            continue
-
-        available_fonts.append({
-            **option,
-            "path": font_path,
-        })
+        else:
+            available_fonts.append({**option, "path": path})
 
     if missing_fonts:
         raise RuntimeError(
-            "Some requested fonts are missing: "
+            "Required caption fonts are missing: "
             + ", ".join(missing_fonts)
             + ". Run scripts/install_caption_fonts.py first."
         )
 
-    if len(available_fonts) != len(FONT_OPTIONS):
-        raise RuntimeError(
-            "The preview requires all four requested font families."
-        )
-
     measure_image = Image.new("RGB", (8, 8), "white")
     measure_draw = ImageDraw.Draw(measure_image)
+
+    title_font = load_font(available_fonts[0]["path"], 34)
+    subtitle_font = load_font(available_fonts[0]["path"], 22)
+    label_font = load_font(available_fonts[0]["path"], 18)
 
     prepared_rows = []
 
     for option in available_fonts:
         for size in FONT_SIZES:
             font = load_font(option["path"], size)
-            sample_font = load_font(
-                option["path"],
-                max(16, size - 2),
-            )
+            sample_font = load_font(option["path"], max(16, size - 2))
 
-            _, first_height = text_dimensions(
+            first_height = text_height(
                 measure_draw,
                 SAMPLE_TEXT,
                 font,
             )
-
-            _, second_height = text_dimensions(
+            second_height = text_height(
                 measure_draw,
                 SECOND_SAMPLE,
                 sample_font,
             )
 
             content_height = (
-                max(first_height, second_height)
-                + SAMPLE_GAP
+                first_height + SAMPLE_GAP + second_height
             )
-
-            card_height = (
-                LABEL_HEIGHT
-                + content_height
-                + 2 * CARD_GAP
-            )
+            card_height = LABEL_HEIGHT + content_height + 2 * CARD_GAP
 
             prepared_rows.append({
                 "option": option,
@@ -218,10 +242,7 @@ def build_preview() -> dict:
                 "card_height": card_height,
             })
 
-    # Include every inter-card gap in the canvas height calculation.
-    cards_height = sum(
-        row["card_height"] for row in prepared_rows
-    )
+    cards_height = sum(row["card_height"] for row in prepared_rows)
     gaps_height = max(0, len(prepared_rows) - 1) * ROW_GAP
 
     image_height = (
@@ -239,38 +260,26 @@ def build_preview() -> dict:
     )
     draw = ImageDraw.Draw(image)
 
-    title_font = load_font(
-        available_fonts[0]["path"],
-        34,
-    )
-    subtitle_font = load_font(
-        available_fonts[0]["path"],
-        22,
-    )
-    label_font = load_font(
-        available_fonts[0]["path"],
-        18,
-    )
-
-    draw.text(
-        (MARGIN, 20),
+    draw_hindi_text(
+        draw,
+        (MARGIN, 18),
         "Hindi Caption Font Preview",
-        font=title_font,
-        fill="#111827",
+        title_font,
+        "#111827",
     )
-
-    draw.text(
-        (MARGIN, 70),
+    draw_hindi_text(
+        draw,
+        (MARGIN, 68),
         f"उदाहरण: {SAMPLE_TEXT}",
-        font=subtitle_font,
-        fill="#374151",
+        subtitle_font,
+        "#374151",
     )
-
-    draw.text(
-        (MARGIN, 110),
-        "Compare all four fonts at sizes 22, 28 and 34.",
-        font=label_font,
-        fill="#4B5563",
+    draw_hindi_text(
+        draw,
+        (MARGIN, 112),
+        "चार fonts की तुलना: Size 22, 28 और 34",
+        label_font,
+        "#4B5563",
     )
 
     manifest_rows = []
@@ -279,12 +288,10 @@ def build_preview() -> dict:
     for row in prepared_rows:
         option = row["option"]
         size = row["size"]
-        card_height = row["card_height"]
-
         left = MARGIN
         right = MARGIN + CARD_WIDTH
         top = y
-        bottom = top + card_height
+        bottom = top + row["card_height"]
 
         draw.rounded_rectangle(
             (left, top, right, bottom),
@@ -298,21 +305,22 @@ def build_preview() -> dict:
             f'{option["name"]} | Size {size} | '
             f'{option["description"]}'
         )
-
-        draw.text(
+        draw_hindi_text(
+            draw,
             (left + CARD_GAP, top + 10),
             label,
-            font=label_font,
-            fill="#111827",
+            label_font,
+            "#111827",
         )
 
         sample_y = top + LABEL_HEIGHT
 
-        draw.text(
+        draw_hindi_text(
+            draw,
             (left + CARD_GAP, sample_y),
             SAMPLE_TEXT,
-            font=row["font"],
-            fill="#111827",
+            row["font"],
+            "#111827",
         )
 
         second_y = (
@@ -320,12 +328,12 @@ def build_preview() -> dict:
             + row["first_height"]
             + SAMPLE_GAP
         )
-
-        draw.text(
+        draw_hindi_text(
+            draw,
             (left + CARD_GAP, second_y),
             SECOND_SAMPLE,
-            font=row["sample_font"],
-            fill="#374151",
+            row["sample_font"],
+            "#374151",
         )
 
         manifest_rows.append({
@@ -341,25 +349,24 @@ def build_preview() -> dict:
 
     footer_y = image_height - FOOTER_HEIGHT + 8
 
-    draw.text(
+    draw_hindi_text(
+        draw,
         (MARGIN, footer_y),
-        "Preview only: final appearance depends on video resolution,",
-        font=label_font,
-        fill="#4B5563",
+        "यह preview है; final appearance video resolution और outline पर भी निर्भर करेगा।",
+        label_font,
+        "#4B5563",
+    )
+    draw_hindi_text(
+        draw,
+        (MARGIN, footer_y + 30),
+        "Preview बनाने से production caption settings नहीं बदलतीं।",
+        label_font,
+        "#4B5563",
     )
 
-    draw.text(
-        (MARGIN, footer_y + 28),
-        "caption outline, renderer and selected font size.",
-        font=label_font,
-        fill="#4B5563",
-    )
-
-    image.save(
-        OUTPUT_IMAGE,
-        format="PNG",
-        optimize=True,
-    )
+    temp_image = OUTPUT_IMAGE.with_name(OUTPUT_IMAGE.name + ".tmp.png")
+    image.save(temp_image, format="PNG", optimize=True)
+    temp_image.replace(OUTPUT_IMAGE)
 
     manifest = {
         "version": VERSION,
@@ -368,25 +375,24 @@ def build_preview() -> dict:
         "sample_text": SAMPLE_TEXT,
         "second_sample_text": SECOND_SAMPLE,
         "font_sizes": FONT_SIZES,
-        "available_fonts": [
-            item["name"] for item in available_fonts
-        ],
+        "hindi_shaping": "Pillow RAQM",
+        "available_fonts": [item["name"] for item in available_fonts],
         "missing_fonts": [],
         "examples": manifest_rows,
         "note": (
-            "This preview compares font families and sizes. "
-            "It does not change the production caption settings."
+            "Preview compares the installed font files at three sizes. "
+            "It does not change production caption settings."
         ),
     }
 
-    OUTPUT_MANIFEST.write_text(
-        json.dumps(
-            manifest,
-            ensure_ascii=False,
-            indent=2,
-        ) + "\n",
+    temp_manifest = OUTPUT_MANIFEST.with_name(
+        OUTPUT_MANIFEST.name + ".tmp"
+    )
+    temp_manifest.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    temp_manifest.replace(OUTPUT_MANIFEST)
 
     print(f"Preview image: {OUTPUT_IMAGE}")
     print(f"Preview manifest: {OUTPUT_MANIFEST}")
@@ -394,7 +400,6 @@ def build_preview() -> dict:
         f"Preview rows: {len(manifest_rows)} "
         f"({len(available_fonts)} fonts x {len(FONT_SIZES)} sizes)"
     )
-
     return manifest
 
 
