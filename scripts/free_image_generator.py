@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resumable photo-motion image generation with conservative billing defaults."""
+"""Resumable, billing-safe scene image generation for Katha Lok AI."""
 
 from __future__ import annotations
 
@@ -28,16 +28,15 @@ JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 
-HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "").strip()
-POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
-
-# Billable providers require this exact opt-in phrase.
 PAID_OPT_IN = "I_ACCEPT_POTENTIAL_CHARGES"
 ALLOW_BILLABLE_PROVIDERS = (
     os.getenv("ALLOW_BILLABLE_PROVIDERS", "").strip() == PAID_OPT_IN
 )
+
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "").strip()
+POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 
 GEMINI_MODEL = os.getenv(
     "GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"
@@ -47,20 +46,20 @@ REPLICATE_MODEL = os.getenv(
     "REPLICATE_IMAGE_MODEL", "black-forest-labs/flux-schnell"
 ).strip()
 
-# These are public Hugging Face Spaces, not a guarantee of availability.
 HF_SPACES = list(dict.fromkeys(
-    item.strip()
-    for item in [
+    value.strip()
+    for value in [
         os.getenv("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo"),
         *os.getenv("FREE_IMAGE_FALLBACK_SPACES", "").split(","),
     ]
-    if item.strip()
+    if value.strip()
 ))
 
 REQUEST_TIMEOUT = 180
 BASE_SEED = 20261009
 MIN_IMAGE_BYTES = 5000
 
+# Keep these values identical to generate_visuals.py.
 QUALITY = (
     "Photorealistic live-action cinematic photography. Realistic Indian "
     "people, clothing, locations and architecture. Natural skin texture, "
@@ -71,11 +70,13 @@ QUALITY = (
 )
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "KathaLokAI-PhotoMotion/3.0"})
+SESSION.headers.update({
+    "User-Agent": "KathaLokAI-PhotoMotion/4.0"
+})
 
 
-def log(*args):
-    print(*args, flush=True)
+def log(*items):
+    print(*items, flush=True)
 
 
 def read_json(path, default=None):
@@ -116,21 +117,23 @@ def get_jobs():
         )
         metadata = document
     else:
-        jobs, metadata = [], {}
+        raise RuntimeError("visual_jobs.json must be a JSON object or list.")
 
     if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError("visual_jobs.json contains no jobs.")
+        raise RuntimeError("visual_jobs.json contains no image jobs.")
 
     seen = set()
 
     for index, job in enumerate(jobs, 1):
         if not isinstance(job, dict):
-            raise RuntimeError(f"Job {index} must be an object.")
+            raise RuntimeError(f"Job {index} must be a JSON object.")
 
         try:
             number = int(job.get("global_scene", job.get("scene", index)))
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid scene number in job {index}.") from exc
+            raise RuntimeError(
+                f"Invalid scene number in job {index}."
+            ) from exc
 
         if number < 1 or number in seen:
             raise RuntimeError(f"Invalid or duplicate scene number: {number}")
@@ -152,19 +155,17 @@ def get_size(job):
         width, height = map(
             int, str(job.get("image_size", "720x1280")).split("x", 1)
         )
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError("Invalid scene image_size.") from exc
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Invalid image_size in visual job.") from exc
 
     if not (256 <= width <= 2048 and 256 <= height <= 2048):
-        raise RuntimeError(f"Invalid image dimensions: {width}x{height}")
+        raise RuntimeError(f"Unsafe image dimensions: {width}x{height}")
 
     return width, height
 
 
 def get_path(job, number):
-    raw = job.get("image_path") or (
-        f"output/visuals/scene_{number:02d}.png"
-    )
+    raw = job.get("image_path") or f"output/visuals/scene_{number:02d}.png"
     path = Path(str(raw))
 
     if not path.is_absolute():
@@ -173,9 +174,7 @@ def get_path(job, number):
     path = path.resolve()
 
     if not path.is_relative_to(ROOT.resolve()):
-        raise RuntimeError(
-            f"Scene {number}: image path outside repository."
-        )
+        raise RuntimeError(f"Scene {number}: image path escapes repository.")
 
     return path
 
@@ -188,12 +187,11 @@ def valid_image(path, size=None):
         with Image.open(path) as image:
             image.verify()
 
-        if size:
+        if size is not None:
             with Image.open(path) as image:
                 return image.size == size
 
         return True
-
     except Exception:
         return False
 
@@ -201,7 +199,9 @@ def valid_image(path, size=None):
 def save_image(image, destination, size):
     image = ImageOps.exif_transpose(image).convert("RGB")
     image = ImageOps.fit(
-        image, size, method=Image.Resampling.LANCZOS
+        image,
+        size,
+        method=Image.Resampling.LANCZOS,
     )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -211,10 +211,9 @@ def save_image(image, destination, size):
         image.save(temporary, "PNG", optimize=True)
 
         if not valid_image(temporary, size):
-            raise ValueError("Image failed PNG validation.")
+            raise ValueError("Generated image failed validation.")
 
         temporary.replace(destination)
-
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -249,6 +248,7 @@ def prompt_for(job):
 
     negative = str(job.get("negative_prompt", "")).strip()
 
+    # This exact structure must match generate_visuals.py.
     return f"{prompt}\n\nQuality: {QUALITY}\n\nAvoid: {negative}"
 
 
@@ -261,6 +261,9 @@ def get_hash(job):
 def get_old_rows():
     document = read_json(IMAGE_MANIFEST, {})
     rows = document.get("scenes", []) if isinstance(document, dict) else []
+
+    if isinstance(document, list):
+        rows = document
 
     result = {}
 
@@ -280,7 +283,6 @@ def get_old_rows():
 
 def is_access_or_quota_error(message):
     message = message.lower()
-
     return any(term in message for term in (
         "429", "401", "403", "402", "quota", "rate limit",
         "billing", "payment required", "insufficient credit",
@@ -300,7 +302,9 @@ def generate_hf(prompt, destination, size, seed, space):
 
     kwargs = {"verbose": False}
 
-    if HF_TOKEN:
+    # Avoid sending an account token to public Spaces unless billing
+    # or authenticated access was explicitly enabled.
+    if HF_TOKEN and ALLOW_BILLABLE_PROVIDERS:
         kwargs["token"] = HF_TOKEN
 
     client = Client(space, **kwargs)
@@ -351,13 +355,13 @@ def generate_hf(prompt, destination, size, seed, space):
             return
 
     raise ValueError(
-        f"Space {space} returned no usable image; API schema may differ."
+        f"Space {space} returned no usable image; its API may have changed."
     )
 
 
 def generate_gemini(prompt, destination, size):
     if not ALLOW_BILLABLE_PROVIDERS:
-        raise RuntimeError("Gemini Image is disabled by billing policy.")
+        raise RuntimeError("Gemini Image blocked: explicit billing opt-in missing.")
 
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
@@ -408,17 +412,14 @@ def generate_gemini(prompt, destination, size):
 
 def generate_replicate(prompt, destination, size):
     if not ALLOW_BILLABLE_PROVIDERS:
-        raise RuntimeError("Replicate is disabled by billing policy.")
+        raise RuntimeError("Replicate blocked: explicit billing opt-in missing.")
 
     if not REPLICATE_API_TOKEN:
         raise RuntimeError("REPLICATE_API_TOKEN is not configured.")
 
     parts = REPLICATE_MODEL.split("/", 1)
-
     if len(parts) != 2 or not all(parts):
-        raise RuntimeError(
-            "REPLICATE_IMAGE_MODEL must be owner/model-name."
-        )
+        raise RuntimeError("REPLICATE_IMAGE_MODEL must be owner/model-name.")
 
     owner, model = parts
     width, height = size
@@ -452,7 +453,6 @@ def generate_replicate(prompt, destination, size):
 
         if not poll_url:
             prediction_id = prediction.get("id")
-
             if not prediction_id:
                 raise ValueError("Replicate returned no prediction ID.")
 
@@ -476,7 +476,6 @@ def generate_replicate(prompt, destination, size):
         )
 
     output = prediction.get("output")
-
     if isinstance(output, str):
         output = [output]
     elif isinstance(output, dict):
@@ -505,18 +504,15 @@ def generate_replicate(prompt, destination, size):
     save_image_bytes(image_response.content, destination, size)
 
 
-def generate_authenticated_pollinations(
-    prompt, destination, size, seed
-):
+def generate_authenticated_pollinations(prompt, destination, size, seed):
     if not ALLOW_BILLABLE_PROVIDERS:
         raise RuntimeError(
-            "Authenticated Pollinations is disabled by billing policy."
+            "Authenticated Pollinations blocked: explicit billing opt-in missing."
         )
 
     if not POLLINATIONS_API_KEY:
         raise RuntimeError("POLLINATIONS_API_KEY is not configured.")
 
-    # Only use this endpoint after explicitly accepting possible charges.
     response = SESSION.get(
         "https://gen.pollinations.ai/image/" + quote(prompt, safe=""),
         params={
@@ -569,6 +565,8 @@ def main():
             "attempts": [],
         }
 
+        # Reuse only when the prompt fingerprint matches and the image
+        # is readable and has the required dimensions.
         if (
             previous.get("prompt_sha256") == digest
             and valid_image(destination, size)
@@ -584,14 +582,14 @@ def main():
         records.append(record)
 
     manifest = {
-        "version": "photo-motion-safe-9.0",
+        "version": "photo-motion-safe-10.0",
         "policy": {
             "paid_providers_enabled": ALLOW_BILLABLE_PROVIDERS,
             "opt_in_required": PAID_OPT_IN,
             "legacy_pollinations_endpoint_enabled": False,
             "note": (
-                "Public free-tier services may have changing quotas, "
-                "availability and terms."
+                "Provider quotas, free-tier availability and pricing can change. "
+                "Potentially billable providers remain disabled without opt-in."
             ),
         },
         "total_scenes": len(records),
@@ -605,22 +603,17 @@ def main():
                 row["status"] in ("existing", "generated")
                 for row in records
             ),
-            "failed": sum(
-                row["status"] == "failed" for row in records
-            ),
-            "pending": sum(
-                row["status"] == "pending" for row in records
-            ),
+            "failed": sum(row["status"] == "failed" for row in records),
+            "pending": sum(row["status"] == "pending" for row in records),
         }
 
         save_json(GENERATION_MANIFEST, manifest)
 
         rows = []
-
         for job, record in zip(jobs, records):
             try:
                 duration = float(job.get("duration", 5.0))
-                if not (0.5 <= duration <= 3600):
+                if not 0.5 <= duration <= 3600:
                     duration = 5.0
             except (TypeError, ValueError):
                 duration = 5.0
@@ -629,9 +622,7 @@ def main():
                 "scene": record["scene"],
                 "global_scene": record["scene"],
                 "part": job.get("part", 1),
-                "local_scene": job.get(
-                    "local_scene", record["scene"]
-                ),
+                "local_scene": job.get("local_scene", record["scene"]),
                 "image": record["file"],
                 "image_path": record["file"],
                 "duration": duration,
@@ -640,8 +631,9 @@ def main():
                 "prompt_sha256": record["prompt_sha256"],
             })
 
-        save_json(IMAGE_MANIFEST, {
-            "version": "photo-motion-safe-9.0",
+        # Keep story fields if they exist in the upstream visual job file.
+        image_manifest = {
+            "version": "photo-motion-safe-10.0",
             "format": mode,
             "total_scenes": len(rows),
             "images_ready": sum(
@@ -650,26 +642,30 @@ def main():
             ),
             "images_required": len(rows),
             "scenes": rows,
-        })
+        }
+
+        for key in ("story_topic", "story_title", "story_category"):
+            if job_document.get(key):
+                image_manifest[key] = job_document[key]
+
+        save_json(IMAGE_MANIFEST, image_manifest)
 
     checkpoint()
 
     log("=" * 60)
-    log("KATHA LOK AI — SAFE IMAGE GENERATION")
+    log("KATHA LOK AI — RESUMABLE IMAGE GENERATION")
     log("Total scenes:", len(jobs))
     log("Already ready:", len(jobs) - len(pending))
     log("Pending:", len(pending))
-    log("Configured Hugging Face Spaces:", HF_SPACES)
-    log("Paid providers explicitly enabled:", ALLOW_BILLABLE_PROVIDERS)
+    log("Hugging Face Spaces:", HF_SPACES)
+    log("Potentially billable providers enabled:", ALLOW_BILLABLE_PROVIDERS)
 
     if not ALLOW_BILLABLE_PROVIDERS:
         log("Gemini Image, Replicate and authenticated Pollinations are blocked.")
-        log("Pollinations legacy endpoint is always disabled.")
-
-    log("=" * 60)
+        log("No legacy Pollinations endpoint will be called.")
 
     if not pending:
-        log("All scene images are ready; no provider calls required.")
+        log("All images are valid and match their prompt hashes; no calls needed.")
         return
 
     blocked_hf = set()
@@ -699,9 +695,7 @@ def main():
             if GEMINI_API_KEY and "gemini" not in blocked_paid:
                 providers.append((
                     f"Gemini Image: {GEMINI_MODEL}",
-                    lambda: generate_gemini(
-                        prompt, destination, size
-                    ),
+                    lambda: generate_gemini(prompt, destination, size),
                     "gemini",
                     True,
                 ))
@@ -709,9 +703,7 @@ def main():
             if REPLICATE_API_TOKEN and "replicate" not in blocked_paid:
                 providers.append((
                     f"Replicate: {REPLICATE_MODEL}",
-                    lambda: generate_replicate(
-                        prompt, destination, size
-                    ),
+                    lambda: generate_replicate(prompt, destination, size),
                     "replicate",
                     True,
                 ))
@@ -766,21 +758,18 @@ def main():
                     elif potentially_billable:
                         blocked_paid.add(provider_key)
 
-                # Do not retry a failed provider for the same scene.
-
         if not success:
             record["status"] = "failed"
             record["error"] = last_error[:800]
             log(
-                f"Scene {record['scene']} failed; "
-                "successful checkpoints were preserved."
+                f"Scene {record['scene']} failed; successful image "
+                "checkpoints are preserved."
             )
 
         checkpoint()
 
     failed = [
-        row["scene"] for row in records
-        if row["status"] == "failed"
+        row["scene"] for row in records if row["status"] == "failed"
     ]
     ready = sum(
         row["status"] in ("existing", "generated")
