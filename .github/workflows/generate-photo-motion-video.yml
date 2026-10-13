@@ -49,22 +49,47 @@ jobs:
       POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
       REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
 
-      # Keep billable image-provider opt-in disabled.
+      # Keep billable image providers disabled by default.
       ALLOW_BILLABLE_PROVIDERS: "false"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Calculate current input and code fingerprints
+        id: fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s Input/topic.txt
+
+          INPUT_HASH="$(sha256sum Input/topic.txt | awk '{print $1}')"
+
+          {
+            sha256sum Input/topic.txt
+            find scripts -type f -name '*.py' -print0 \
+              | sort -z \
+              | xargs -0 -r sha256sum
+            sha256sum .github/workflows/generate-photo-motion-video.yml
+          } > /tmp/katha-code-files.sha256
+
+          CODE_HASH="$(sha256sum /tmp/katha-code-files.sha256 | awk '{print $1}')"
+
+          echo "input_hash=$INPUT_HASH" >> "$GITHUB_OUTPUT"
+          echo "code_hash=$CODE_HASH" >> "$GITHUB_OUTPUT"
+
+          echo "Input fingerprint: $INPUT_HASH"
+          echo "Code fingerprint: $CODE_HASH"
+
       - name: Restore matching previous checkpoint
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
+          CURRENT_CODE_HASH: ${{ steps.fingerprints.outputs.code_hash }}
         run: |
           set -euo pipefail
-          test -s Input/topic.txt
           mkdir -p output
-          CURRENT_HASH="$(sha256sum Input/topic.txt | awk '{print $1}')"
           TEMP_DIR="$(mktemp -d)"
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
@@ -96,21 +121,31 @@ jobs:
               continue
             fi
 
-            HASH_FILE="$DEST/extracted/output/.resume-input.sha256"
-            if [ ! -s "$HASH_FILE" ]; then
+            SAVED_OUTPUT="$DEST/extracted/output"
+            INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
+            CODE_FILE="$SAVED_OUTPUT/.resume-code.sha256"
+
+            # Old checkpoints without both fingerprints are not trusted.
+            if [ ! -s "$INPUT_FILE" ] || [ ! -s "$CODE_FILE" ]; then
+              echo "Skipping legacy checkpoint from run $RUN_ID."
               continue
             fi
 
-            if [ "$(cat "$HASH_FILE")" != "$CURRENT_HASH" ]; then
+            if [ "$(cat "$INPUT_FILE")" != "$CURRENT_INPUT_HASH" ]; then
               continue
             fi
 
-            cp -a "$DEST/extracted/output/." output/
-            echo "Matching checkpoint restored from run $RUN_ID"
+            if [ "$(cat "$CODE_FILE")" != "$CURRENT_CODE_HASH" ]; then
+              echo "Skipping checkpoint from different code version: $RUN_ID"
+              continue
+            fi
+
+            cp -a "$SAVED_OUTPUT/." output/
+            echo "Matching input-and-code checkpoint restored from run $RUN_ID."
             exit 0
           done
 
-          echo "No matching checkpoint found; starting without restored output."
+          echo "No compatible checkpoint found; starting with current code."
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -178,7 +213,11 @@ jobs:
             }
           done
 
-          echo "Input configuration file exists."
+          python - <<'PY'
+          from scripts.input_config import load_and_validate, print_config_summary
+          config = load_and_validate("Input/topic.txt")
+          print_config_summary(config)
+          PY
 
       - name: Select Gemini model
         run: python scripts/select_gemini_model.py
@@ -236,63 +275,60 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json
           import re
           from pathlib import Path
 
           output = Path("output")
-          topic_file = Path("Input/topic.txt")
-          topic_text = topic_file.read_text(encoding="utf-8-sig")
-
           values = {}
-          for line in topic_text.splitlines():
+
+          for line in Path("Input/topic.txt").read_text(
+              encoding="utf-8-sig"
+          ).splitlines():
               line = line.strip()
               if not line or line.startswith("#") or "=" not in line:
                   continue
+
               key, value = line.split("=", 1)
               values[key.strip().upper()] = value.split("#", 1)[0].strip().strip("'\"")
 
-          topic = re.sub(r"\s+", " ", values.get("TOPIC", "")).strip()
+          def clean(value):
+              return re.sub(r"\s+", " ", str(value or "")).strip()
+
+          topic = clean(values.get("TOPIC", ""))
           title_file = output / "story" / "final_title.txt"
           title = ""
+
           if title_file.is_file():
-              title = title_file.read_text(encoding="utf-8-sig").strip().splitlines()[0]
+              lines = title_file.read_text(
+                  encoding="utf-8-sig"
+              ).splitlines()
+              if lines:
+                  title = clean(lines[0])
 
-          title = re.sub(r"\s+", " ", title or topic or "Katha Lok AI Story")[:100]
-          story_text = ""
-          story_file = output / "story" / "story.json"
+          title = (title or topic or "Katha Lok AI Story")[:100]
 
-          if story_file.is_file():
-              try:
-                  data = json.loads(story_file.read_text(encoding="utf-8-sig"))
-                  fragments = []
-                  for part in data.get("parts", []):
-                      for scene in part.get("scenes", []):
-                          value = scene.get("narration", scene.get("text", ""))
-                          if value:
-                              fragments.append(str(value).strip())
-                  story_text = " ".join(fragments)
-              except (ValueError, OSError, TypeError) as exc:
-                  print("Story text could not be loaded:", exc)
-
-          story_text = re.sub(r"\s+", " ", story_text).strip()
-          description = title + "\n\n"
-          description += story_text[:2500] if story_text else (
-              "A Katha Lok AI story based on: " + (topic or title)
+          # Keep the description concise. Never paste the full story here.
+          description = (
+              f"{title}\n\n"
+              f"Watch this Katha Lok AI story about "
+              f"{topic or title}. Enjoy the cinematic storytelling, "
+              "narration and scene-by-scene visuals.\n\n"
+              "#KathaLokAI #HindiKahani"
           )
-          if len(story_text) > 2500:
-              description += "..."
-          description += "\n\n#KathaLokAI #HindiKahani"
 
           tokens = re.findall(
               r"[A-Za-z0-9]+|[\u0900-\u097F]+",
-              title + " " + topic,
+              f"{title} {topic}",
           )
+
           tags = []
           seen = set()
+
           for tag in tokens + [
-              "Katha Lok AI", "Hindi story",
-              "Hindi kahani", "Hindi storytelling",
+              "Katha Lok AI",
+              "Hindi story",
+              "Hindi kahani",
+              "Hindi storytelling",
           ]:
               key = tag.casefold()
               if len(tag) >= 3 and key not in seen:
@@ -306,10 +342,11 @@ jobs:
               f"Description:\n\n{description}\n\n"
               f"Tags:\n{', '.join(tags)}\n"
           )
+
           (output / "youtube_metadata.txt").write_text(
               metadata, encoding="utf-8"
           )
-          print("Metadata generated.")
+          print("Topic-based metadata generated.")
           PY
 
       - name: Validate final deliverables
@@ -338,11 +375,16 @@ jobs:
       - name: Save resumable checkpoint
         if: always()
         shell: bash
+        env:
+          INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
+          CODE_HASH: ${{ steps.fingerprints.outputs.code_hash }}
         run: |
           set -euo pipefail
           mkdir -p output
-          sha256sum Input/topic.txt | awk '{print $1}' \
-            > output/.resume-input.sha256
+
+          printf '%s\n' "$INPUT_HASH" > output/.resume-input.sha256
+          printf '%s\n' "$CODE_HASH" > output/.resume-code.sha256
+
           rm -f checkpoint.zip
           zip -qr checkpoint.zip output
           test -s checkpoint.zip
