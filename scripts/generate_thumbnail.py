@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Create a cinematic, high-contrast Hindi story thumbnail."""
+"""Create story-aware cinematic thumbnails with adaptive title colors."""
 
 from __future__ import annotations
 
@@ -10,28 +10,122 @@ import re
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageStat
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from input_config import load_and_validate, get_format, get_title_source
 
+INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT = ROOT / "output"
-TOPIC_FILE = ROOT / "Input" / "topic.txt"
-VISUAL_JOBS = OUTPUT / "visuals" / "visual_jobs.json"
-IMAGE_MANIFEST = OUTPUT / "visuals" / "image_manifest.json"
 TITLE_FILE = OUTPUT / "story" / "final_title.txt"
-
+VISUAL_DIR = OUTPUT / "visuals"
+IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
+JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 THUMB_DIR = OUTPUT / "thumbnail"
 THUMBNAIL = OUTPUT / "thumbnail.jpg"
 MANIFEST = THUMB_DIR / "thumbnail_manifest.json"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
+# Semantic palette selection is a style guide, not a fixed color.
+PALETTES = {
+    "devotional": {
+        "name": "divine_gold",
+        "board": (64, 20, 77),
+        "board_edge": (255, 194, 69),
+        "title": (255, 226, 125),
+        "title_edge": (88, 36, 8),
+        "accent": (255, 146, 45),
+    },
+    "mystery": {
+        "name": "mystery_violet",
+        "board": (20, 20, 61),
+        "board_edge": (149, 117, 255),
+        "title": (230, 221, 255),
+        "title_edge": (42, 19, 91),
+        "accent": (93, 190, 255),
+    },
+    "horror": {
+        "name": "dark_crimson",
+        "board": (24, 12, 21),
+        "board_edge": (210, 48, 63),
+        "title": (255, 221, 217),
+        "title_edge": (91, 5, 21),
+        "accent": (255, 62, 52),
+    },
+    "historical": {
+        "name": "royal_bronze",
+        "board": (53, 28, 21),
+        "board_edge": (214, 148, 72),
+        "title": (255, 218, 157),
+        "title_edge": (70, 27, 8),
+        "accent": (180, 89, 43),
+    },
+    "emotional": {
+        "name": "warm_rose",
+        "board": (76, 29, 48),
+        "board_edge": (255, 174, 160),
+        "title": (255, 240, 220),
+        "title_edge": (91, 25, 42),
+        "accent": (255, 130, 102),
+    },
+    "nature": {
+        "name": "forest_emerald",
+        "board": (15, 46, 40),
+        "board_edge": (125, 222, 166),
+        "title": (229, 255, 221),
+        "title_edge": (11, 53, 38),
+        "accent": (102, 216, 174),
+    },
+    "general": {
+        "name": "cinematic_cobalt",
+        "board": (19, 35, 66),
+        "board_edge": (100, 196, 255),
+        "title": (255, 242, 207),
+        "title_edge": (24, 34, 65),
+        "accent": (255, 180, 73),
+    },
+}
 
-def fail(message):
-    raise RuntimeError(message)
+KEYWORDS = {
+    "devotional": (
+        "भगवान", "भगवान्", "देव", "देवी", "मंदिर", "भक्ति", "कृष्ण",
+        "राम", "शिव", "विष्णु", "हनुमान", "बालाजी", "दुर्गा", "गणेश",
+        "कथा", "पुराण", "अवतार", "पूजा", "तीर्थ", "divine", "god",
+        "goddess", "temple", "devotional", "krishna", "rama", "shiva",
+    ),
+    "mystery": (
+        "रहस्य", "राज", "गुमशुदा", "गायब", "पहेली", "सच", "सच्चाई",
+        "खोज", "अनोखा", "अज्ञात", "mystery", "secret", "unknown",
+        "disappear", "hidden", "truth", "enigma",
+    ),
+    "horror": (
+        "भूत", "प्रेत", "डर", "डरावनी", "भय", "चुड़ैल", "आत्मा",
+        "शैतान", "खौफ", "हवेली", "haunted", "horror", "ghost",
+        "witch", "demon", "scary", "terror",
+    ),
+    "historical": (
+        "राजा", "रानी", "राज्य", "युद्ध", "महाराज", "सम्राट", "किला",
+        "इतिहास", "योद्धा", "साम्राज्य", "historical", "king", "queen",
+        "emperor", "warrior", "battle", "kingdom", "fort",
+    ),
+    "emotional": (
+        "माँ", "मां", "पिता", "बेटा", "बेटी", "परिवार", "प्रेम",
+        "प्यार", "विरह", "बलिदान", "आंसू", "दर्द", "emotional",
+        "mother", "father", "family", "love", "sacrifice", "heart",
+    ),
+    "nature": (
+        "जंगल", "वन", "पहाड़", "नदी", "प्रकृति", "गाँव", "गांव",
+        "किसान", "पशु", "पक्षी", "forest", "village", "nature",
+        "mountain", "river", "wildlife", "farmer",
+    ),
+}
+
+
+def log(*values):
+    print(*values, flush=True)
 
 
 def read_json(path):
@@ -39,6 +133,23 @@ def read_json(path):
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
+
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        temp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def clean_text(value, limit=250):
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
 def sha256_file(path):
@@ -49,38 +160,48 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def clean_text(value, limit=300):
-    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
-
-
 def load_title(config):
     if TITLE_FILE.is_file():
         try:
             for line in TITLE_FILE.read_text(
                 encoding="utf-8-sig"
             ).splitlines():
-                title = clean_text(line, 160)
+                title = clean_text(line)
                 if title:
                     return title
         except OSError as exc:
-            print(f"WARNING: Cannot read title file: {exc}")
+            log("WARNING: Could not read final title:", exc)
 
-    title = clean_text(get_title_source(config), 160)
+    title = clean_text(get_title_source(config))
     if title:
         return title
 
-    fail("No usable title in final_title.txt or Input/topic.txt.")
+    raise RuntimeError(
+        "No title found in final_title.txt or Input/topic.txt."
+    )
+
+
+def choose_palette(title, topic):
+    text = f"{title} {topic}".casefold()
+
+    # Most specific categories take precedence.
+    for category in (
+        "horror", "mystery", "devotional",
+        "historical", "emotional", "nature",
+    ):
+        if any(word.casefold() in text for word in KEYWORDS[category]):
+            return dict(PALETTES[category])
+
+    return dict(PALETTES["general"])
 
 
 def rows_from(data):
     if isinstance(data, list):
         return data
-
     if isinstance(data, dict):
         for key in ("scenes", "jobs", "visuals", "items"):
             if isinstance(data.get(key), list):
                 return data[key]
-
     return []
 
 
@@ -112,64 +233,64 @@ def resolve_image(value):
 def choose_source_image():
     candidates = []
 
-    for manifest_path in (IMAGE_MANIFEST, VISUAL_JOBS):
-        for row in rows_from(read_json(manifest_path)):
+    for manifest_path in (IMAGE_MANIFEST, JOBS_FILE):
+        data = read_json(manifest_path)
+        for row in rows_from(data):
             if not isinstance(row, dict):
                 continue
 
             status = str(row.get("status", "")).lower()
             if status and status not in {
                 "completed", "complete", "success", "done",
-                "generated", "ready", "reused"
+                "generated", "ready", "reused", "existing",
             }:
                 continue
 
             for key in (
-                "image_path", "image", "asset_path", "image_file"
+                "image_path", "image", "asset_path", "image_file",
             ):
-                candidate = resolve_image(row.get(key))
-                if candidate and candidate not in candidates:
-                    candidates.append(candidate)
+                path = resolve_image(row.get(key))
+                if path and path not in candidates:
+                    candidates.append(path)
                     break
 
-    visual_dir = OUTPUT / "visuals"
-    if visual_dir.is_dir():
-        for path in sorted(visual_dir.glob("scene_*")):
+    if VISUAL_DIR.is_dir():
+        for path in sorted(VISUAL_DIR.glob("scene_*")):
             candidate = resolve_image(str(path))
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
 
     for path in candidates:
         try:
-            with Image.open(path) as image:
-                image.verify()
-            with Image.open(path) as image:
-                if image.width >= 64 and image.height >= 64:
+            with Image.open(path) as im:
+                im.verify()
+            with Image.open(path) as im:
+                if im.width >= 64 and im.height >= 64:
                     return path
         except Exception as exc:
-            print(f"WARNING: Invalid image {path.name}: {exc}")
+            log("WARNING: Skipping invalid image:", path.name, exc)
 
-    fail("No valid scene image found for the thumbnail.")
+    raise RuntimeError("No valid scene image found for thumbnail.")
 
 
 def find_font(size, bold=True):
     if bold:
-        candidates = [
+        candidates = (
             "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
             "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
+        )
     else:
-        candidates = [
+        candidates = (
             "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
             "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf",
-        ]
+        )
 
-    for path in candidates:
+    for font_path in candidates:
         try:
-            return ImageFont.truetype(path, size=size)
+            return ImageFont.truetype(font_path, size=size)
         except OSError:
             pass
 
@@ -178,7 +299,6 @@ def find_font(size, bold=True):
 
 def crop_to_ratio(image, ratio):
     width, height = image.size
-
     if width / height > ratio:
         new_width = max(1, round(height * ratio))
         left = (width - new_width) // 2
@@ -189,21 +309,15 @@ def crop_to_ratio(image, ratio):
     return image.crop((0, top, width, top + new_height))
 
 
-def wrap_text(draw, text, font, max_width):
-    words = text.split()
-    if not words:
-        return ["Katha Lok AI"]
-
+def fit_lines(draw, title, font, max_width):
+    words = title.split()
     lines = []
     current = ""
 
     for word in words:
         candidate = word if not current else current + " " + word
-        bounds = draw.textbbox(
-            (0, 0), candidate, font=font, stroke_width=2
-        )
-
-        if bounds[2] - bounds[0] <= max_width:
+        box = draw.textbbox((0, 0), candidate, font=font, stroke_width=2)
+        if box[2] - box[0] <= max_width:
             current = candidate
         else:
             if current:
@@ -213,24 +327,20 @@ def wrap_text(draw, text, font, max_width):
     if current:
         lines.append(current)
 
-    return lines
+    return lines or [title]
 
 
 def fit_title(draw, title, max_width, max_lines, start_size):
     size = start_size
-
     while size >= 24:
         font = find_font(size)
-        lines = wrap_text(draw, title, font, max_width)
-
+        lines = fit_lines(draw, title, font, max_width)
         if len(lines) <= max_lines:
             return font, lines, size
-
         size -= 3
 
     font = find_font(24)
-    lines = wrap_text(draw, title, font, max_width)
-
+    lines = fit_lines(draw, title, font, max_width)
     if len(lines) > max_lines:
         lines = lines[:max_lines]
         last = lines[-1]
@@ -243,78 +353,76 @@ def fit_title(draw, title, max_width, max_lines, start_size):
     return font, lines, 24
 
 
-def gradient_background(width, height):
-    layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
+def image_palette_adjustment(image, palette):
+    """Use the scene's overall brightness to tune title contrast."""
+    sample = image.resize((64, 64)).convert("RGB")
+    brightness = sum(ImageStat.Stat(sample).mean) / 3
 
-    for y in range(height):
-        ratio = y / max(1, height - 1)
-        alpha = int(175 * (1.0 - ratio) ** 1.25)
-        draw.line(
-            (0, y, width, y),
-            fill=(12, 5, 15, alpha),
+    result = dict(palette)
+    if brightness < 78:
+        result["board"] = tuple(
+            min(255, int(channel * 1.16 + 8))
+            for channel in palette["board"]
         )
+        result["title"] = (255, 244, 205)
+    elif brightness > 185:
+        result["board"] = tuple(
+            max(0, int(channel * 0.72))
+            for channel in palette["board"]
+        )
+        result["title_edge"] = (12, 12, 22)
 
-    return layer
+    return result, round(brightness, 2)
 
 
-def draw_gold_frame(draw, box, radius, width=5):
+def make_overlay(width, height, mode):
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    # Darken the title region while preserving the original scene.
+    if mode == "short":
+        start = int(height * 0.22)
+        end = int(height * 0.53)
+    else:
+        start = int(height * 0.08)
+        end = int(height * 0.64)
+
+    span = max(1, end - start)
+    for y in range(start, end):
+        distance = min(y - start, end - y) / max(1, span / 2)
+        alpha = int(42 + 72 * max(0, 1 - distance))
+        draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
+
+    return overlay
+
+
+def draw_frame(draw, box, radius, palette, width):
     x1, y1, x2, y2 = box
+    edge = palette["board_edge"]
+
     draw.rounded_rectangle(
-        (x1 + 5, y1 + 7, x2 + 5, y2 + 7),
+        (x1 + 6, y1 + 8, x2 + 6, y2 + 8),
         radius=radius,
-        fill=(0, 0, 0, 155),
+        fill=(0, 0, 0, 190),
     )
     draw.rounded_rectangle(
         box,
         radius=radius,
-        fill=(85, 9, 10, 248),
-        outline=(255, 197, 54, 255),
+        fill=(*palette["board"], 244),
+        outline=(*edge, 255),
         width=width,
     )
+
     inset = max(8, width * 2)
     draw.rounded_rectangle(
         (x1 + inset, y1 + inset, x2 - inset, y2 - inset),
-        radius=max(4, radius - inset),
-        outline=(255, 224, 126, 230),
+        radius=max(5, radius - inset),
+        outline=(*edge, 180),
         width=max(1, width // 2),
     )
 
 
-def draw_centered_text(draw, box, text, font, fill, stroke_fill,
-                       stroke_width=3, shadow=True):
-    x1, y1, x2, y2 = box
-    bounds = draw.textbbox(
-        (0, 0), text, font=font, stroke_width=stroke_width
-    )
-    tw = bounds[2] - bounds[0]
-    th = bounds[3] - bounds[1]
-
-    x = x1 + max(0, (x2 - x1 - tw) // 2) - bounds[0]
-    y = y1 + max(0, (y2 - y1 - th) // 2) - bounds[1]
-
-    if shadow:
-        draw.text(
-            (x + 4, y + 5),
-            text,
-            font=font,
-            fill=(0, 0, 0, 255),
-            stroke_width=stroke_width + 3,
-            stroke_fill=(0, 0, 0, 255),
-        )
-
-    draw.text(
-        (x, y),
-        text,
-        font=font,
-        fill=fill,
-        stroke_width=stroke_width,
-        stroke_fill=stroke_fill,
-    )
-
-
-def render_thumbnail(source, title, mode, destination):
-    # Short thumbnails are portrait; Full thumbnails are 16:9 landscape.
+def render_thumbnail(source, title, mode, destination, palette):
     size = (1080, 1920) if mode == "short" else (1280, 720)
     width, height = size
     ratio = width / height
@@ -325,48 +433,30 @@ def render_thumbnail(source, title, mode, destination):
     image = crop_to_ratio(image, ratio).resize(
         size, Image.Resampling.LANCZOS
     )
+    image = image.filter(
+        ImageFilter.UnsharpMask(radius=2, percent=115, threshold=3)
+    )
 
-    # Increase visual depth and contrast without another API call.
-    image = image.filter(ImageFilter.UnsharpMask(
-        radius=2, percent=125, threshold=3
-    ))
+    palette, brightness = image_palette_adjustment(image, palette)
+
     base = image.convert("RGBA")
-    base.alpha_composite(gradient_background(width, height), (0, 0))
-
-    # Warm cinematic tint along the bottom.
-    warm = Image.new("RGBA", size, (0, 0, 0, 0))
-    warm_draw = ImageDraw.Draw(warm)
-    warm_height = int(height * 0.34)
-    for y in range(warm_height):
-        alpha = int(55 * (y / max(1, warm_height - 1)))
-        warm_draw.line(
-            (0, height - warm_height + y, width, height - warm_height + y),
-            fill=(255, 107, 15, alpha),
-        )
-    base.alpha_composite(warm)
-
+    base.alpha_composite(make_overlay(width, height, mode))
     image = base.convert("RGB")
-    draw = ImageDraw.Draw(image)
 
-    # The plaque stays away from the most important image edges.
     if mode == "short":
         plaque = (
-            int(width * 0.055),
-            int(height * 0.245),
-            int(width * 0.945),
-            int(height * 0.485),
+            int(width * 0.055), int(height * 0.235),
+            int(width * 0.945), int(height * 0.485),
         )
-        title_size = int(width * 0.105)
+        start_size = int(width * 0.105)
         max_lines = 4
         border_width = 6
     else:
         plaque = (
-            int(width * 0.255),
-            int(height * 0.115),
-            int(width * 0.745),
-            int(height * 0.615),
+            int(width * 0.235), int(height * 0.105),
+            int(width * 0.765), int(height * 0.625),
         )
-        title_size = int(width * 0.073)
+        start_size = int(width * 0.075)
         max_lines = 3
         border_width = 5
 
@@ -374,134 +464,86 @@ def render_thumbnail(source, title, mode, destination):
     plaque_width = x2 - x1
     plaque_height = y2 - y1
 
-    # Soft outer glow gives the gold frame a cinematic shine.
     glow = Image.new("RGBA", size, (0, 0, 0, 0))
     glow_draw = ImageDraw.Draw(glow)
     glow_draw.rounded_rectangle(
-        (x1 - 8, y1 - 8, x2 + 8, y2 + 8),
+        (x1 - 7, y1 - 7, x2 + 7, y2 + 7),
         radius=28,
-        fill=(255, 155, 20, 100),
+        fill=(*palette["accent"], 105),
     )
-    glow = glow.filter(ImageFilter.GaussianBlur(16))
-    image = Image.alpha_composite(image.convert("RGBA"), glow).convert("RGB")
+    glow = glow.filter(ImageFilter.GaussianBlur(17))
+    image = Image.alpha_composite(image.convert("RGBA"), glow)
     draw = ImageDraw.Draw(image)
 
-    draw_gold_frame(draw, plaque, radius=24, width=border_width)
+    draw_frame(draw, plaque, 25, palette, border_width)
 
-    # A subtle center highlight creates a richer red enamel effect.
-    inner = Image.new("RGBA", (plaque_width, plaque_height), (0, 0, 0, 0))
-    inner_draw = ImageDraw.Draw(inner)
-
-    for y in range(plaque_height):
-        ratio_y = y / max(1, plaque_height - 1)
-        red = int(112 + 32 * (1 - abs(0.5 - ratio_y) * 2))
-        inner_draw.line(
-            (0, y, plaque_width, y),
-            fill=(red, 7, 13, 45),
-        )
-
-    image_rgba = image.convert("RGBA")
-    image_rgba.alpha_composite(inner, (x1, y1))
-    image = image_rgba.convert("RGB")
-    draw = ImageDraw.Draw(image)
-
-    # Leave a small interior margin so text never touches the frame.
-    text_margin_x = int(plaque_width * 0.065)
-    text_margin_y = int(plaque_height * 0.07)
+    margin_x = int(plaque_width * 0.065)
+    margin_y = int(plaque_height * 0.075)
     text_box = (
-        x1 + text_margin_x,
-        y1 + text_margin_y,
-        x2 - text_margin_x,
-        y2 - text_margin_y,
+        x1 + margin_x, y1 + margin_y,
+        x2 - margin_x, y2 - margin_y,
     )
 
     font, lines, chosen_size = fit_title(
-        draw,
-        title,
-        text_box[2] - text_box[0],
-        max_lines,
-        title_size,
+        draw, title, text_box[2] - text_box[0],
+        max_lines, start_size,
     )
 
     line_gap = max(4, chosen_size // 10)
-    heights = []
-    for line in lines:
-        b = draw.textbbox((0, 0), line, font=font, stroke_width=3)
-        heights.append(max(1, b[3] - b[1]))
 
-    total_text_height = sum(heights) + line_gap * (len(lines) - 1)
-    available_height = text_box[3] - text_box[1]
-
-    # If the title is tall, shrink font before rendering.
-    while total_text_height > available_height and chosen_size > 22:
-        chosen_size -= 2
-        font = find_font(chosen_size)
+    def measure():
         heights = []
         for line in lines:
-            b = draw.textbbox((0, 0), line, font=font, stroke_width=3)
-            heights.append(max(1, b[3] - b[1]))
-        line_gap = max(3, chosen_size // 10)
-        total_text_height = sum(heights) + line_gap * (len(lines) - 1)
+            box = draw.textbbox((0, 0), line, font=font, stroke_width=3)
+            heights.append(max(1, box[3] - box[1]))
+        return heights
 
-    y = text_box[1] + max(
-        0, (available_height - total_text_height) // 2
-    )
+    heights = measure()
+    available_height = text_box[3] - text_box[1]
+
+    while sum(heights) + line_gap * (len(lines) - 1) > available_height and chosen_size > 22:
+        chosen_size -= 2
+        font = find_font(chosen_size)
+        line_gap = max(3, chosen_size // 10)
+        heights = measure()
+
+    total_height = sum(heights) + line_gap * (len(lines) - 1)
+    y = text_box[1] + max(0, (available_height - total_height) // 2)
 
     for line, line_height in zip(lines, heights):
         bounds = draw.textbbox((0, 0), line, font=font, stroke_width=3)
         text_width = bounds[2] - bounds[0]
         x = (width - text_width) // 2 - bounds[0]
 
-        # Black extrusion + bright gold fill + dark red edge.
         draw.text(
-            (x + 5, y + 6),
-            line,
-            font=font,
-            fill=(0, 0, 0),
-            stroke_width=6,
-            stroke_fill=(20, 0, 0),
+            (x + 5, y + 6), line, font=font,
+            fill=(0, 0, 0, 255), stroke_width=7,
+            stroke_fill=(0, 0, 0, 255),
         )
         draw.text(
-            (x, y),
-            line,
-            font=font,
-            fill=(255, 207, 43),
-            stroke_width=3,
-            stroke_fill=(92, 25, 0),
+            (x, y), line, font=font,
+            fill=(*palette["title"], 255), stroke_width=4,
+            stroke_fill=(*palette["title_edge"], 255),
         )
         draw.text(
-            (x, y - 1),
-            line,
-            font=font,
-            fill=(255, 224, 89),
-            stroke_width=1,
-            stroke_fill=(255, 246, 184),
+            (x, y - 1), line, font=font,
+            fill=(*palette["title"], 255), stroke_width=1,
+            stroke_fill=(255, 255, 230, 255),
         )
-
         y += line_height + line_gap
 
-    # Fine gold corner ornaments, kept simple for mobile readability.
-    ornament_font = find_font(max(22, width // 24))
-    draw.text(
-        (x1 + 12, y1 + 4),
-        "✦",
-        font=ornament_font,
-        fill=(255, 214, 105),
-        stroke_width=1,
-        stroke_fill=(105, 35, 0),
-    )
-    ornament = "✦"
-    ornament_bounds = draw.textbbox(
-        (0, 0), ornament, font=ornament_font
-    )
-    draw.text(
-        (x2 - (ornament_bounds[2] - ornament_bounds[0]) - 12, y1 + 4),
-        ornament,
-        font=ornament_font,
-        fill=(255, 214, 105),
-        stroke_width=1,
-        stroke_fill=(105, 35, 0),
-    )
+    # Small story-colored corner accents.
+    ornament_font = find_font(max(22, width // 25))
+    for x in (
+        x1 + 13,
+        x2 - width // 18,
+    ):
+        draw.text(
+            (x, y1 + 5), "✦", font=ornament_font,
+            fill=(*palette["board_edge"], 255),
+            stroke_width=1,
+            stroke_fill=(*palette["title_edge"], 255),
+        )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp = destination.with_name(destination.stem + ".tmp.jpg")
@@ -510,91 +552,115 @@ def render_thumbnail(source, title, mode, destination):
         image.convert("RGB").save(
             temp, "JPEG", quality=94, optimize=True
         )
-
         with Image.open(temp) as check:
             check.verify()
         with Image.open(temp) as check:
             if check.size != size:
-                fail(f"Wrong thumbnail dimensions: {check.size}")
-
+                raise RuntimeError(
+                    f"Unexpected thumbnail size: {check.size}"
+                )
         if temp.stat().st_size < 1000:
-            fail("Thumbnail file is unexpectedly small.")
-
+            raise RuntimeError("Thumbnail output is unexpectedly small.")
         temp.replace(destination)
     finally:
         temp.unlink(missing_ok=True)
 
+    return palette, brightness, size
+
 
 def main():
-    config = load_and_validate(TOPIC_FILE)
-    mode = get_format(config)
-    title = load_title(config)
+    config = load_and_validate(INPUT_FILE)
+    mode = str(get_format(config)).strip().lower()
+    mode = "full" if mode in {"full", "long", "landscape", "youtube"} else "short"
 
+    title = load_title(config)
+    topic = clean_text(config.get("TOPIC") or config.get("TITLE") or "")
+    if not topic:
+        try:
+            topic = INPUT_FILE.read_text(
+                encoding="utf-8-sig"
+            )[:600]
+        except OSError:
+            topic = title
+
+    palette = choose_palette(title, topic)
     source = choose_source_image()
+
     source_hash = sha256_file(source)
     title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()
-    size = (1080, 1920) if mode == "short" else (1280, 720)
+    topic_hash = hashlib.sha256(topic.encode("utf-8")).hexdigest()
+    style_hash = hashlib.sha256(
+        json.dumps(palette, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
+    expected_size = (1080, 1920) if mode == "short" else (1280, 720)
     previous = read_json(MANIFEST)
-    can_reuse = (
+
+    reusable = (
         isinstance(previous, dict)
         and previous.get("status") == "completed"
         and previous.get("format") == mode
         and previous.get("title_sha256") == title_hash
+        and previous.get("topic_sha256") == topic_hash
         and previous.get("source_sha256") == source_hash
-        and previous.get("path") == THUMBNAIL.relative_to(ROOT).as_posix()
+        and previous.get("style_sha256") == style_hash
+        and previous.get("path") == "output/thumbnail.jpg"
         and THUMBNAIL.is_file()
     )
 
-    if can_reuse:
+    if reusable:
         try:
             with Image.open(THUMBNAIL) as image:
                 image.verify()
             with Image.open(THUMBNAIL) as image:
-                can_reuse = image.size == size
+                reusable = image.size == expected_size
         except Exception:
-            can_reuse = False
+            reusable = False
 
-    if can_reuse:
-        print("Reusing valid thumbnail; no image generation required.")
+    brightness = None
+    if reusable:
+        final_palette = palette
+        log("Reusing valid matching thumbnail.")
+        with Image.open(source) as image:
+            _, brightness = image_palette_adjustment(
+                image.convert("RGB"), palette
+            )
+        final_size = expected_size
     else:
-        render_thumbnail(source, title, mode, THUMBNAIL)
-
-    with Image.open(THUMBNAIL) as image:
-        image.verify()
+        final_palette, brightness, final_size = render_thumbnail(
+            source, title, mode, THUMBNAIL, palette
+        )
 
     result = {
         "status": "completed",
         "format": mode,
         "title": title,
         "title_sha256": title_hash,
+        "topic_sha256": topic_hash,
         "source_visual": str(source.relative_to(ROOT)),
         "source_sha256": source_hash,
-        "path": str(THUMBNAIL.relative_to(ROOT)),
-        "width": size[0],
-        "height": size[1],
+        "path": "output/thumbnail.jpg",
+        "width": final_size[0],
+        "height": final_size[1],
         "size_bytes": THUMBNAIL.stat().st_size,
-        "reused": bool(can_reuse),
-        "style": "cinematic_red_gold_hindi_plaque_v2",
+        "reused": bool(reusable),
+        "style": final_palette["name"],
+        "palette": final_palette,
+        "source_brightness": brightness,
+        "style_sha256": style_hash,
+        "palette_rule": "story-keywords-plus-background-brightness",
     }
 
-    THUMB_DIR.mkdir(parents=True, exist_ok=True)
-    temp_manifest = MANIFEST.with_suffix(".json.tmp")
+    write_json(MANIFEST, result)
 
-    try:
-        temp_manifest.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temp_manifest.replace(MANIFEST)
-    finally:
-        temp_manifest.unlink(missing_ok=True)
-
-    print("THUMBNAIL GENERATION SUCCESS")
-    print("Format:", mode)
-    print("Dimensions:", f"{size[0]}x{size[1]}")
-    print("Thumbnail:", THUMBNAIL.relative_to(ROOT))
-    print("Manifest:", MANIFEST.relative_to(ROOT))
+    log("THUMBNAIL GENERATION SUCCESS")
+    log("Format:", mode)
+    log("Title:", title)
+    log("Selected style:", final_palette["name"])
+    log("Image brightness:", brightness)
+    log("Dimensions:", f"{final_size[0]}x{final_size[1]}")
+    log("Thumbnail:", THUMBNAIL.relative_to(ROOT))
+    log("Manifest:", MANIFEST.relative_to(ROOT))
 
 
 if __name__ == "__main__":
