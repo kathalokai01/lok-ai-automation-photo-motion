@@ -1,19 +1,28 @@
 
 #!/usr/bin/env python3
+"""Prepare scene narration with deterministic mapping and safe checkpoints.
 
+This stage makes no Gemini generation requests. It prepares narration text
+from completed story scenes and checkpoints each scene independently.
+"""
+
+from __future__ import annotations
+
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from input_config import (
-    load_input_config,
+    load_and_validate,
     get_parts,
     get_scenes,
-    normalize_format,
+    get_format,
     get_topic,
+    get_story_text,
 )
-
 
 AI_STORY_FILE = Path("output/story/ai_story.json")
 SCENES_FILE = Path("output/scenes/scenes.json")
@@ -21,158 +30,70 @@ MODEL_FILE = Path("output/config/selected_model.json")
 OUTPUT_FILE = Path("output/narration/narration.json")
 
 
-# ============================================================
-# GENERAL HELPERS
-# ============================================================
-
-def utc_now():
+def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def cfg_text(config, key, default=""):
-    value = config.get(key, default)
-
-    if value is None:
-        return str(default)
-
-    return str(value).strip()
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def cfg_bool(config, key, default=False):
-    value = config.get(key, default)
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
 
-    if isinstance(value, bool):
-        return value
-
-    text = str(value).strip().lower()
-
-    if text in {"true", "yes", "on", "1"}:
-        return True
-
-    if text in {"false", "no", "off", "0"}:
-        return False
-
-    return bool(default)
-
-
-def positive_int(value, name):
     try:
-        result = int(value)
-    except (TypeError, ValueError):
-        raise SystemExit(
-            f"ERROR: {name} must be a valid integer; got {value!r}"
-        )
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
-    if result < 1:
-        raise SystemExit(
-            f"ERROR: {name} must be greater than zero."
-        )
-
-    return result
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def get_scene_duration_value(config):
-    value = config.get("SCENE_DURATION", "auto")
-
-    if value is None:
-        return "auto"
-
-    text = str(value).strip()
-
-    return text if text else "auto"
-
-
-def resolve_topic_value(config):
-    try:
-        topic = get_topic(config)
-    except Exception:
-        topic = config.get("TOPIC", "")
-
-    if topic is None:
-        return ""
-
-    return str(topic).strip()
-
-
-# ============================================================
-# JSON HELPERS
-# ============================================================
-
-def load_json(path):
+def read_json(path: Path, required: bool = True) -> dict[str, Any] | None:
     if not path.is_file():
-        raise SystemExit(
-            f"ERROR: Required file not found: {path}"
-        )
+        if required:
+            raise SystemExit(f"ERROR: Required file not found: {path}")
+        return None
 
     try:
-        with path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(
-            f"ERROR: Could not read valid JSON from {path}: {exc}"
-        )
+        if required:
+            raise SystemExit(f"ERROR: Invalid JSON in {path}: {exc}") from exc
+        print(f"WARNING: Ignoring unreadable checkpoint {path}: {exc}")
+        return None
 
     if not isinstance(data, dict):
-        raise SystemExit(
-            f"ERROR: Expected a JSON object in {path}."
-        )
+        if required:
+            raise SystemExit(f"ERROR: Expected a JSON object in {path}.")
+        return None
 
     return data
 
 
-def load_optional_json(path):
-    if not path.is_file():
+def scene_key(scene: dict[str, Any]) -> tuple[int, int] | None:
+    try:
+        part = int(scene.get("part"))
+        number = int(scene.get("scene"))
+    except (TypeError, ValueError):
         return None
 
-    try:
-        with path.open("r", encoding="utf-8") as file:
-            return json.load(file)
-    except (OSError, json.JSONDecodeError) as exc:
-        print(
-            f"WARNING: Existing checkpoint could not be read: "
-            f"{path}: {exc}"
-        )
+    if part < 1 or number < 1:
         return None
 
-
-def save_json_atomic(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    temp_file = path.with_name(path.name + ".tmp")
-
-    try:
-        with temp_file.open("w", encoding="utf-8") as file:
-            json.dump(
-                data,
-                file,
-                ensure_ascii=False,
-                indent=2,
-            )
-            file.write("\n")
-            file.flush()
-            os.fsync(file.fileno())
-
-        os.replace(temp_file, path)
-
-    finally:
-        if temp_file.exists():
-            try:
-                temp_file.unlink()
-            except OSError:
-                pass
+    return part, number
 
 
-# ============================================================
-# SCENE EXTRACTION
-# ============================================================
-
-def extract_ai_story_scenes(ai_story):
-    parts = ai_story.get("parts", [])
+def extract_ai_story_scenes(data: dict[str, Any]) -> list[dict[str, Any]]:
+    parts = data.get("parts", [])
 
     if not isinstance(parts, list):
-        raise SystemExit(
-            "ERROR: ai_story.json 'parts' must be a list."
-        )
+        raise SystemExit("ERROR: ai_story.json 'parts' must be a list.")
 
     result = []
 
@@ -190,172 +111,159 @@ def extract_ai_story_scenes(ai_story):
             if not isinstance(scene, dict):
                 continue
 
-            scene_copy = dict(scene)
-            scene_copy["part"] = part_number
-            result.append(scene_copy)
+            item = dict(scene)
+            item["part"] = part_number
+            result.append(item)
 
     return result
 
 
-def extract_generated_scenes():
-    data = load_optional_json(SCENES_FILE)
+def extract_source_scenes() -> tuple[list[dict[str, Any]], str]:
+    generated = read_json(SCENES_FILE, required=False)
 
-    if data is None:
-        return []
+    if generated is not None:
+        scenes = generated.get("scenes", [])
 
-    if not isinstance(data, dict):
-        raise SystemExit(
-            f"ERROR: {SCENES_FILE} must contain a JSON object."
-        )
+        if not isinstance(scenes, list):
+            raise SystemExit(
+                f"ERROR: {SCENES_FILE} 'scenes' must be a list."
+            )
 
-    scenes = data.get("scenes", [])
+        if scenes:
+            if any(not isinstance(item, dict) for item in scenes):
+                raise SystemExit(
+                    f"ERROR: {SCENES_FILE} contains a non-object scene."
+                )
 
-    if not isinstance(scenes, list):
-        raise SystemExit(
-            f"ERROR: {SCENES_FILE} 'scenes' must be a list."
-        )
+            return [dict(item) for item in scenes], str(SCENES_FILE)
 
-    if any(not isinstance(scene, dict) for scene in scenes):
-        raise SystemExit(
-            f"ERROR: {SCENES_FILE} contains a non-object scene."
-        )
+    story = read_json(AI_STORY_FILE)
 
-    return [dict(scene) for scene in scenes]
+    if story.get("status") != "completed":
+        raise SystemExit("ERROR: AI story is not marked completed.")
 
+    scenes = extract_ai_story_scenes(story)
 
-# ============================================================
-# SCENE IDENTIFICATION AND VALIDATION
-# ============================================================
+    if not scenes:
+        raise SystemExit("ERROR: No scenes found in AI story.")
 
-def scene_key(scene):
-    if not isinstance(scene, dict):
-        return None
-
-    try:
-        part = int(scene.get("part"))
-        number = int(scene.get("scene"))
-    except (TypeError, ValueError):
-        return None
-
-    if part < 1 or number < 1:
-        return None
-
-    return part, number
+    return scenes, str(AI_STORY_FILE)
 
 
-def validate_expected_scenes(scenes, expected_total):
-    if len(scenes) != expected_total:
-        raise SystemExit(
-            "ERROR: Scene count mismatch.\n"
-            f"Expected from Input: {expected_total}\n"
-            f"Found: {len(scenes)}"
-        )
+def source_narration(scene: dict[str, Any]) -> str:
+    """Use the scene narration field, with text as a safe fallback."""
+    value = scene.get("narration")
 
-    seen = set()
+    if not isinstance(value, str) or not value.strip():
+        value = scene.get("text")
+
+    if not isinstance(value, str):
+        return ""
+
+    return " ".join(value.split())
+
+
+def validate_source_scenes(
+    scenes: list[dict[str, Any]],
+    expected_parts: int,
+    scenes_per_part: int,
+) -> dict[tuple[int, int], dict[str, Any]]:
+    expected = {
+        (part, scene)
+        for part in range(1, expected_parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    }
+
+    result: dict[tuple[int, int], dict[str, Any]] = {}
 
     for index, scene in enumerate(scenes, start=1):
         key = scene_key(scene)
 
         if key is None:
             raise SystemExit(
-                f"ERROR: Invalid part/scene number at scene index {index}."
+                f"ERROR: Invalid part/scene mapping at source row {index}."
             )
 
-        if key in seen:
+        if key in result:
+            raise SystemExit(f"ERROR: Duplicate source scene {key}.")
+
+        text = source_narration(scene)
+
+        if not text:
             raise SystemExit(
-                f"ERROR: Duplicate scene number found: {key}."
+                f"ERROR: Empty narration in Part {key[0]} Scene {key[1]}."
             )
 
-        seen.add(key)
-
-        text = scene.get("narration")
-
-        if not isinstance(text, str) or not text.strip():
+        if key not in expected:
             raise SystemExit(
-                "ERROR: Missing narration in source scene "
-                f"Part {key[0]} Scene {key[1]}."
+                f"ERROR: Unexpected source scene {key}; "
+                "it does not match Input/topic.txt."
             )
 
-    return seen
+        result[key] = scene
 
-
-def validate_scene_numbers(narration_scenes, expected_scenes):
-    expected_keys = set()
-    actual_keys = set()
-
-    for scene in expected_scenes:
-        key = scene_key(scene)
-
-        if key is None:
-            raise ValueError(
-                "Invalid part/scene number in expected scenes."
-            )
-
-        if key in expected_keys:
-            raise ValueError(
-                f"Duplicate expected scene number: {key}"
-            )
-
-        expected_keys.add(key)
-
-    for scene in narration_scenes:
-        key = scene_key(scene)
-
-        if key is None:
-            raise ValueError(
-                "Invalid part/scene number in narration output."
-            )
-
-        if key in actual_keys:
-            raise ValueError(
-                f"Duplicate narration scene number: {key}"
-            )
-
-        actual_keys.add(key)
-
-    missing = sorted(expected_keys - actual_keys)
-    extra = sorted(actual_keys - expected_keys)
+    missing = sorted(expected - set(result))
 
     if missing:
-        raise ValueError(
-            f"Missing narration scenes: {missing}"
+        raise SystemExit(
+            f"ERROR: Input/source scene mapping is incomplete: {missing}"
         )
 
-    if extra:
-        raise ValueError(
-            f"Unexpected narration scenes: {extra}"
-        )
+    return result
 
 
-# ============================================================
-# NARRATION PREPARATION
-# ============================================================
+def build_settings(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "format": get_format(config),
+        "audience": str(config.get("AUDIENCE", "adult")).strip(),
+        "voice": str(config.get("VOICE", "male")).strip(),
+        "speed": str(config.get("SPEED", "+0%")).strip(),
+        "captions": str(config.get("CAPTIONS", "hindi")).strip().lower(),
+        "scene_duration": str(config.get("SCENE_DURATION", "auto")).strip(),
+        "story_length": str(config.get("STORY_LENGTH", "auto")).strip(),
+        "music": bool(config.get("MUSIC", True)),
+        "sfx": bool(config.get("SFX", True)),
+        "ambient_sound": bool(config.get("AMBIENT_SOUND", True)),
+        "transitions": str(config.get("TRANSITIONS", "cinematic")).strip(),
+        "parts": get_parts(config),
+        "scenes_per_part": get_scenes(config),
+    }
 
-def build_narration_scene(scene, settings):
+
+def get_scene_duration(
+    scene: dict[str, Any],
+    settings: dict[str, Any],
+) -> Any:
+    value = scene.get("duration")
+
+    if value is None or not str(value).strip():
+        return settings["scene_duration"]
+
+    return value
+
+
+def build_scene_record(
+    scene: dict[str, Any],
+    settings: dict[str, Any],
+) -> dict[str, Any]:
     key = scene_key(scene)
 
     if key is None:
-        raise ValueError("Cannot prepare narration for an invalid scene.")
+        raise ValueError("Cannot build narration for an invalid scene.")
 
-    part, scene_number = key
-    text = scene.get("narration")
+    part, number = key
+    text = source_narration(scene)
 
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError(
-            f"Empty narration for Part {part} Scene {scene_number}."
-        )
+    if not text:
+        raise ValueError(f"Empty narration for Part {part} Scene {number}.")
 
-    text = text.strip()
-
-    duration = scene.get("duration")
-
-    if duration is None or not str(duration).strip():
-        duration = settings["scene_duration"]
+    duration = get_scene_duration(scene, settings)
 
     return {
         "part": part,
-        "scene": scene_number,
+        "scene": number,
         "text": text,
+        "text_sha256": sha256_text(text),
         "voice": settings["voice"],
         "speed": settings["speed"],
         "captions": settings["captions"],
@@ -367,345 +275,225 @@ def build_narration_scene(scene, settings):
     }
 
 
-def load_compatible_checkpoint(expected_by_key):
-    existing = load_optional_json(OUTPUT_FILE)
-    narration_map = {}
+def load_reusable_checkpoint(
+    expected: dict[tuple[int, int], dict[str, Any]],
+    settings: dict[str, Any],
+    settings_sha: str,
+) -> dict[tuple[int, int], dict[str, Any]]:
+    existing = read_json(OUTPUT_FILE, required=False)
 
-    if not isinstance(existing, dict):
-        return narration_map
+    if not existing or existing.get("status") not in {
+        "in_progress",
+        "completed",
+    }:
+        return {}
 
-    existing_scenes = existing.get("scenes", [])
+    # A changed format, voice, caption mode, scene count or duration policy
+    # invalidates the old narration checkpoint.
+    if existing.get("settings_sha256") != settings_sha:
+        print("Checkpoint settings changed; rebuilding narration mapping.")
+        return {}
 
-    if not isinstance(existing_scenes, list):
-        return narration_map
+    old_scenes = existing.get("scenes", [])
 
-    for item in existing_scenes:
-        if not isinstance(item, dict):
+    if not isinstance(old_scenes, list):
+        return {}
+
+    reusable = {}
+
+    for old in old_scenes:
+        if not isinstance(old, dict):
             continue
 
-        key = scene_key(item)
+        key = scene_key(old)
 
-        if key is None or key not in expected_by_key:
+        if key is None or key not in expected:
             continue
 
-        if item.get("status") != "completed":
+        if old.get("status") != "completed":
             continue
 
-        old_text = item.get("text")
-        new_text = expected_by_key[key].get("narration")
+        current_text = source_narration(expected[key])
+        old_text = old.get("text")
 
         if not isinstance(old_text, str):
             continue
 
-        if not isinstance(new_text, str):
+        if old_text.strip() != current_text:
             continue
 
-        # Do not reuse stale narration if the source scene changed.
-        if old_text.strip() != new_text.strip():
-            print(
-                f"Refreshing changed narration: "
-                f"Part {key[0]} Scene {key[1]}"
-            )
+        expected_hash = sha256_text(current_text)
+
+        if old.get("text_sha256") != expected_hash:
             continue
 
-        narration_map[key] = dict(item)
+        # Only reuse records whose settings still match.
+        if old.get("voice") != settings["voice"]:
+            continue
+        if old.get("speed") != settings["speed"]:
+            continue
+        if old.get("captions") != settings["captions"]:
+            continue
+        if old.get("format") != settings["format"]:
+            continue
+        if old.get("audience") != settings["audience"]:
+            continue
 
-    return narration_map
+        reusable[key] = dict(old)
+
+    return reusable
 
 
-# ============================================================
-# MAIN
-# ============================================================
+def main() -> None:
+    print("=" * 56)
+    print("KATHA LOK AI — NARRATION PREPARATION")
+    print("Gemini generation calls in this stage: 0")
+    print("=" * 56)
 
-def main():
-    print("=" * 54)
-    print("       NARRATION PREPARATION")
-    print("=" * 54)
-    print("Mode: Prepare narration from generated scene data")
-    print("Gemini API calls: 0")
+    config = load_and_validate("Input/topic.txt")
+    settings = build_settings(config)
 
-    # --------------------------------------------------------
-    # CENTRALIZED INPUT CONFIGURATION
-    # --------------------------------------------------------
+    expected_total = settings["parts"] * settings["scenes_per_part"]
 
-    config = load_input_config()
+    model_data = read_json(MODEL_FILE)
 
-    parts = positive_int(get_parts(config), "PARTS")
-    scenes_per_part = positive_int(
-        get_scenes(config),
-        "SCENES per part",
+    if model_data.get("status") != "selected":
+        raise SystemExit(
+            f"ERROR: No selected Gemini model found in {MODEL_FILE}."
+        )
+
+    model = str(model_data.get("model", "")).strip()
+
+    if not model:
+        raise SystemExit("ERROR: Selected Gemini model name is empty.")
+
+    source_scenes, source_path = extract_source_scenes()
+
+    expected = validate_source_scenes(
+        source_scenes,
+        settings["parts"],
+        settings["scenes_per_part"],
     )
 
-    settings = {
-        "format": normalize_format(config),
-        "audience": cfg_text(config, "AUDIENCE", "adult"),
-        "voice": cfg_text(config, "VOICE", "male"),
-        "speed": cfg_text(config, "SPEED", "+0%"),
-        "captions": cfg_text(config, "CAPTIONS", "hindi"),
-        "scene_duration": get_scene_duration_value(config),
-        "parts": parts,
-        "scenes_per_part": scenes_per_part,
-        "music": cfg_bool(config, "MUSIC", True),
-        "sfx": cfg_bool(config, "SFX", True),
-        "ambient_sound": cfg_bool(config, "AMBIENT_SOUND", True),
-        "transitions": cfg_text(config, "TRANSITIONS", "cinematic"),
-    }
-
-    expected_total = parts * scenes_per_part
-
-    # --------------------------------------------------------
-    # SELECTED MODEL METADATA
-    # --------------------------------------------------------
-
-    model_config = load_json(MODEL_FILE)
-
-    if model_config.get("status") != "selected":
-        raise SystemExit(
-            "ERROR: No selected model found in "
-            f"{MODEL_FILE}. Run model selection first."
-        )
-
-    model = model_config.get("model")
-
-    if not isinstance(model, str) or not model.strip():
-        raise SystemExit(
-            "ERROR: Selected model metadata has no valid 'model' value."
-        )
-
-    model = model.strip()
-
-    # --------------------------------------------------------
-    # STORY INPUT
-    # --------------------------------------------------------
-
-    ai_story = load_json(AI_STORY_FILE)
-
-    if ai_story.get("status") != "completed":
-        raise SystemExit(
-            "ERROR: AI story is not completed."
-        )
-
-    topic = resolve_topic_value(config)
+    topic = get_topic(config) or get_story_text(config)
 
     if not topic:
-        topic = str(
-            ai_story.get("title") or ai_story.get("topic") or ""
-        ).strip()
+        story = read_json(AI_STORY_FILE, required=False) or {}
+        topic = str(story.get("title") or story.get("topic") or "").strip()
 
-    # Prefer processed scenes, which may contain updated narration.
-    generated_scenes = extract_generated_scenes()
-
-    if generated_scenes:
-        expected_scenes = generated_scenes
-        scene_source = str(SCENES_FILE)
-    else:
-        expected_scenes = extract_ai_story_scenes(ai_story)
-        scene_source = str(AI_STORY_FILE)
-
-    if not expected_scenes:
-        raise SystemExit(
-            "ERROR: No scenes found for narration."
-        )
-
-    expected_keys = validate_expected_scenes(
-        expected_scenes,
-        expected_total,
+    settings_sha = sha256_text(
+        json.dumps(settings, ensure_ascii=False, sort_keys=True)
     )
 
-    expected_by_key = {
-        scene_key(scene): scene
-        for scene in expected_scenes
-    }
+    print(f"Format: {settings['format']}")
+    print(f"Parts: {settings['parts']}")
+    print(f"Scenes per part: {settings['scenes_per_part']}")
+    print(f"Expected total scenes: {expected_total}")
+    print(f"Source: {source_path}")
+    print(f"Selected model metadata: {model}")
+    print(f"Topic/title source: {topic or '(not provided)'}")
 
-    # --------------------------------------------------------
-    # CONFIG SUMMARY
-    # --------------------------------------------------------
-
-    print()
-    print("========== INPUT CONFIG ==========")
-    print(f"FORMAT          : {settings['format']}")
-    print(f"AUDIENCE        : {settings['audience']}")
-    print(f"VOICE           : {settings['voice']}")
-    print(f"SPEED           : {settings['speed']}")
-    print(f"CAPTIONS        : {settings['captions']}")
-    print(f"SCENE_DURATION  : {settings['scene_duration']}")
-    print(f"PARTS           : {parts}")
-    print(f"SCENES/PART     : {scenes_per_part}")
-    print(f"MUSIC           : {settings['music']}")
-    print(f"SFX             : {settings['sfx']}")
-    print(f"AMBIENT_SOUND   : {settings['ambient_sound']}")
-    print(f"TRANSITIONS     : {settings['transitions']}")
-    print("==================================")
-    print(f"Topic/Title     : {topic}")
-    print(f"Scene source    : {scene_source}")
-    print(f"Selected model  : {model}")
-    print(f"Total scenes    : {len(expected_scenes)}")
-
-    # --------------------------------------------------------
-    # RESUME CHECKPOINT
-    # --------------------------------------------------------
-
-    narration_map = load_compatible_checkpoint(expected_by_key)
-
-    print(
-        f"Reusable completed scenes: {len(narration_map)}"
+    narration_map = load_reusable_checkpoint(
+        expected=expected,
+        settings=settings,
+        settings_sha=settings_sha,
     )
 
-    # Keep valid existing checkpoints in the first saved output.
-    # This prevents the checkpoint from being erased before the
-    # first new scene is processed.
-    output = {
+    print(f"Reusable validated scenes: {len(narration_map)}")
+
+    output: dict[str, Any] = {
         "status": "in_progress",
         "topic": topic,
         "model": model,
         "api_calls": 0,
-        "total_parts": parts,
-        "scenes_per_part": scenes_per_part,
-        "total_scenes": len(expected_scenes),
-        "input_config": {
-            "format": settings["format"],
-            "audience": settings["audience"],
-            "voice": settings["voice"],
-            "speed": settings["speed"],
-            "captions": settings["captions"],
-            "scene_duration": settings["scene_duration"],
-            "music": settings["music"],
-            "sfx": settings["sfx"],
-            "ambient_sound": settings["ambient_sound"],
-            "transitions": settings["transitions"],
-        },
-        "scenes": sorted(
-            narration_map.values(),
-            key=lambda item: (
-                int(item["part"]),
-                int(item["scene"]),
-            ),
-        ),
-        "generated_at": utc_now(),
+        "total_parts": settings["parts"],
+        "scenes_per_part": settings["scenes_per_part"],
+        "total_scenes": expected_total,
+        "settings_sha256": settings_sha,
+        "source_file": source_path,
+        "input_config": settings,
+        "scenes": [],
+        "updated_at": utc_now(),
     }
 
-    save_json_atomic(OUTPUT_FILE, output)
+    # Preserve compatible completed records before starting the loop.
+    output["scenes"] = sorted(
+        narration_map.values(),
+        key=lambda item: (int(item["part"]), int(item["scene"])),
+    )
+    atomic_write_json(OUTPUT_FILE, output)
 
-    # --------------------------------------------------------
-    # PREPARE AND CHECKPOINT EVERY SCENE
-    # --------------------------------------------------------
-
-    for index, scene in enumerate(expected_scenes, start=1):
-        key = scene_key(scene)
-        part, scene_number = key
+    for index, key in enumerate(sorted(expected), start=1):
+        source_scene = expected[key]
+        part, number = key
 
         if key in narration_map:
-            item = dict(narration_map[key])
-
-            # Refresh configuration fields on resumed scenes.
-            item["voice"] = settings["voice"]
-            item["speed"] = settings["speed"]
-            item["captions"] = settings["captions"]
-            item["format"] = settings["format"]
-            item["audience"] = settings["audience"]
-
-            duration = scene.get("duration")
-
-            if duration is None or not str(duration).strip():
-                duration = settings["scene_duration"]
-
-            item["duration"] = duration
-            item["estimated_duration"] = duration
-            narration_map[key] = item
-
+            record = dict(narration_map[key])
             print(
-                f"[{index}/{len(expected_scenes)}] "
-                f"Reusing Part {part} Scene {scene_number}"
+                f"[{index}/{expected_total}] "
+                f"Reuse Part {part} Scene {number}"
             )
-
         else:
+            record = build_scene_record(source_scene, settings)
             print(
-                f"[{index}/{len(expected_scenes)}] "
-                f"Preparing Part {part} Scene {scene_number}"
+                f"[{index}/{expected_total}] "
+                f"Prepare Part {part} Scene {number}"
             )
 
-            narration_map[key] = build_narration_scene(
-                scene,
-                settings,
-            )
+        narration_map[key] = record
 
-        output["scenes"] = sorted(
-            narration_map.values(),
-            key=lambda item: (
-                int(item["part"]),
-                int(item["scene"]),
-            ),
-        )
-
+        output["scenes"] = [
+            narration_map[item_key]
+            for item_key in sorted(narration_map)
+        ]
         output["last_completed"] = {
             "part": part,
-            "scene": scene_number,
+            "scene": number,
         }
+        output["updated_at"] = utc_now()
 
-        # Save after EVERY scene, including resumed scenes.
-        save_json_atomic(OUTPUT_FILE, output)
+        # Checkpoint after each scene so an interrupted run can resume.
+        atomic_write_json(OUTPUT_FILE, output)
 
-    # --------------------------------------------------------
-    # FINAL VALIDATION
-    # --------------------------------------------------------
+    final_scenes = [
+        narration_map[key]
+        for key in sorted(expected)
+    ]
 
-    final_scenes = sorted(
-        narration_map.values(),
-        key=lambda item: (
-            int(item["part"]),
-            int(item["scene"]),
-        ),
-    )
-
-    validate_scene_numbers(final_scenes, expected_scenes)
+    final_keys = [scene_key(item) for item in final_scenes]
 
     if len(final_scenes) != expected_total:
-        raise SystemExit(
-            "ERROR: Final narration scene count does not match Input."
-        )
+        raise SystemExit("ERROR: Final narration count does not match Input.")
+
+    if len(set(final_keys)) != expected_total:
+        raise SystemExit("ERROR: Final narration has duplicate scene mappings.")
 
     for item in final_scenes:
-        text = item.get("text")
-
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(item.get("text"), str) or not item["text"].strip():
             raise SystemExit(
-                "ERROR: Empty narration for "
-                f"Part {item.get('part')} "
-                f"Scene {item.get('scene')}."
+                f"ERROR: Empty final narration at "
+                f"Part {item.get('part')} Scene {item.get('scene')}."
             )
-
-    # Ensure the output includes precisely the expected scene set.
-    final_keys = {scene_key(item) for item in final_scenes}
-
-    if final_keys != expected_keys:
-        raise SystemExit(
-            "ERROR: Final narration scene mapping does not match source."
-        )
-
-    # --------------------------------------------------------
-    # FINAL OUTPUT
-    # --------------------------------------------------------
 
     output["status"] = "completed"
     output["scenes"] = final_scenes
-    output["total_scenes"] = len(final_scenes)
+    output["completed_scenes"] = len(final_scenes)
     output["api_calls"] = 0
     output["completed_at"] = utc_now()
+    output["updated_at"] = utc_now()
 
-    save_json_atomic(OUTPUT_FILE, output)
+    atomic_write_json(OUTPUT_FILE, output)
 
-    print()
-    print("=" * 54)
-    print("    NARRATION PREPARATION COMPLETED")
-    print("=" * 54)
-    print(f"Scenes prepared : {len(final_scenes)}")
-    print("Gemini API calls: 0")
-    print(f"Voice           : {settings['voice']}")
-    print(f"Speed           : {settings['speed']}")
-    print(f"Captions        : {settings['captions']}")
-    print(f"Output          : {OUTPUT_FILE}")
-    print("=" * 54)
+    print("=" * 56)
+    print("NARRATION PREPARATION COMPLETED")
+    print(f"Prepared scenes: {len(final_scenes)}")
+    print("Gemini generation calls: 0")
+    print(f"Output: {OUTPUT_FILE}")
+    print("=" * 56)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit("Narration preparation cancelled.")
