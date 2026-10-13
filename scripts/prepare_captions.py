@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Prepare scene captions with validated caching and accurate API accounting."""
+"""Prepare validated captions with resumable caching and style metadata."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -17,8 +18,16 @@ NARRATION_FILE = ROOT / "output" / "narration" / "narration.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 OUTPUT_FILE = ROOT / "output" / "captions" / "captions.json"
 
+VERSION = 2
 TIMEOUT = 180
 API_VERSION = "v1beta"
+
+SUPPORTED_FONTS = {
+    "noto sans devanagari": "Noto Sans Devanagari",
+    "mukta": "Mukta",
+    "hind": "Hind",
+    "tiro devanagari hindi": "Tiro Devanagari Hindi",
+}
 
 
 def log(*items):
@@ -27,7 +36,7 @@ def log(*items):
 
 def stable_hash(value):
     data = json.dumps(
-        value, ensure_ascii=False, sort_keys=True
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(data).hexdigest()
 
@@ -43,7 +52,7 @@ def read_json(path, required=True):
     except (OSError, ValueError) as exc:
         if required:
             raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
-        log(f"WARNING: Ignoring invalid checkpoint {path}: {exc}")
+        log(f"WARNING: Ignoring invalid JSON {path}: {exc}")
         return None
 
 
@@ -67,12 +76,59 @@ def read_config(path):
         raise RuntimeError(f"Input config not found: {path}")
 
     config = {}
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = line.strip()
+    multiline_key = None
+    multiline_lines = []
+
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+
+        if multiline_key is not None:
+            if '"""' in line:
+                before = line.split('"""', 1)[0]
+                if before:
+                    multiline_lines.append(before)
+                config[multiline_key] = "\n".join(multiline_lines).strip()
+                multiline_key = None
+                multiline_lines = []
+            else:
+                multiline_lines.append(raw_line)
+            continue
+
         if not line or line.startswith("#") or "=" not in line:
             continue
+
         key, value = line.split("=", 1)
-        config[key.strip().upper()] = value.strip().strip("'\"")
+        key = key.strip().upper()
+        value = value.strip()
+
+        if value.startswith('"""'):
+            remainder = value[3:]
+            if '"""' in remainder:
+                config[key] = remainder.split('"""', 1)[0].strip()
+            else:
+                multiline_key = key
+                multiline_lines = [remainder] if remainder else []
+            continue
+
+        if value.startswith("'''"):
+            remainder = value[3:]
+            if "'''" in remainder:
+                config[key] = remainder.split("'''", 1)[0].strip()
+            else:
+                multiline_key = key
+                multiline_lines = [remainder] if remainder else []
+            continue
+
+        if value.startswith("#"):
+            value = ""
+
+        config[key] = value.strip().strip("'\"")
+
+    if multiline_key is not None:
+        raise RuntimeError(
+            f"Unclosed multiline value for {multiline_key} in topic.txt."
+        )
+
     return config
 
 
@@ -86,18 +142,53 @@ def normalize_mode(value):
         "roman hindi": "hinglish",
         "roman-hindi": "hinglish",
     }
+
     mode = str(value or "hindi").strip().lower()
     if mode not in aliases:
         raise RuntimeError(
             f"Unsupported CAPTIONS mode {mode!r}; "
             "use hindi, english, or hinglish."
         )
+
     return aliases[mode]
+
+
+def normalize_font(config):
+    requested = str(config.get("CAPTION_FONT", "Hind")).strip()
+    normalized = SUPPORTED_FONTS.get(requested.lower())
+
+    if normalized is None:
+        raise RuntimeError(
+            f"Unsupported CAPTION_FONT {requested!r}. "
+            f"Choose: {', '.join(SUPPORTED_FONTS.values())}."
+        )
+
+    return normalized
+
+
+def normalize_font_size(config):
+    raw = str(config.get("CAPTION_FONT_SIZE", "28")).strip().lower()
+
+    if raw == "auto":
+        return "auto"
+
+    try:
+        size = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "CAPTION_FONT_SIZE must be auto or an integer from 16 to 64."
+        ) from exc
+
+    if not 16 <= size <= 64:
+        raise RuntimeError("CAPTION_FONT_SIZE must be between 16 and 64.")
+
+    return size
 
 
 def get_scene_records(narration):
     if not isinstance(narration, dict):
         raise RuntimeError("Narration JSON must be an object.")
+
     if narration.get("status") != "completed":
         raise RuntimeError("Narration is not marked completed.")
 
@@ -130,7 +221,9 @@ def get_scene_records(narration):
 
         text = item.get("text", item.get("narration"))
         if not isinstance(text, str) or not text.strip():
-            raise RuntimeError(f"Empty narration at Part {part}, Scene {scene}.")
+            raise RuntimeError(
+                f"Empty narration at Part {part}, Scene {scene}."
+            )
 
         records.append({
             "part": part,
@@ -143,6 +236,7 @@ def get_scene_records(narration):
 
 def load_selected_model():
     data = read_json(MODEL_FILE)
+
     if not isinstance(data, dict) or data.get("status") != "selected":
         raise RuntimeError("Gemini model selection is not marked selected.")
 
@@ -154,6 +248,7 @@ def load_selected_model():
         or any(char.isspace() for char in model)
     ):
         raise RuntimeError(f"Invalid selected Gemini model name: {model!r}")
+
     return model
 
 
@@ -188,6 +283,7 @@ def transform_with_gemini(records, mode, model, api_key):
         "- Include every input ID exactly once.\n"
         "- Preserve scene order and story meaning.\n"
         "- Keep captions concise and readable without losing key meaning.\n"
+        "- Avoid unnecessarily long sentences.\n"
         "- No markdown or explanations.\n\n"
         "Input scenes:\n"
         + json.dumps(source, ensure_ascii=False)
@@ -233,35 +329,45 @@ def transform_with_gemini(records, mode, model, api_key):
         generated = body["candidates"][0]["content"]["parts"][0]["text"]
         captions = json.loads(generated)["captions"]
     except (ValueError, TypeError, KeyError, IndexError) as exc:
-        raise RuntimeError(f"Gemini returned invalid caption JSON: {exc}") from exc
+        raise RuntimeError(
+            f"Gemini returned invalid caption JSON: {exc}"
+        ) from exc
 
     if not isinstance(captions, list):
         raise RuntimeError("Gemini captions field is not a list.")
 
     by_id = {}
+
     for item in captions:
         if not isinstance(item, dict):
             raise RuntimeError("Gemini returned an invalid caption record.")
+
         try:
             caption_id = int(item["id"])
             text = item["text"]
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("Caption record lacks a valid ID or text.") from exc
+            raise RuntimeError(
+                "Caption record lacks a valid ID or text."
+            ) from exc
 
         if not isinstance(text, str) or not text.strip():
             raise RuntimeError("Gemini returned an empty caption.")
+
         if caption_id in by_id:
             raise RuntimeError("Gemini returned duplicate caption IDs.")
+
         by_id[caption_id] = text.strip()
 
     expected_ids = set(range(1, len(records) + 1))
     if set(by_id) != expected_ids:
-        raise RuntimeError("Gemini caption IDs do not match narration scene count.")
+        raise RuntimeError(
+            "Gemini caption IDs do not match narration scene count."
+        )
 
     return [by_id[index] for index in range(1, len(records) + 1)]
 
 
-def reuse_existing_captions(mode, source_hash, records):
+def reuse_existing_captions(mode, source_hash, records, font_name, font_size):
     existing = read_json(OUTPUT_FILE, required=False)
     if not isinstance(existing, dict):
         return None
@@ -270,6 +376,8 @@ def reuse_existing_captions(mode, source_hash, records):
         existing.get("status") != "completed"
         or existing.get("mode") != mode
         or existing.get("source_sha256") != source_hash
+        or existing.get("caption_font") != font_name
+        or existing.get("caption_font_size") != font_size
     ):
         return None
 
@@ -284,6 +392,7 @@ def reuse_existing_captions(mode, source_hash, records):
     for row in captions:
         if not isinstance(row, dict):
             return None
+
         try:
             key = (int(row["part"]), int(row["scene"]))
         except (KeyError, TypeError, ValueError):
@@ -298,35 +407,54 @@ def reuse_existing_captions(mode, source_hash, records):
 
     if actual_keys != expected_keys:
         return None
+
     return texts
 
 
-def validate_and_save(records, output_texts, mode, source_hash, model, api_calls):
+def validate_and_save(
+    records,
+    output_texts,
+    mode,
+    source_hash,
+    model,
+    api_calls,
+    config,
+    font_name,
+    font_size,
+):
     if len(output_texts) != len(records):
-        raise RuntimeError("Caption count does not match narration scene count.")
+        raise RuntimeError(
+            "Caption count does not match narration scene count."
+        )
 
     output_records = []
+
     for row, caption_text in zip(records, output_texts):
         if not isinstance(caption_text, str) or not caption_text.strip():
             raise RuntimeError(
                 f"Empty caption at Part {row['part']} Scene {row['scene']}."
             )
+
+        text = re.sub(r"\s+", " ", caption_text).strip()
+
         output_records.append({
             "part": row["part"],
             "scene": row["scene"],
-            "text": caption_text.strip(),
+            "text": text,
         })
 
-    config = read_config(CONFIG_FILE)
     result = {
+        "version": VERSION,
         "status": "completed",
         "mode": mode,
-        "format": config.get("FORMAT", "short").strip().lower(),
+        "format": str(config.get("FORMAT", "short")).strip().lower(),
         "source": str(NARRATION_FILE.relative_to(ROOT)),
         "source_sha256": source_hash,
         "model": model,
         "api_calls": int(api_calls),
         "total_scenes": len(output_records),
+        "caption_font": font_name,
+        "caption_font_size": font_size,
         "captions": output_records,
     }
 
@@ -338,17 +466,24 @@ def validate_and_save(records, output_texts, mode, source_hash, model, api_calls
         or saved.get("status") != "completed"
         or saved.get("mode") != mode
         or saved.get("source_sha256") != source_hash
+        or saved.get("caption_font") != font_name
+        or saved.get("caption_font_size") != font_size
         or saved.get("api_calls") != int(api_calls)
         or len(saved.get("captions", [])) != len(records)
     ):
         raise RuntimeError("Saved captions failed validation.")
 
     log("Caption output validated:", OUTPUT_FILE.relative_to(ROOT))
+    log("Caption font:", font_name)
+    log("Caption size:", font_size)
 
 
 def main():
     config = read_config(CONFIG_FILE)
     mode = normalize_mode(config.get("CAPTIONS", "hindi"))
+    font_name = normalize_font(config)
+    font_size = normalize_font_size(config)
+
     narration = read_json(NARRATION_FILE)
     records = get_scene_records(narration)
 
@@ -361,6 +496,29 @@ def main():
         for row in records
     ])
 
+    cached = reuse_existing_captions(
+        mode, source_hash, records, font_name, font_size
+    )
+
+    if cached is not None:
+        old = read_json(OUTPUT_FILE)
+        log(
+            f"Reusing {len(cached)} validated {mode} captions; "
+            "new Gemini calls: 0"
+        )
+        validate_and_save(
+            records,
+            cached,
+            mode,
+            source_hash,
+            old.get("model"),
+            0,
+            config,
+            font_name,
+            font_size,
+        )
+        return
+
     if mode == "hindi":
         log("Hindi captions: using original narration; Gemini calls: 0")
         validate_and_save(
@@ -370,15 +528,9 @@ def main():
             source_hash,
             None,
             0,
-        )
-        return
-
-    cached = reuse_existing_captions(mode, source_hash, records)
-    if cached is not None:
-        old = read_json(OUTPUT_FILE)
-        log(f"Reusing {len(cached)} validated {mode} captions; Gemini calls: 0")
-        validate_and_save(
-            records, cached, mode, source_hash, old.get("model"), 0
+            config,
+            font_name,
+            font_size,
         )
         return
 
@@ -392,9 +544,20 @@ def main():
     model = load_selected_model()
     log(f"Generating {mode} captions with selected model: {model}")
 
-    output_texts = transform_with_gemini(records, mode, model, api_key)
+    output_texts = transform_with_gemini(
+        records, mode, model, api_key
+    )
+
     validate_and_save(
-        records, output_texts, mode, source_hash, model, 1
+        records,
+        output_texts,
+        mode,
+        source_hash,
+        model,
+        1,
+        config,
+        font_name,
+        font_size,
     )
 
     log("=" * 55)
