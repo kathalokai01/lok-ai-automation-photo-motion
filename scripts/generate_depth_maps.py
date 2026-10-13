@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resumable and validated depth-map generation for Katha Lok AI."""
+"""Resumable, validated and optimized depth-map generation."""
 
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ DEPTH_DIR = VISUALS_DIR / "depth_maps"
 MANIFEST_FILE = DEPTH_DIR / "depth_manifest.json"
 
 MODEL_ID = "depth-anything/Depth-Anything-V2-Small-hf"
-FALLBACK_MODEL_ID = "fallback-radial-pseudo-depth-v1"
+FALLBACK_MODEL_ID = "fallback-radial-pseudo-depth-v2"
 
 MIN_IMAGE_BYTES = 1000
 MIN_DEPTH_BYTES = 100
-SCRIPT_VERSION = "depth-checkpoint-v2"
+SCRIPT_VERSION = "depth-checkpoint-v3"
 
 
 def log(*args):
@@ -57,6 +57,7 @@ def safe_path(value, label):
         raise RuntimeError(f"Missing {label}.")
 
     path = Path(value.strip())
+
     if not path.is_absolute():
         path = ROOT / path
 
@@ -95,7 +96,7 @@ def load_jobs():
 
     if not isinstance(jobs, list) or not jobs:
         raise RuntimeError(
-            "No visual jobs found. Run generate_visuals.py first."
+            "No visual jobs found. Prepare images with generate_visuals.py first."
         )
 
     from PIL import Image
@@ -138,8 +139,10 @@ def load_jobs():
 
             with Image.open(image_path) as image:
                 width, height = image.size
-                if width < 64 or height < 64:
-                    raise RuntimeError("Image dimensions are too small.")
+
+            if width < 64 or height < 64:
+                raise RuntimeError("Image dimensions are too small.")
+
         except Exception as exc:
             raise RuntimeError(
                 f"Invalid source image for scene {number}: {exc}"
@@ -159,8 +162,7 @@ def load_jobs():
 
     if numbers != list(range(1, len(prepared) + 1)):
         raise RuntimeError(
-            "Scene numbers must be continuous from 1. "
-            f"Found: {numbers}"
+            f"Scene numbers must be continuous from 1. Found: {numbers}"
         )
 
     return prepared
@@ -208,10 +210,8 @@ def validate_depth(path):
 
         with Image.open(path) as image:
             width, height = image.size
-
             if width < 64 or height < 64:
                 return None
-
             image.load()
 
         return width, height
@@ -242,7 +242,6 @@ def make_entry(item, path, model, status):
 
 
 def try_reuse(item, previous_row):
-    """Reuse a matching AI map, or retain a matching fallback if necessary."""
     if not isinstance(previous_row, dict):
         return None
 
@@ -271,11 +270,10 @@ def try_reuse(item, previous_row):
         and previous_row.get("status") not in {
             "fallback_pseudo_depth",
             "pseudo_depth",
+            "fallback_reused",
         }
     )
 
-    # An existing fallback is reusable only when AI depth generation
-    # is unavailable or fails. The main loop decides this after loading.
     entry = dict(previous_row)
     entry.update({
         "scene": item["scene"],
@@ -287,7 +285,7 @@ def try_reuse(item, previous_row):
         "height": dimensions[1],
         "size_bytes": path.stat().st_size,
         "script_version": SCRIPT_VERSION,
-        "status": "reused" if is_ai_map else "fallback_pseudo_depth",
+        "status": "reused" if is_ai_map else "fallback_reused",
     })
 
     entry["_is_ai_map"] = is_ai_map
@@ -310,7 +308,8 @@ def generate_ai_depth(estimator, item, output_path):
             raise RuntimeError("Depth model returned no depth image.")
 
         if not isinstance(depth, Image.Image):
-            depth = Image.fromarray(depth)
+            import numpy as np
+            depth = Image.fromarray(np.asarray(depth))
 
         depth = ImageOps.autocontrast(depth.convert("L"))
 
@@ -332,15 +331,32 @@ def generate_ai_depth(estimator, item, output_path):
         temporary.unlink(missing_ok=True)
 
 
-def generate_pseudo_depth(item, output_path):
-    """Create a radial approximation; this is not true scene geometry."""
-    from PIL import Image
-
-    temporary = output_path.with_name(output_path.stem + ".tmp.png")
-
+def radial_depth_array(width, height):
+    """Fast radial depth approximation; not true scene geometry."""
     try:
-        with Image.open(item["image_path"]) as source:
-            width, height = source.size
+        import numpy as np
+
+        x = np.arange(width, dtype=np.float32)
+        y = np.arange(height, dtype=np.float32)
+        cx = (width - 1) / 2.0
+        cy = (height - 1) / 2.0
+
+        x_distance = ((x - cx) / max(cx, 1.0)) ** 2
+        y_distance = ((y - cy) / max(cy, 1.0)) ** 2
+
+        radius_squared = y_distance[:, None] + x_distance[None, :]
+        normalized = np.sqrt(np.clip(radius_squared, 0.0, 2.0))
+        normalized /= math.sqrt(2.0)
+
+        values = 20.0 + 220.0 * np.power(
+            np.clip(1.0 - normalized, 0.0, 1.0), 1.6
+        )
+
+        return np.clip(values, 0, 255).astype(np.uint8)
+
+    except ImportError:
+        # Compatibility fallback for environments without NumPy.
+        from PIL import Image
 
         depth = Image.new("L", (width, height), 0)
         pixels = depth.load()
@@ -351,16 +367,31 @@ def generate_pseudo_depth(item, output_path):
 
         for y in range(height):
             for x in range(width):
-                distance = math.sqrt(
-                    (x - cx) ** 2 + (y - cy) ** 2
-                )
+                distance = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
                 normalized = min(1.0, distance / max_distance)
                 pixels[x, y] = int(
-                    max(0, min(
-                        255,
-                        20 + 220 * (1 - normalized) ** 1.6
-                    ))
+                    max(0, min(255, 20 + 220 * (1 - normalized) ** 1.6))
                 )
+
+        return depth
+
+
+def generate_pseudo_depth(item, output_path):
+    """Create a radial fallback, explicitly not a model-estimated depth map."""
+    from PIL import Image
+
+    temporary = output_path.with_name(output_path.stem + ".tmp.png")
+
+    try:
+        with Image.open(item["image_path"]) as source:
+            width, height = source.size
+
+        array = radial_depth_array(width, height)
+
+        if not isinstance(array, Image.Image):
+            depth = Image.fromarray(array, mode="L")
+        else:
+            depth = array
 
         depth.save(temporary, format="PNG")
 
@@ -371,7 +402,7 @@ def generate_pseudo_depth(item, output_path):
 
         log(
             f"WARNING: Scene {item['scene']} uses radial pseudo-depth. "
-            "This is an approximation, not AI-estimated scene geometry."
+            "This is an approximation, not AI-estimated geometry."
         )
 
         return make_entry(
@@ -409,8 +440,7 @@ def main():
     entries = {}
     pending = []
 
-    # First reuse valid AI depth maps for unchanged source images.
-    # Do not load the model if every scene already has an AI map.
+    # Reuse AI depth maps before loading the model.
     for item in prepared:
         number = item["scene"]
         old = try_reuse(item, previous.get(number))
@@ -434,13 +464,11 @@ def main():
             from transformers import pipeline
 
             log("Loading depth model:", MODEL_ID)
-
             estimator = pipeline(
                 task="depth-estimation",
                 model=MODEL_ID,
                 device=-1,
             )
-
             log("Depth model loaded.")
 
         except Exception as exc:
@@ -455,7 +483,6 @@ def main():
         item = pending_item["item"]
         old_fallback = pending_item["old_fallback"]
         number = item["scene"]
-
         output_path = DEPTH_DIR / f"depth_{number:04d}.png"
 
         log(
@@ -477,7 +504,6 @@ def main():
                 )
 
         if entry is None and old_fallback is not None:
-            # Preserve a valid old fallback if this run cannot produce AI depth.
             entry = dict(old_fallback)
             entry.pop("_is_ai_map", None)
             entry["status"] = "fallback_reused"
@@ -491,11 +517,7 @@ def main():
         entries[number] = entry
         save_manifest(entries)
 
-        log(
-            "Checkpoint saved:",
-            entry["depth_map"],
-            entry["status"],
-        )
+        log("Checkpoint saved:", entry["depth_map"], entry["status"])
 
     final_rows = [entries[number] for number in sorted(entries)]
 
