@@ -113,15 +113,33 @@ def bool_value(config: dict, key: str, default: bool = True) -> bool:
 
 def selected_model() -> str:
     data = read_json(MODEL_FILE)
-    if not isinstance(data, dict) or data.get("status") != "selected":
+
+    if not isinstance(data, dict):
         raise RuntimeError(
-            "Selected Gemini model is missing. Run "
+            "Gemini model configuration is missing. Run "
             "scripts/select_gemini_model.py first."
         )
 
+    status = str(data.get("status", "")).strip()
+    if status not in {"selected", "configured_unverified"}:
+        raise RuntimeError(
+            f"Unsupported Gemini model status: {status!r}. "
+            "Run scripts/select_gemini_model.py first."
+        )
+
     model = str(data.get("model", "")).strip()
-    if not model or model.startswith("models/") or "/" in model:
+
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
         raise RuntimeError(f"Invalid selected Gemini model: {model!r}")
+
+    if status == "configured_unverified":
+        print(
+            "WARNING: Gemini model is configured but not live-verified. "
+            "The upcoming story-generation API request may incur usage "
+            "or charges. Check account access and pricing first.",
+            flush=True,
+        )
+
     return model
 
 
