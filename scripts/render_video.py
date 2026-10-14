@@ -1,700 +1,687 @@
 
 #!/usr/bin/env python3
-"""Resumable scene renderer with audio mixing and validated video assembly."""
+"""Strict final-output validation; never regenerates media."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
-import os
+import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import load_and_validate, get_format, get_parts, get_scenes, get_fps
+from input_config import load_and_validate, get_format, get_parts, get_scenes
 
 OUTPUT = ROOT / "output"
-MOTION_MANIFEST = OUTPUT / "photo_motion" / "photo_motion_manifest.json"
-AUDIO_JOBS = OUTPUT / "narration" / "audio_jobs.json"
-RENDER_DIR = OUTPUT / "scene_renders"
-RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
-PARTS_DIR = OUTPUT / "parts"
-VIDEOS_DIR = OUTPUT / "videos"
-
-VERSION = 10
-MIN_BYTES = 1000
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
-VOLUMES = {"music": 0.12, "ambient": 0.08, "sfx": 0.20}
-
-AUDIO_DIRS = {
-    "music": [
-        OUTPUT / "audio" / "music",
-        OUTPUT / "music",
-        ROOT / "assets" / "audio" / "music",
-        ROOT / "Input" / "audio" / "music",
-    ],
-    "ambient": [
-        OUTPUT / "audio" / "ambient",
-        ROOT / "assets" / "audio" / "ambient",
-    ],
-    "sfx": [
-        OUTPUT / "audio" / "sfx",
-        OUTPUT / "sfx",
-        ROOT / "assets" / "audio" / "sfx",
-    ],
-}
+ERRORS: list[str] = []
+WARNINGS: list[str] = {}
 
 
-def log(*args):
-    print(*args, flush=True)
+def log(message: str) -> None:
+    print(message, flush=True)
 
 
-def fingerprint(data):
-    raw = json.dumps(
-        data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+def error(message: str) -> None:
+    ERRORS.append(message)
+    log(f"ERROR: {message}")
 
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def warning(message: str) -> None:
+    WARNINGS.append(message)
+    log(f"WARNING: {message}")
 
 
-def read_json(path, default=None):
+def success(message: str) -> None:
+    log(f"OK: {message}")
+
+
+def read_json(path: Path, required: bool = True) -> Any:
+    if not path.is_file():
+        if required:
+            error(f"Missing file: {path.relative_to(ROOT)}")
+        return None
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
-        return default
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(f"Cannot read JSON {path}: {exc}") from exc
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        error(f"Invalid JSON {path.relative_to(ROOT)}: {exc}")
+        return None
 
 
-def write_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    try:
-        with temp.open("w", encoding="utf-8") as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
-
-
-def safe_path(value, label):
+def safe_file(value: Any, label: str, minimum: int = 1) -> Path | None:
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"Missing path for {label}")
+        error(f"{label}: missing file path")
+        return None
+
     path = Path(value.strip())
     if not path.is_absolute():
         path = ROOT / path
-    path = path.resolve()
-    if not path.is_relative_to(ROOT.resolve()):
-        raise RuntimeError(f"{label} points outside repository")
+
+    try:
+        path = path.resolve()
+        path.relative_to(ROOT.resolve())
+    except (OSError, ValueError):
+        error(f"{label}: path is outside the repository")
+        return None
+
+    if not path.is_file():
+        error(f"{label}: file not found ({path})")
+        return None
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        error(f"{label}: cannot inspect file: {exc}")
+        return None
+
+    if size < minimum:
+        error(f"{label}: file is too small ({size} bytes)")
+        return None
+
     return path
 
 
-def config_bool(config, key, default=False):
-    value = config.get(key, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    value = str(value).strip().lower()
-    if value in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if value in {"0", "false", "no", "off", "disabled", ""}:
-        return False
-    log(f"WARNING: Invalid {key}={value!r}; using {default}")
-    return default
-
-
-def run(command, timeout=1800):
-    command = [str(item) for item in command]
-    log("$", " ".join(command))
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    if result.stdout:
-        log(result.stdout.rstrip())
-    if result.returncode:
-        raise RuntimeError(
-            f"Command failed with exit code {result.returncode}: {command[0]}"
-        )
-
-
-def probe(path):
-    path = Path(path)
-    if not path.is_file() or path.stat().st_size < MIN_BYTES:
-        raise RuntimeError(f"Media missing or too small: {path}")
-
+def probe_media(path: Path) -> dict[str, Any] | None:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
-        raise RuntimeError("ffprobe is required")
+        error("ffprobe is unavailable")
+        return None
 
-    result = subprocess.run(
-        [
-            ffprobe, "-v", "error",
-            "-show_entries",
-            "format=duration:stream=codec_type,width,height",
-            "-of", "json", str(path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-show_entries",
+                "format=duration,size:"
+                "stream=codec_type,width,height,codec_name",
+                "-of", "json", str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        error(f"ffprobe failed for {path.name}: {exc}")
+        return None
+
     if result.returncode:
-        raise RuntimeError(f"ffprobe failed for {path.name}: {result.stderr[-400:]}")
+        error(f"Unreadable media {path.name}: {result.stderr.strip()[:250]}")
+        return None
 
     try:
         data = json.loads(result.stdout)
-        duration = float(data["format"]["duration"])
         streams = data.get("streams", [])
-    except (ValueError, TypeError, KeyError) as exc:
-        raise RuntimeError(f"Invalid media metadata: {path}") from exc
+        videos = [s for s in streams if s.get("codec_type") == "video"]
+        audios = [s for s in streams if s.get("codec_type") == "audio"]
+        duration = float(data.get("format", {}).get("duration", 0))
+        size = int(data.get("format", {}).get("size", 0))
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        error(f"Invalid ffprobe output for {path.name}: {exc}")
+        return None
 
-    video = next(
-        (s for s in streams if s.get("codec_type") == "video"), None
-    )
-    audio = next(
-        (s for s in streams if s.get("codec_type") == "audio"), None
-    )
+    if not videos:
+        error(f"No video stream in {path.name}")
+        return None
     if not math.isfinite(duration) or duration <= 0:
-        raise RuntimeError(f"Invalid media duration: {path}")
+        error(f"Invalid duration in {path.name}")
+        return None
 
-    width = int(video.get("width") or 0) if video else 0
-    height = int(video.get("height") or 0) if video else 0
-    if video and (width < 1 or height < 1):
-        raise RuntimeError(f"Invalid video dimensions: {path}")
+    video = videos[0]
+    width = int(video.get("width") or 0)
+    height = int(video.get("height") or 0)
+    if width < 1 or height < 1:
+        error(f"Invalid dimensions in {path.name}")
 
     return {
-        "duration": duration,
         "width": width,
         "height": height,
-        "has_video": video is not None,
-        "has_audio": audio is not None,
+        "duration": duration,
+        "size": size,
+        "has_audio": bool(audios),
+        "video_codec": video.get("codec_name"),
     }
 
 
-def audio_duration(path):
-    info = probe(path)
-    if not info["has_audio"]:
-        raise RuntimeError(f"Audio stream missing: {path}")
-    return info["duration"]
+def check_video(
+    value: Any,
+    label: str,
+    mode: str,
+    require_audio: bool = True,
+    minimum: int = 1024,
+) -> tuple[Path | None, dict[str, Any] | None]:
+    path = safe_file(value, label, minimum)
+    if path is None:
+        return None, None
 
+    info = probe_media(path)
+    if info is None:
+        return path, None
 
-def read_motion(mode, total):
-    data = read_json(MOTION_MANIFEST)
-    if not isinstance(data, list) or len(data) != total:
-        count = len(data) if isinstance(data, list) else "invalid"
-        raise RuntimeError(
-            f"Motion manifest requires {total} scenes; found {count}"
+    expected = (720, 1280) if mode == "short" else (1280, 720)
+    actual = (info["width"], info["height"])
+    if actual != expected:
+        error(
+            f"{label}: expected {expected[0]}x{expected[1]}, "
+            f"found {actual[0]}x{actual[1]}"
         )
 
-    resolution = (1280, 720) if mode == "full" else (720, 1280)
-    clips = []
-    seen_global = set()
-    seen_mapping = set()
+    if require_audio and not info["has_audio"]:
+        error(f"{label}: audio stream is missing")
 
-    for index, row in enumerate(data, 1):
-        if not isinstance(row, dict):
-            raise RuntimeError(f"Invalid motion row {index}")
-        try:
-            global_scene = int(row.get("global_scene", row.get("scene", 0)))
-            part = int(row["part"])
-            local = int(row["local_scene"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid scene mapping at row {index}") from exc
+    return path, info
 
-        mapping = (part, local)
-        if (
-            global_scene != index
-            or part < 1
-            or local < 1
-            or global_scene in seen_global
-            or mapping in seen_mapping
-        ):
-            raise RuntimeError(f"Duplicate or invalid scene mapping: {mapping}")
 
-        path = safe_path(row.get("video"), f"motion scene {global_scene}")
-        info = probe(path)
-        if not info["has_video"]:
-            raise RuntimeError(f"Motion scene {global_scene} has no video")
-        if (info["width"], info["height"]) != resolution:
-            raise RuntimeError(
-                f"Scene {global_scene} resolution is "
-                f"{info['width']}x{info['height']}; expected {resolution}"
+def int_value(row: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        if row.get(key) is not None:
+            try:
+                return int(row[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def scene_rows(data: Any) -> list[dict[str, Any]] | None:
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = None
+        for key in ("scenes", "jobs", "visual_jobs", "completed_scenes"):
+            if isinstance(data.get(key), list):
+                rows = data[key]
+                break
+        if rows is None:
+            return None
+    else:
+        return None
+
+    if not all(isinstance(row, dict) for row in rows):
+        return None
+    return rows
+
+
+def validate_scene_asset_manifest(
+    path: Path,
+    total: int,
+    label: str,
+    mode: str | None = None,
+    require_video: bool = False,
+) -> None:
+    data = read_json(path)
+    rows = scene_rows(data)
+
+    if rows is None:
+        error(f"{label}: no valid scene list")
+        return
+    if len(rows) != total:
+        error(f"{label}: expected {total} rows, found {len(rows)}")
+
+    expected_ids = set(range(1, total + 1))
+    seen: set[int] = set()
+
+    for row in rows:
+        scene = int_value(row, "global_scene", "scene")
+        if scene is None:
+            error(f"{label}: row missing numeric scene ID")
+            continue
+        if scene in seen:
+            error(f"{label}: duplicate scene ID {scene}")
+        seen.add(scene)
+
+        if row.get("status") not in (None, "completed", "success"):
+            error(f"{label}: scene {scene} is incomplete")
+
+        if require_video:
+            value = next(
+                (
+                    row.get(key)
+                    for key in ("video", "output", "video_path", "output_path")
+                    if row.get(key)
+                ),
+                None,
             )
+            if mode:
+                check_video(
+                    value, f"{label} scene {scene}", mode,
+                    require_audio=False,
+                )
+            else:
+                safe_file(value, f"{label} scene {scene}", 100)
+        else:
+            value = next(
+                (
+                    row.get(key)
+                    for key in ("image_path", "image", "path")
+                    if row.get(key)
+                ),
+                None,
+            )
+            image = safe_file(value, f"{label} scene {scene}", 100)
+            if image and image.suffix.lower() not in {
+                ".png", ".jpg", ".jpeg", ".webp"
+            }:
+                error(f"{label} scene {scene}: unsupported image format")
 
-        seen_global.add(global_scene)
-        seen_mapping.add(mapping)
-        clips.append({
-            "scene": global_scene,
-            "global_scene": global_scene,
-            "part": part,
-            "local_scene": local,
-            "path": path,
-            "duration": info["duration"],
-            "manifest_row": row,
-        })
-
-    return clips, resolution
-
-
-def read_narration(clips):
-    data = read_json(AUDIO_JOBS)
-    if not isinstance(data, dict) or data.get("status") != "completed":
-        raise RuntimeError("TTS audio manifest is not completed")
-
-    jobs = data.get("jobs")
-    if not isinstance(jobs, list):
-        raise RuntimeError("TTS manifest must contain a jobs list")
-
-    identity = {
-        (clip["part"], clip["local_scene"]): clip["scene"]
-        for clip in clips
-    }
-    audio = {}
-
-    for job in jobs:
-        if not isinstance(job, dict) or job.get("status") != "completed":
-            continue
-        try:
-            key = (int(job["part"]), int(job["scene"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-
-        scene_number = identity.get(key)
-        if scene_number is None:
-            continue
-        if scene_number in audio:
-            raise RuntimeError(f"Duplicate narration for scene {scene_number}")
-
-        path = safe_path(job.get("output"), f"narration scene {scene_number}")
-        audio_duration(path)
-        audio[scene_number] = path
-
-    missing = [c["scene"] for c in clips if c["scene"] not in audio]
-    if missing:
-        raise RuntimeError(f"Narration missing for scenes: {missing[:30]}")
-    return audio
+    if seen != expected_ids:
+        error(f"{label}: scene IDs do not cover 1..{total}")
+    elif len(rows) == total:
+        success(f"{label}: {total} unique scenes")
 
 
-def discover_backgrounds(config):
-    enabled = {
-        "music": config_bool(config, "MUSIC", True),
-        "ambient": config_bool(config, "AMBIENT_SOUND", True),
-        "sfx": config_bool(config, "SFX", True),
-    }
-    result = {}
+def validate_audio(total: int, parts: int, scenes_per_part: int) -> None:
+    data = read_json(OUTPUT / "narration" / "audio_jobs.json")
+    if not isinstance(data, dict):
+        error("Audio jobs manifest must be a JSON object")
+        return
+    if data.get("status") != "completed":
+        error("Audio jobs manifest status is not completed")
 
-    for kind, directories in AUDIO_DIRS.items():
-        candidates = set()
-        if enabled[kind]:
-            for directory in directories:
-                if not directory.is_dir():
-                    continue
-                for path in directory.rglob("*"):
-                    try:
-                        if (
-                            path.is_file()
-                            and path.suffix.lower() in AUDIO_EXTENSIONS
-                            and path.stat().st_size > 0
-                            and path.resolve().is_relative_to(ROOT.resolve())
-                        ):
-                            candidates.add(path.resolve())
-                    except OSError:
-                        continue
-
-        result[kind] = sorted(
-            candidates, key=lambda p: p.as_posix().lower()
-        )[:1]
-        if enabled[kind] and not result[kind]:
-            log(f"INFO: {kind} enabled, but no audio track was found")
-    return result
-
-
-def cache_key(clip, narration, backgrounds, fps, duration):
-    background_hashes = {
-        kind: sha256_file(paths[0])
-        for kind, paths in backgrounds.items() if paths
-    }
-    return fingerprint({
-        "version": VERSION,
-        "renderer_sha256": sha256_file(Path(__file__).resolve()),
-        "motion_sha256": sha256_file(clip["path"]),
-        "narration_sha256": sha256_file(narration),
-        "background_hashes": background_hashes,
-        "fps": fps,
-        "duration": round(duration, 4),
-        "volumes": VOLUMES,
-    })
-
-
-def render_scene(clip, narration, backgrounds, fps):
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg is required")
-
-    source = clip["path"]
-    source_info = probe(source)
-    voice_duration = audio_duration(narration)
-    target_duration = (
-        math.ceil(max(source_info["duration"], voice_duration) * fps) / fps
-    )
-
-    number = clip["scene"]
-    destination = RENDER_DIR / f"scene_{number:04d}.mp4"
-    cache_file = RENDER_DIR / f"scene_{number:04d}.render.json"
-    RENDER_DIR.mkdir(parents=True, exist_ok=True)
-    key = cache_key(clip, narration, backgrounds, fps, target_duration)
-
-    if destination.is_file() and cache_file.is_file():
-        try:
-            saved = read_json(cache_file, {})
-            info = probe(destination)
-            if (
-                saved.get("version") == VERSION
-                and saved.get("cache_key") == key
-                and info["has_video"] and info["has_audio"]
-                and (info["width"], info["height"])
-                == (source_info["width"], source_info["height"])
-                and info["duration"] + 0.15 >= voice_duration
-                and abs(info["duration"] - target_duration) <= 0.75
-            ):
-                log(f"REUSE rendered scene {number}")
-                return destination, info["duration"], key
-        except Exception as exc:
-            log(f"Scene {number} cache rejected: {exc}")
-
-    tracks = [
-        (kind, paths[0])
-        for kind, paths in backgrounds.items() if paths
-    ]
-    command = [
-        ffmpeg, "-hide_banner", "-y",
-        "-i", str(source), "-i", str(narration),
-    ]
-    for kind, path in tracks:
-        if kind in {"music", "ambient"}:
-            command.extend(["-stream_loop", "-1"])
-        command.extend(["-i", str(path)])
-
-    padding = max(0.0, target_duration - source_info["duration"])
-    filters = [
-        f"[0:v]tpad=stop_mode=clone:stop_duration={padding:.6f},"
-        f"trim=duration={target_duration:.6f},setpts=PTS-STARTPTS[vout]",
-        "[1:a]aresample=44100,"
-        "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-        f"apad,atrim=duration={target_duration:.6f},"
-        "asetpts=PTS-STARTPTS[voice]",
-    ]
-    audio_labels = ["[voice]"]
-
-    for input_index, (kind, _) in enumerate(tracks, start=2):
-        label = f"bg{input_index}"
-        filters.append(
-            f"[{input_index}:a]aresample=44100,"
-            "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"volume={VOLUMES[kind]},"
-            f"apad,atrim=duration={target_duration:.6f},"
-            f"asetpts=PTS-STARTPTS[{label}]"
-        )
-        audio_labels.append(f"[{label}]")
-
-    filters.append(
-        "".join(audio_labels)
-        + f"amix=inputs={len(audio_labels)}:duration=longest:"
-        "dropout_transition=1,"
-        f"atrim=duration={target_duration:.6f},"
-        "alimiter=limit=0.95,aresample=44100[aout]"
-    )
-
-    temp = destination.with_name(destination.stem + ".tmp.mp4")
-    temp.unlink(missing_ok=True)
-    try:
-        command.extend([
-            "-filter_complex", ";".join(filters),
-            "-map", "[vout]", "-map", "[aout]",
-            "-t", f"{target_duration:.6f}",
-            "-r", str(fps),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-            "-movflags", "+faststart", str(temp),
-        ])
-        run(command)
-        info = probe(temp)
-
-        if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(f"Rendered scene {number} has missing streams")
-        if (info["width"], info["height"]) != (
-            source_info["width"], source_info["height"]
-        ):
-            raise RuntimeError(f"Scene {number} resolution changed")
-        if info["duration"] + 0.15 < voice_duration:
-            raise RuntimeError(f"Narration truncated in scene {number}")
-
-        os.replace(temp, destination)
-        write_json(cache_file, {
-            "version": VERSION,
-            "cache_key": key,
-            "scene": number,
-            "part": clip["part"],
-            "local_scene": clip["local_scene"],
-            "video": destination.relative_to(ROOT).as_posix(),
-            "duration": round(info["duration"], 6),
-            "size_bytes": destination.stat().st_size,
-            "status": "completed",
-        })
-        return destination, info["duration"], key
-    except Exception:
-        temp.unlink(missing_ok=True)
-        raise
-
-
-def concat_videos(paths, destination, list_file, resolution):
-    if not paths:
-        raise RuntimeError("Cannot concatenate an empty video list")
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg is required")
-
-    for path in paths:
-        info = probe(path)
-        if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(f"Missing video/audio stream: {path}")
-        if (info["width"], info["height"]) != resolution:
-            raise RuntimeError(f"Unexpected concat resolution: {path}")
-
-    list_file.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
-    for path in paths:
-        value = str(Path(path).resolve())
-        if "\n" in value or "\r" in value:
-            raise RuntimeError("Invalid newline in media path")
-        lines.append("file '" + value.replace("'", "'\\''") + "'")
-    list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp = destination.with_name(destination.stem + ".tmp.mp4")
-    temp.unlink(missing_ok=True)
-    try:
-        run([
-            ffmpeg, "-hide_banner", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(list_file),
-            "-map", "0:v:0", "-map", "0:a:0",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-            "-movflags", "+faststart", str(temp),
-        ])
-        info = probe(temp)
-        if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(f"Output missing streams: {destination}")
-        if (info["width"], info["height"]) != resolution:
-            raise RuntimeError(f"Output resolution is wrong: {destination}")
-        os.replace(temp, destination)
-        return probe(destination)
-    except Exception:
-        temp.unlink(missing_ok=True)
-        raise
-    finally:
-        list_file.unlink(missing_ok=True)
-
-
-def save_checkpoint(
-    mode, rows, total, parts=None, final_video=None,
-    alias=None, final_info=None, status="in_progress",
-):
-    data = {
-        "version": VERSION,
-        "format": mode,
-        "status": status,
-        "total_scenes": total,
-        "completed_count": len(rows),
-        "completed_scenes": rows,
-        "captions_burned": False,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if parts is not None:
-        data["parts"] = [p.relative_to(ROOT).as_posix() for p in parts]
-    if final_video is not None:
-        data["final_video"] = final_video.relative_to(ROOT).as_posix()
-    if alias is not None:
-        data["alias"] = alias.relative_to(ROOT).as_posix()
-    if final_info is not None:
-        data.update({
-            "duration": round(final_info["duration"], 6),
-            "width": final_info["width"],
-            "height": final_info["height"],
-        })
-    write_json(RENDER_MANIFEST, data)
-
-
-def main():
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        raise RuntimeError("FFmpeg and ffprobe are required")
-
-    config = load_and_validate(ROOT / "Input" / "topic.txt")
-    mode = str(get_format(config)).strip().lower()
-    parts_count = int(get_parts(config))
-    scenes_per_part = int(get_scenes(config))
-    fps = int(get_fps(config))
-
-    if mode not in {"short", "full"}:
-        raise RuntimeError(f"Unsupported FORMAT: {mode}")
-    if parts_count < 1 or scenes_per_part < 1:
-        raise RuntimeError("PARTS and SCENES must be positive")
-    if not 1 <= fps <= 60:
-        raise RuntimeError("FPS must be between 1 and 60")
-
-    for directory in (RENDER_DIR, PARTS_DIR, VIDEOS_DIR):
-        directory.mkdir(parents=True, exist_ok=True)
-
-    total = parts_count * scenes_per_part
-    clips, resolution = read_motion(mode, total)
+    rows = data.get("jobs", data.get("audio_jobs", []))
+    if not isinstance(rows, list) or len(rows) != total:
+        error(f"Audio jobs: expected {total} rows")
+        return
 
     expected = {
-        (part, local)
-        for part in range(1, parts_count + 1)
-        for local in range(1, scenes_per_part + 1)
+        (part, scene)
+        for part in range(1, parts + 1)
+        for scene in range(1, scenes_per_part + 1)
     }
-    actual = {(c["part"], c["local_scene"]) for c in clips}
-    if actual != expected:
-        raise RuntimeError(
-            "Scene mapping differs from Input/topic.txt. "
-            f"Missing={sorted(expected - actual)[:20]}; "
-            f"extra={sorted(actual - expected)[:20]}"
+    seen: set[tuple[int, int]] = set()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            error("Audio manifest contains an invalid row")
+            continue
+
+        part = int_value(row, "part")
+        scene = int_value(row, "scene", "local_scene")
+        if part is None or scene is None:
+            error("Audio job is missing part/scene mapping")
+            continue
+
+        key = (part, scene)
+        if key in seen:
+            error(f"Duplicate audio job: {key}")
+        seen.add(key)
+
+        if key not in expected:
+            error(f"Unexpected audio job mapping: {key}")
+        if row.get("status") != "completed":
+            error(f"Audio job incomplete: {key}")
+
+        audio = safe_file(
+            row.get("output") or row.get("audio_path") or row.get("path"),
+            f"Narration Part {part}, Scene {scene}",
+            100,
         )
+        if audio:
+            try:
+                result = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error",
+                        "-select_streams", "a:0",
+                        "-show_entries", "stream=codec_type",
+                        "-of", "json", str(audio),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                parsed = json.loads(result.stdout or "{}")
+                if result.returncode or not parsed.get("streams"):
+                    error(f"No audio stream in {audio.name}")
+            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+                error(f"Could not verify audio {audio.name}: {exc}")
 
-    narration = read_narration(clips)
-    backgrounds = discover_backgrounds(config)
-    log(f"FORMAT={mode} | PARTS={parts_count} | SCENES={total} | FPS={fps}")
-    log("Optional tracks:", {
-        kind: [p.name for p in paths] for kind, paths in backgrounds.items()
-    })
+    if seen != expected:
+        error("Audio job mapping is incomplete or incorrect")
+    else:
+        success(f"Audio jobs: {total} unique scene mappings")
 
-    rows = []
-    rendered = {}
 
-    for index, clip in enumerate(clips, 1):
-        path, duration, key = render_scene(
-            clip, narration[clip["scene"]], backgrounds, fps
-        )
-        relative = path.relative_to(ROOT).as_posix()
-        source_relative = clip["path"].relative_to(ROOT).as_posix()
-        row = {
-            **clip["manifest_row"],
-            "scene": clip["scene"],
-            "global_scene": clip["global_scene"],
-            "part": clip["part"],
-            "local_scene": clip["local_scene"],
-            "source_photo_motion_video": source_relative,
-            "source_rendered_video": relative,
-            "video": relative,
-            "duration": round(duration, 6),
-            "fps": fps,
-            "render_cache_key": key,
-            "narration": narration[clip["scene"]].relative_to(ROOT).as_posix(),
-            "rendered_with_narration": True,
-            "captions_burned": False,
-            "status": "completed",
-        }
-        rows.append(row)
-        rendered[clip["scene"]] = path
-        save_checkpoint(mode, rows, total)
-        log(f"CHECKPOINT saved: scene {index}/{total}")
+def validate_captions(total: int, parts: int, scenes_per_part: int) -> None:
+    data = read_json(OUTPUT / "captions" / "captions.json")
+    if not isinstance(data, dict):
+        error("captions.json must be a JSON object")
+        return
+    if data.get("status") != "completed":
+        error("Caption preparation status is not completed")
 
-    part_paths = []
-    for part in range(1, parts_count + 1):
-        group = sorted(
-            [c for c in clips if c["part"] == part],
-            key=lambda c: c["local_scene"],
-        )
-        local_ids = [c["local_scene"] for c in group]
-        if local_ids != list(range(1, scenes_per_part + 1)):
-            raise RuntimeError(f"Part {part} has missing or unordered scenes")
+    rows = data.get("captions", [])
+    if not isinstance(rows, list) or len(rows) != total:
+        error(f"Caption count must equal {total}")
+        return
 
-        destination = PARTS_DIR / f"part_{part:02d}.mp4"
-        concat_videos(
-            [rendered[c["scene"]] for c in group],
-            destination,
-            OUTPUT / "photo_motion" / f"concat_part_{part:02d}.txt",
-            resolution,
-        )
-        part_paths.append(destination)
-        log(f"PART {part}/{parts_count} merged")
+    expected = {
+        (part, scene)
+        for part in range(1, parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    }
+    seen: set[tuple[int, int]] = set()
 
-    final_video = VIDEOS_DIR / "katha_lok_ai_final.mp4"
-    final_info = concat_videos(
-        [rendered[c["scene"]] for c in clips],
-        final_video,
-        OUTPUT / "photo_motion" / "concat_final.txt",
-        resolution,
+    for row in rows:
+        if not isinstance(row, dict):
+            error("Invalid caption row")
+            continue
+        part = int_value(row, "part")
+        scene = int_value(row, "scene", "local_scene")
+        if part is None or scene is None:
+            error("Caption row is missing part/scene IDs")
+            continue
+
+        key = (part, scene)
+        if key in seen:
+            error(f"Duplicate caption mapping: {key}")
+        seen.add(key)
+        if key not in expected:
+            error(f"Unexpected caption mapping: {key}")
+        if not str(row.get("text", "")).strip():
+            error(f"Empty caption at Part {part}, Scene {scene}")
+
+    if seen != expected:
+        error("Caption mapping does not match the configured scene plan")
+    else:
+        success(f"Captions: {total} unique scene mappings")
+
+
+def parse_srt_time(value: str) -> float | None:
+    match = re.fullmatch(
+        r"(\d{2,}):([0-5]\d):([0-5]\d)[,.](\d{3})",
+        value.strip(),
     )
+    if not match:
+        return None
+    hours, minutes, seconds, millis = map(int, match.groups())
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000
 
-    alias = VIDEOS_DIR / (
-        "katha_lok_ai_full.mp4" if mode == "full"
-        else "katha_lok_ai_short.mp4"
-    )
-    temp_alias = alias.with_name(alias.stem + ".tmp.mp4")
+
+def validate_srt(total_duration: float) -> None:
+    path = OUTPUT / "captions" / "final_captions.srt"
+    if not path.is_file():
+        error("Final SRT file is missing")
+        return
+
     try:
-        shutil.copy2(final_video, temp_alias)
-        alias_info = probe(temp_alias)
-        if (
-            not alias_info["has_video"] or not alias_info["has_audio"]
-            or (alias_info["width"], alias_info["height"]) != resolution
-            or abs(alias_info["duration"] - final_info["duration"]) > 0.5
-        ):
-            raise RuntimeError("Final format alias failed validation")
-        os.replace(temp_alias, alias)
-    finally:
-        temp_alias.unlink(missing_ok=True)
+        content = path.read_text(encoding="utf-8-sig").strip()
+    except OSError as exc:
+        error(f"Cannot read final SRT: {exc}")
+        return
 
-    opposite = VIDEOS_DIR / (
-        "katha_lok_ai_short.mp4" if mode == "full"
+    if not content:
+        error("Final SRT file is empty")
+        return
+
+    blocks = re.split(r"\n\s*\n", content)
+    previous_end = 0.0
+    valid = 0
+
+    for index, block in enumerate(blocks, 1):
+        lines = block.strip().splitlines()
+        if len(lines) < 3 or not lines[0].strip().isdigit():
+            error(f"SRT cue {index} is malformed")
+            continue
+
+        match = re.fullmatch(
+            r"\s*(\d{2,}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*"
+            r"(\d{2,}:\d{2}:\d{2}[,.]\d{3})(?:\s+.*)?",
+            lines[1].strip(),
+        )
+        if not match:
+            error(f"SRT cue {index} has invalid timestamps")
+            continue
+
+        start = parse_srt_time(match.group(1))
+        end = parse_srt_time(match.group(2))
+        if start is None or end is None or end <= start:
+            error(f"SRT cue {index} has invalid duration")
+            continue
+        if start + 0.05 < previous_end:
+            error(f"SRT cues overlap or are out of order at cue {index}")
+        if end > total_duration + 1.0:
+            error(f"SRT cue {index} exceeds final video duration")
+        if not " ".join(lines[2:]).strip():
+            error(f"SRT cue {index} has no text")
+        if len(lines[2:]) > 2:
+            warning(f"SRT cue {index} has more than two text lines")
+
+        previous_end = end
+        valid += 1
+
+    if valid:
+        success(f"SRT: {valid} readable cues")
+
+
+def validate_render(mode: str, parts: int, total: int) -> float:
+    data = read_json(OUTPUT / "scene_renders" / "render_manifest.json")
+    if not isinstance(data, dict):
+        error("Render manifest must be a JSON object")
+        return 0.0
+
+    if data.get("status") != "completed":
+        error("Render manifest status is not completed")
+    if data.get("format") != mode:
+        error(f"Render manifest format must be {mode}")
+
+    # This validator runs after burn_captions.py, not before it.
+    if data.get("captions_burned") is not True:
+        error("Render manifest does not confirm that captions were burned")
+
+    rows = data.get("completed_scenes", [])
+    if not isinstance(rows, list) or len(rows) != total:
+        error(f"Captioned scene count must equal {total}")
+        rows = []
+
+    expected_ids = set(range(1, total + 1))
+    seen: set[int] = set()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            error("Invalid rendered-scene row")
+            continue
+
+        scene = int_value(row, "global_scene", "scene")
+        if scene is None:
+            error("Rendered scene is missing its numeric ID")
+            continue
+        if scene in seen:
+            error(f"Duplicate rendered scene ID: {scene}")
+        seen.add(scene)
+
+        if row.get("status") != "completed":
+            error(f"Captioned scene {scene} is not completed")
+        if row.get("captions_burned") is not True:
+            error(f"Captioned scene {scene} is not marked captions_burned=true")
+
+        video_value = row.get("video") or row.get("output")
+        video_path, video_info = check_video(
+            video_value, f"Captioned scene {scene}", mode
+        )
+        if video_info and not video_info["has_audio"]:
+            error(f"Captioned scene {scene} has no audio")
+
+        source_value = row.get("source_rendered_video")
+        if source_value:
+            source_path = safe_file(
+                source_value, f"Pre-caption source for scene {scene}", 1024
+            )
+            if source_path and video_path and source_path.resolve() == video_path.resolve():
+                error(f"Scene {scene}: captioned video points to its own source")
+
+    if seen != expected_ids:
+        error("Captioned scene IDs do not cover every expected scene")
+
+    part_rows = data.get("parts", [])
+    if not isinstance(part_rows, list) or len(part_rows) != parts:
+        error(f"Expected exactly {parts} final part videos")
+        part_rows = []
+
+    for index, item in enumerate(part_rows, 1):
+        value = (
+            item.get("path") or item.get("video") or item.get("output")
+            if isinstance(item, dict)
+            else item
+        )
+        check_video(value, f"Final part {index:02d}", mode)
+
+    final_value = data.get("final_video")
+    if not final_value:
+        final_value = "output/videos/katha_lok_ai_final.mp4"
+    final_path, final_info = check_video(final_value, "Final merged video", mode)
+
+    expected_alias = (
+        "katha_lok_ai_short.mp4"
+        if mode == "short"
         else "katha_lok_ai_full.mp4"
     )
-    opposite.unlink(missing_ok=True)
+    alias_value = data.get("alias") or f"output/videos/{expected_alias}"
+    alias_path, alias_info = check_video(alias_value, "Final format alias", mode)
 
-    save_checkpoint(
-        mode, rows, total, parts=part_paths,
-        final_video=final_video, alias=alias,
-        final_info=final_info, status="completed",
+    if alias_path and alias_path.name != expected_alias:
+        error(f"Expected final alias filename: {expected_alias}")
+
+    if final_info and alias_info:
+        if abs(final_info["duration"] - alias_info["duration"]) > 0.5:
+            error("Final video and alias durations differ")
+        if (final_info["width"], final_info["height"]) != (
+            alias_info["width"], alias_info["height"]
+        ):
+            error("Final video and alias dimensions differ")
+
+    if final_path and alias_path:
+        try:
+            if final_path.stat().st_size != alias_path.stat().st_size:
+                warning("Final video and alias file sizes differ")
+        except OSError:
+            pass
+
+    opposite_name = (
+        "katha_lok_ai_full.mp4"
+        if mode == "short"
+        else "katha_lok_ai_short.mp4"
     )
-    log("=" * 48)
-    log("SCENE VIDEO/AUDIO RENDER COMPLETE")
-    log(f"Format: {mode} | Scenes: {total} | Parts: {len(part_paths)}")
-    log("Final:", final_video.relative_to(ROOT))
-    log("Alias:", alias.relative_to(ROOT))
-    log("Captions are not burned yet; burn_captions.py handles that stage.")
+    opposite = OUTPUT / "videos" / opposite_name
+    if opposite.exists():
+        error(f"Unexpected opposite-format output: {opposite_name}")
+
+    return final_info["duration"] if final_info else 0.0
+
+
+def validate_thumbnail_and_metadata(mode: str) -> None:
+    thumbnail = OUTPUT / "thumbnail.jpg"
+    if not thumbnail.is_file():
+        error("Thumbnail output/thumbnail.jpg is missing")
+    else:
+        try:
+            from PIL import Image
+
+            with Image.open(thumbnail) as image:
+                image.verify()
+            with Image.open(thumbnail) as image:
+                width, height = image.size
+
+            if width < 320 or height < 320:
+                error("Thumbnail dimensions are too small")
+            if mode == "short" and height <= width:
+                error("Short thumbnail should be portrait")
+            if mode == "full" and width <= height:
+                error("Full thumbnail should be landscape")
+            success(f"Thumbnail valid: {width}x{height}")
+        except Exception as exc:
+            error(f"Thumbnail is not a valid image: {exc}")
+
+    metadata_path = OUTPUT / "youtube_metadata.txt"
+    if not metadata_path.is_file():
+        error("YouTube metadata file is missing")
+        return
+
+    try:
+        content = metadata_path.read_text(encoding="utf-8-sig").strip()
+    except OSError as exc:
+        error(f"Cannot read YouTube metadata: {exc}")
+        return
+
+    for field in ("Title", "Description", "Tags"):
+        match = re.search(
+            rf"(?ims)^\s*{field}\s*:\s*\n?(.*?)(?=^\s*"
+            rf"(?:Title|Description|Tags)\s*:|\Z)",
+            content,
+        )
+        if not match or not match.group(1).strip():
+            error(f"Metadata field is empty: {field}")
+
+    if content:
+        success("Metadata contains Title, Description and Tags")
+
+
+def main() -> int:
+    try:
+        config = load_and_validate(ROOT / "Input" / "topic.txt")
+        mode = str(get_format(config)).strip().lower()
+        parts = int(get_parts(config))
+        scenes_per_part = int(get_scenes(config))
+    except Exception as exc:
+        error(f"Invalid input configuration: {exc}")
+        return 1
+
+    if mode not in {"short", "full"}:
+        error(f"Unsupported FORMAT: {mode}")
+        return 1
+    if parts < 1 or scenes_per_part < 1:
+        error("PARTS and SCENES must be positive")
+        return 1
+
+    total = parts * scenes_per_part
+    log("=" * 60)
+    log(
+        f"FORMAT={mode} | PARTS={parts} | "
+        f"SCENES/PART={scenes_per_part} | TOTAL={total}"
+    )
+    log("Validation-only stage: this script does not regenerate media.")
+    log("=" * 60)
+
+    validate_scene_asset_manifest(
+        OUTPUT / "visuals" / "visual_jobs.json",
+        total,
+        "Visual jobs",
+    )
+    validate_scene_asset_manifest(
+        OUTPUT / "visuals" / "image_manifest.json",
+        total,
+        "Image manifest",
+    )
+    validate_audio(total, parts, scenes_per_part)
+    validate_scene_asset_manifest(
+        OUTPUT / "photo_motion" / "photo_motion_manifest.json",
+        total,
+        "Photo-motion manifest",
+        mode=mode,
+        require_video=True,
+    )
+    validate_captions(total, parts, scenes_per_part)
+
+    duration = validate_render(mode, parts, total)
+    if duration > 0:
+        validate_srt(duration)
+    validate_thumbnail_and_metadata(mode)
+
+    log("=" * 60)
+    log(f"ERRORS={len(ERRORS)} | WARNINGS={len(WARNINGS)}")
+    if ERRORS:
+        log("FINAL VALIDATION: FAILED")
+        for item in ERRORS:
+            log(f"- {item}")
+        return 1
+
+    log("FINAL VALIDATION: PASSED")
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("RENDER CANCELLED", file=sys.stderr)
-        sys.exit(130)
-    except Exception as exc:
-        print(f"RENDER FAILED: {exc}", file=sys.stderr)
-        sys.exit(1)
+    raise SystemExit(main())
