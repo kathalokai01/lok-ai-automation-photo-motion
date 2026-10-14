@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Resume-safe scene renderer with cue-timed, non-looping SFX."""
+"""Resume-safe scene renderer with manifest-driven audio mixing and SFX cues."""
 
 from __future__ import annotations
 
@@ -24,15 +24,17 @@ AUDIO_DIR = OUTPUT / "narration"
 RENDER_DIR = OUTPUT / "scene_renders"
 PART_DIR = OUTPUT / "parts"
 VIDEO_DIR = OUTPUT / "videos"
+SOUND_DIR = OUTPUT / "sound_design"
 
 PHOTO_MANIFEST = PHOTO_DIR / "photo_motion_manifest.json"
 AUDIO_MANIFEST = AUDIO_DIR / "audio_jobs.json"
+SOUND_MANIFEST = SOUND_DIR / "sound_design_manifest.json"
+SFX_CUE_MANIFEST = SOUND_DIR / "sfx_cues.json"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
-SFX_CUE_MANIFEST = OUTPUT / "sound_design" / "sfx_cues.json"
 
 MIN_MEDIA_BYTES = 1000
-DURATION_TOLERANCE = 0.35
-RENDERER_VERSION = "render-video-v14-sfx-cues"
+DURATION_TOLERANCE = 0.8
+RENDERER_VERSION = "render-video-v15-manifest-audio"
 
 
 def log(*args):
@@ -59,8 +61,8 @@ def write_json(path, data):
 def sha256_file(path):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
     return digest.hexdigest()
 
 
@@ -97,20 +99,24 @@ def get_rows(data, *keys):
     return []
 
 
-def run_probe(path, audio_only=False):
+def probe(path, audio_only=False):
     executable = shutil.which("ffprobe")
     if not executable:
         raise RuntimeError("ffprobe is not installed")
 
-    entries = (
-        "format=duration:stream=codec_type"
-        if audio_only
-        else "format=duration:stream=codec_type,width,height"
-    )
+    entries = "format=duration:stream=codec_type"
+    if not audio_only:
+        entries += ",stream=width,height"
+
     result = subprocess.run(
-        [executable, "-v", "error", "-show_entries", entries,
-         "-of", "json", str(path)],
-        capture_output=True, text=True, timeout=60, check=False,
+        [
+            executable, "-v", "error", "-show_entries", entries,
+            "-of", "json", str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
     if result.returncode:
         raise RuntimeError(
@@ -135,8 +141,7 @@ def run_probe(path, audio_only=False):
         return {"duration": duration}
 
     video = next(
-        (row for row in streams if row.get("codec_type") == "video"),
-        None,
+        (row for row in streams if row.get("codec_type") == "video"), None
     )
     if not video:
         raise RuntimeError(f"No video stream: {path.name}")
@@ -147,14 +152,6 @@ def run_probe(path, audio_only=False):
         "height": int(video.get("height") or 0),
         "has_audio": audio,
     }
-
-
-def ffprobe(path):
-    return run_probe(path)
-
-
-def probe_audio(path):
-    return run_probe(path, audio_only=True)
 
 
 def audio_job_map():
@@ -189,113 +186,142 @@ def audio_job_map():
             "part": key[0],
             "scene": key[1],
             "path": audio,
-            "duration": probe_audio(audio)["duration"],
+            "duration": probe(audio, audio_only=True)["duration"],
             "sha256": sha256_file(audio),
         }
 
     return mapping
 
 
-def optional_background_files():
-    """Find at most one music and one ambience track. Never auto-load SFX."""
-    result = {"music": [], "ambient": []}
-    roots = [
-        OUTPUT / "audio",
-        OUTPUT / "sound",
-        OUTPUT / "music",
-    ]
-    allowed = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac"}
-
-    for root in roots:
-        if not root.exists():
+def enabled_setting(config, category, default=True):
+    aliases = {
+        "music": ("MUSIC_ENABLED", "MUSIC", "BACKGROUND_MUSIC"),
+        "ambient": ("AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND"),
+        "sfx": ("SFX_ENABLED", "SFX", "SOUND_EFFECTS"),
+    }
+    for key in aliases[category]:
+        if key not in config:
             continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.suffix.lower() not in allowed:
-                continue
-
-            lower = str(path).lower()
-            if any(token in lower for token in ("ambient", "environment")):
-                category = "ambient"
-            elif any(token in lower for token in ("music", "bgm", "background")):
-                category = "music"
-            else:
-                continue
-
-            resolved = path.resolve()
-            if resolved not in result[category]:
-                result[category].append(resolved)
-
-    return {key: paths[:1] for key, paths in result.items()}
-
-
-def background_gain(category):
-    return {"music": 0.10, "ambient": 0.045}[category]
+        value = str(config[key]).strip().lower()
+        if value in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if value in {"0", "false", "no", "off", "disabled"}:
+            return False
+        raise RuntimeError(f"{key} must be true or false")
+    return default
 
 
 def track_category(path):
     lower = str(path).lower()
-    if any(token in lower for token in ("ambient", "environment")):
+    if any(token in lower for token in ("ambient", "environment", "ambience")):
         return "ambient"
     if any(token in lower for token in ("music", "bgm", "background")):
         return "music"
     raise RuntimeError(f"Cannot classify background track: {path}")
 
 
-def load_sfx_cues(part, scene, duration):
-    """
-    Optional manifest format:
-    {
-      "cues": [
-        {
-          "part": 1,
-          "scene": 2,
-          "time": 4.2,
-          "file": "output/sfx/door_creak.wav",
-          "gain": 0.075
-        }
-      ]
-    }
+def background_gain(category):
+    return {"music": 0.10, "ambient": 0.045}[category]
 
-    Cue time is seconds from the start of that scene.
-    Missing manifest or no matching cue means no SFX for that scene.
-    """
+
+def optional_background_files(config):
+    """Use sound-design manifest first, then compatible legacy paths."""
+    enabled = {
+        category: enabled_setting(config, category)
+        for category in ("music", "ambient")
+    }
+    selected = {}
+
+    manifest = {}
+    if SOUND_MANIFEST.is_file():
+        data = read_json(SOUND_MANIFEST)
+        if data.get("status") == "completed":
+            manifest = data.get("tracks", {})
+
+    for category in ("music", "ambient"):
+        if not enabled[category]:
+            continue
+
+        record = manifest.get(category)
+        if isinstance(record, dict) and record.get("status") == "completed":
+            path = safe_path(record.get("path"), f"{category} track", 100)
+            probe(path, audio_only=True)
+            selected[category] = path
+            continue
+
+        legacy_roots = (
+            OUTPUT / "audio",
+            OUTPUT / "sound",
+            OUTPUT / "music",
+        )
+        tokens = (
+            ("ambient", "environment", "ambience")
+            if category == "ambient"
+            else ("music", "bgm", "background")
+        )
+        found = None
+
+        for root in legacy_roots:
+            if not root.exists():
+                continue
+            for candidate in sorted(root.rglob("*")):
+                if not candidate.is_file():
+                    continue
+                if candidate.suffix.lower() not in {
+                    ".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac"
+                }:
+                    continue
+                lower = str(candidate).lower()
+                if any(token in lower for token in tokens):
+                    found = candidate.resolve()
+                    break
+            if found:
+                break
+
+        if found:
+            probe(found, audio_only=True)
+            selected[category] = found
+
+    return selected
+
+
+def load_sfx_cues(part, scene, duration, config):
+    if not enabled_setting(config, "sfx"):
+        return []
     if not SFX_CUE_MANIFEST.is_file():
         return []
 
     data = read_json(SFX_CUE_MANIFEST)
-    rows = get_rows(data, "cues")
-    selected = []
+    if data.get("status") not in (None, "completed"):
+        raise RuntimeError("SFX cue manifest is not completed")
 
-    for index, row in enumerate(rows, start=1):
+    selected = []
+    for index, row in enumerate(get_rows(data, "cues"), start=1):
         if not isinstance(row, dict):
             raise RuntimeError(f"Invalid SFX cue row {index}")
 
         try:
-            cue_part = int(row["part"])
-            cue_scene = int(row["scene"])
+            key = (int(row["part"]), int(row["scene"]))
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"SFX cue {index}: invalid part/scene") from exc
+            raise RuntimeError(f"SFX cue {index}: invalid scene mapping") from exc
 
-        if (cue_part, cue_scene) != (part, scene):
+        if key != (part, scene):
             continue
 
         try:
             cue_time = float(row["time"])
             gain = float(row.get("gain", 0.075))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"SFX cue {index}: invalid time/gain") from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"SFX cue {index}: invalid time or gain") from exc
 
         if not math.isfinite(cue_time) or cue_time < 0 or cue_time >= duration:
-            raise RuntimeError(
-                f"SFX cue {index}: time must be within the scene duration"
-            )
+            raise RuntimeError(f"SFX cue {index}: time outside scene duration")
         if not math.isfinite(gain) or not 0 <= gain <= 1:
             raise RuntimeError(f"SFX cue {index}: gain must be between 0 and 1")
 
         sound = safe_path(row.get("file"), f"SFX cue {index}", 100)
-        sound_info = probe_audio(sound)
-
-        if cue_time >= duration or sound_info["duration"] <= 0:
+        info = probe(sound, audio_only=True)
+        if info["duration"] <= 0:
             continue
 
         selected.append({
@@ -317,10 +343,10 @@ def cache_signature(source, narration, backgrounds, cues, fps, resolution, durat
             {
                 "path": relative(path),
                 "sha256": sha256_file(path),
-                "category": track_category(path),
-                "gain": background_gain(track_category(path)),
+                "category": category,
+                "gain": background_gain(category),
             }
-            for path in backgrounds
+            for category, path in sorted(backgrounds.items())
         ],
         "sfx_cues": [
             {
@@ -341,7 +367,7 @@ def cache_signature(source, narration, backgrounds, cues, fps, resolution, durat
 
 
 def validate_rendered_file(path, resolution, expected_duration):
-    info = ffprobe(path)
+    info = probe(path)
     if not info["has_audio"]:
         raise RuntimeError(f"Rendered file has no audio: {path.name}")
     if (info["width"], info["height"]) != resolution:
@@ -380,10 +406,11 @@ def render_scene(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.stem + ".tmp.mp4")
 
-    # Only music and ambience loop. SFX inputs are one-shot inputs, never looped.
+    # Input 0: video; input 1: narration; then looping backgrounds; then one-shot SFX.
     inputs = ["-i", str(source), "-i", str(narration["path"])]
-    for background in backgrounds:
-        inputs.extend(["-stream_loop", "-1", "-i", str(background)])
+    background_order = list(sorted(backgrounds.items()))
+    for _, path in background_order:
+        inputs.extend(["-stream_loop", "-1", "-i", str(path)])
     for cue in cues:
         inputs.extend(["-i", str(cue["path"])])
 
@@ -397,12 +424,10 @@ def render_scene(
         f"apad,atrim=duration={duration:.3f},"
         "asetpts=PTS-STARTPTS[narr]",
     ]
-
     audio_labels = ["[narr]"]
     next_input = 2
 
-    for background in backgrounds:
-        category = track_category(background)
+    for category, _ in background_order:
         label = f"bg{next_input}"
         gain = background_gain(category)
         filters.append(
@@ -422,7 +447,7 @@ def render_scene(
             f"[{next_input}:a]aresample=44100,"
             f"volume={cue['gain']:.4f},"
             f"adelay=delays={delay_ms}:all=1,"
-            f"apad,atrim=duration={duration:.3f},"
+            f"atrim=duration={duration:.3f},"
             f"asetpts=PTS-STARTPTS[{label}]"
         )
         audio_labels.append(f"[{label}]")
@@ -434,7 +459,6 @@ def render_scene(
         })
         next_input += 1
 
-    # No automatic normalization: extra tracks must not lower narration level.
     filters.append(
         "".join(audio_labels)
         + f"amix=inputs={len(audio_labels)}:duration=longest:"
@@ -480,10 +504,10 @@ def render_scene(
             "background_tracks": [
                 {
                     "path": relative(path),
-                    "category": track_category(path),
-                    "gain": background_gain(track_category(path)),
+                    "category": category,
+                    "gain": background_gain(category),
                 }
-                for path in backgrounds
+                for category, path in background_order
             ],
             "sfx_cues": cue_details,
             "video": relative(destination),
@@ -538,11 +562,11 @@ def concat_videos(videos, destination):
             )
         if not temporary.is_file() or temporary.stat().st_size < MIN_MEDIA_BYTES:
             raise RuntimeError(f"Merged file is empty: {destination.name}")
-        info = ffprobe(temporary)
+        info = probe(temporary)
         if not info["has_audio"]:
             raise RuntimeError(f"Merged video has no audio: {destination.name}")
         os.replace(temporary, destination)
-        return ffprobe(destination)
+        return probe(destination)
     finally:
         for path in (concat_file, temporary):
             try:
@@ -585,8 +609,8 @@ def main():
             raise RuntimeError(f"Invalid photo-motion row {index}")
         try:
             part = int(row["part"])
-            local_scene = int(row["local_scene"])
-            global_scene = int(row.get("global_scene", row.get("scene", index)))
+            local_scene = int(row.get("local_scene", row["scene"]))
+            global_scene = int(row.get("global_scene", index))
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError(f"Invalid scene mapping at row {index}") from exc
 
@@ -610,12 +634,14 @@ def main():
             None,
         )
         source = safe_path(value, f"Photo-motion scene {key}", MIN_MEDIA_BYTES)
-        info = ffprobe(source)
+        info = probe(source)
         if (info["width"], info["height"]) != resolution:
             raise RuntimeError(f"Photo-motion resolution mismatch for {key}")
         photo_map[key] = {
-            "part": part, "scene": local_scene,
-            "global_scene": global_scene, "path": source,
+            "part": part,
+            "scene": local_scene,
+            "global_scene": global_scene,
+            "path": source,
             "duration": info["duration"],
         }
 
@@ -626,32 +652,26 @@ def main():
             f"found {len(narration_map)}"
         )
 
-    missing = sorted(set(photo_map) - set(narration_map))
-    extra = sorted(set(narration_map) - set(photo_map))
-    if missing or extra:
-        raise RuntimeError(
-            f"Scene mapping mismatch; missing={missing}, extra={extra}"
-        )
+    expected_keys = {
+        (part, scene)
+        for part in range(1, parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    }
+    if set(photo_map) != expected_keys or set(narration_map) != expected_keys:
+        raise RuntimeError("Photo-motion/narration scene mapping mismatch")
 
-    background_map = optional_background_files()
-    background_files = [
-        background_map[category][0]
-        for category in ("music", "ambient")
-        if background_map[category]
-    ]
-
+    backgrounds = optional_background_files(config)
     log("FORMAT:", mode)
     log("EXPECTED SCENES:", expected_count)
     log("BACKGROUND TRACKS:", [
         {
             "path": relative(path),
-            "category": track_category(path),
-            "gain": background_gain(track_category(path)),
+            "category": category,
+            "gain": background_gain(category),
         }
-        for path in background_files
+        for category, path in sorted(backgrounds.items())
     ])
     log("SFX CUE MANIFEST:", relative(SFX_CUE_MANIFEST))
-    log("SFX POLICY: only manifest cues play; SFX never loop")
 
     RENDER_DIR.mkdir(parents=True, exist_ok=True)
     scene_rows = []
@@ -659,24 +679,16 @@ def main():
     for global_scene in range(1, expected_count + 1):
         part = ((global_scene - 1) // scenes_per_part) + 1
         local_scene = ((global_scene - 1) % scenes_per_part) + 1
-        row = photo_map[(part, local_scene)]
         key = (part, local_scene)
-        source = row["path"]
+        source = photo_map[key]["path"]
         narration = narration_map[key]
-        duration = max(row["duration"], narration["duration"])
-
-        cues = load_sfx_cues(part, local_scene, duration)
+        duration = max(photo_map[key]["duration"], narration["duration"])
+        cues = load_sfx_cues(part, local_scene, duration, config)
         destination = RENDER_DIR / f"scene_{global_scene:04d}.mp4"
 
         info, signature = render_scene(
-            source=source,
-            narration=narration,
-            backgrounds=background_files,
-            cues=cues,
-            destination=destination,
-            fps=fps,
-            resolution=resolution,
-            duration=duration,
+            source, narration, backgrounds, cues, destination,
+            fps, resolution, duration,
         )
 
         scene_rows.append({
@@ -718,27 +730,24 @@ def main():
             "background_tracks": [
                 {
                     "path": relative(path),
-                    "category": track_category(path),
-                    "gain": background_gain(track_category(path)),
+                    "category": category,
+                    "gain": background_gain(category),
                 }
-                for path in background_files
+                for category, path in sorted(backgrounds.items())
             ],
             "sfx_cue_manifest": (
                 relative(SFX_CUE_MANIFEST)
                 if SFX_CUE_MANIFEST.is_file() else None
             ),
         })
-        log(
-            f"RENDERED {global_scene}/{expected_count}; "
-            f"SFX cues={len(cues)}"
-        )
+        log(f"RENDERED {global_scene}/{expected_count}; SFX cues={len(cues)}")
 
     part_paths = []
     for part in range(1, parts + 1):
-        part_rows = sorted(
-            [row for row in scene_rows if row["part"] == part],
-            key=lambda row: row["local_scene"],
-        )
+        part_rows = [
+            row for row in scene_rows if row["part"] == part
+        ]
+        part_rows.sort(key=lambda row: row["local_scene"])
         if len(part_rows) != scenes_per_part:
             raise RuntimeError(f"Part {part} scene count mismatch")
 
@@ -775,8 +784,7 @@ def main():
         "katha_lok_ai_full.mp4"
         if mode == "short" else "katha_lok_ai_short.mp4"
     )
-    if opposite.exists():
-        opposite.unlink()
+    opposite.unlink(missing_ok=True)
 
     write_json(RENDER_MANIFEST, {
         "status": "completed",
@@ -798,10 +806,10 @@ def main():
         "background_tracks": [
             {
                 "path": relative(path),
-                "category": track_category(path),
-                "gain": background_gain(track_category(path)),
+                "category": category,
+                "gain": background_gain(category),
             }
-            for path in background_files
+            for category, path in sorted(backgrounds.items())
         ],
         "sfx_cue_manifest": (
             relative(SFX_CUE_MANIFEST)
@@ -816,9 +824,7 @@ def main():
     log("SCENES:", expected_count)
     log("PARTS:", parts)
     log("FINAL:", relative(final_path))
-    log("SFX: only explicitly cued one-shot sounds; no automatic looping")
     log("CAPTIONS: pending next pipeline stage")
-    log("=" * 58)
 
 
 if __name__ == "__main__":
