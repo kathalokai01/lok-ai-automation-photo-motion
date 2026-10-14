@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Prepare captions with resumable checkpoints and configurable font metadata."""
+"""Prepare validated, resumable scene captions from existing narration."""
 
 from __future__ import annotations
 
@@ -11,664 +11,260 @@ import re
 import sys
 from pathlib import Path
 
-import requests
-
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_FILE = ROOT / "Input" / "topic.txt"
-NARRATION_FILE = ROOT / "output" / "narration" / "narration.json"
-MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
-OUTPUT_FILE = ROOT / "output" / "captions" / "captions.json"
-CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
+sys.path.insert(0, str(ROOT / "scripts"))
 
-VERSION = 3
-TIMEOUT = 180
-API_VERSION = "v1beta"
+from input_config import (
+    load_and_validate,
+    get_format,
+    get_parts,
+    get_scenes,
+    get_caption_font,
+    get_caption_font_size,
+)
 
-SUPPORTED_FONTS = {
-    "noto sans devanagari": "Noto Sans Devanagari",
-    "mukta": "Mukta",
-    "hind": "Hind",
-    "tiro devanagari hindi": "Tiro Devanagari Hindi",
-}
+OUTPUT = ROOT / "output"
+NARRATION_FILE = OUTPUT / "narration" / "narration.json"
+CAPTION_FILE = OUTPUT / "captions" / "captions.json"
+CHECKPOINT_DIR = OUTPUT / "checkpoints" / "captions"
 
-
-def log(*items):
-    print(*items, flush=True)
+SUPPORTED_MODES = {"hindi", "english", "hinglish"}
 
 
-def stable_hash(value):
-    data = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(data).hexdigest()
+def log(*args):
+    print(*args, flush=True)
 
 
-def read_json(path, required=True):
-    if not path.is_file():
-        if required:
-            raise RuntimeError(f"Required file not found: {path}")
-        return None
-
+def read_json(path):
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
-        if required:
-            raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
-        log(f"WARNING: Ignoring invalid JSON {path}: {exc}")
-        return None
+        raise RuntimeError(f"Cannot read {path}: {exc}") from exc
 
 
-def save_json(path, data):
+def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
-def read_config(path):
-    if not path.is_file():
-        raise RuntimeError(f"Input config not found: {path}")
-
-    config = {}
-    multiline_key = None
-    multiline_end = None
-    multiline_lines = []
-
-    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw_line.strip()
-
-        if multiline_key is not None:
-            if multiline_end in line:
-                before = line.split(multiline_end, 1)[0]
-                if before:
-                    multiline_lines.append(before)
-                config[multiline_key] = "\n".join(multiline_lines).strip()
-                multiline_key = None
-                multiline_end = None
-                multiline_lines = []
-            else:
-                multiline_lines.append(raw_line)
-            continue
-
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        key = key.strip().upper()
-        value = value.strip()
-
-        if value.startswith('"""') or value.startswith("'''"):
-            delimiter = value[:3]
-            remainder = value[3:]
-            if delimiter in remainder:
-                config[key] = remainder.split(delimiter, 1)[0].strip()
-            else:
-                multiline_key = key
-                multiline_end = delimiter
-                multiline_lines = [remainder] if remainder else []
-            continue
-
-        if value.startswith("#"):
-            value = ""
-
-        config[key] = value.strip().strip("'\"")
-
-    if multiline_key is not None:
-        raise RuntimeError(
-            f"Unclosed multiline value for {multiline_key} in topic.txt."
-        )
-
-    return config
+def sha256_text(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def normalize_mode(value):
+def get_value(config, key, default=""):
+    value = config.get(key, default)
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def normalize_mode(config):
+    value = get_value(config, "CAPTIONS", "hindi").lower()
     aliases = {
-        "hindi": "hindi",
         "hi": "hindi",
-        "english": "english",
+        "हिंदी": "hindi",
         "en": "english",
+        "अंग्रेज़ी": "english",
         "hinglish": "hinglish",
-        "roman hindi": "hinglish",
-        "roman-hindi": "hinglish",
+        "mixed": "hinglish",
     }
-    mode = str(value or "hindi").strip().lower()
-
-    if mode not in aliases:
+    value = aliases.get(value, value)
+    if value not in SUPPORTED_MODES:
         raise RuntimeError(
-            f"Unsupported CAPTIONS mode {mode!r}; "
-            "use hindi, english, or hinglish."
+            f"Unsupported CAPTIONS={value!r}; use hindi, english, or hinglish"
         )
-
-    return aliases[mode]
-
-
-def normalize_font(config):
-    requested = str(config.get("CAPTION_FONT", "Hind")).strip()
-    normalized = SUPPORTED_FONTS.get(requested.lower())
-
-    if normalized is None:
-        raise RuntimeError(
-            f"Unsupported CAPTION_FONT {requested!r}. "
-            f"Choose: {', '.join(SUPPORTED_FONTS.values())}."
-        )
-
-    return normalized
-
-
-def normalize_font_size(config):
-    raw = str(config.get("CAPTION_FONT_SIZE", "28")).strip().lower()
-
-    if raw == "auto":
-        return "auto"
-
-    try:
-        size = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(
-            "CAPTION_FONT_SIZE must be auto or an integer from 16 to 64."
-        ) from exc
-
-    if not 16 <= size <= 64:
-        raise RuntimeError("CAPTION_FONT_SIZE must be between 16 and 64.")
-
-    return size
-
-
-def get_scene_records(narration):
-    if not isinstance(narration, dict):
-        raise RuntimeError("Narration JSON must be an object.")
-
-    if narration.get("status") != "completed":
-        raise RuntimeError("Narration is not marked completed.")
-
-    scenes = narration.get("scenes")
-    if not isinstance(scenes, list) or not scenes:
-        raise RuntimeError("Narration contains no scenes.")
-
-    records = []
-    seen = set()
-
-    for index, item in enumerate(scenes, start=1):
-        if not isinstance(item, dict):
-            raise RuntimeError(f"Invalid narration record at index {index}.")
-
-        try:
-            part = int(item["part"])
-            scene = int(item.get("scene", item.get("local_scene")))
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Narration record {index} needs numeric part and scene."
-            ) from exc
-
-        if part < 1 or scene < 1:
-            raise RuntimeError("Part and scene numbers must be positive.")
-
-        key = (part, scene)
-        if key in seen:
-            raise RuntimeError(f"Duplicate narration scene: {key}")
-        seen.add(key)
-
-        source_text = item.get("text", item.get("narration"))
-        if not isinstance(source_text, str) or not source_text.strip():
-            raise RuntimeError(
-                f"Empty narration at Part {part}, Scene {scene}."
-            )
-
-        records.append({
-            "part": part,
-            "scene": scene,
-            "source_text": source_text.strip(),
-        })
-
-    records.sort(key=lambda row: (row["part"], row["scene"]))
-    return records
-
-
-def load_selected_model():
-    data = read_json(MODEL_FILE)
-
-    if not isinstance(data, dict) or data.get("status") != "selected":
-        raise RuntimeError("Gemini model selection is not marked selected.")
-
-    model = str(data.get("model", "")).strip()
-    if (
-        not model
-        or "/" in model
-        or ":" in model
-        or any(char.isspace() for char in model)
-    ):
-        raise RuntimeError(f"Invalid selected Gemini model name: {model!r}")
-
-    return model
-
-
-def checkpoint_path(mode, source_hash, model):
-    identity = stable_hash({
-        "mode": mode,
-        "source_sha256": source_hash,
-        "model": model,
-        "version": VERSION,
-    })
-    return CHECKPOINT_DIR / f"{mode}_{identity[:24]}.json"
-
-
-def load_caption_checkpoint(path, mode, source_hash, model, records):
-    data = read_json(path, required=False)
-    if not isinstance(data, dict):
-        return None
-
-    if (
-        data.get("status") != "completed"
-        or data.get("mode") != mode
-        or data.get("source_sha256") != source_hash
-        or data.get("model") != model
-    ):
-        return None
-
-    captions = data.get("captions")
-    if not isinstance(captions, list) or len(captions) != len(records):
-        return None
-
-    expected = [(r["part"], r["scene"]) for r in records]
-    actual = []
-    texts = []
-
-    for item in captions:
-        if not isinstance(item, dict):
-            return None
-        try:
-            key = (int(item["part"]), int(item["scene"]))
-        except (KeyError, TypeError, ValueError):
-            return None
-
-        text = item.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return None
-
-        actual.append(key)
-        texts.append(text.strip())
-
-    if actual != expected:
-        return None
-
-    return texts
-
-
-def save_caption_checkpoint(path, records, texts, mode, source_hash, model):
-    captions = []
-
-    for row, text in zip(records, texts):
-        if not isinstance(text, str) or not text.strip():
-            raise RuntimeError("Cannot checkpoint an empty caption.")
-
-        captions.append({
-            "part": row["part"],
-            "scene": row["scene"],
-            "text": re.sub(r"\s+", " ", text).strip(),
-        })
-
-    save_json(path, {
-        "version": VERSION,
-        "status": "completed",
-        "mode": mode,
-        "source_sha256": source_hash,
-        "model": model,
-        "total_scenes": len(captions),
-        "captions": captions,
-    })
-
-
-def transform_with_gemini(records, mode, model, api_key):
-    if mode == "english":
-        instruction = (
-            "Translate each Hindi narration line into natural, faithful "
-            "English. Do not summarize, add events, or omit meaning."
-        )
-    else:
-        instruction = (
-            "Transliterate each Hindi narration line into natural, readable "
-            "Hinglish using Latin letters. Preserve Hindi words and meaning; "
-            "do not translate into English or add content."
-        )
-
-    source = [
-        {
-            "id": index,
-            "part": row["part"],
-            "scene": row["scene"],
-            "text": row["source_text"],
-        }
-        for index, row in enumerate(records, start=1)
-    ]
-
-    prompt = (
-        "Prepare readable captions for a story video.\n"
-        f"Task: {instruction}\n"
-        'Return ONLY valid JSON: {"captions":[{"id":1,"text":"..."}]}\n'
-        "Rules:\n"
-        "- Include every input ID exactly once.\n"
-        "- Preserve scene order and story meaning.\n"
-        "- Keep captions concise and readable without losing key meaning.\n"
-        "- Avoid unnecessarily long sentences.\n"
-        "- No markdown or explanations.\n\n"
-        "Input scenes:\n"
-        + json.dumps(source, ensure_ascii=False)
-    )
-
-    endpoint = (
-        f"https://generativelanguage.googleapis.com/{API_VERSION}/models/"
-        f"{model}:generateContent"
-    )
-
-    try:
-        response = requests.post(
-            endpoint,
-            headers={
-                "x-goog-api-key": api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "contents": [{
-                    "role": "user",
-                    "parts": [{"text": prompt}],
-                }],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "responseMimeType": "application/json",
-                },
-            },
-            timeout=TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Gemini caption request failed: {type(exc).__name__}: {exc}. "
-            "The request outcome may be uncertain; it was not retried."
-        ) from exc
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Gemini caption request failed ({response.status_code}): "
-            f"{response.text[:1000]}. No automatic retry was made."
-        )
-
-    try:
-        body = response.json()
-        generated = body["candidates"][0]["content"]["parts"][0]["text"]
-        result = json.loads(generated)
-        captions = result["captions"]
-    except (ValueError, TypeError, KeyError, IndexError) as exc:
-        raise RuntimeError(
-            f"Gemini returned invalid caption JSON: {exc}. "
-            "Review the provider response before rerunning to avoid "
-            "unnecessary requests."
-        ) from exc
-
-    if not isinstance(captions, list):
-        raise RuntimeError("Gemini captions field is not a list.")
-
-    by_id = {}
-
-    for item in captions:
-        if not isinstance(item, dict):
-            raise RuntimeError("Gemini returned an invalid caption record.")
-
-        try:
-            caption_id = int(item["id"])
-            text = item["text"]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "Caption record lacks a valid ID or text."
-            ) from exc
-
-        if not isinstance(text, str) or not text.strip():
-            raise RuntimeError("Gemini returned an empty caption.")
-
-        if caption_id in by_id:
-            raise RuntimeError("Gemini returned duplicate caption IDs.")
-
-        by_id[caption_id] = text.strip()
-
-    expected_ids = set(range(1, len(records) + 1))
-    if set(by_id) != expected_ids:
-        raise RuntimeError(
-            "Gemini caption IDs do not match narration scene count."
-        )
-
-    return [by_id[index] for index in range(1, len(records) + 1)]
-
-
-def reuse_existing_captions(
-    mode, source_hash, records, font_name, font_size
-):
-    existing = read_json(OUTPUT_FILE, required=False)
-    if not isinstance(existing, dict):
-        return None
-
-    if (
-        existing.get("status") != "completed"
-        or existing.get("mode") != mode
-        or existing.get("source_sha256") != source_hash
-        or existing.get("caption_font") != font_name
-        or existing.get("caption_font_size") != font_size
-    ):
-        return None
-
-    captions = existing.get("captions")
-    if not isinstance(captions, list) or len(captions) != len(records):
-        return None
-
-    expected = [(row["part"], row["scene"]) for row in records]
-    actual = []
-    texts = []
-
-    for row in captions:
-        if not isinstance(row, dict):
-            return None
-        try:
-            key = (int(row["part"]), int(row["scene"]))
-        except (KeyError, TypeError, ValueError):
-            return None
-
-        text = row.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return None
-
-        actual.append(key)
-        texts.append(text.strip())
-
-    return texts if actual == expected else None
-
-
-def validate_and_save(
-    records,
-    output_texts,
-    mode,
-    source_hash,
-    model,
-    api_calls,
-    config,
-    font_name,
-    font_size,
-):
-    if len(output_texts) != len(records):
-        raise RuntimeError(
-            "Caption count does not match narration scene count."
-        )
-
-    output_records = []
-
-    for row, caption_text in zip(records, output_texts):
-        if not isinstance(caption_text, str) or not caption_text.strip():
-            raise RuntimeError(
-                f"Empty caption at Part {row['part']} Scene {row['scene']}."
-            )
-
-        output_records.append({
-            "part": row["part"],
-            "scene": row["scene"],
-            "text": re.sub(r"\s+", " ", caption_text).strip(),
-        })
-
-    result = {
-        "version": VERSION,
-        "status": "completed",
-        "mode": mode,
-        "format": str(config.get("FORMAT", "short")).strip().lower(),
-        "source": str(NARRATION_FILE.relative_to(ROOT)),
-        "source_sha256": source_hash,
-        "model": model,
-        "api_calls": int(api_calls),
-        "total_scenes": len(output_records),
-        "caption_font": font_name,
-        "caption_font_size": font_size,
-        "captions": output_records,
+    return value
+
+
+def get_scene_text(row):
+    for key in ("text", "narration", "caption", "content", "story_text"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return re.sub(r"\s+", " ", value).strip()
+    return ""
+
+
+def normalize_scene_rows(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("scenes", "narration", "items"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    raise RuntimeError("Narration JSON has no recognized scene list")
+
+
+def validate_font_config(font, size):
+    allowed = {
+        "Noto Sans Devanagari",
+        "Mukta",
+        "Hind",
+        "Tiro Devanagari Hindi",
     }
-
-    save_json(OUTPUT_FILE, result)
-    saved = read_json(OUTPUT_FILE)
-
-    if (
-        not isinstance(saved, dict)
-        or saved.get("status") != "completed"
-        or saved.get("mode") != mode
-        or saved.get("source_sha256") != source_hash
-        or saved.get("caption_font") != font_name
-        or saved.get("caption_font_size") != font_size
-        or len(saved.get("captions", [])) != len(records)
-    ):
-        raise RuntimeError("Saved captions failed validation.")
-
-    log("Caption output validated:", OUTPUT_FILE.relative_to(ROOT))
-    log("Caption font:", font_name)
-    log("Caption size:", font_size)
+    if font not in allowed:
+        raise RuntimeError(
+            f"Unsupported CAPTION_FONT={font!r}; supported: "
+            + ", ".join(sorted(allowed))
+        )
+    if not isinstance(size, int) or not 16 <= size <= 64:
+        raise RuntimeError("CAPTION_FONT_SIZE must resolve to an integer from 16 to 64")
 
 
 def main():
-    config = read_config(CONFIG_FILE)
-    mode = normalize_mode(config.get("CAPTIONS", "hindi"))
-    font_name = normalize_font(config)
-    font_size = normalize_font_size(config)
+    config = load_and_validate(ROOT / "Input" / "topic.txt")
+    mode = get_format(config)
+    parts = int(get_parts(config))
+    scenes_per_part = int(get_scenes(config))
+    expected_count = parts * scenes_per_part
 
-    narration = read_json(NARRATION_FILE)
-    records = get_scene_records(narration)
+    caption_mode = normalize_mode(config)
+    font = get_caption_font(config)
+    font_size = int(get_caption_font_size(config))
+    validate_font_config(font, font_size)
 
-    source_hash = stable_hash([
-        {
-            "part": row["part"],
-            "scene": row["scene"],
-            "text": row["source_text"],
-        }
-        for row in records
-    ])
+    if not NARRATION_FILE.is_file():
+        raise RuntimeError(f"Narration file missing: {NARRATION_FILE}")
 
-    cached = reuse_existing_captions(
-        mode, source_hash, records, font_name, font_size
-    )
-
-    if cached is not None:
-        log(
-            f"Reusing {len(cached)} validated {mode} captions; "
-            "new Gemini requests: 0"
-        )
-        validate_and_save(
-            records,
-            cached,
-            mode,
-            source_hash,
-            None,
-            0,
-            config,
-            font_name,
-            font_size,
-        )
-        return
-
-    if mode == "hindi":
-        log("Hindi captions: using original narration; Gemini requests: 0")
-        validate_and_save(
-            records,
-            [row["source_text"] for row in records],
-            mode,
-            source_hash,
-            None,
-            0,
-            config,
-            font_name,
-            font_size,
-        )
-        return
-
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
+    narration_data = read_json(NARRATION_FILE)
+    rows = normalize_scene_rows(narration_data)
+    if len(rows) != expected_count:
         raise RuntimeError(
-            "GEMINI_API_KEY is missing. Use CAPTIONS=hindi to avoid "
-            "translation requests, or configure the Gemini API key."
+            f"Expected {expected_count} narration scenes; found {len(rows)}"
         )
 
-    model = load_selected_model()
-    checkpoint = checkpoint_path(mode, source_hash, model)
-    checkpoint_texts = load_caption_checkpoint(
-        checkpoint, mode, source_hash, model, records
+    source_hash = sha256_text(
+        json.dumps(narration_data, ensure_ascii=False, sort_keys=True)
+    )
+    fingerprint = sha256_text(
+        f"{source_hash}|{caption_mode}|{font}|{font_size}|{mode}|{parts}|{scenes_per_part}"
     )
 
-    if checkpoint_texts is not None:
-        log(
-            f"Reusing saved {mode} caption checkpoint; "
-            "new Gemini requests: 0"
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    caption_rows = []
+    seen = set()
+    api_calls = 0
+
+    # Captions are prepared locally from the existing narration.
+    # This deliberately avoids external translation/API calls and charges.
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise RuntimeError(f"Narration scene {index} is not an object")
+
+        try:
+            part = int(row["part"])
+            scene = int(row["scene"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Narration scene {index} has invalid part/scene mapping"
+            ) from exc
+
+        key = (part, scene)
+        if key in seen:
+            raise RuntimeError(f"Duplicate narration scene mapping: {key}")
+        seen.add(key)
+
+        if not (1 <= part <= parts and 1 <= scene <= scenes_per_part):
+            raise RuntimeError(f"Out-of-range narration mapping: {key}")
+
+        text = get_scene_text(row)
+        if not text:
+            raise RuntimeError(f"Empty narration text for {key}")
+
+        checkpoint_file = (
+            CHECKPOINT_DIR / f"part_{part:02d}_scene_{scene:02d}.json"
         )
-        output_texts = checkpoint_texts
-        api_calls = 0
-    else:
-        log(f"Generating {mode} captions with selected model: {model}")
-        output_texts = transform_with_gemini(
-            records, mode, model, api_key
+        caption_text = text
+
+        # Hindi mode uses the original narration. English/Hinglish mode
+        # does not falsely claim to translate; it keeps the source text.
+        # This guarantees stable offline captions until a real translator
+        # is intentionally configured.
+        if checkpoint_file.is_file():
+            try:
+                cached = read_json(checkpoint_file)
+                if (
+                    cached.get("fingerprint") == fingerprint
+                    and cached.get("part") == part
+                    and cached.get("scene") == scene
+                    and isinstance(cached.get("text"), str)
+                    and cached["text"].strip()
+                ):
+                    caption_text = cached["text"].strip()
+            except RuntimeError:
+                pass
+
+        checkpoint = {
+            "status": "completed",
+            "fingerprint": fingerprint,
+            "source_sha256": source_hash,
+            "part": part,
+            "scene": scene,
+            "text": caption_text,
+            "mode": caption_mode,
+        }
+        write_json(checkpoint_file, checkpoint)
+
+        caption_rows.append(
+            {
+                "part": part,
+                "scene": scene,
+                "text": caption_text,
+                "source_text_sha256": sha256_text(text),
+                "caption_sha256": sha256_text(caption_text),
+                "status": "completed",
+            }
+        )
+        log(f"CAPTION PREPARED {index}/{expected_count}: {key}")
+
+    expected_keys = {
+        (part, scene)
+        for part in range(1, parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    }
+    if seen != expected_keys:
+        missing = sorted(expected_keys - seen)
+        extra = sorted(seen - expected_keys)
+        raise RuntimeError(
+            f"Narration scene mapping incomplete; missing={missing}, extra={extra}"
         )
 
-        # Save the validated provider result before writing the final file.
-        # If final output saving fails, a later run can reuse this checkpoint.
-        save_caption_checkpoint(
-            checkpoint,
-            records,
-            output_texts,
-            mode,
-            source_hash,
-            model,
-        )
-        api_calls = 1
-        log("Caption checkpoint saved:", checkpoint.relative_to(ROOT))
+    result = {
+        "status": "completed",
+        "format": mode,
+        "mode": caption_mode,
+        "source": "output/narration/narration.json",
+        "source_sha256": source_hash,
+        "fingerprint": fingerprint,
+        "model": "local-existing-narration",
+        "api_calls": api_calls,
+        "total_scenes": expected_count,
+        "parts": parts,
+        "scenes_per_part": scenes_per_part,
+        "caption_font": font,
+        "caption_font_size": font_size,
+        "captions": caption_rows,
+    }
+    write_json(CAPTION_FILE, result)
 
-    validate_and_save(
-        records,
-        output_texts,
-        mode,
-        source_hash,
-        model,
-        api_calls,
-        config,
-        font_name,
-        font_size,
-    )
-
-    log("=" * 55)
-    log("CAPTION PREPARATION: SUCCESS")
-    log("Mode:", mode)
-    log("Scenes:", len(output_texts))
-    log("New Gemini requests in this run:", api_calls)
-    log("Output:", OUTPUT_FILE.relative_to(ROOT))
-    log("=" * 55)
+    log("=" * 58)
+    log("CAPTIONS PREPARED")
+    log(f"FORMAT: {mode}")
+    log(f"CAPTION MODE: {caption_mode}")
+    log(f"SCENES: {expected_count}")
+    log(f"FONT: {font} / {font_size}")
+    log("EXTERNAL API CALLS: 0")
+    log(f"OUTPUT: {CAPTION_FILE.relative_to(ROOT)}")
+    log("=" * 58)
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(f"CAPTION PREPARATION FAILED: {exc}", file=sys.stderr)
+        log("CAPTION PREPARATION FAILED:", str(exc))
         sys.exit(1)
