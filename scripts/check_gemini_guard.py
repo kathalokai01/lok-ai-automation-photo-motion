@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit Gemini billing-guard wiring without making network requests."""
+"""Static audit of Gemini billing guard integration; never calls APIs."""
 
 from __future__ import annotations
 
@@ -16,19 +16,26 @@ SCRIPTS = ROOT / "scripts"
 GUARD_FILE = SCRIPTS / "gemini_api_guard.py"
 REPORT_FILE = ROOT / "output" / "config" / "gemini_guard_audit.json"
 
-VERSION = "gemini-guard-audit-v1"
+VERSION = "gemini-guard-audit-v2"
 
-GENERATION_SCRIPTS = (
-    "generate_story_plan.py",
-    "generate_story.py",
-    "generate_ai_story.py",
-    "generate_character_bible.py",
-    "generate_scenes.py",
+NETWORK_FUNCTIONS = {
+    "urlopen",
+    "post",
+    "request",
+    "generate_content",
+    "generatecontent",
+    "generate",
+    "predict",
+}
+
+GEMINI_MARKERS = (
+    "generativelanguage.googleapis.com",
+    "gemini",
+    "generateContent",
+    "generate_content",
 )
 
-
-def read_source(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+GUARD_FUNCTION = "require_gemini_generation"
 
 
 def atomic_json_write(path: Path, data: dict[str, Any]) -> None:
@@ -41,17 +48,34 @@ def atomic_json_write(path: Path, data: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def read_source(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def dotted_name(node: ast.AST) -> str:
+    """Convert a callable expression into a dotted name."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = dotted_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    if isinstance(node, ast.Call):
+        return dotted_name(node.func)
+    return ""
+
+
 def inspect_guard() -> dict[str, Any]:
     result: dict[str, Any] = {
         "file_exists": GUARD_FILE.is_file(),
         "syntax_valid": False,
         "has_guard_function": False,
         "has_explicit_opt_in": False,
+        "has_key_check": False,
         "error": None,
     }
 
     if not GUARD_FILE.is_file():
-        result["error"] = "scripts/gemini_api_guard.py is missing."
+        result["error"] = "Gemini guard file is missing."
         return result
 
     try:
@@ -59,20 +83,27 @@ def inspect_guard() -> dict[str, Any]:
         tree = ast.parse(source, filename=str(GUARD_FILE))
         result["syntax_valid"] = True
 
-        function_names = {
-            node.name
+        functions = {
+            node.name: node
             for node in ast.walk(tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
 
         result["has_guard_function"] = (
-            "require_gemini_generation" in function_names
+            GUARD_FUNCTION in functions
         )
-
         result["has_explicit_opt_in"] = (
             "I_ACCEPT_POTENTIAL_GEMINI_CHARGES" in source
             and "ALLOW_GEMINI_GENERATION" in source
         )
+
+        guard_node = functions.get(GUARD_FUNCTION)
+        if guard_node:
+            guard_source = ast.get_source_segment(source, guard_node) or ""
+            result["has_key_check"] = (
+                "api_key" in guard_source
+                and "raise" in guard_source
+            )
 
     except (OSError, UnicodeError, SyntaxError) as exc:
         result["error"] = str(exc)
@@ -80,82 +111,79 @@ def inspect_guard() -> dict[str, Any]:
     return result
 
 
-def inspect_generation_script(filename: str) -> dict[str, Any]:
-    path = SCRIPTS / filename
+def inspect_script(path: Path) -> dict[str, Any]:
+    relative = path.relative_to(ROOT).as_posix()
 
     result: dict[str, Any] = {
-        "file": f"scripts/{filename}",
-        "exists": path.is_file(),
+        "file": relative,
         "syntax_valid": False,
         "imports_guard": False,
         "calls_guard": False,
-        "guard_before_network": False,
+        "network_call_sites": [],
+        "gemini_markers": [],
         "status": "NOT_VERIFIED",
         "error": None,
     }
-
-    if not path.is_file():
-        result["status"] = "MISSING"
-        result["error"] = "Generation script does not exist."
-        return result
 
     try:
         source = read_source(path)
         tree = ast.parse(source, filename=str(path))
         result["syntax_valid"] = True
 
+        imports_guard = False
+        calls_guard = []
+        network_calls = []
+        gemini_markers = [
+            marker for marker in GEMINI_MARKERS if marker in source
+        ]
+
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 if node.module == "gemini_api_guard":
-                    result["imports_guard"] = any(
-                        alias.name == "require_gemini_generation"
+                    if any(
+                        alias.name == GUARD_FUNCTION
                         for alias in node.names
-                    )
+                    ):
+                        imports_guard = True
 
             elif isinstance(node, ast.Import):
                 if any(
                     alias.name == "gemini_api_guard"
                     for alias in node.names
                 ):
-                    result["imports_guard"] = True
+                    imports_guard = True
 
-        result["calls_guard"] = (
-            "require_gemini_generation" in source
-            and result["imports_guard"]
+            elif isinstance(node, ast.Call):
+                name = dotted_name(node.func)
+                leaf = name.rsplit(".", 1)[-1].lower()
+
+                if leaf == GUARD_FUNCTION.lower():
+                    calls_guard.append(node.lineno)
+
+                if leaf in NETWORK_FUNCTIONS:
+                    network_calls.append({
+                        "line": node.lineno,
+                        "call": name[:160],
+                    })
+
+        result["imports_guard"] = imports_guard
+        result["calls_guard"] = bool(calls_guard)
+        result["guard_call_lines"] = sorted(set(calls_guard))
+        result["network_call_sites"] = sorted(
+            network_calls,
+            key=lambda item: item["line"],
         )
+        result["gemini_markers"] = gemini_markers
 
-        # Conservative check: require an explicit guard call to appear
-        # textually before common network-request markers. This is a
-        # heuristic, not proof of execution order on every code path.
-        guard_position = source.find("require_gemini_generation(")
-
-        network_markers = (
-            "urlopen(",
-            ".urlopen(",
-            "requests.post(",
-            "requests.request(",
-            "httpx.post(",
-        )
-
-        network_positions = [
-            source.find(marker)
-            for marker in network_markers
-            if source.find(marker) >= 0
-        ]
-
-        result["guard_before_network"] = (
-            result["calls_guard"]
-            and guard_position >= 0
-            and bool(network_positions)
-            and guard_position < min(network_positions)
-        )
-
-        if result["guard_before_network"]:
-            result["status"] = "HEURISTIC_PASS"
-        elif result["calls_guard"]:
-            result["status"] = "REVIEW_REQUIRED"
+        if not gemini_markers:
+            result["status"] = "NO_GEMINI_MARKER"
+        elif not network_calls:
+            result["status"] = "REVIEW_REQUIRED_NO_DETECTED_NETWORK_CALL"
+        elif not imports_guard or not calls_guard:
+            result["status"] = "POTENTIAL_UNGUARDED_GEMINI_PATH"
         else:
-            result["status"] = "GUARD_NOT_WIRED"
+            # Presence is not proof that every request is guarded.
+            result["status"] = "MANUAL_REVIEW_REQUIRED"
 
     except (OSError, UnicodeError, SyntaxError) as exc:
         result["status"] = "ERROR"
@@ -165,36 +193,41 @@ def inspect_generation_script(filename: str) -> dict[str, Any]:
 
 
 def main() -> int:
-    log_lines: list[str] = []
+    if not SCRIPTS.is_dir():
+        print("ERROR: scripts/ directory is missing.")
+        return 1
 
     guard = inspect_guard()
-    scripts = [
-        inspect_generation_script(filename)
-        for filename in GENERATION_SCRIPTS
-    ]
+    files = sorted(SCRIPTS.glob("*.py"))
+    script_reports = [inspect_script(path) for path in files]
 
-    missing_or_unwired = [
-        item["file"]
-        for item in scripts
+    potential_paths = [
+        item for item in script_reports
         if item["status"] in {
-            "MISSING",
-            "GUARD_NOT_WIRED",
+            "POTENTIAL_UNGUARDED_GEMINI_PATH",
+            "MANUAL_REVIEW_REQUIRED",
+            "REVIEW_REQUIRED_NO_DETECTED_NETWORK_CALL",
             "ERROR",
         }
     ]
 
-    review_required = [
-        item["file"]
-        for item in scripts
-        if item["status"] == "REVIEW_REQUIRED"
+    unguarded_paths = [
+        item["file"] for item in script_reports
+        if item["status"] == "POTENTIAL_UNGUARDED_GEMINI_PATH"
     ]
 
-    guard_ready = (
-        guard["file_exists"]
-        and guard["syntax_valid"]
-        and guard["has_guard_function"]
-        and guard["has_explicit_opt_in"]
-    )
+    syntax_errors = [
+        item["file"] for item in script_reports
+        if not item["syntax_valid"]
+    ]
+
+    guard_ready = all((
+        guard["file_exists"],
+        guard["syntax_valid"],
+        guard["has_guard_function"],
+        guard["has_explicit_opt_in"],
+        guard["has_key_check"],
+    ))
 
     report = {
         "version": VERSION,
@@ -202,44 +235,58 @@ def main() -> int:
         "network_requests_made": 0,
         "generation_performed": False,
         "guard": guard,
-        "generation_scripts": scripts,
+        "scripts_scanned": len(script_reports),
+        "scripts": script_reports,
         "summary": {
             "guard_definition_ready": guard_ready,
-            "scripts_checked": len(scripts),
-            "missing_or_unwired": missing_or_unwired,
-            "review_required": review_required,
+            "potential_gemini_paths": len(potential_paths),
+            "potentially_unguarded_paths": unguarded_paths,
+            "syntax_errors": syntax_errors,
             "fully_verified": False,
             "note": (
-                "Static source inspection cannot prove runtime protection. "
-                "A HEURISTIC_PASS still requires manual review of every "
-                "Gemini request path."
+                "Static scanning cannot prove runtime protection. "
+                "Review every potential Gemini request path, including "
+                "indirect SDK calls, imported helpers, subprocesses, "
+                "and dynamically constructed URLs. This audit sends "
+                "no network requests."
             ),
         },
     }
 
     atomic_json_write(REPORT_FILE, report)
 
-    print("===== GEMINI GUARD AUDIT =====")
-    print("Network requests: 0")
+    print("===== GEMINI GUARD STATIC AUDIT =====")
+    print("Network requests made: 0")
+    print("Generation performed: False")
     print("Guard definition ready:", guard_ready)
+    print("Python scripts scanned:", len(script_reports))
+    print("Potential paths requiring review:", len(potential_paths))
 
-    for item in scripts:
+    for item in script_reports:
+        if item["status"] != "NO_GEMINI_MARKER":
+            print(
+                f"{item['status']}: {item['file']} "
+                f"(guard_import={item['imports_guard']}, "
+                f"guard_call={item['calls_guard']}, "
+                f"network_sites={len(item['network_call_sites'])})"
+            )
+
+    print("Report:", REPORT_FILE.relative_to(ROOT))
+
+    if not guard_ready or unguarded_paths or syntax_errors:
+        print("AUDIT RESULT: FAIL — inspect the report before workflow run.")
+        return 1
+
+    if potential_paths:
         print(
-            f"{item['status']}: {item['file']} "
-            f"(import={item['imports_guard']}, "
-            f"call={item['calls_guard']}, "
-            f"before_network={item['guard_before_network']})"
+            "AUDIT RESULT: REVIEW REQUIRED — static checks cannot certify "
+            "billing protection."
         )
-
-    print("Report:", REPORT_FILE)
-
-    if not guard_ready or missing_or_unwired or review_required:
-        print("AUDIT RESULT: guard integration needs work.")
         return 1
 
     print(
-        "AUDIT RESULT: static checks passed; "
-        "runtime billing protection is not proven."
+        "AUDIT RESULT: no potential Gemini paths detected by these "
+        "heuristics; runtime protection is still not proven."
     )
     return 0
 
