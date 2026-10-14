@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Burn correctly selected fonts into scene videos with resumable checkpoints."""
+"""Burn scene captions with adaptive contrast and resumable checkpoints."""
 
 from __future__ import annotations
 
@@ -30,10 +31,10 @@ AUDIO_MANIFEST = OUT / "narration" / "audio_jobs.json"
 PROGRESS_FILE = OUT / "captions" / "burn_progress.json"
 FINAL_SRT = OUT / "captions" / "final_captions.srt"
 
-VERSION = "burn-captions-v17"
+VERSION = "burn-captions-v18-adaptive-contrast"
 MIN_VIDEO_BYTES = 1000
-DURATION_TOLERANCE = 0.8
-CAPTION_STYLE = "bottom-centered;white-text;black-outline;dark-box;max-two-lines"
+MIN_AUDIO_BYTES = 100
+DURATION_TOLERANCE = 1.0
 
 
 def log(*args):
@@ -57,7 +58,7 @@ def write_json(path, data):
     temporary.replace(path)
 
 
-def sha256_file(path):
+def digest_file(path):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -65,7 +66,7 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def signature(data):
+def digest_data(data):
     raw = json.dumps(
         data, ensure_ascii=False, sort_keys=True
     ).encode("utf-8")
@@ -91,6 +92,10 @@ def safe_file(value, label, minimum_bytes=1):
     return path
 
 
+def relative(path):
+    return path.resolve().relative_to(ROOT.resolve()).as_posix()
+
+
 def run(command, label, timeout=300):
     result = subprocess.run(
         command,
@@ -101,7 +106,7 @@ def run(command, label, timeout=300):
     )
     if result.returncode:
         raise RuntimeError(
-            f"{label} failed:\n{result.stderr[-2500:]}"
+            f"{label} failed: {result.stderr[-2000:]}"
         )
     return result
 
@@ -114,10 +119,15 @@ def media_info(path):
             "format=duration:stream=codec_type,width,height",
             "-of", "json", str(path),
         ],
-        f"ffprobe {path.name}",
+        f"Inspect {path.name}",
     )
 
-    data = json.loads(result.stdout)
+    try:
+        data = json.loads(result.stdout)
+        duration = float(data["format"]["duration"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"Invalid media metadata: {path.name}") from exc
+
     streams = data.get("streams", [])
     video = next(
         (item for item in streams if item.get("codec_type") == "video"),
@@ -127,7 +137,6 @@ def media_info(path):
         (item for item in streams if item.get("codec_type") == "audio"),
         None,
     )
-    duration = float(data.get("format", {}).get("duration") or 0)
 
     if duration <= 0:
         raise RuntimeError(f"Invalid media duration: {path.name}")
@@ -159,12 +168,7 @@ def find_path(row, keys):
     return None
 
 
-def relative(path):
-    return path.resolve().relative_to(ROOT.resolve()).as_posix()
-
-
 def resolve_font(family):
-    """Resolve the selected family to an installed font file."""
     if not shutil.which("fc-match"):
         raise RuntimeError("fontconfig fc-match is required")
 
@@ -172,19 +176,14 @@ def resolve_font(family):
         ["fc-match", "-f", "%{file}\n", family],
         f"Resolve caption font {family}",
     )
-
-    candidate = result.stdout.strip().splitlines()
-    if not candidate:
+    candidates = result.stdout.strip().splitlines()
+    if not candidates:
         raise RuntimeError(f"No installed font found for {family!r}")
 
-    font_path = Path(candidate[0]).resolve()
-    if not font_path.is_file():
-        raise RuntimeError(
-            f"Font file not found for {family!r}: {font_path}"
-        )
-
-    # Confirm the selected family really resolves to a usable file.
-    return font_path
+    path = Path(candidates[0]).resolve()
+    if not path.is_file():
+        raise RuntimeError(f"Font file not found: {path}")
+    return path
 
 
 def load_caption_mapping(parts, scenes):
@@ -196,18 +195,16 @@ def load_caption_mapping(parts, scenes):
     for row in get_rows(data, "captions"):
         if not isinstance(row, dict):
             continue
-
         try:
             key = (int(row["part"]), int(row["scene"]))
-        except (KeyError, ValueError, TypeError):
+        except (KeyError, TypeError, ValueError):
             continue
 
         text = str(row.get("text", "")).strip()
         if not text:
-            raise RuntimeError(f"Empty caption text: {key}")
+            raise RuntimeError(f"Empty caption: {key}")
         if key in mapping:
             raise RuntimeError(f"Duplicate caption mapping: {key}")
-
         mapping[key] = text
 
     expected = {
@@ -221,7 +218,6 @@ def load_caption_mapping(parts, scenes):
             f"missing={sorted(expected - set(mapping))}; "
             f"extra={sorted(set(mapping) - expected)}"
         )
-
     return mapping
 
 
@@ -234,30 +230,29 @@ def load_audio_mapping(parts, scenes):
     for row in get_rows(data, "jobs", "audio_jobs"):
         if not isinstance(row, dict):
             continue
-
         try:
             key = (int(row["part"]), int(row["scene"]))
-        except (KeyError, ValueError, TypeError):
+        except (KeyError, TypeError, ValueError):
             continue
 
         if str(row.get("status", "")).lower() != "completed":
-            raise RuntimeError(f"Narration is not completed: {key}")
-
-        audio_path = find_path(
-            row, ("output", "audio_path", "path", "file", "audio")
-        )
-        audio = safe_file(audio_path, f"Narration {key}", 100)
-        info = media_info(audio)
-
-        if not info["has_audio"]:
-            raise RuntimeError(f"Narration has no audio stream: {key}")
+            raise RuntimeError(f"Narration incomplete: {key}")
         if key in mapping:
             raise RuntimeError(f"Duplicate narration mapping: {key}")
 
+        path = safe_file(
+            find_path(row, ("output", "audio_path", "path", "file", "audio")),
+            f"Narration {key}",
+            MIN_AUDIO_BYTES,
+        )
+        info = media_info(path)
+        if not info["has_audio"]:
+            raise RuntimeError(f"Narration has no audio stream: {key}")
+
         mapping[key] = {
-            "path": audio,
+            "path": path,
             "duration": info["duration"],
-            "sha256": sha256_file(audio),
+            "sha256": digest_file(path),
         }
 
     expected = {
@@ -267,14 +262,14 @@ def load_audio_mapping(parts, scenes):
     }
     if set(mapping) != expected:
         raise RuntimeError(
-            "Narration mapping does not match configured scenes"
+            "Narration mapping does not match configured scenes; "
+            f"missing={sorted(expected - set(mapping))}"
         )
-
     return mapping
 
 
 def wrap_caption(text, max_chars=38):
-    """Wrap text into at most two lines and mark truncation."""
+    """Produce no more than two lines; truncate excess text explicitly."""
     clean = re.sub(r"\s+", " ", str(text)).strip()
     if not clean:
         return ""
@@ -282,41 +277,47 @@ def wrap_caption(text, max_chars=38):
     words = clean.split()
     lines = []
     current = ""
+    consumed = 0
     truncated = False
 
     for word in words:
-        candidate = word if not current else f"{current} {word}"
-
+        candidate = word if not current else current + " " + word
         if len(candidate) <= max_chars:
             current = candidate
+            consumed += 1
             continue
 
-        if not current:
-            current = word[:max_chars]
+        if current:
+            lines.append(current)
+        elif not lines:
+            lines.append(word[:max_chars])
+            consumed += 1
 
-        lines.append(current)
-        current = word
-
-        if len(lines) == 2:
-            truncated = True
+        current = ""
+        if len(lines) >= 2:
+            truncated = consumed < len(words)
             break
 
-    if len(lines) < 2 and current:
-        lines.append(current)
-    elif current and len(lines) >= 2:
-        truncated = True
+        # Start the next line with the current word if it fits.
+        if len(word) <= max_chars:
+            current = word
+            consumed += 1
+        else:
+            current = word[:max_chars]
+            consumed += 1
+            truncated = True
 
-    # Detect words not represented in the rendered lines.
-    rendered_words = " ".join(lines).split()
-    if len(rendered_words) < len(words):
+    if current and len(lines) < 2:
+        lines.append(current)
+
+    if consumed < len(words):
         truncated = True
 
     if truncated and lines:
         last = lines[-1].rstrip()
         if not last.endswith("…"):
-            if len(last) >= max_chars:
-                last = last[:max_chars - 1].rstrip()
-            lines[-1] = last + "…"
+            last = last[:max(1, max_chars - 1)].rstrip() + "…"
+        lines[-1] = last
 
     return r"\N".join(lines[:2])
 
@@ -343,21 +344,63 @@ def escape_filter_path(path):
     return value
 
 
-def caption_filter(srt_path, font_family, font_path, size, width, height):
-    """Use a real font directory and preserve the selected family."""
-    margin_v = max(32, int(height * 0.055))
+def estimate_frame_luma(video, timestamp):
+    """Return approximate average frame brightness on a 0-255 scale."""
+    result = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-ss", f"{max(0, timestamp):.3f}",
+            "-i", str(video),
+            "-frames:v", "1",
+            "-vf", "scale=1:1:flags=area,format=gray",
+            "-f", "rawvideo", "-",
+        ],
+        capture_output=True,
+        timeout=90,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout:
+        log("WARNING: frame brightness sampling failed; using safe dark style")
+        return 64
+
+    return int(result.stdout[0])
+
+
+def choose_contrast(video, duration):
+    """Choose caption foreground and backing box based on sampled luminance."""
+    luma = estimate_frame_luma(video, duration / 2.0)
+
+    if luma >= 145:
+        return {
+            "average_luma": luma,
+            "mode": "light-background",
+            "primary": "&H00000000",
+            "outline": "&H00FFFFFF",
+            "back": "&H70FFFFFF",
+        }
+
+    return {
+        "average_luma": luma,
+        "mode": "dark-background",
+        "primary": "&H00FFFFFF",
+        "outline": "&H00000000",
+        "back": "&H90000000",
+    }
+
+
+def caption_filter(srt_path, family, font_path, size, width, height, contrast):
     font_size = max(12, min(int(size), int(height * 0.045)))
+    margin_v = max(32, int(height * 0.055))
 
     subtitle_file = escape_filter_path(srt_path)
     font_directory = escape_filter_path(font_path.parent)
 
-    # The font path is a directory here, not the font file itself.
     style = (
-        f"FontName={font_family},"
+        f"FontName={family},"
         f"FontSize={font_size},"
-        "PrimaryColour=&H00FFFFFF,"
-        "OutlineColour=&H00000000,"
-        "BackColour=&H70000000,"
+        f"PrimaryColour={contrast['primary']},"
+        f"OutlineColour={contrast['outline']},"
+        f"BackColour={contrast['back']},"
         "BorderStyle=3,"
         "Outline=2,"
         "Shadow=0,"
@@ -374,39 +417,26 @@ def caption_filter(srt_path, font_family, font_path, size, width, height):
     )
 
 
-def burn_scene(
-    source,
-    output,
-    text,
-    font_family,
-    font_path,
-    size,
-    duration,
-    resolution,
-):
+def burn_scene(source, output, text, family, font_path, size,
+               duration, resolution, contrast):
     width, height = resolution
     output.parent.mkdir(parents=True, exist_ok=True)
 
     temporary_srt = output.with_suffix(".srt")
-    temporary_output = output.with_suffix(".tmp.mp4")
-    temporary_output.unlink(missing_ok=True)
+    temporary_video = output.with_name(output.stem + ".tmp.mp4")
+    temporary_video.unlink(missing_ok=True)
 
-    wrapped = wrap_caption(text)
-    subtitle_text = wrapped.replace(r"\N", "\n")
+    caption_text = wrap_caption(text).replace(r"\N", "\n")
     temporary_srt.write_text(
         "1\n"
         f"{srt_time(0)} --> {srt_time(duration)}\n"
-        f"{subtitle_text}\n",
+        f"{caption_text}\n",
         encoding="utf-8",
     )
 
     filter_value = caption_filter(
-        temporary_srt,
-        font_family,
-        font_path,
-        size,
-        width,
-        height,
+        temporary_srt, family, font_path, size,
+        width, height, contrast,
     )
 
     try:
@@ -427,81 +457,67 @@ def burn_scene(
                 "-af", "aresample=async=1:first_pts=0",
                 "-t", f"{duration:.3f}",
                 "-movflags", "+faststart",
-                str(temporary_output),
+                str(temporary_video),
             ],
-            f"Burn captions {output.name}",
+            f"Burn captions into {output.name}",
+            timeout=900,
         )
 
-        info = media_info(temporary_output)
+        info = media_info(temporary_video)
         if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(
-                f"Captioned video lacks video/audio: {output.name}"
-            )
-
+            raise RuntimeError(f"Captioned scene missing audio/video: {output.name}")
         if (info["width"], info["height"]) != resolution:
-            raise RuntimeError(
-                f"Captioned resolution mismatch: {output.name}"
-            )
-
+            raise RuntimeError(f"Captioned resolution mismatch: {output.name}")
         if abs(info["duration"] - duration) > DURATION_TOLERANCE:
-            raise RuntimeError(
-                f"Captioned duration mismatch: {output.name}"
-            )
+            raise RuntimeError(f"Captioned duration mismatch: {output.name}")
 
-        temporary_output.replace(output)
-
+        temporary_video.replace(output)
     finally:
         temporary_srt.unlink(missing_ok=True)
-        temporary_output.unlink(missing_ok=True)
+        temporary_video.unlink(missing_ok=True)
 
 
 def concat_videos(paths, output):
     if not paths:
-        raise RuntimeError("Cannot concatenate an empty video list")
+        raise RuntimeError(f"No videos supplied for {output.name}")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     list_file = output.with_suffix(".concat.txt")
-    temporary_output = output.with_suffix(".tmp.mp4")
+    temporary = output.with_name(output.stem + ".tmp.mp4")
 
     lines = []
     for path in paths:
-        escaped = str(path.resolve()).replace("'", "'\\''")
-        lines.append(f"file '{escaped}'")
+        resolved = str(path.resolve())
+        if "\n" in resolved or "\r" in resolved:
+            raise RuntimeError("Unexpected newline in video path")
+        lines.append("file '" + resolved.replace("'", "'\\''") + "'")
 
     list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    temporary_output.unlink(missing_ok=True)
+    temporary.unlink(missing_ok=True)
 
     try:
         run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", str(list_file),
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "20",
+                "-f", "concat", "-safe", "0", "-i", str(list_file),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-b:a", "160k",
-                "-movflags", "+faststart",
-                str(temporary_output),
+                "-c:a", "aac", "-b:a", "160k",
+                "-movflags", "+faststart", str(temporary),
             ],
-            f"Merge video {output.name}",
-            timeout=900,
+            f"Merge {output.name}",
+            timeout=1800,
         )
-
-        info = media_info(temporary_output)
+        info = media_info(temporary)
         if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(f"Merged video invalid: {output.name}")
-
-        temporary_output.replace(output)
-
+            raise RuntimeError(f"Merged video missing audio/video: {output.name}")
+        temporary.replace(output)
     finally:
         list_file.unlink(missing_ok=True)
-        temporary_output.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
-def build_srt(captions, audio, parts, scenes, render_rows):
+def build_final_srt(captions, audio, rendered, parts, scenes):
     lines = []
     cue_number = 1
     cursor = 0.0
@@ -509,25 +525,21 @@ def build_srt(captions, audio, parts, scenes, render_rows):
     for part in range(1, parts + 1):
         for scene in range(1, scenes + 1):
             key = (part, scene)
-            render = render_rows[key]
             duration = min(
-                render["duration"],
+                rendered[key]["duration"],
                 audio[key]["duration"],
             )
-
             if duration <= 0:
                 raise RuntimeError(f"Invalid caption duration: {key}")
 
-            plain_text = wrap_caption(captions[key]).replace(r"\N", "\n")
             lines.extend([
                 str(cue_number),
                 f"{srt_time(cursor)} --> {srt_time(cursor + duration)}",
-                plain_text,
+                wrap_caption(captions[key]).replace(r"\N", "\n"),
                 "",
             ])
-
             cue_number += 1
-            cursor += render["duration"]
+            cursor += rendered[key]["duration"]
 
     FINAL_SRT.parent.mkdir(parents=True, exist_ok=True)
     temporary = FINAL_SRT.with_suffix(".srt.tmp")
@@ -544,30 +556,23 @@ def main():
     mode = get_format(config)
     parts = int(get_parts(config))
     scenes = int(get_scenes(config))
-
     if mode not in ("short", "full"):
         raise RuntimeError(f"Unsupported format: {mode}")
 
     resolution = (1280, 720) if mode == "full" else (720, 1280)
 
-    font_family = get_caption_font(config)
+    family = get_caption_font(config)
     configured_size = get_caption_font_size(config)
-
     if str(configured_size).strip().lower() == "auto":
         font_size = 32 if mode == "full" else 46
     else:
         font_size = int(configured_size)
 
     if not 8 <= font_size <= 160:
-        raise RuntimeError("Resolved caption font size is outside safe limits")
+        raise RuntimeError("Caption font size outside safe limits")
 
-    font_path = resolve_font(font_family)
-    font_sha256 = sha256_file(font_path)
-
-    log("CAPTION FONT FAMILY:", font_family)
-    log("CAPTION FONT FILE:", font_path)
-    log("CAPTION FONT SIZE:", font_size)
-
+    font_path = resolve_font(family)
+    font_hash = digest_file(font_path)
     captions = load_caption_mapping(parts, scenes)
     audio = load_audio_mapping(parts, scenes)
 
@@ -579,26 +584,26 @@ def main():
     expected_count = parts * scenes
     if len(rows) != expected_count:
         raise RuntimeError(
-            f"Expected {expected_count} rendered scenes, found {len(rows)}"
+            f"Expected {expected_count} rendered scenes; found {len(rows)}"
         )
 
     render_rows = {}
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
-            raise RuntimeError(f"Invalid render row: {index}")
-
-        part = int(row.get("part", 0))
-        scene = int(row.get("local_scene", row.get("scene", 0)))
-        global_scene = int(row.get("global_scene", index))
+            raise RuntimeError(f"Invalid rendered scene row {index}")
+        try:
+            part = int(row["part"])
+            scene = int(row.get("local_scene", row.get("scene", 0)))
+            global_scene = int(row.get("global_scene", index))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"Invalid scene mapping at row {index}") from exc
 
         expected_part = (index - 1) // scenes + 1
         expected_scene = (index - 1) % scenes + 1
-
         if (part, scene, global_scene) != (
             expected_part, expected_scene, index
         ):
-            raise RuntimeError(f"Render scene order mismatch: {index}")
-
+            raise RuntimeError(f"Rendered scene order mismatch at row {index}")
         render_rows[(part, scene)] = row
 
     progress = read_json(PROGRESS_FILE, {})
@@ -606,10 +611,13 @@ def main():
     if not isinstance(cached, dict):
         cached = {}
 
-    output_dir = OUT / "scene_renders" / "captioned"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    captioned_dir = OUT / "scene_renders" / "captioned"
+    captioned_dir.mkdir(parents=True, exist_ok=True)
     completed = {}
+
+    log("CAPTION FONT:", family)
+    log("FONT SIZE:", font_size)
+    log("ADAPTIVE CONTRAST: enabled")
 
     for index in range(1, expected_count + 1):
         part = (index - 1) // scenes + 1
@@ -617,38 +625,40 @@ def main():
         key = (part, scene)
         row = render_rows[key]
 
-        source_value = find_path(
-            row, ("source_rendered_video", "video", "output")
-        )
         source = safe_file(
-            source_value, f"Source scene {key}", MIN_VIDEO_BYTES
+            find_path(
+                row,
+                ("source_rendered_video", "source_video", "video", "output"),
+            ),
+            f"Source scene {key}",
+            MIN_VIDEO_BYTES,
         )
-
         source_info = media_info(source)
-        if not source_info["has_video"]:
-            raise RuntimeError(f"Source has no video stream: {key}")
 
+        if not source_info["has_video"] or not source_info["has_audio"]:
+            raise RuntimeError(f"Source scene missing audio/video: {key}")
         if (source_info["width"], source_info["height"]) != resolution:
             raise RuntimeError(f"Source resolution mismatch: {key}")
 
         duration = min(source_info["duration"], audio[key]["duration"])
         if duration <= 0:
-            raise RuntimeError(f"Invalid source/audio duration: {key}")
+            raise RuntimeError(f"Invalid source duration: {key}")
 
-        target = output_dir / f"part_{part:02d}_scene_{scene:03d}.mp4"
+        contrast = choose_contrast(source, duration)
+        target = captioned_dir / f"part_{part:02d}_scene_{scene:03d}.mp4"
 
-        scene_signature = signature({
+        scene_signature = digest_data({
             "version": VERSION,
-            "style": CAPTION_STYLE,
-            "source_sha256": sha256_file(source),
-            "narration_sha256": audio[key]["sha256"],
+            "source_sha256": digest_file(source),
+            "audio_sha256": audio[key]["sha256"],
             "caption": captions[key],
-            "font_family": font_family,
-            "font_file": str(font_path),
-            "font_sha256": font_sha256,
+            "font_family": family,
+            "font_path": str(font_path),
+            "font_sha256": font_hash,
             "font_size": font_size,
             "duration": round(duration, 4),
             "resolution": resolution,
+            "contrast": contrast,
         })
 
         old = cached.get(f"{part}:{scene}", {})
@@ -659,30 +669,23 @@ def main():
                 info = media_info(target)
                 reused = (
                     old.get("signature") == scene_signature
-                    and old.get("sha256") == sha256_file(target)
+                    and old.get("sha256") == digest_file(target)
                     and info["has_video"]
                     and info["has_audio"]
                     and (info["width"], info["height"]) == resolution
-                    and abs(info["duration"] - duration)
-                    <= DURATION_TOLERANCE
+                    and abs(info["duration"] - duration) <= DURATION_TOLERANCE
                 )
             except Exception:
                 reused = False
 
         if not reused:
             burn_scene(
-                source,
-                target,
-                captions[key],
-                font_family,
-                font_path,
-                font_size,
-                duration,
-                resolution,
+                source, target, captions[key], family, font_path,
+                font_size, duration, resolution, contrast,
             )
 
-        digest = sha256_file(target)
-        info = media_info(target)
+        target_hash = digest_file(target)
+        target_info = media_info(target)
 
         completed[key] = {
             "part": part,
@@ -691,17 +694,19 @@ def main():
             "status": "completed",
             "source_rendered_video": relative(source),
             "video": relative(target),
-            "duration": round(info["duration"], 4),
+            "duration": round(target_info["duration"], 4),
             "captions_burned": True,
             "signature": scene_signature,
-            "sha256": digest,
+            "sha256": target_hash,
             "cache_reused": reused,
+            "caption_contrast": contrast,
         }
 
         cached[f"{part}:{scene}"] = {
             "signature": scene_signature,
-            "sha256": digest,
+            "sha256": target_hash,
             "path": relative(target),
+            "caption_contrast": contrast,
         }
 
         write_json(PROGRESS_FILE, {
@@ -713,48 +718,44 @@ def main():
         })
 
         log(
-            f"{'REUSED' if reused else 'BURNED'}: "
-            f"part={part} scene={scene} "
-            f"({index}/{expected_count})"
+            f"{'REUSED' if reused else 'BURNED'} "
+            f"{index}/{expected_count}: part={part} scene={scene}; "
+            f"contrast={contrast['mode']} luma={contrast['average_luma']}"
         )
 
-    part_paths = []
     parts_dir = OUT / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
+    part_paths = []
 
     for part in range(1, parts + 1):
-        ordered = [
+        scene_paths = [
             ROOT / completed[(part, scene)]["video"]
             for scene in range(1, scenes + 1)
         ]
-
-        part_output = parts_dir / f"part_{part:02d}.mp4"
-        concat_videos(ordered, part_output)
-        part_paths.append(part_output)
-        log("PART READY:", relative(part_output))
+        part_path = parts_dir / f"part_{part:02d}.mp4"
+        concat_videos(scene_paths, part_path)
+        part_paths.append(part_path)
+        log("PART READY:", relative(part_path))
 
     videos_dir = OUT / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
-
     final_path = videos_dir / "katha_lok_ai_final.mp4"
     concat_videos(part_paths, final_path)
 
     alias_name = (
-        "katha_lok_ai_short.mp4"
-        if mode == "short"
+        "katha_lok_ai_short.mp4" if mode == "short"
         else "katha_lok_ai_full.mp4"
     )
     alias_path = videos_dir / alias_name
     shutil.copy2(final_path, alias_path)
 
-    opposite_name = (
-        "katha_lok_ai_full.mp4"
-        if mode == "short"
+    opposite = videos_dir / (
+        "katha_lok_ai_full.mp4" if mode == "short"
         else "katha_lok_ai_short.mp4"
     )
-    (videos_dir / opposite_name).unlink(missing_ok=True)
+    opposite.unlink(missing_ok=True)
 
-    build_srt(captions, audio, parts, scenes, render_rows)
+    build_final_srt(captions, audio, completed, parts, scenes)
     final_info = media_info(final_path)
 
     final_manifest = {
@@ -763,8 +764,8 @@ def main():
         "version": VERSION,
         "format": mode,
         "captions_burned": True,
-        "caption_style": CAPTION_STYLE,
-        "caption_font": font_family,
+        "caption_style": "adaptive-contrast;max-two-lines;bottom-centered",
+        "caption_font": family,
         "caption_font_file": str(font_path),
         "caption_font_size": font_size,
         "completed_count": expected_count,
@@ -778,7 +779,6 @@ def main():
         "alias": relative(alias_path),
         "duration": round(final_info["duration"], 4),
         "resolution": list(resolution),
-        "fps": manifest.get("fps"),
         "caption_manifest": relative(CAPTION_MANIFEST),
         "final_srt": relative(FINAL_SRT),
     }
@@ -796,9 +796,7 @@ def main():
     log("CAPTION BURN COMPLETE")
     log("FORMAT:", mode)
     log("SCENES:", expected_count)
-    log("FONT:", font_family, "| SIZE:", font_size)
     log("FINAL VIDEO:", relative(final_path))
-    log("ALIAS:", relative(alias_path))
     log("SRT:", relative(FINAL_SRT))
 
 
