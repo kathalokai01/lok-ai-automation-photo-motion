@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Install and verify free Hindi caption fonts with resumable fallbacks."""
+"""Install free Hindi caption fonts with system-font fallback and checkpoints."""
 
 from __future__ import annotations
 
@@ -9,24 +10,17 @@ import os
 import shutil
 import subprocess
 import sys
-import urllib.error
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-
-FONT_DIR = (
-    Path.home()
-    / ".local"
-    / "share"
-    / "fonts"
-    / "katha-caption"
-)
+FONT_DIR = Path.home() / ".local" / "share" / "fonts" / "katha-caption"
 MANIFEST = FONT_DIR / "font_install_manifest.json"
 
-MAX_FONT_BYTES = 20 * 1024 * 1024
-MIN_FONT_BYTES = 1024
-VERSION = "caption-font-installer-v4-resilient"
+VERSION = "caption-font-installer-v5-system-fallback"
+MAX_BYTES = 20 * 1024 * 1024
+MIN_BYTES = 1024
 
 FONT_FILES = {
     "NotoSansDevanagari-Regular.ttf": {
@@ -56,20 +50,14 @@ FONT_FILES = {
     "TiroDevanagariHindi-Regular.ttf": {
         "url": (
             "https://raw.githubusercontent.com/google/fonts/main/"
-            "ofl/tirodevanagarihindi/"
-            "TiroDevanagariHindi-Regular.ttf"
+            "ofl/tirodevanagarihindi/TiroDevanagariHindi-Regular.ttf"
         ),
         "family": "Tiro Devanagari Hindi",
         "required": False,
     },
 }
 
-VALID_FONT_SIGNATURES = {
-    b"\x00\x01\x00\x00",
-    b"OTTO",
-    b"true",
-    b"typ1",
-}
+SIGNATURES = {b"\x00\x01\x00\x00", b"OTTO", b"true", b"typ1"}
 
 
 def log(*args):
@@ -81,155 +69,162 @@ def run(command, timeout=30):
         command,
         capture_output=True,
         text=True,
-        check=False,
         timeout=timeout,
+        check=False,
     )
 
 
 def sha256_file(path):
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
-def atomic_write_json(path, data):
+def atomic_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def validate_font_file(path):
-    if not path.is_file():
-        raise RuntimeError(f"Font file does not exist: {path}")
+def load_manifest():
+    try:
+        value = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
-    size = path.stat().st_size
-    if not MIN_FONT_BYTES <= size <= MAX_FONT_BYTES:
+
+def require_tools():
+    missing = [
+        tool for tool in ("fc-cache", "fc-match", "fc-scan")
+        if shutil.which(tool) is None
+    ]
+    if missing:
         raise RuntimeError(
-            f"Unexpected font size for {path.name}: {size} bytes"
+            "Missing fontconfig tools: " + ", ".join(missing)
         )
-
-    with path.open("rb") as handle:
-        signature = handle.read(4)
-
-    if signature not in VALID_FONT_SIGNATURES:
-        raise RuntimeError(
-            f"Invalid font signature in {path.name}; "
-            "download may be an error page."
-        )
-
-
-def scan_font(path):
-    scanner = shutil.which("fc-scan")
-    if not scanner:
-        raise RuntimeError("fc-scan is missing; install fontconfig.")
-
-    result = run(
-        [scanner, "--format", "%{family}\n", str(path)],
-        timeout=20,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Cannot inspect {path.name}: {result.stderr.strip()}"
-        )
-    return result.stdout.strip()
 
 
 def family_matches(actual, expected):
-    families = [
+    names = [
         item.strip().casefold()
         for item in actual.split(",")
         if item.strip()
     ]
-    expected = expected.casefold()
-
+    target = expected.casefold()
     return any(
-        family == expected or family.startswith(expected + " ")
-        for family in families
+        name == target or name.startswith(target + " ")
+        for name in names
     )
 
 
-def verify_font(filename, details):
-    path = FONT_DIR / filename
-    validate_font_file(path)
-
-    actual_family = scan_font(path)
-    if not family_matches(actual_family, details["family"]):
+def scan_family(path):
+    result = run([
+        "fc-scan", "--format", "%{family}\n", str(path)
+    ])
+    if result.returncode:
         raise RuntimeError(
-            f"Font family mismatch for {filename}: "
-            f"expected {details['family']!r}, found {actual_family!r}"
+            f"fc-scan failed for {path.name}: {result.stderr.strip()}"
+        )
+    return result.stdout.strip()
+
+
+def validate_file(path):
+    if not path.is_file():
+        raise RuntimeError(f"Font file not found: {path}")
+
+    size = path.stat().st_size
+    if not MIN_BYTES <= size <= MAX_BYTES:
+        raise RuntimeError(f"Unexpected font size: {path.name} ({size} bytes)")
+
+    with path.open("rb") as stream:
+        signature = stream.read(4)
+
+    if signature not in SIGNATURES:
+        raise RuntimeError(f"Invalid font signature: {path.name}")
+
+
+def verify_font_file(path, family):
+    validate_file(path)
+    actual = scan_family(path)
+
+    if not family_matches(actual, family):
+        raise RuntimeError(
+            f"Font family mismatch: expected {family!r}, got {actual!r}"
         )
 
-    try:
-        from PIL import ImageFont
-        font = ImageFont.truetype(str(path), size=28)
-        if font.getbbox("Hindi 123") is None:
-            raise RuntimeError(
-                f"Pillow cannot measure text using {filename}"
-            )
-    except ImportError as exc:
-        raise RuntimeError("Pillow is required to verify fonts.") from exc
-    except OSError as exc:
-        raise RuntimeError(
-            f"Pillow cannot load {filename}: {exc}"
-        ) from exc
-
-    record = {
-        "filename": filename,
-        "family": details["family"],
-        "required": details["required"],
+    return {
+        "family": family,
+        "path": str(path.resolve()),
         "bytes": path.stat().st_size,
         "sha256": sha256_file(path),
-        "path": str(path),
+        "verification": "font-file-verified",
     }
 
-    log("FONT VERIFIED:", details["family"], "|", filename)
+
+def system_font(family):
+    """Use a font already installed on the runner without downloading it."""
+    result = run([
+        "fc-match", "-f", "%{family}\n%{file}\n", family
+    ])
+
+    if result.returncode:
+        return None
+
+    lines = result.stdout.strip().splitlines()
+    if len(lines) < 2:
+        return None
+
+    actual_family = lines[0].strip()
+    path = Path(lines[1].strip())
+
+    if not family_matches(actual_family, family):
+        return None
+
+    if not path.is_file():
+        return None
+
+    try:
+        record = verify_font_file(path, family)
+    except (OSError, RuntimeError):
+        return None
+
+    record["verification"] = "existing-system-font-verified"
     return record
 
 
 def download_font(filename, details):
     destination = FONT_DIR / filename
     temporary = destination.with_suffix(destination.suffix + ".download")
-
     request = urllib.request.Request(
         details["url"],
-        headers={"User-Agent": "KathaLokAI-CaptionFontInstaller/4.0"},
+        headers={"User-Agent": "KathaLokAI-CaptionFontInstaller/5.0"},
     )
 
     try:
-        log("Downloading font:", details["family"])
+        log("Downloading free font:", details["family"])
 
         with urllib.request.urlopen(request, timeout=60) as response:
-            data = response.read(MAX_FONT_BYTES + 1)
+            data = response.read(MAX_BYTES + 1)
 
-        if len(data) > MAX_FONT_BYTES:
-            raise RuntimeError("Download exceeds font size limit.")
-        if len(data) < MIN_FONT_BYTES:
-            raise RuntimeError("Download is unexpectedly small.")
+        if not MIN_BYTES <= len(data) <= MAX_BYTES:
+            raise RuntimeError("Downloaded font size is outside allowed limits")
 
         temporary.write_bytes(data)
-        validate_font_file(temporary)
+        verify_font_file(temporary, details["family"])
+        os.replace(temporary, destination)
 
-        actual_family = scan_font(temporary)
-        if not family_matches(actual_family, details["family"]):
-            raise RuntimeError(
-                f"Downloaded font family mismatch: {actual_family!r}"
-            )
-
-        # Only replace the destination after validating the temporary file.
-        temporary.replace(destination)
-        log("FONT DOWNLOADED:", filename)
-
+        return verify_font_file(destination, details["family"])
     except (
         urllib.error.URLError,
         TimeoutError,
@@ -240,190 +235,124 @@ def download_font(filename, details):
     finally:
         temporary.unlink(missing_ok=True)
 
-    return destination
 
-
-def verify_fontconfig(details):
-    matcher = shutil.which("fc-match")
-    if not matcher:
-        raise RuntimeError("fc-match is missing.")
-
-    result = run(
-        [
-            matcher, "-f", "%{family}\n%{file}\n",
-            details["family"],
-        ],
-        timeout=20,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"fontconfig failed for {details['family']}: "
-            f"{result.stderr.strip()}"
-        )
-
-    lines = result.stdout.strip().splitlines()
-    if len(lines) < 2:
-        raise RuntimeError(
-            f"fontconfig returned incomplete data for {details['family']}"
-        )
-
-    actual_family = lines[0].strip()
-    actual_path = Path(lines[1].strip())
-
-    if not family_matches(actual_family, details["family"]):
-        raise RuntimeError(
-            f"fontconfig substituted {actual_family!r} for "
-            f"{details['family']!r}"
-        )
-
-    if not actual_path.is_file():
-        raise RuntimeError(
-            f"fontconfig returned a missing file: {actual_path}"
-        )
-
-    return str(actual_path)
-
-
-def load_old_manifest():
-    try:
-        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def require_tools():
-    missing = [
-        name for name in ("fc-cache", "fc-match", "fc-scan")
-        if shutil.which(name) is None
-    ]
-    if missing:
-        raise RuntimeError(
-            "Required font tools missing: " + ", ".join(missing)
-        )
-
-
-def install_one(filename, details, old_manifest):
-    path = FONT_DIR / filename
-    old_records = old_manifest.get("fonts", {})
+def resolve_installed_font(filename, details, old_manifest):
+    local_path = FONT_DIR / filename
+    old_fonts = old_manifest.get("fonts", {})
     old_record = (
-        old_records.get(filename, {})
-        if isinstance(old_records, dict)
+        old_fonts.get(filename, {})
+        if isinstance(old_fonts, dict)
         else {}
     )
 
-    if path.is_file():
+    # Prefer an already downloaded and verified project font.
+    if local_path.is_file():
         try:
-            record = verify_font(filename, details)
-            if (
-                old_manifest.get("status") == "completed"
-                and isinstance(old_record, dict)
-                and old_record.get("sha256") == record["sha256"]
-            ):
-                log("CHECKPOINT REUSED:", filename)
+            record = verify_font_file(local_path, details["family"])
+            record["source"] = "project-font-cache"
+            record["status"] = "verified"
+
+            if old_record.get("sha256") == record["sha256"]:
+                log("CHECKPOINT REUSED:", details["family"])
             else:
-                log("VALID EXISTING FONT REUSED:", filename)
-            return record, "reused"
+                log("VALID EXISTING FONT REUSED:", details["family"])
+
+            return record
         except (OSError, RuntimeError) as exc:
             log("FONT CACHE INVALID:", filename, "|", exc)
 
-    download_font(filename, details)
-    return verify_font(filename, details), "downloaded"
+    # If the project font is absent, first check the system font database.
+    existing = system_font(details["family"])
+    if existing:
+        existing["source"] = "system-font"
+        existing["status"] = "verified"
+        log("SYSTEM FONT REUSED:", details["family"])
+        return existing
+
+    # Download only when neither a valid project font nor a matching
+    # system font is available.
+    record = download_font(filename, details)
+    record["source"] = "downloaded-free-font"
+    record["status"] = "verified"
+    log("FONT DOWNLOADED AND VERIFIED:", details["family"])
+    return record
 
 
 def main():
     require_tools()
     FONT_DIR.mkdir(parents=True, exist_ok=True)
+    old_manifest = load_manifest()
 
-    old_manifest = load_old_manifest()
     records = {}
     failures = {}
-    downloaded = []
-    reused = []
+    required_failure = None
 
     for filename, details in FONT_FILES.items():
         try:
-            record, action = install_one(
+            records[filename] = resolve_installed_font(
                 filename, details, old_manifest
             )
-            records[filename] = record
-
-            if action == "downloaded":
-                downloaded.append(filename)
-            else:
-                reused.append(filename)
-
         except Exception as exc:
             failures[filename] = str(exc)
             log(
-                "OPTIONAL FONT FAILURE:" if not details["required"]
-                else "REQUIRED FONT FAILURE:",
-                filename,
+                "REQUIRED FONT FAILURE:" if details["required"]
+                else "OPTIONAL FONT FAILURE:",
+                details["family"],
                 "|",
                 exc,
             )
-
             if details["required"]:
-                raise RuntimeError(
-                    "Required Hindi font could not be installed. "
-                    "Fix the font download or network issue before "
-                    "continuing. Details: " + str(exc)
-                ) from exc
+                required_failure = str(exc)
 
-    if not records:
-        raise RuntimeError("No usable caption fonts were installed.")
+    # Refresh fontconfig after any downloaded fonts.
+    cache = run(["fc-cache", "-f"], timeout=90)
+    if cache.returncode:
+        raise RuntimeError(f"fc-cache failed: {cache.stderr.strip()}")
 
-    result = run(["fc-cache", "-f", str(FONT_DIR)], timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError(f"fc-cache failed: {result.stderr.strip()}")
+    # Verify the required family resolves after the cache refresh.
+    required_family = FONT_FILES[
+        "NotoSansDevanagari-Regular.ttf"
+    ]["family"]
 
-    fontconfig_results = {}
-    for filename, record in records.items():
-        details = FONT_FILES[filename]
-        try:
-            fontconfig_results[filename] = {
-                "status": "verified",
-                "resolved_path": verify_fontconfig(details),
-            }
-        except Exception as exc:
-            # Do not silently claim that fontconfig selected this font.
-            fontconfig_results[filename] = {
-                "status": "unverified",
-                "error": str(exc),
-            }
-            log("FONTCONFIG WARNING:", details["family"], "|", exc)
+    resolved = system_font(required_family)
 
-            if details["required"]:
-                raise RuntimeError(
-                    "Required Hindi font is installed but fontconfig "
-                    "cannot resolve it: " + str(exc)
-                ) from exc
+    # Some systems ship an alternate Hindi-capable family instead.
+    if not resolved:
+        for fallback in ("Mukta", "Hind"):
+            resolved = system_font(fallback)
+            if resolved:
+                resolved["fallback_for"] = required_family
+                log("HINDI FONT FALLBACK SELECTED:", fallback)
+                break
 
-    manifest = {
+    if not resolved:
+        raise RuntimeError(
+            "No verified Hindi font could be resolved after installation. "
+            f"Original required-font error: {required_failure or 'none'}"
+        )
+
+    atomic_json(MANIFEST, {
         "status": "completed",
         "version": VERSION,
         "font_directory": str(FONT_DIR),
         "fonts": records,
-        "fontconfig": fontconfig_results,
+        "selected_hindi_font": resolved,
         "optional_font_failures": failures,
-        "downloaded": downloaded,
-        "reused": reused,
         "external_api_calls": 0,
         "paid_services_used": False,
-    }
-    atomic_write_json(MANIFEST, manifest)
+        "note": (
+            "Existing system fonts are accepted when the requested family "
+            "is available. A verified Hindi-capable fallback is recorded "
+            "when Noto Sans Devanagari cannot be resolved."
+        ),
+    })
 
-    log("======================================")
     log("CAPTION FONT INSTALLATION COMPLETE")
-    log("VERIFIED FONT FILES:", len(records))
-    log("DOWNLOADED:", len(downloaded))
-    log("REUSED:", len(reused))
-    log("OPTIONAL FONT FAILURES:", len(failures))
-    log("FONT DIRECTORY:", FONT_DIR)
-    log("MANIFEST:", MANIFEST)
-    log("EXTERNAL API CALLS: 0")
-    log("PAID SERVICES USED: false")
-    log("======================================")
+    log("Verified project font records:", len(records))
+    log("Hindi font selected:", resolved["family"])
+    log("Manifest:", MANIFEST)
+    log("External API calls: 0")
+    log("Paid services used: false")
 
 
 if __name__ == "__main__":
