@@ -226,7 +226,8 @@ jobs:
             scripts/preview_caption_fonts.py \
             scripts/burn_captions.py \
             scripts/generate_thumbnail.py \
-            scripts/validate_final_output.py
+            scripts/validate_final_output.py \
+            scripts/package_output.py
           do
             test -s "$file" || {
               echo "Missing required script: $file"
@@ -376,13 +377,12 @@ jobs:
       - name: Validate final deliverables
         run: python scripts/validate_final_output.py
 
-      - name: Create output ZIP
-        shell: bash
+      - name: Package and verify final output ZIP
         run: |
           set -euo pipefail
-          rm -f katha-lok-ai-photo-motion-output.zip
-          zip -qr katha-lok-ai-photo-motion-output.zip output
+          python scripts/package_output.py
           test -s katha-lok-ai-photo-motion-output.zip
+          unzip -t katha-lok-ai-photo-motion-output.zip
           ls -lh katha-lok-ai-photo-motion-output.zip
 
       - name: Upload final output artifact
