@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Validate SFX cues against real narration durations before rendering."""
+"""Validate SFX timing against actual narration and renderer trim behavior."""
 
 from __future__ import annotations
 
@@ -19,11 +20,9 @@ from input_config import load_and_validate, get_parts, get_scenes
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
-OUTPUT_FILE = (
-    ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
-)
+OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-timing-validator-v3"
+VERSION = "sfx-timing-validator-v4-effective-trim"
 MIN_AUDIO_BYTES = 100
 TIME_EPSILON = 0.001
 MAX_GAIN = 1.0
@@ -76,7 +75,6 @@ def safe_file(value, label, minimum_bytes=1):
         raise RuntimeError(f"{label}: missing file path")
 
     path = Path(value.strip())
-
     if not path.is_absolute():
         path = ROOT / path
 
@@ -106,7 +104,6 @@ def sha256_file(path):
 
 def media_info(path):
     executable = shutil.which("ffprobe")
-
     if not executable:
         raise RuntimeError(
             "ffprobe is required to validate actual audio durations"
@@ -142,18 +139,16 @@ def media_info(path):
     if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError(f"Invalid duration for {path.name}")
 
-    streams = data.get("streams", [])
-
     has_audio = any(
         isinstance(stream, dict)
         and stream.get("codec_type") == "audio"
-        for stream in streams
+        for stream in data.get("streams", [])
     )
 
     if not has_audio:
         raise RuntimeError(f"No audio stream found in {path.name}")
 
-    return {"duration": duration, "has_audio": has_audio}
+    return {"duration": duration, "has_audio": True}
 
 
 def expected_scene_keys(parts, scenes):
@@ -166,14 +161,14 @@ def expected_scene_keys(parts, scenes):
 
 def load_narration(parts, scenes):
     data = read_json(AUDIO_FILE)
-    rows = rows_from(data, "jobs", "audio_jobs")
+    jobs = rows_from(data, "jobs", "audio_jobs", "scenes")
 
-    if not rows:
+    if not jobs:
         raise RuntimeError("No narration jobs found in audio_jobs.json")
 
     mapping = {}
 
-    for index, row in enumerate(rows, start=1):
+    for index, row in enumerate(jobs, start=1):
         if not isinstance(row, dict):
             raise RuntimeError(f"Invalid narration job at row {index}")
 
@@ -190,19 +185,16 @@ def load_narration(parts, scenes):
         if str(row.get("status", "")).strip().lower() != "completed":
             raise RuntimeError(f"Narration is not completed for scene {key}")
 
-        value = first_path(
-            row,
-            ("output", "audio_path", "path", "file", "audio"),
-        )
-
         path = safe_file(
-            value,
+            first_path(
+                row,
+                ("output", "audio_path", "path", "file", "audio"),
+            ),
             f"Narration {key}",
             MIN_AUDIO_BYTES,
         )
 
         info = media_info(path)
-
         mapping[key] = {
             "path": path,
             "duration": info["duration"],
@@ -211,14 +203,12 @@ def load_narration(parts, scenes):
 
     expected = expected_scene_keys(parts, scenes)
     actual = set(mapping)
-
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
 
     if missing or extra:
         raise RuntimeError(
-            "Narration scene mismatch: "
-            f"missing={missing}; extra={extra}"
+            f"Narration scene mismatch: missing={missing}; extra={extra}"
         )
 
     return mapping
@@ -234,9 +224,8 @@ def validate_cues(parts, scenes, narration):
         raise RuntimeError("SFX cue manifest is not completed")
 
     rows = rows_from(data, "cues", "items")
-
     seen = set()
-    valid = []
+    reports = []
     warnings = []
     cue_scenes = set()
 
@@ -263,79 +252,83 @@ def validate_cues(parts, scenes, narration):
             raise RuntimeError(f"SFX cue references unknown narration: {key}")
 
         kind = str(row.get("kind", "unspecified")).strip() or "unspecified"
-
         cue_id = (part, scene, round(timestamp, 6), kind)
 
         if cue_id in seen:
             raise RuntimeError(f"Duplicate SFX cue: {cue_id}")
-
         seen.add(cue_id)
-        cue_scenes.add(key)
 
         if not math.isfinite(timestamp) or timestamp < 0:
             raise RuntimeError(f"Invalid SFX timestamp at row {index}")
 
         if not math.isfinite(gain) or not 0 <= gain <= MAX_GAIN:
-            raise RuntimeError(f"SFX gain must be between 0 and 1: row {index}")
+            raise RuntimeError(
+                f"SFX gain must be between 0 and 1: row {index}"
+            )
 
         narration_duration = narration[key]["duration"]
 
         if timestamp >= narration_duration:
             raise RuntimeError(
-                f"SFX cue starts after narration ends for {key}: "
+                f"SFX cue starts at or after narration end for {key}: "
                 f"cue={timestamp:.3f}s, "
                 f"narration={narration_duration:.3f}s"
             )
 
-        path_value = first_path(
-            row,
-            ("file", "path", "audio", "output"),
-        )
-
         path = safe_file(
-            path_value,
+            first_path(row, ("file", "path", "audio", "output")),
             f"SFX cue {index}",
             MIN_AUDIO_BYTES,
         )
 
         info = media_info(path)
-        remaining = narration_duration - timestamp
-        tail_overrun = info["duration"] - remaining
+        remaining = max(0.0, narration_duration - timestamp)
 
-        cue_report = {
+        # Renderer delays the SFX by its cue timestamp and trims the final
+        # mixed scene to narration duration. Only this much SFX can remain.
+        effective_duration = min(info["duration"], remaining)
+        truncated_duration = max(0.0, info["duration"] - effective_duration)
+
+        if truncated_duration > TIME_EPSILON:
+            timing_status = "will_be_trimmed_at_narration_end"
+            warnings.append({
+                "part": part,
+                "scene": scene,
+                "kind": kind,
+                "sfx_file_duration_seconds": round(info["duration"], 3),
+                "effective_duration_seconds": round(effective_duration, 3),
+                "truncated_seconds": round(truncated_duration, 3),
+                "note": (
+                    "The renderer's scene-duration trim cuts off the SFX "
+                    "at the narration end; the original SFX file is unchanged."
+                ),
+            })
+        else:
+            timing_status = "fits_remaining_narration"
+
+        cue_scenes.add(key)
+        reports.append({
             "part": part,
             "scene": scene,
             "kind": kind,
             "time_seconds": round(timestamp, 3),
             "gain": gain,
             "narration_duration_seconds": round(narration_duration, 3),
-            "sfx_duration_seconds": round(info["duration"], 3),
+            "sfx_file_duration_seconds": round(info["duration"], 3),
             "remaining_narration_seconds": round(remaining, 3),
+            "effective_duration_seconds": round(effective_duration, 3),
+            "truncated_seconds": round(truncated_duration, 3),
+            "timing_status": timing_status,
             "file": path.relative_to(ROOT).as_posix(),
             "sha256": sha256_file(path),
-            "timing_status": "valid",
-        }
-
-        if tail_overrun > TIME_EPSILON:
-            cue_report["timing_status"] = "warning_sfx_may_extend"
-            warnings.append({
-                "part": part,
-                "scene": scene,
-                "kind": kind,
-                "warning": "SFX may extend beyond narration duration",
-                "overrun_seconds": round(tail_overrun, 3),
-                "sfx_duration_seconds": round(info["duration"], 3),
-                "remaining_narration_seconds": round(remaining, 3),
-            })
-
-        valid.append(cue_report)
+        })
 
     return {
         "status": "valid",
-        "cue_count": len(valid),
+        "cue_count": len(reports),
         "scenes_with_sfx": len(cue_scenes),
         "scenes_without_sfx": len(narration) - len(cue_scenes),
-        "cues": valid,
+        "cues": reports,
         "warnings": warnings,
     }
 
@@ -344,12 +337,21 @@ def main():
     if not shutil.which("ffprobe"):
         raise RuntimeError("ffprobe is required but was not found")
 
+    if not AUDIO_FILE.is_file():
+        raise RuntimeError(f"Narration manifest missing: {AUDIO_FILE}")
+
+    if not CUES_FILE.is_file():
+        raise RuntimeError(f"SFX cue manifest missing: {CUES_FILE}")
+
     config = load_and_validate(INPUT_FILE)
     parts = int(get_parts(config))
     scenes = int(get_scenes(config))
 
+    if parts < 1 or scenes < 1:
+        raise RuntimeError("PARTS and SCENES must both be positive")
+
     narration = load_narration(parts, scenes)
-    cue_report = validate_cues(parts, scenes, narration)
+    sfx_report = validate_cues(parts, scenes, narration)
 
     report = {
         "status": "completed",
@@ -362,12 +364,20 @@ def main():
         "narration_total_seconds": round(
             sum(item["duration"] for item in narration.values()), 3
         ),
-        "sfx": cue_report,
+        "renderer_behavior": {
+            "scene_duration_source": "actual narration file duration",
+            "sfx_end_limit": "narration/scene end",
+            "note": (
+                "This validator reports SFX that will be cut short. "
+                "It does not modify SFX audio files or cue manifests."
+            ),
+        },
+        "sfx": sfx_report,
         "limitations": [
-            "This validates media timing, not subjective sound quality.",
-            "A valid cue may still be too loud or masked by narration.",
-            "A warning indicates that an SFX may continue after narration ends.",
-            "This script validates existing files; it does not generate audio.",
+            "This validates file paths and timing, not subjective sound quality.",
+            "It does not measure perceived loudness or narration masking.",
+            "Long SFX are trimmed in the final scene; their source files remain unchanged.",
+            "This script makes no external API calls and generates no audio.",
         ],
     }
 
@@ -375,9 +385,9 @@ def main():
 
     log("SFX TIMING VALIDATION: PASSED")
     log("Narration scenes checked:", len(narration))
-    log("SFX cues checked:", cue_report["cue_count"])
-    log("Scenes without SFX:", cue_report["scenes_without_sfx"])
-    log("Timing warnings:", len(cue_report["warnings"]))
+    log("SFX cues checked:", sfx_report["cue_count"])
+    log("Scenes without SFX:", sfx_report["scenes_without_sfx"])
+    log("SFX cues trimmed by scene end:", len(sfx_report["warnings"]))
     log("Report:", OUTPUT_FILE.relative_to(ROOT))
 
 
