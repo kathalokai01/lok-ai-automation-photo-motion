@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Free local sound design with resumable tracks and scene-timed SFX cues."""
+"""Generate resumable local background audio and timed SFX cues."""
 
 from __future__ import annotations
 
@@ -25,15 +24,31 @@ DESIGN_DIR = OUTPUT / "sound_design"
 MANIFEST = DESIGN_DIR / "sound_design_manifest.json"
 CUE_MANIFEST = DESIGN_DIR / "sfx_cues.json"
 
-VERSION = "free-sound-design-v2"
+VERSION = "free-sound-design-v3"
 SAMPLE_RATE = 22050
 BACKGROUND_DURATION = 30
 SFX_DURATION = 1.6
-AMPLITUDE = 0.22
 
 
 def log(*args):
     print(*args, flush=True)
+
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temp.replace(path)
+
+
+def read_json(path, default=None):
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return default
 
 
 def read_settings():
@@ -47,101 +62,99 @@ def read_settings():
             continue
 
         key, value = line.split("=", 1)
-        key = key.strip().upper()
-        value = value.split("#", 1)[0].strip().strip("'\"")
-        values[key] = value
+        values[key.strip().upper()] = value.strip().strip("'\"")
 
     return values
 
 
-def enabled(values, *keys, default=True):
+def as_bool(values, *keys, default=True):
     for key in keys:
-        if key in values:
-            return values[key].strip().lower() in {
-                "1", "true", "yes", "on", "enabled"
-            }
+        if key not in values:
+            continue
+
+        value = values[key].strip().lower()
+        if value in {"true", "yes", "on", "1", "enabled"}:
+            return True
+        if value in {"false", "no", "off", "0", "disabled"}:
+            return False
+
+        raise RuntimeError(f"{key} must be true or false")
+
     return default
 
 
 def positive_int(values, key, default):
-    raw = values.get(key, str(default))
     try:
-        result = int(raw)
+        value = int(values.get(key, default))
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"{key} must be a positive integer") from exc
 
-    if result < 1:
+    if value < 1:
         raise RuntimeError(f"{key} must be a positive integer")
-    return result
+
+    return value
 
 
-def fingerprint(payload):
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def signature(data):
     encoded = json.dumps(
-        payload, sort_keys=True, ensure_ascii=False
+        data, ensure_ascii=False, sort_keys=True
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def file_hash(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-
-
 def write_wav(path, samples):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temp = path.with_suffix(path.suffix + ".tmp")
 
-    with wave.open(str(temporary), "wb") as audio:
+    with wave.open(str(temp), "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
         audio.setframerate(SAMPLE_RATE)
 
         block_size = 16384
         for start in range(0, len(samples), block_size):
-            packed = bytearray()
+            block = bytearray()
+
             for sample in samples[start:start + block_size]:
                 value = max(-1.0, min(1.0, sample))
-                packed.extend(struct.pack("<h", int(value * 32767)))
-            audio.writeframesraw(packed)
+                block.extend(struct.pack("<h", int(value * 32767)))
 
-    temporary.replace(path)
+            audio.writeframesraw(block)
+
+    temp.replace(path)
 
 
-def validate_wav(path, minimum_duration=1.0):
+def validate_wav(path, minimum_duration):
     with wave.open(str(path), "rb") as audio:
         if audio.getnchannels() != 1:
             raise RuntimeError(f"Unexpected channel count: {path}")
         if audio.getframerate() != SAMPLE_RATE:
             raise RuntimeError(f"Unexpected sample rate: {path}")
+
         duration = audio.getnframes() / audio.getframerate()
         if duration < minimum_duration:
-            raise RuntimeError(f"Audio file is too short: {path}")
+            raise RuntimeError(f"Audio is too short: {path}")
+
         return duration
 
 
 def make_music():
-    """Generate a gentle synthetic harmonic background track."""
     count = SAMPLE_RATE * BACKGROUND_DURATION
+    roots = (110.0, 130.81, 98.0, 146.83)
+    intervals = (1.0, 1.25, 1.5, 2.0)
     samples = []
-    chord_roots = (110.0, 130.81, 98.0, 146.83)
-    chord_intervals = (1.0, 1.25, 1.5, 2.0)
 
     for index in range(count):
         t = index / SAMPLE_RATE
-        chord = int(t // 6) % len(chord_roots)
+        root = roots[int(t // 6) % len(roots)]
 
         fade_in = min(1.0, t / 2.5)
         fade_out = min(1.0, (BACKGROUND_DURATION - t) / 2.0)
@@ -149,19 +162,19 @@ def make_music():
         swell = 0.78 + 0.22 * math.sin(2 * math.pi * t / 12.0)
 
         value = 0.0
-        root = chord_roots[chord]
-        for interval in chord_intervals:
+        for interval in intervals:
             frequency = root * interval
             value += math.sin(2 * math.pi * frequency * t) * 0.22
-            value += math.sin(2 * math.pi * frequency * 2.003 * t) * 0.035
+            value += math.sin(
+                2 * math.pi * frequency * 2.003 * t
+            ) * 0.035
 
-        samples.append(value * AMPLITUDE * envelope * swell)
+        samples.append(value * 0.22 * envelope * swell)
 
     return samples
 
 
 def make_ambient():
-    """Generate quiet generic environmental texture, not a real location recording."""
     count = SAMPLE_RATE * BACKGROUND_DURATION
     rng = random.Random(271828)
     samples = []
@@ -174,8 +187,8 @@ def make_ambient():
         low = math.sin(2 * math.pi * 55.0 * t)
         mid = math.sin(2 * math.pi * 82.41 * t + 0.4)
         modulation = 0.7 + 0.3 * math.sin(2 * math.pi * t / 9.0)
-
         fade = min(1.0, t / 1.5, (BACKGROUND_DURATION - t) / 1.5)
+
         value = low * 0.08 + mid * 0.04 + noise * 0.12
         samples.append(value * modulation * max(0.0, fade) * 0.25)
 
@@ -183,7 +196,6 @@ def make_ambient():
 
 
 def make_transition_sfx():
-    """Generate one short whoosh only; no hidden repeats or long silent tail."""
     count = int(SAMPLE_RATE * SFX_DURATION)
     rng = random.Random(314159)
     samples = []
@@ -196,66 +208,77 @@ def make_transition_sfx():
         noise = noise * 0.72 + rng.uniform(-1.0, 1.0) * 0.28
         envelope = math.sin(math.pi * progress) ** 1.5
         pitch = 180.0 + 500.0 * progress
-        tonal = math.sin(2 * math.pi * pitch * t) * 0.18
+        tone = math.sin(2 * math.pi * pitch * t) * 0.18
 
-        samples.append((noise * 0.10 + tonal * 0.25) * envelope)
+        samples.append((noise * 0.10 + tone * 0.25) * envelope)
 
     return samples
 
 
-def save_track(path, generator, records, category, signature, min_duration):
-    previous = records.get(category, {})
+def create_or_resume_track(
+    category,
+    path,
+    generator,
+    minimum_duration,
+    previous_records,
+    config_signature,
+):
+    track_signature = signature({
+        "version": VERSION,
+        "category": category,
+        "config_signature": config_signature,
+    })
+
+    previous = previous_records.get(category, {})
 
     if path.is_file():
         try:
-            duration = validate_wav(path, min_duration)
-            digest = file_hash(path)
+            duration = validate_wav(path, minimum_duration)
+            digest = sha256_file(path)
+
             if (
-                previous.get("signature") == signature
+                previous.get("signature") == track_signature
                 and previous.get("sha256") == digest
             ):
-                log("RESUME: reusing", path.relative_to(ROOT))
+                log("RESUME:", path.relative_to(ROOT))
                 return {
                     "status": "completed",
                     "path": path.relative_to(ROOT).as_posix(),
-                    "signature": signature,
+                    "signature": track_signature,
                     "sha256": digest,
                     "duration_seconds": round(duration, 3),
                     "generation": "local_synthesis_no_external_api",
                 }
         except (OSError, ValueError, wave.Error, RuntimeError):
-            log("REBUILD: invalid or stale audio", path.name)
+            log("REBUILD:", path.name)
 
     write_wav(path, generator())
-    duration = validate_wav(path, min_duration)
-    digest = file_hash(path)
+    duration = validate_wav(path, minimum_duration)
+    digest = sha256_file(path)
 
     log("CREATED:", path.relative_to(ROOT))
+
     return {
         "status": "completed",
         "path": path.relative_to(ROOT).as_posix(),
-        "signature": signature,
+        "signature": track_signature,
         "sha256": digest,
         "duration_seconds": round(duration, 3),
         "generation": "local_synthesis_no_external_api",
     }
 
 
-def make_scene_cues(parts, scenes_per_part, sfx_enabled, sfx_path):
-    """
-    Add a transition cue at the beginning of each scene after scene 1.
-    These are generic transition cues, not story-event-aware sound effects.
-    """
+def build_cues(parts, scenes, enabled, sfx_path):
     cues = []
 
-    if not sfx_enabled:
+    if not enabled:
         return cues
 
     relative_sfx = sfx_path.relative_to(ROOT).as_posix()
 
-    for global_scene in range(2, parts * scenes_per_part + 1):
-        part = ((global_scene - 1) // scenes_per_part) + 1
-        local_scene = ((global_scene - 1) % scenes_per_part) + 1
+    for global_scene in range(2, parts * scenes + 1):
+        part = (global_scene - 1) // scenes + 1
+        local_scene = (global_scene - 1) % scenes + 1
 
         cues.append({
             "part": part,
@@ -273,46 +296,40 @@ def make_scene_cues(parts, scenes_per_part, sfx_enabled, sfx_path):
 def main():
     values = read_settings()
     parts = positive_int(values, "PARTS", 1)
-    scenes_per_part = positive_int(values, "SCENES", 11)
+    scenes = positive_int(values, "SCENES", 11)
 
     switches = {
-        "music": enabled(
+        "music": as_bool(
             values, "MUSIC_ENABLED", "MUSIC", "BACKGROUND_MUSIC",
             default=True,
         ),
-        "ambient": enabled(
-            values, "AMBIENT_ENABLED", "AMBIENT", "ENVIRONMENT_SOUND",
-            default=True,
+        "ambient": as_bool(
+            values, "AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND",
+            "ENVIRONMENT_SOUND", default=True,
         ),
-        "sfx": enabled(
+        "sfx": as_bool(
             values, "SFX_ENABLED", "SFX", "SOUND_EFFECTS",
             default=True,
         ),
     }
 
-    DESIGN_DIR.mkdir(parents=True, exist_ok=True)
-    MUSIC_DIR.mkdir(parents=True, exist_ok=True)
-    AMBIENT_DIR.mkdir(parents=True, exist_ok=True)
-    SFX_DIR.mkdir(parents=True, exist_ok=True)
+    for directory in (MUSIC_DIR, AMBIENT_DIR, SFX_DIR, DESIGN_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
 
-    config_signature = fingerprint({
-        "version": VERSION,
+    config_signature = signature({
+        "parts": parts,
+        "scenes": scenes,
+        "switches": switches,
         "sample_rate": SAMPLE_RATE,
         "background_duration": BACKGROUND_DURATION,
         "sfx_duration": SFX_DURATION,
-        "parts": parts,
-        "scenes_per_part": scenes_per_part,
-        "switches": switches,
     })
 
+    previous_manifest = read_json(MANIFEST, {})
     previous_records = {}
-    if MANIFEST.is_file():
-        try:
-            old = json.loads(MANIFEST.read_text(encoding="utf-8"))
-            if old.get("version") == VERSION:
-                previous_records = old.get("tracks", {})
-        except (OSError, ValueError, TypeError):
-            previous_records = {}
+
+    if previous_manifest.get("version") == VERSION:
+        previous_records = previous_manifest.get("tracks", {})
 
     definitions = {
         "music": (
@@ -332,36 +349,35 @@ def main():
         ),
     }
 
-    records = {}
+    tracks = {}
+
     for category, (path, generator, minimum_duration) in definitions.items():
         if not switches[category]:
-            records[category] = {
+            tracks[category] = {
                 "status": "disabled",
                 "path": None,
                 "generation": "local_synthesis_no_external_api",
             }
+
             if path.exists():
                 path.unlink()
+
             continue
 
-        signature = fingerprint({
-            "config": config_signature,
-            "category": category,
-        })
-        records[category] = save_track(
+        tracks[category] = create_or_resume_track(
+            category=category,
             path=path,
             generator=generator,
-            records=previous_records,
-            category=category,
-            signature=signature,
-            min_duration=minimum_duration,
+            minimum_duration=minimum_duration,
+            previous_records=previous_records,
+            config_signature=config_signature,
         )
 
     sfx_path = SFX_DIR / "transition_sfx.wav"
-    cues = make_scene_cues(
+    cues = build_cues(
         parts=parts,
-        scenes_per_part=scenes_per_part,
-        sfx_enabled=switches["sfx"],
+        scenes=scenes,
+        enabled=switches["sfx"],
         sfx_path=sfx_path,
     )
 
@@ -369,11 +385,11 @@ def main():
         "status": "completed",
         "version": VERSION,
         "parts": parts,
-        "scenes_per_part": scenes_per_part,
+        "scenes_per_part": scenes,
         "cue_count": len(cues),
         "cue_policy": (
-            "Generic transition whoosh at scene start after scene 1; "
-            "not context-aware story-event SFX."
+            "One generic transition whoosh at 0.08 seconds into each "
+            "scene after scene 1. Not story-event-aware."
         ),
         "external_api_calls": 0,
         "paid_services_used": False,
@@ -381,7 +397,7 @@ def main():
     }
     write_json(CUE_MANIFEST, cue_data)
 
-    result = {
+    manifest = {
         "status": "completed",
         "version": VERSION,
         "generation": "local_synthesis_no_external_api",
@@ -391,19 +407,19 @@ def main():
         "background_duration_seconds": BACKGROUND_DURATION,
         "sfx_duration_seconds": SFX_DURATION,
         "parts": parts,
-        "scenes_per_part": scenes_per_part,
+        "scenes_per_part": scenes,
         "enabled": switches,
-        "tracks": records,
+        "tracks": tracks,
         "sfx_cue_manifest": CUE_MANIFEST.relative_to(ROOT).as_posix(),
         "sfx_cue_count": len(cues),
     }
-    write_json(MANIFEST, result)
+    write_json(MANIFEST, manifest)
 
     log("SOUND DESIGN COMPLETE")
-    log("PARTS:", parts)
-    log("SCENES PER PART:", scenes_per_part)
+    log("MUSIC:", tracks["music"]["status"])
+    log("AMBIENT:", tracks["ambient"]["status"])
+    log("SFX:", tracks["sfx"]["status"])
     log("SFX CUES:", len(cues))
-    log("CUE MANIFEST:", CUE_MANIFEST.relative_to(ROOT))
     log("External API calls: 0")
     log("Paid services used: false")
 
