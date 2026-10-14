@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Generate a resumable, validated character and world bible."""
 
@@ -19,6 +18,7 @@ from input_config import (
     get_topic,
     get_story_text,
 )
+from gemini_api_guard import require_gemini_generation
 
 ROOT = Path(__file__).resolve().parent.parent
 STORY_DIR = ROOT / "output" / "story"
@@ -26,7 +26,7 @@ INPUT = STORY_DIR / "ai_story.json"
 OUTPUT = STORY_DIR / "character_bible.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 CHECKPOINT = STORY_DIR / "character_bible_response_checkpoint.json"
-VERSION = 3
+VERSION = 4
 TIMEOUT = max(30, int(os.getenv("BIBLE_REQUEST_TIMEOUT", "180")))
 
 
@@ -36,8 +36,7 @@ def log(message):
 
 def fingerprint(data):
     raw = json.dumps(
-        data, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":"),
+        data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -87,7 +86,6 @@ def selected_model():
             "A selected Gemini model is required. "
             "Run scripts/select_gemini_model.py first."
         )
-
     model = str(data.get("model", "")).strip()
     if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
         raise RuntimeError(f"Invalid selected model ID: {model!r}")
@@ -123,30 +121,35 @@ def build_config(source):
         "avoid_cartoon": as_bool(source, "AVOID_CARTOON_LOOK", True),
         "avoid_neon": as_bool(source, "AVOID_NEON", True),
         "avoid_glitch": as_bool(source, "AVOID_GLITCH_EFFECTS", True),
-        # Kept for config compatibility. Uncertain requests are never
-        # automatically repeated merely because a response was not parsed.
+        # Retained for input compatibility; no automatic generation retries.
         "max_retries_configured": max(1, min(5, retries)),
     }
 
 
 def build_story_context(story):
     context = []
-    expected_global = 0
+    global_number = 0
 
-    for part in story.get("parts", []):
+    parts = story.get("parts", [])
+    if not isinstance(parts, list):
+        raise RuntimeError("AI story parts must be a list.")
+
+    for part in parts:
         if not isinstance(part, dict):
             raise RuntimeError("AI story contains an invalid part.")
+        scenes = part.get("scenes", [])
+        if not isinstance(scenes, list):
+            raise RuntimeError("Part scenes must be a list.")
 
-        for scene in part.get("scenes", []):
+        for scene in scenes:
             if not isinstance(scene, dict):
                 raise RuntimeError("AI story contains an invalid scene.")
-
-            expected_global += 1
+            global_number += 1
             context.append({
                 "part": part.get("part"),
                 "scene": scene.get("scene"),
                 "global_scene_number": scene.get(
-                    "global_scene_number", expected_global
+                    "global_scene_number", global_number
                 ),
                 "role": scene.get("role", ""),
                 "narration": scene.get("narration", ""),
@@ -251,8 +254,7 @@ CHARACTERS:
 - Assign stable IDs CHAR_001, CHAR_002, etc.
 - Preserve face, age, skin tone, hair, eyes, body and distinctive traits.
 - Clothing changes only when justified by the story.
-- visual_identity must be detailed English text directly reusable
-  in image-generation prompts.
+- visual_identity must be detailed English text reusable in image prompts.
 - Do not invent major characters or change relationships.
 
 WORLD:
@@ -323,9 +325,7 @@ def validate_bible(data):
                 character[field] = str(character[field] or "").strip()
 
         if len(character["visual_identity"]) < 20:
-            raise RuntimeError(
-                f"{char_id}: visual_identity is too short."
-            )
+            raise RuntimeError(f"{char_id}: visual_identity is too short.")
 
         rules = character["consistency_rules"]
         if not isinstance(rules, list):
@@ -458,7 +458,7 @@ def main():
     if not topic and not story_text:
         raise RuntimeError("No topic or source story text is available.")
 
-    # Validate scene structure before making any API request.
+    # Validate structure before considering any API request.
     build_story_context(story)
 
     source_fp = fingerprint({
@@ -527,18 +527,25 @@ def main():
             raise RuntimeError("GEMINI_API_KEY secret is missing.")
 
         prompt = make_prompt(story, topic, story_text, config)
-        log(f"Generating character/world bible with {model}.")
 
+        # Critical cost guard: do not send the request without explicit opt-in.
+        # Existing completed output/checkpoints above can still be reused.
+        require_gemini_generation(
+            "character/world bible generation",
+            api_key=api_key,
+        )
+
+        log(f"Generating character/world bible with {model}.")
         try:
             response = request_gemini(api_key, model, prompt)
         except Exception as exc:
-            # Do not retry uncertain failures automatically.
             raise RuntimeError(
                 f"Generation stopped safely: {exc}. No automatic retry "
                 "was made; inspect the run and provider quota before retrying."
             ) from exc
 
-        # Persist the raw JSON response before schema validation.
+        # Preserve the raw response before schema validation so a later
+        # validation fix can reuse it without another generation request.
         write_json(CHECKPOINT, {
             "status": "response_saved",
             "version": VERSION,
