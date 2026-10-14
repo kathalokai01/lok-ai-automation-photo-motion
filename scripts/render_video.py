@@ -32,7 +32,7 @@ RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 PARTS_DIR = OUTPUT / "parts"
 VIDEOS_DIR = OUTPUT / "videos"
 
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 MIN_BYTES = 1000
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 
@@ -71,7 +71,10 @@ def sha256_file(path):
 
 def fingerprint(data):
     raw = json.dumps(
-        data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -111,6 +114,25 @@ def safe_path(value, label):
     return path
 
 
+def config_bool(config, key, default=False):
+    value = config.get(key, default)
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        return value != 0
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "disabled", ""}:
+        return False
+
+    log(f"WARNING: Unrecognized {key}={value!r}; using {default}")
+    return default
+
+
 def run(command, timeout=900):
     log("$", " ".join(map(str, command)))
     result = subprocess.run(
@@ -140,18 +162,23 @@ def probe(path):
 
     result = subprocess.run(
         [
-            ffprobe, "-v", "error",
+            ffprobe,
+            "-v", "error",
             "-show_entries",
             "format=duration:stream=codec_type,width,height",
-            "-of", "json", str(path),
+            "-of", "json",
+            str(path),
         ],
         capture_output=True,
         text=True,
         timeout=45,
         check=False,
     )
+
     if result.returncode:
-        raise RuntimeError(f"ffprobe failed for {path}: {result.stderr[-400:]}")
+        raise RuntimeError(
+            f"ffprobe failed for {path}: {result.stderr[-400:]}"
+        )
 
     try:
         data = json.loads(result.stdout)
@@ -195,6 +222,7 @@ def audio_duration(path):
 
 def read_motion(mode, expected_total):
     data = read_json(MOTION_MANIFEST)
+
     if not isinstance(data, list) or len(data) != expected_total:
         count = len(data) if isinstance(data, list) else "invalid"
         raise RuntimeError(
@@ -215,9 +243,12 @@ def read_motion(mode, expected_total):
             part = int(row["part"])
             local_scene = int(row["local_scene"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid scene mapping at row {index}") from exc
+            raise RuntimeError(
+                f"Invalid scene mapping at row {index}"
+            ) from exc
 
         mapping = (part, local_scene)
+
         if (
             global_scene != index
             or part < 1
@@ -254,6 +285,7 @@ def read_motion(mode, expected_total):
 
 def read_narration(clips):
     data = read_json(AUDIO_JOBS)
+
     if not isinstance(data, dict) or data.get("status") != "completed":
         raise RuntimeError("TTS audio manifest is not completed")
 
@@ -285,7 +317,10 @@ def read_narration(clips):
                 f"Duplicate completed narration for scene {scene_number}"
             )
 
-        path = safe_path(job.get("output"), f"narration scene {scene_number}")
+        path = safe_path(
+            job.get("output"),
+            f"narration scene {scene_number}",
+        )
         audio_duration(path)
         audio[scene_number] = path
 
@@ -298,38 +333,49 @@ def read_narration(clips):
     return audio
 
 
-def discover_backgrounds():
-    """Choose at most one deterministic track per optional audio category."""
+def discover_backgrounds(config):
+    """Find one deterministic optional track for each enabled audio category."""
+    enabled = {
+        "music": config_bool(config, "MUSIC", True),
+        "ambient": config_bool(config, "AMBIENT_SOUND", True),
+        "sfx": config_bool(config, "SFX", True),
+    }
     result = {}
 
     for kind, directories in AUDIO_DIRS.items():
         candidates = set()
 
-        for directory in directories:
-            if not directory.is_dir():
-                continue
-
-            for path in directory.rglob("*"):
-                try:
-                    if (
-                        path.is_file()
-                        and path.suffix.lower() in AUDIO_EXTENSIONS
-                        and path.stat().st_size > 0
-                        and path.resolve().is_relative_to(ROOT.resolve())
-                    ):
-                        candidates.add(path.resolve())
-                except OSError:
+        if enabled[kind]:
+            for directory in directories:
+                if not directory.is_dir():
                     continue
 
+                for path in directory.rglob("*"):
+                    try:
+                        if (
+                            path.is_file()
+                            and path.suffix.lower() in AUDIO_EXTENSIONS
+                            and path.stat().st_size > 0
+                            and path.resolve().is_relative_to(ROOT.resolve())
+                        ):
+                            candidates.add(path.resolve())
+                    except OSError:
+                        continue
+
         result[kind] = sorted(
-            candidates, key=lambda path: path.as_posix().lower()
+            candidates,
+            key=lambda path: path.as_posix().lower(),
         )[:1]
+
+        if enabled[kind] and not result[kind]:
+            log(f"INFO: {kind} enabled, but no track was found; skipping it.")
 
     return result
 
 
 def cache_key(clip, narration, backgrounds, fps, duration):
     background_hashes = {}
+
     for kind, paths in backgrounds.items():
         for path in paths:
             background_hashes[kind] = sha256_file(path)
@@ -355,7 +401,7 @@ def render_scene(clip, narration, backgrounds, fps):
     source_info = probe(source)
     voice_duration = audio_duration(narration)
 
-    # Round upward to a frame boundary so narration is not cut off.
+    # Keep the complete narration and round duration up to a frame boundary.
     target_duration = (
         math.ceil(max(source_info["duration"], voice_duration) * fps) / fps
     )
@@ -371,6 +417,7 @@ def render_scene(clip, narration, backgrounds, fps):
         try:
             saved = read_json(cache_file)
             info = probe(destination)
+
             if (
                 saved.get("version") == CACHE_VERSION
                 and saved.get("cache_key") == key
@@ -382,6 +429,7 @@ def render_scene(clip, narration, backgrounds, fps):
             ):
                 log(f"REUSE rendered scene {number}")
                 return destination, info["duration"], key
+
         except Exception as exc:
             log(f"Scene {number} cache rejected: {exc}")
 
@@ -392,7 +440,8 @@ def render_scene(clip, narration, backgrounds, fps):
     ]
 
     command = [
-        ffmpeg, "-hide_banner", "-y",
+        ffmpeg,
+        "-hide_banner", "-y",
         "-i", str(source),
         "-i", str(narration),
     ]
@@ -403,6 +452,7 @@ def render_scene(clip, narration, backgrounds, fps):
         command.extend(["-i", str(path)])
 
     padding = max(0.0, target_duration - source_info["duration"])
+
     filters = [
         f"[0:v]tpad=stop_mode=clone:stop_duration={padding:.6f},"
         f"trim=duration={target_duration:.6f},"
@@ -412,10 +462,12 @@ def render_scene(clip, narration, backgrounds, fps):
         f"apad,atrim=duration={target_duration:.6f},"
         "asetpts=PTS-STARTPTS[voice]",
     ]
+
     audio_labels = ["[voice]"]
 
     for input_index, (kind, _) in enumerate(tracks, start=2):
         label = f"bg{input_index}"
+
         filters.append(
             f"[{input_index}:a]aresample=44100,"
             "aformat=sample_fmts=fltp:channel_layouts=stereo,"
@@ -439,13 +491,18 @@ def render_scene(clip, narration, backgrounds, fps):
     try:
         command.extend([
             "-filter_complex", ";".join(filters),
-            "-map", "[vout]", "-map", "[aout]",
+            "-map", "[vout]",
+            "-map", "[aout]",
             "-t", f"{target_duration:.6f}",
             "-r", str(fps),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "18",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            "-ar", "44100", "-ac", "2",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-ac", "2",
             "-movflags", "+faststart",
             str(temp),
         ])
@@ -455,14 +512,17 @@ def render_scene(clip, narration, backgrounds, fps):
 
         if not info["has_audio"]:
             raise RuntimeError(f"Rendered scene {number} has no audio")
+
         if (info["width"], info["height"]) != (
             source_info["width"], source_info["height"]
         ):
             raise RuntimeError(f"Rendered scene {number} resolution changed")
+
         if info["duration"] + 0.15 < voice_duration:
             raise RuntimeError(f"Narration truncated in scene {number}")
 
         temp.replace(destination)
+
         write_json(cache_file, {
             "version": CACHE_VERSION,
             "cache_key": key,
@@ -474,6 +534,7 @@ def render_scene(clip, narration, backgrounds, fps):
             "size_bytes": destination.stat().st_size,
             "status": "completed",
         })
+
         return destination, info["duration"], key
 
     except Exception:
@@ -491,8 +552,10 @@ def concat_videos(paths, destination, list_file, resolution):
 
     for path in paths:
         info = probe(path)
+
         if (info["width"], info["height"]) != resolution:
             raise RuntimeError(f"Unexpected concat resolution: {path}")
+
         if not info["has_audio"]:
             raise RuntimeError(f"Audio missing from concat input: {path}")
 
@@ -501,31 +564,47 @@ def concat_videos(paths, destination, list_file, resolution):
 
     for path in paths:
         value = str(Path(path).resolve())
+
         if "\n" in value or "\r" in value:
             raise RuntimeError("Invalid newline in media path")
+
         lines.append("file '" + value.replace("'", "'\\''") + "'")
 
-    list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    list_file.write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp = destination.with_name(destination.stem + ".tmp.mp4")
     temp.unlink(missing_ok=True)
 
     try:
         run([
-            ffmpeg, "-hide_banner", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(list_file),
-            "-map", "0:v:0", "-map", "0:a:0",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            ffmpeg,
+            "-hide_banner", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_file),
+            "-map", "0:v:0",
+            "-map", "0:a:0",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "18",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            "-ar", "44100", "-ac", "2",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-ac", "2",
             "-movflags", "+faststart",
             str(temp),
         ], timeout=1800)
 
         info = probe(temp)
+
         if not info["has_audio"]:
             raise RuntimeError(f"Output has no audio: {destination}")
+
         if (info["width"], info["height"]) != resolution:
             raise RuntimeError(f"Output resolution is wrong: {destination}")
 
@@ -535,6 +614,7 @@ def concat_videos(paths, destination, list_file, resolution):
     except Exception:
         temp.unlink(missing_ok=True)
         raise
+
     finally:
         list_file.unlink(missing_ok=True)
 
@@ -564,10 +644,13 @@ def save_checkpoint(
         data["parts"] = [
             path.relative_to(ROOT).as_posix() for path in parts
         ]
+
     if final_video is not None:
         data["final_video"] = final_video.relative_to(ROOT).as_posix()
+
     if alias is not None:
         data["alias"] = alias.relative_to(ROOT).as_posix()
+
     if final_info is not None:
         data.update({
             "duration": round(final_info["duration"], 6),
@@ -580,6 +663,7 @@ def save_checkpoint(
 
 def main():
     config = load_and_validate(ROOT / "Input" / "topic.txt")
+
     mode = str(get_format(config)).strip().lower()
     requested_parts = int(get_parts(config))
     scenes_per_part = int(get_scenes(config))
@@ -587,10 +671,13 @@ def main():
 
     if mode not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
+
     if requested_parts < 1 or scenes_per_part < 1:
         raise RuntimeError("PARTS and SCENES must both be positive")
+
     if not 1 <= fps <= 60:
         raise RuntimeError(f"FPS must be between 1 and 60; got {fps}")
+
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("FFmpeg and ffprobe are required")
 
@@ -605,7 +692,10 @@ def main():
         for part in range(1, requested_parts + 1)
         for local in range(1, scenes_per_part + 1)
     }
-    actual = {(clip["part"], clip["local_scene"]) for clip in clips}
+    actual = {
+        (clip["part"], clip["local_scene"])
+        for clip in clips
+    }
 
     if actual != expected:
         raise RuntimeError(
@@ -615,7 +705,7 @@ def main():
         )
 
     narration = read_narration(clips)
-    backgrounds = discover_backgrounds()
+    backgrounds = discover_backgrounds(config)
 
     log(
         f"FORMAT={mode} | PARTS={requested_parts} "
@@ -631,8 +721,12 @@ def main():
 
     for index, clip in enumerate(clips, 1):
         path, duration, key = render_scene(
-            clip, narration[clip["scene"]], backgrounds, fps
+            clip,
+            narration[clip["scene"]],
+            backgrounds,
+            fps,
         )
+
         relative_path = path.relative_to(ROOT).as_posix()
         source_relative = clip["path"].relative_to(ROOT).as_posix()
 
@@ -657,8 +751,7 @@ def main():
         rows.append(row)
         rendered[clip["scene"]] = path
 
-        # Persist successful scene progress immediately. If a later scene
-        # fails, the individual render caches can be reused on the next run.
+        # Save progress after every successful scene.
         save_checkpoint(mode, rows, total_scenes)
         log(f"CHECKPOINT saved: scene {index}/{total_scenes}")
 
@@ -675,16 +768,19 @@ def main():
             raise RuntimeError(f"Part {part} has missing or unordered scenes")
 
         destination = PARTS_DIR / f"part_{part:02d}.mp4"
+
         concat_videos(
             [rendered[clip["scene"]] for clip in group],
             destination,
             OUTPUT / "photo_motion" / f"concat_part_{part:02d}.txt",
             resolution,
         )
+
         part_paths.append(destination)
         log(f"PART {part}/{requested_parts} merged")
 
     final_video = VIDEOS_DIR / "katha_lok_ai_final.mp4"
+
     final_info = concat_videos(
         [rendered[clip["scene"]] for clip in clips],
         final_video,
@@ -697,6 +793,7 @@ def main():
         if mode == "full"
         else "katha_lok_ai_short.mp4"
     )
+
     temp_alias = alias.with_name(alias.stem + ".tmp.mp4")
 
     try:
@@ -711,6 +808,7 @@ def main():
             raise RuntimeError("Final format alias failed validation")
 
         temp_alias.replace(alias)
+
     finally:
         temp_alias.unlink(missing_ok=True)
 
