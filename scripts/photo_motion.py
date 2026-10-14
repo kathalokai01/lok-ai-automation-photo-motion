@@ -1,11 +1,13 @@
+
 #!/usr/bin/env python3
-"""Validated, resumable photo-motion renderer for Katha Lok AI."""
+"""Resumable cinematic photo-motion renderer for Katha Lok AI."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -24,7 +26,9 @@ MANIFEST_FILE = OUTPUT_DIR / "photo_motion_manifest.json"
 
 CRF = 20
 PRESET = "medium"
-CACHE_VERSION = "photo-motion-v2"
+CACHE_VERSION = "photo-motion-v3"
+MIN_IMAGE_BYTES = 1000
+MIN_VIDEO_BYTES = 1000
 
 EFFECTS = [
     "zoom_in",
@@ -57,11 +61,22 @@ def atomic_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
-    temp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temp.replace(path)
+
+    try:
+        temp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def read_json(path, default=None):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return default
 
 
 def safe_path(value, label):
@@ -73,41 +88,41 @@ def safe_path(value, label):
         path = ROOT / path
 
     path = path.resolve()
-    if not path.is_relative_to(ROOT):
+
+    if not path.is_relative_to(ROOT.resolve()):
         raise RuntimeError(f"{label} must remain inside the repository.")
 
     return path
 
 
-def run_command(command):
+def run_command(command, timeout=900):
     log("\n$", " ".join(map(str, command)))
+
     result = subprocess.run(
-        command,
+        [str(value) for value in command],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        timeout=timeout,
+        check=False,
     )
+
     if result.stdout:
         log(result.stdout.rstrip())
+
     if result.returncode:
         raise RuntimeError(
             f"Command failed ({result.returncode}): {command[0]}"
         )
 
 
-def read_json(path, default=None):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
-
-
 def read_jobs():
     data = read_json(JOBS_FILE)
+
     if data is None:
         raise RuntimeError(
             "Cannot read output/visuals/visual_jobs.json. "
-            "Run generate_visuals.py first."
+            "Generate visual jobs first."
         )
 
     if isinstance(data, list):
@@ -130,6 +145,7 @@ def read_jobs():
 
 def get_scene_number(job, index):
     value = job.get("global_scene", job.get("scene", index))
+
     if isinstance(value, dict):
         value = value.get("global_scene", value.get("number"))
 
@@ -146,6 +162,18 @@ def get_scene_number(job, index):
     return number
 
 
+def positive_integer(value, label):
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid {label}: {value!r}") from exc
+
+    if number < 1:
+        raise RuntimeError(f"{label} must be positive.")
+
+    return number
+
+
 def get_duration(job):
     for key in ("duration", "scene_duration", "duration_seconds", "seconds"):
         try:
@@ -156,7 +184,7 @@ def get_duration(job):
             pass
 
     raise RuntimeError(
-        "Each visual job must contain a valid duration from 0.5 to 3600 seconds."
+        "Every visual job must have a duration from 0.5 to 3600 seconds."
     )
 
 
@@ -164,28 +192,41 @@ def prepare_jobs(jobs):
     from PIL import Image
 
     prepared = []
-    seen = set()
+    seen_global = set()
+    seen_mapping = set()
 
     for index, job in enumerate(jobs, 1):
         if not isinstance(job, dict):
             raise RuntimeError(f"Scene job {index} is not an object.")
 
         number = get_scene_number(job, index)
-        if number in seen:
-            raise RuntimeError(f"Duplicate scene number: {number}")
-        seen.add(number)
+
+        if number in seen_global:
+            raise RuntimeError(f"Duplicate global scene number: {number}")
+        seen_global.add(number)
+
+        part = positive_integer(job.get("part", 1), "part number")
+        local_scene = positive_integer(
+            job.get("local_scene", number), "local scene number"
+        )
+
+        mapping = (part, local_scene)
+        if mapping in seen_mapping:
+            raise RuntimeError(f"Duplicate part/local-scene mapping: {mapping}")
+        seen_mapping.add(mapping)
 
         image = safe_path(
             job.get("image_path") or job.get("image"),
             f"image for scene {number}",
         )
 
-        if not image.is_file() or image.stat().st_size < 1000:
+        if not image.is_file() or image.stat().st_size < MIN_IMAGE_BYTES:
             raise RuntimeError(f"Image is missing or too small: {image}")
 
         try:
             with Image.open(image) as im:
                 im.verify()
+
             with Image.open(image) as im:
                 if im.width < 64 or im.height < 64:
                     raise RuntimeError("Image dimensions are too small.")
@@ -196,8 +237,8 @@ def prepare_jobs(jobs):
 
         prepared.append({
             "number": number,
-            "part": job.get("part", 1),
-            "local_scene": job.get("local_scene", number),
+            "part": part,
+            "local_scene": local_scene,
             "image": image,
             "image_sha256": sha256_file(image),
             "duration": get_duration(job),
@@ -209,7 +250,7 @@ def prepare_jobs(jobs):
 
     if numbers != list(range(1, len(prepared) + 1)):
         raise RuntimeError(
-            "Scene numbers must be continuous starting at 1. "
+            "Global scene numbers must be continuous from 1. "
             f"Found: {numbers}"
         )
 
@@ -218,8 +259,9 @@ def prepare_jobs(jobs):
 
 def read_depth_maps():
     data = read_json(DEPTH_MANIFEST)
+
     if data is None:
-        log("NOTICE: No readable depth manifest; using standard 2D motion.")
+        log("NOTICE: No depth manifest; using 2D cinematic motion.")
         return {}
 
     if isinstance(data, list):
@@ -235,6 +277,7 @@ def read_depth_maps():
         entries = []
 
     result = {}
+
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -246,6 +289,7 @@ def read_depth_maps():
                     entry.get("scene", entry.get("number")),
                 )
             )
+
             path = safe_path(
                 entry.get("depth_map")
                 or entry.get("path")
@@ -256,6 +300,7 @@ def read_depth_maps():
             continue
 
         source_hash = entry.get("image_sha256")
+
         if (
             number < 1
             or not path.is_file()
@@ -277,13 +322,16 @@ def read_depth_maps():
 
 def read_previous_manifest():
     data = read_json(MANIFEST_FILE, [])
+
     if not isinstance(data, list):
         return {}
 
     previous = {}
+
     for entry in data:
         if not isinstance(entry, dict):
             continue
+
         try:
             number = int(entry.get("global_scene", entry.get("scene")))
             if number > 0:
@@ -292,6 +340,11 @@ def read_previous_manifest():
             continue
 
     return previous
+
+
+def choose_effect(index):
+    """Cycle through distinct camera movements in a deterministic order."""
+    return EFFECTS[index % len(EFFECTS)]
 
 
 def make_filter(effect, frames, width, height, fps):
@@ -305,33 +358,43 @@ def make_filter(effect, frames, width, height, fps):
 
     if effect == "zoom_in":
         zoom = f"min(1+0.10*on/{denominator},1.10)"
+
     elif effect == "zoom_out":
         zoom = f"max(1.10-0.10*on/{denominator},1.0)"
+
     elif effect == "pan_left":
         x = f"(iw-iw/zoom)*(1-on/{denominator})"
+
     elif effect == "pan_right":
         x = f"(iw-iw/zoom)*on/{denominator}"
+
     elif effect == "tilt_up":
         zoom = "1.07"
         y = f"(ih-ih/zoom)*(1-on/{denominator})"
+
     elif effect == "tilt_down":
         zoom = "1.07"
         y = f"(ih-ih/zoom)*on/{denominator}"
+
     elif effect == "diagonal_drift":
         zoom = "1.09"
         x = f"(iw-iw/zoom)*on/{denominator}"
         y = f"(ih-ih/zoom)*(1-on/{denominator})"
+
     elif effect == "handheld_drift":
         zoom = "1.055"
         x = "(iw-iw/zoom)/2+2*sin(on*0.16)"
         y = "(ih-ih/zoom)/2+2*sin(on*0.11)"
+
     elif effect == "cinematic_sweep":
         zoom = f"1.035+0.025*sin(PI*on/{denominator})"
         x = f"(iw-iw/zoom)*(0.5-0.35*cos(PI*on/{denominator}))"
         y = f"(ih-ih/zoom)*(0.5+0.20*sin(PI*on/{denominator}))"
+
     elif effect == "dutch_angle":
         zoom = "1.055"
-    elif effect not in ("parallax",):
+
+    elif effect != "parallax":
         raise RuntimeError(f"Unsupported motion effect: {effect}")
 
     filters = [
@@ -352,23 +415,26 @@ def make_filter(effect, frames, width, height, fps):
         "setsar=1",
         "format=yuv420p",
     ])
+
     return ",".join(filters)
 
 
 def probe_clip(path, ffprobe, width, height, expected_duration):
-    if not path.is_file() or path.stat().st_size < 1000:
+    if not path.is_file() or path.stat().st_size < MIN_VIDEO_BYTES:
         raise RuntimeError(f"Missing or invalid rendered clip: {path}")
 
     result = subprocess.run(
         [
             ffprobe, "-v", "error",
             "-show_entries",
-            "stream=codec_type,width,height,nb_frames:"
+            "stream=codec_type,width,height:"
             "format=duration,size",
             "-of", "json", str(path),
         ],
         capture_output=True,
         text=True,
+        timeout=60,
+        check=False,
     )
 
     if result.returncode:
@@ -396,6 +462,7 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
         int(stream.get("width", 0)),
         int(stream.get("height", 0)),
     )
+
     if actual_size != (width, height):
         raise RuntimeError(
             f"{path.name} resolution is {actual_size}; "
@@ -405,7 +472,7 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
     if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError(f"Invalid duration in {path.name}.")
 
-    if abs(duration - expected_duration) > 0.20:
+    if abs(duration - expected_duration) > max(0.20, 2 / max(1, 60)):
         raise RuntimeError(
             f"{path.name} duration {duration:.3f}s; "
             f"expected about {expected_duration:.3f}s."
@@ -416,6 +483,7 @@ def probe_clip(path, ffprobe, width, height, expected_duration):
 
 def cache_signature(item, effect, depth_info, frames, width, height, fps, mode):
     parallax_script = ROOT / "scripts" / "depth_parallax.py"
+
     payload = {
         "version": CACHE_VERSION,
         "renderer_sha256": sha256_file(Path(__file__).resolve()),
@@ -435,6 +503,7 @@ def cache_signature(item, effect, depth_info, frames, width, height, fps, mode):
         "crf": CRF,
         "preset": PRESET,
     }
+
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -442,6 +511,7 @@ def cache_signature(item, effect, depth_info, frames, width, height, fps, mode):
 def try_reuse(item, old_entry, signature, ffprobe, width, height, expected):
     if not isinstance(old_entry, dict):
         return None
+
     if old_entry.get("cache_signature") != signature:
         return None
 
@@ -450,29 +520,37 @@ def try_reuse(item, old_entry, signature, ffprobe, width, height, expected):
             old_entry.get("video"),
             f"cached clip for scene {item['number']}",
         )
+
         if old_path != item["target"] or not old_path.is_file():
             return None
 
         duration = probe_clip(
             old_path, ffprobe, width, height, expected
         )
+
         entry = dict(old_entry)
         entry.update({
             "scene": item["number"],
             "global_scene": item["number"],
+            "part": item["part"],
+            "local_scene": item["local_scene"],
             "image": item["image"].relative_to(ROOT).as_posix(),
+            "image_sha256": item["image_sha256"],
             "video": old_path.relative_to(ROOT).as_posix(),
             "duration": duration,
             "size_bytes": old_path.stat().st_size,
             "status": "reused",
         })
+
         return entry
+
     except (OSError, ValueError, RuntimeError):
         return None
 
 
 def render_parallax(item, depth_path, target, frames, width, height, fps):
     script = ROOT / "scripts" / "depth_parallax.py"
+
     if not script.is_file():
         raise RuntimeError(f"Missing parallax renderer: {script}")
 
@@ -503,6 +581,7 @@ def main():
 
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
+
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and ffprobe must be installed.")
 
@@ -543,9 +622,10 @@ def main():
         number = item["number"]
         frames = max(1, round(item["duration"] * fps))
         expected_duration = frames / fps
-        effect = EFFECTS[index % len(EFFECTS)]
+        effect = choose_effect(index)
 
         depth_info = depth_maps.get(number)
+
         if depth_info and (
             depth_info["image_sha256"] != item["image_sha256"]
         ):
@@ -553,6 +633,7 @@ def main():
             depth_info = None
 
         true_parallax = effect == "parallax" and depth_info is not None
+
         if effect == "parallax" and not true_parallax:
             effect = "cinematic_sweep"
 
@@ -612,8 +693,9 @@ def main():
                 temp, ffprobe, width, height, expected_duration
             )
 
-            # Replace the final clip only after successful validation.
+            # Replace final clip only after successful validation.
             temp.replace(item["target"])
+
         except Exception:
             temp.unlink(missing_ok=True)
             raise
@@ -647,21 +729,24 @@ def main():
 
         manifest[number] = entry
         generated += 1
+
         if true_parallax:
             parallax_count += 1
 
-        # Save a durable checkpoint after each scene.
         checkpoint()
         log("Checkpoint saved:", entry["video"])
 
-    # Final validation: every requested scene must have a valid clip.
+    # Validate all scenes before marking this stage complete.
     for item in prepared:
         number = item["number"]
         entry = manifest.get(number)
+
         if not isinstance(entry, dict):
             raise RuntimeError(f"Missing manifest entry for scene {number}.")
+
         if entry.get("image_sha256") != item["image_sha256"]:
             raise RuntimeError(f"Image hash mismatch for scene {number}.")
+
         if not entry.get("cache_signature"):
             raise RuntimeError(f"Missing cache signature for scene {number}.")
 
