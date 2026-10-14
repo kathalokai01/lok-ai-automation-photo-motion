@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Select the visual model without surprise API calls.
+
+Cloudflare model testing is disabled by default.
+Set ALLOW_BILLABLE_PROVIDERS=true to explicitly permit a test request.
+"""
+
+from __future__ import annotations
 
 import json
 import os
@@ -8,128 +15,91 @@ from pathlib import Path
 
 import requests
 
-from input_config import (
-    load_input_config,
-    normalize_format,
-)
+from input_config import load_input_config, normalize_format
 
 
-OUTPUT_FILE = Path(
-    "output/config/selected_visual_model.json"
-)
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
 MODEL = "alibaba/wan-2.6-image"
-
-API_BASE = (
-    "https://api.cloudflare.com/client/v4/accounts"
-)
-
-TEST_TIMEOUT = 120
+API_BASE = "https://api.cloudflare.com/client/v4/accounts"
+TEST_TIMEOUT = 60
+VERSION = "safe-visual-model-selector-v2"
 
 
-# ============================================================
-# INPUT CONFIG COMPATIBILITY HELPERS
-# ============================================================
+def log(*items):
+    print(*items, flush=True)
 
-def cfg_bool(config, key, default=False):
-    value = config.get(key, default)
 
-    if isinstance(value, bool):
-        return value
+def env_true(name, default=False):
+    value = os.getenv(name)
 
     if value is None:
         return default
 
-    text = str(value).strip().lower()
-
-    if text in {"true", "1", "yes", "y", "on"}:
-        return True
-
-    if text in {"false", "0", "no", "n", "off"}:
-        return False
-
-    return default
+    return value.strip().lower() in {
+        "1", "true", "yes", "y", "on"
+    }
 
 
-def cfg_int(config, key, default=0):
-    value = config.get(key, default)
-
-    if value is None:
-        return default
-
+def cfg_int(config, key, default):
     try:
-        return int(value)
+        value = int(config.get(key, default))
+        return max(1, min(value, 3))
     except (TypeError, ValueError):
         return default
 
 
-# ============================================================
-# BASIC HELPERS
-# ============================================================
-
-def fail(message):
-    print(f"ERROR: {message}")
-    sys.exit(1)
-
-
-def get_credentials():
-
-    account_id = os.getenv(
-        "CLOUDFLARE_ACCOUNT_ID",
-        ""
-    ).strip()
-
-    api_token = os.getenv(
-        "CLOUDFLARE_API_TOKEN",
-        ""
-    ).strip()
-
-    if not account_id:
-        fail(
-            "CLOUDFLARE_ACCOUNT_ID is not set."
-        )
-
-    if not api_token:
-        fail(
-            "CLOUDFLARE_API_TOKEN is not set."
-        )
-
-    return account_id, api_token
+def read_existing_selection():
+    try:
+        data = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
-# ============================================================
-# CLOUDFLARE MODEL TEST
-# ============================================================
-
-def test_model(
-    account_id,
-    api_token,
+def save_selection(
+    *,
+    status,
+    model=MODEL,
+    provider="cloudflare",
+    reason="",
+    tested=False,
 ):
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    # IMPORTANT:
-    # Cloudflare's current REST API uses:
-    #
-    # POST /accounts/{account_id}/ai/run
-    #
-    # with:
-    #
-    # {
-    #   "model": "...",
-    #   "input": {...}
-    # }
-    #
-    # Do NOT append /@model to the URL.
+    data = {
+        "version": VERSION,
+        "status": status,
+        "model": model,
+        "provider": provider,
+        "selected_by": "select_visual_model.py",
+        "timestamp": int(time.time()),
+        "tested": tested,
+        "reason": reason,
+        "external_api_calls": 0,
+        "paid_services_used": False,
+    }
 
-    url = (
-        f"{API_BASE}/"
-        f"{account_id}"
-        f"/ai/run"
+    temporary = OUTPUT_FILE.with_suffix(
+        OUTPUT_FILE.suffix + ".tmp"
     )
 
+    temporary.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(OUTPUT_FILE)
+
+    return data
+
+
+def test_cloudflare_model(account_id, api_token):
+    """Send one opt-in model test request."""
+    url = f"{API_BASE}/{account_id}/ai/run"
+
     headers = {
-        "Authorization": (
-            f"Bearer {api_token}"
-        ),
+        "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json",
     }
 
@@ -137,393 +107,165 @@ def test_model(
         "model": MODEL,
         "input": {
             "prompt": (
-                "A photorealistic cinematic "
-                "live-action environment test "
-                "frame, natural realistic lighting, "
-                "real-world appearance"
+                "Photorealistic cinematic Indian environment, "
+                "natural lighting, realistic live-action appearance. "
+                "This is a single provider availability test."
             ),
             "size": "768x1024",
         },
     }
 
-    print()
-    print(
-        f"Testing visual model: {MODEL}"
-    )
-    print(
-        f"Endpoint: {url}"
-    )
-
     try:
-
         response = requests.post(
             url,
             headers=headers,
             json=payload,
             timeout=TEST_TIMEOUT,
         )
-
     except requests.RequestException as exc:
-
-        print(
-            f"Model test request failed: {exc}"
-        )
-
-        return False, None
-
-    print(
-        f"HTTP status: "
-        f"{response.status_code}"
-    )
+        return False, f"Network request failed: {exc}"
 
     try:
+        body = response.json()
+    except ValueError:
+        body = {"response_excerpt": response.text[:1000]}
 
-        data = response.json()
-
-    except Exception:
-
-        data = {
-            "raw": response.text[:3000]
-        }
-
-    if response.status_code in (
-        200,
-        201,
-        202,
-    ):
-
-        if (
-            isinstance(data, dict)
-            and data.get("success") is False
-        ):
-
-            print(
-                "Cloudflare returned "
-                "success=false."
-            )
-
-            print(
-                json.dumps(
-                    data,
-                    ensure_ascii=False,
-                    indent=2,
-                )[:3000]
-            )
-
-            return False, data
-
-        # Wan 2.6 returns the generated image
-        # inside result.image.
-        result = (
-            data.get("result", {})
-            if isinstance(data, dict)
-            else {}
+    if not 200 <= response.status_code < 300:
+        return False, (
+            f"HTTP {response.status_code}: "
+            + json.dumps(body, ensure_ascii=False)[:1500]
         )
 
-        image = (
-            result.get("image")
-            if isinstance(result, dict)
-            else None
+    if not isinstance(body, dict) or body.get("success") is False:
+        return False, (
+            "Provider reported failure: "
+            + json.dumps(body, ensure_ascii=False)[:1500]
         )
 
-        if image:
-
-            print(
-                "Cloudflare visual model "
-                "test succeeded."
-            )
-
-            print(
-                "Generated image result received."
-            )
-
-            return True, data
-
-        print(
-            "Cloudflare request succeeded, "
-            "but no result.image was returned."
+    result = body.get("result")
+    if not isinstance(result, dict) or not result.get("image"):
+        return False, (
+            "No result.image returned; provider compatibility "
+            "has not been confirmed."
         )
 
-        print(
-            json.dumps(
-                data,
-                ensure_ascii=False,
-                indent=2,
-            )[:3000]
-        )
+    return True, "Cloudflare returned an image result."
 
-        return False, data
-
-    if response.status_code in (
-        401,
-        403,
-    ):
-
-        print(
-            "Cloudflare authentication/"
-            "permission error."
-        )
-
-    elif response.status_code == 400:
-
-        print(
-            "Cloudflare rejected the model "
-            "request."
-        )
-
-    elif response.status_code == 404:
-
-        print(
-            "Cloudflare AI endpoint was "
-            "not found."
-        )
-
-    elif response.status_code == 429:
-
-        print(
-            "Cloudflare rate limit received."
-        )
-
-    elif response.status_code >= 500:
-
-        print(
-            "Cloudflare server-side error."
-        )
-
-    print(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2,
-        )[:3000]
-    )
-
-    return False, data
-
-
-# ============================================================
-# SAVE MODEL SELECTION
-# ============================================================
-
-def save_selection(
-    model,
-    status,
-):
-
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    data = {
-        "status": status,
-        "model": model,
-        "provider": "cloudflare",
-        "selected_by": (
-            "select_visual_model.py"
-        ),
-        "timestamp": int(time.time()),
-    }
-
-    tmp = OUTPUT_FILE.with_suffix(
-        OUTPUT_FILE.suffix + ".tmp"
-    )
-
-    with tmp.open(
-        "w",
-        encoding="utf-8",
-    ) as f:
-
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    tmp.replace(
-        OUTPUT_FILE
-    )
-
-    return data
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        "        SELECTING VISUAL GENERATION MODEL"
-    )
-
-    print(
-        "=" * 60
-    )
+    log("=" * 58)
+    log("SAFE VISUAL MODEL SELECTION")
+    log("=" * 58)
 
     try:
-
         config = load_input_config()
-
     except Exception as exc:
+        log("ERROR: Could not load Input/topic.txt:", exc)
+        return 1
 
-        fail(
-            "Failed to load Input "
-            f"configuration: {exc}"
+    log("FORMAT:", normalize_format(config))
+
+    allow_billable = env_true(
+        "ALLOW_BILLABLE_PROVIDERS",
+        default=False,
+    )
+
+    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    api_token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+
+    # Safe default: never send a provider request unless explicitly allowed.
+    if not allow_billable:
+        existing = read_existing_selection()
+
+        if (
+            existing.get("status") == "selected"
+            and existing.get("model")
+            and existing.get("provider")
+        ):
+            log(
+                "API TEST SKIPPED. Keeping the existing model selection:",
+                existing["provider"],
+                existing["model"],
+            )
+            log("No external API request was made.")
+            return 0
+
+        save_selection(
+            status="skipped",
+            model=None,
+            provider=None,
+            reason=(
+                "Model testing is disabled by default. "
+                "No provider was tested or selected. "
+                "Configure a free provider separately, or explicitly "
+                "enable a provider test after checking its pricing."
+            ),
         )
 
-    format_name = normalize_format(
-        config
-    )
+        log("API TEST SKIPPED: ALLOW_BILLABLE_PROVIDERS is not true.")
+        log("No API request was made.")
+        log("No provider availability was claimed.")
+        log("Selection record:", OUTPUT_FILE)
+        return 0
 
-    max_retries = cfg_int(
-        config,
-        "MAX_RETRIES",
-        3,
-    )
-
-    resume_enabled = cfg_bool(
-        config,
-        "RESUME_ENABLED",
-        True,
-    )
-
-    print(
-        f"FORMAT        : {format_name}"
-    )
-
-    print(
-        f"MAX_RETRIES   : {max_retries}"
-    )
-
-    print(
-        f"RESUME        : {resume_enabled}"
-    )
-
-    print(
-        f"MODEL         : {MODEL}"
-    )
-
-    account_id, api_token = (
-        get_credentials()
-    )
-
-    # ========================================================
-    # TEST EXACT MODEL
-    # ========================================================
-
-    success = False
-    result = None
-
-    attempts = max(
-        1,
-        max_retries,
-    )
-
-    for attempt in range(
-        1,
-        attempts + 1,
-    ):
-
-        print()
-
-        print(
-            f"Model test attempt "
-            f"{attempt}/{attempts}"
+    if not account_id or not api_token:
+        save_selection(
+            status="failed",
+            reason=(
+                "Opt-in was enabled, but Cloudflare credentials "
+                "are missing. No API request was made."
+            ),
         )
+        log("ERROR: Cloudflare credentials are missing.")
+        return 1
 
-        success, result = test_model(
+    attempts = cfg_int(config, "MAX_RETRIES", 1)
+    attempts = min(attempts, 3)
+
+    for attempt in range(1, attempts + 1):
+        log(f"Opt-in provider test: attempt {attempt}/{attempts}")
+        success, reason = test_cloudflare_model(
             account_id,
             api_token,
         )
 
         if success:
-            break
+            save_selection(
+                status="selected",
+                reason=reason,
+                tested=True,
+            )
+            log("Provider test succeeded.")
+            log("Selected model:", MODEL)
+            log("Selection record:", OUTPUT_FILE)
+            return 0
+
+        log("Provider test failed:", reason)
 
         if attempt < attempts:
-
-            wait_seconds = min(
-                10 * attempt,
-                60,
+            # Do not automatically retry a billable request.
+            log(
+                "Automatic retry stopped to avoid additional "
+                "potentially billable requests."
             )
+            break
 
-            print(
-                f"Retrying in "
-                f"{wait_seconds} seconds..."
-            )
-
-            time.sleep(
-                wait_seconds
-            )
-
-    # ========================================================
-    # FAILURE
-    # ========================================================
-
-    if not success:
-
-        save_selection(
-            MODEL,
-            "failed",
-        )
-
-        fail(
-            f"Visual model test failed: "
-            f"{MODEL}"
-        )
-
-    # ========================================================
-    # SAVE SELECTED MODEL
-    # ========================================================
-
-    selection = save_selection(
-        MODEL,
-        "selected",
+    save_selection(
+        status="failed",
+        reason=(
+            "The opt-in provider test did not confirm availability. "
+            "See the workflow log for the failure reason."
+        ),
+        tested=True,
     )
 
-    print()
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        "        VISUAL MODEL SELECTED"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        f"Selected model : "
-        f"{selection['model']}"
-    )
-
-    print(
-        f"Provider       : "
-        f"{selection['provider']}"
-    )
-
-    print(
-        f"Saved to       : "
-        f"{OUTPUT_FILE}"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    return 0
+    log("No successful model selection was confirmed.")
+    return 1
 
 
 if __name__ == "__main__":
-
-    sys.exit(
-        main()
-    )
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        log("Cancelled.")
+        raise SystemExit(130)
