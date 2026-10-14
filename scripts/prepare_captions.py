@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Prepare scene captions locally with exact mapping and resumable checkpoints."""
+"""Prepare validated, resumable scene captions without paid API calls."""
 
 from __future__ import annotations
 
@@ -27,13 +27,33 @@ NARRATION_FILE = OUTPUT / "narration" / "narration.json"
 CAPTION_FILE = OUTPUT / "captions" / "captions.json"
 CHECKPOINT_DIR = OUTPUT / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v3-scene-checkpoints"
+VERSION = "prepare-captions-v4-language-validated"
 SUPPORTED_MODES = {"hindi", "english", "hinglish"}
 SUPPORTED_FONTS = {
     "Noto Sans Devanagari",
     "Mukta",
     "Hind",
     "Tiro Devanagari Hindi",
+}
+
+# Prefer explicitly supplied caption translations. These are separate from
+# narration text, so a language selection never falsely claims translation.
+CAPTION_KEYS = {
+    "hindi": (
+        "caption_hindi",
+        "hindi_caption",
+        "caption_hi",
+    ),
+    "english": (
+        "caption_english",
+        "english_caption",
+        "caption_en",
+    ),
+    "hinglish": (
+        "caption_hinglish",
+        "hinglish_caption",
+        "caption_mixed",
+    ),
 }
 
 
@@ -47,9 +67,13 @@ def sha256_text(value):
 
 def read_json(path):
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Cannot read {path}: {exc}") from exc
+
+    if not isinstance(value, (dict, list)):
+        raise RuntimeError(f"Unexpected JSON structure: {path}")
+    return value
 
 
 def write_json(path, data):
@@ -80,8 +104,7 @@ def normalize_mode(config):
 
     if value not in SUPPORTED_MODES:
         raise RuntimeError(
-            f"Unsupported CAPTIONS={value!r}; "
-            "use hindi, english, or hinglish"
+            f"Unsupported CAPTIONS={value!r}; use hindi, english, or hinglish"
         )
     return value
 
@@ -101,7 +124,7 @@ def resolve_font_size(config, video_format):
 
     if not 16 <= size <= 64:
         raise RuntimeError(
-            f"Resolved font size {size} is outside the supported range 16-64"
+            f"Resolved caption font size {size} is outside 16-64"
         )
     return size
 
@@ -118,12 +141,66 @@ def normalize_text(value):
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
-def get_scene_text(row):
-    for key in ("text", "narration", "caption", "content", "story_text"):
+def first_nonempty(row, keys):
+    for key in keys:
         value = row.get(key)
         if isinstance(value, str) and value.strip():
-            return normalize_text(value)
-    return ""
+            return normalize_text(value), key
+    return "", ""
+
+
+def source_text(row):
+    return first_nonempty(
+        row,
+        ("text", "narration", "caption", "content", "story_text"),
+    )[0]
+
+
+def selected_caption_text(row, mode):
+    # A specifically named translation field is the strongest signal that
+    # the caption was intentionally prepared in the requested language.
+    value, field = first_nonempty(row, CAPTION_KEYS[mode])
+    if value:
+        return value, field, True
+
+    # A generic caption field may have been explicitly prepared upstream.
+    # Do not assume it is translated: it must be accompanied by a language
+    # label matching the requested output language.
+    generic, generic_field = first_nonempty(
+        row, ("caption_text", "display_caption")
+    )
+    declared = str(
+        row.get("caption_language", row.get("caption_lang", ""))
+    ).strip().lower()
+
+    aliases = {
+        "hi": "hindi",
+        "en": "english",
+        "mixed": "hinglish",
+        "hinglish": "hinglish",
+        "hindi": "hindi",
+        "english": "english",
+    }
+    declared = aliases.get(declared, declared)
+
+    if generic and declared == mode:
+        return generic, generic_field, True
+
+    # Reuse narration only when its source language is explicitly known to
+    # match the requested caption mode. Otherwise fail instead of lying.
+    source_language = str(
+        row.get("language", row.get("narration_language", ""))
+    ).strip().lower()
+    source_language = aliases.get(source_language, source_language)
+
+    if source_language == mode:
+        original, original_field = first_nonempty(
+            row, ("text", "narration", "content", "story_text")
+        )
+        if original:
+            return original, original_field, False
+
+    return "", "", False
 
 
 def normalize_scene_rows(data):
@@ -148,7 +225,7 @@ def main():
         raise RuntimeError("PARTS and SCENES must both be at least 1")
 
     expected_count = parts * scenes_per_part
-    caption_mode = normalize_mode(config)
+    mode = normalize_mode(config)
     font = get_caption_font(config)
     validate_font(font)
     font_size = resolve_font_size(config, video_format)
@@ -164,11 +241,9 @@ def main():
             f"Expected {expected_count} narration scenes; found {len(rows)}"
         )
 
-    # Per-scene fingerprints prevent one changed scene from invalidating
-    # every other scene checkpoint.
     settings = {
         "version": VERSION,
-        "mode": caption_mode,
+        "mode": mode,
         "format": video_format,
         "parts": parts,
         "scenes_per_part": scenes_per_part,
@@ -179,6 +254,7 @@ def main():
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     seen = set()
     caption_by_key = {}
+    missing_translations = []
 
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
@@ -200,17 +276,33 @@ def main():
         if not (1 <= part <= parts and 1 <= scene <= scenes_per_part):
             raise RuntimeError(f"Out-of-range narration mapping: {key}")
 
-        source_text = get_scene_text(row)
-        if not source_text:
+        original = source_text(row)
+        if not original:
             raise RuntimeError(f"Empty narration text for {key}")
 
-        source_hash = sha256_text(source_text)
+        caption_text, caption_source_field, explicitly_prepared = (
+            selected_caption_text(row, mode)
+        )
+
+        if not caption_text:
+            missing_translations.append({
+                "part": part,
+                "scene": scene,
+                "requested_language": mode,
+            })
+            continue
+
+        source_hash = sha256_text(original)
+        caption_hash = sha256_text(caption_text)
         fingerprint = sha256_text(json.dumps(
             {
                 **settings,
                 "part": part,
                 "scene": scene,
                 "source_text_sha256": source_hash,
+                "caption_text_sha256": caption_hash,
+                "caption_source_field": caption_source_field,
+                "explicitly_prepared": explicitly_prepared,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -219,29 +311,25 @@ def main():
         checkpoint_file = (
             CHECKPOINT_DIR / f"part_{part:02d}_scene_{scene:02d}.json"
         )
-        caption_text = source_text
-        reused = False
 
+        # The checkpoint is reusable only if its fingerprint matches the
+        # current input, including the requested language and actual text.
+        reused = False
         if checkpoint_file.is_file():
             try:
                 cached = read_json(checkpoint_file)
-                cached_text = cached.get("text", "")
-                if (
-                    cached.get("status") == "completed"
+                reused = (
+                    isinstance(cached, dict)
+                    and cached.get("status") == "completed"
                     and cached.get("fingerprint") == fingerprint
                     and cached.get("part") == part
                     and cached.get("scene") == scene
-                    and cached.get("source_text_sha256") == source_hash
-                    and isinstance(cached_text, str)
-                    and cached_text.strip()
-                ):
-                    caption_text = normalize_text(cached_text)
-                    reused = True
-            except (RuntimeError, AttributeError):
-                # Corrupt or incompatible checkpoint: regenerate locally.
+                    and cached.get("caption_sha256") == caption_hash
+                    and cached.get("text") == caption_text
+                )
+            except RuntimeError:
                 reused = False
 
-        # This step preserves the source narration text. It does not translate.
         checkpoint = {
             "status": "completed",
             "version": VERSION,
@@ -249,10 +337,12 @@ def main():
             "part": part,
             "scene": scene,
             "source_text_sha256": source_hash,
-            "caption_sha256": sha256_text(caption_text),
+            "caption_sha256": caption_hash,
             "text": caption_text,
-            "requested_caption_mode": caption_mode,
-            "translation_performed": False,
+            "requested_caption_mode": mode,
+            "caption_source_field": caption_source_field,
+            "caption_language_verified_by_field": explicitly_prepared,
+            "translation_performed_here": False,
             "caption_font": font,
             "caption_font_size": font_size,
         }
@@ -263,14 +353,31 @@ def main():
             "scene": scene,
             "text": caption_text,
             "source_text_sha256": source_hash,
-            "caption_sha256": sha256_text(caption_text),
+            "caption_sha256": caption_hash,
             "status": "completed",
             "checkpoint_reused": reused,
+            "caption_source_field": caption_source_field,
+            "language_field_verified": explicitly_prepared,
         }
 
         log(
             f"{'REUSED' if reused else 'PREPARED'} "
-            f"{index}/{expected_count}: part={part}, scene={scene}"
+            f"{index}/{expected_count}: part={part}, scene={scene}, mode={mode}"
+        )
+
+    if missing_translations:
+        preview = ", ".join(
+            f"{item['part']}/{item['scene']}"
+            for item in missing_translations[:20]
+        )
+        raise RuntimeError(
+            f"CAPTIONS={mode} was requested, but no matching caption text "
+            f"or explicitly matching source language was found for "
+            f"{len(missing_translations)} scene(s): {preview}. "
+            "No automatic translation was attempted and no completed "
+            "captions manifest was published. Supply the matching "
+            "caption_hindi, caption_english, or caption_hinglish field "
+            "for each scene, or provide a matching caption_language label."
         )
 
     expected_keys = {
@@ -285,14 +392,13 @@ def main():
             f"extra={sorted(seen - expected_keys)}"
         )
 
-    # Always publish captions in deterministic part/scene order.
     caption_rows = [
         caption_by_key[(part, scene)]
         for part in range(1, parts + 1)
         for scene in range(1, scenes_per_part + 1)
     ]
 
-    narration_source_hash = sha256_text(json.dumps(
+    source_hash = sha256_text(json.dumps(
         narration_data,
         ensure_ascii=False,
         sort_keys=True,
@@ -302,15 +408,17 @@ def main():
         "status": "completed",
         "version": VERSION,
         "format": video_format,
-        "mode": caption_mode,
+        "mode": mode,
         "source": "output/narration/narration.json",
-        "source_sha256": narration_source_hash,
-        "model": "local-existing-narration",
+        "source_sha256": source_hash,
+        "model": "local-existing-caption-text",
         "api_calls": 0,
         "translation_performed": False,
         "translation_note": (
-            "CAPTIONS selects the requested mode, but this script preserves "
-            "the existing narration text and does not translate it."
+            "This script validates and selects existing language-specific "
+            "caption text. It does not translate. If the requested language "
+            "is unavailable, it fails instead of silently using another "
+            "language."
         ),
         "total_scenes": expected_count,
         "parts": parts,
@@ -326,13 +434,13 @@ def main():
     write_json(CAPTION_FILE, result)
 
     log("=" * 56)
-    log("CAPTIONS PREPARED")
+    log("CAPTIONS PREPARED AND LANGUAGE FIELDS VALIDATED")
     log("FORMAT:", video_format)
-    log("REQUESTED CAPTION MODE:", caption_mode)
+    log("CAPTION MODE:", mode)
     log("SCENES:", expected_count)
     log("FONT:", font)
     log("RESOLVED FONT SIZE:", font_size)
-    log("TRANSLATION: not performed; source text preserved")
+    log("AUTOMATIC TRANSLATION: not performed")
     log("EXTERNAL API CALLS: 0")
     log("OUTPUT:", CAPTION_FILE.relative_to(ROOT))
     log("=" * 56)
