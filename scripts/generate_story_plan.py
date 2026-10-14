@@ -107,14 +107,31 @@ def get_text(config, key, default=""):
 
 def selected_model():
     data = read_json(MODEL_FILE)
-    if not isinstance(data, dict) or data.get("status") != "selected":
+
+    if not isinstance(data, dict):
         raise RuntimeError(
-            "Selected Gemini model missing. Run "
-            "scripts/select_gemini_model.py first."
+            "Gemini model configuration is missing. "
+            "Run scripts/select_gemini_model.py first."
         )
+
+    status = str(data.get("status", "")).strip()
+    if status not in {"selected", "configured_unverified"}:
+        raise RuntimeError(
+            f"Unsupported Gemini model status: {status!r}. "
+            "Run scripts/select_gemini_model.py first."
+        )
+
     model = str(data.get("model", "")).strip()
     if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
         raise RuntimeError(f"Invalid Gemini model ID: {model!r}")
+
+    if status == "configured_unverified":
+        log(
+            "WARNING: Using a locally configured Gemini model "
+            "without a live compatibility test. "
+            "Availability and billing status are not verified."
+        )
+
     return model
 
 
