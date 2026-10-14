@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Prepare scene narration with strict mapping and resumable checkpoints."""
+"""Prepare validated, resumable narration records without API calls."""
 
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ SCENES_FILE = ROOT / "output" / "scenes" / "scenes.json"
 AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
 OUTPUT_FILE = ROOT / "output" / "narration" / "narration.json"
 
-VERSION = 3
+VERSION = 4
 
 
 def now():
@@ -36,7 +37,9 @@ def now():
 
 
 def digest(value):
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    if not isinstance(value, bytes):
+        value = str(value).encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
 
 
 def canonical_json(data):
@@ -89,17 +92,14 @@ def read_json(path, required=True):
 def parse_bool(value, default=True):
     if value is None or str(value).strip() == "":
         return default
-
     if isinstance(value, bool):
         return value
 
     value = str(value).strip().lower()
-
     if value in {"1", "true", "yes", "on", "enabled"}:
         return True
     if value in {"0", "false", "no", "off", "disabled"}:
         return False
-
     return default
 
 
@@ -117,19 +117,15 @@ def scene_key(item):
 
 
 def narration_text(item):
-    value = item.get("narration")
-
-    if not isinstance(value, str) or not value.strip():
-        value = item.get("text")
-
-    if not isinstance(value, str):
-        return ""
-
-    return re.sub(r"\s+", " ", value).strip()
+    for field in ("narration", "text"):
+        value = item.get(field)
+        if isinstance(value, str) and value.strip():
+            return re.sub(r"\s+", " ", value).strip()
+    return ""
 
 
 def count_words(text):
-    # Count Devanagari and Latin word groups without requiring external libraries.
+    # Count Latin words/numbers and Devanagari word groups.
     return len(
         re.findall(
             r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*|"
@@ -146,20 +142,25 @@ def extract_ai_story(data):
     if not isinstance(parts, list):
         raise RuntimeError("ai_story.json parts must be a list.")
 
-    for part_data in parts:
+    for expected_part, part_data in enumerate(parts, 1):
         if not isinstance(part_data, dict):
             raise RuntimeError("AI story contains an invalid part.")
 
-        part_number = part_data.get("part")
-        scenes = part_data.get("scenes", [])
+        try:
+            part_number = int(part_data.get("part", expected_part))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("AI story contains an invalid part number.") from exc
 
+        if part_number != expected_part:
+            raise RuntimeError(f"Unexpected part number: {part_number}.")
+
+        scenes = part_data.get("scenes", [])
         if not isinstance(scenes, list):
             raise RuntimeError("AI story part scenes must be a list.")
 
         for item in scenes:
             if not isinstance(item, dict):
                 raise RuntimeError("AI story contains an invalid scene.")
-
             row = dict(item)
             row["part"] = part_number
             result.append(row)
@@ -168,30 +169,24 @@ def extract_ai_story(data):
 
 
 def load_source_scenes():
+    # Prefer the latest scene-level output when it is present and complete.
     if SCENES_FILE.is_file():
         data = read_json(SCENES_FILE, required=False)
-
         if isinstance(data, dict):
             scenes = data.get("scenes", [])
-
             if not isinstance(scenes, list):
                 raise RuntimeError("scenes.json scenes must be a list.")
 
             if scenes:
                 if not all(isinstance(item, dict) for item in scenes):
-                    raise RuntimeError(
-                        "scenes.json contains an invalid scene entry."
-                    )
-
+                    raise RuntimeError("scenes.json contains an invalid scene.")
                 return scenes, SCENES_FILE.relative_to(ROOT).as_posix()
 
     data = read_json(AI_STORY_FILE)
-
     if data.get("status") != "completed":
         raise RuntimeError("AI story is not marked completed.")
 
     scenes = extract_ai_story(data)
-
     if not scenes:
         raise RuntimeError("No scenes found in the AI story.")
 
@@ -201,8 +196,8 @@ def load_source_scenes():
 def normalize_settings(config):
     return {
         "format": get_format(config),
-        "parts": get_parts(config),
-        "scenes_per_part": get_scenes(config),
+        "parts": int(get_parts(config)),
+        "scenes_per_part": int(get_scenes(config)),
         "voice": str(config.get("VOICE", "male")).strip(),
         "speed": str(config.get("SPEED", "+0%")).strip(),
         "captions": str(config.get("CAPTIONS", "hindi")).strip().lower(),
@@ -212,9 +207,7 @@ def normalize_settings(config):
         "music": parse_bool(config.get("MUSIC"), True),
         "sfx": parse_bool(config.get("SFX"), True),
         "ambient_sound": parse_bool(config.get("AMBIENT_SOUND"), True),
-        "transitions": str(
-            config.get("TRANSITIONS", "cinematic")
-        ).strip(),
+        "transitions": str(config.get("TRANSITIONS", "cinematic")).strip(),
     }
 
 
@@ -224,30 +217,26 @@ def validate_scenes(source, settings):
         for part in range(1, settings["parts"] + 1)
         for scene in range(1, settings["scenes_per_part"] + 1)
     }
-
     mapped = {}
 
     for index, item in enumerate(source, start=1):
         key = scene_key(item)
-
         if key is None:
             raise RuntimeError(f"Invalid scene mapping at source row {index}.")
-
         if key in mapped:
             raise RuntimeError(f"Duplicate scene mapping: {key}.")
-
         if key not in expected:
             raise RuntimeError(f"Unexpected scene mapping: {key}.")
 
         text = narration_text(item)
-
         if not text:
-            raise RuntimeError(f"Empty narration for part {key[0]}, scene {key[1]}.")
+            raise RuntimeError(
+                f"Empty narration for part {key[0]}, scene {key[1]}."
+            )
 
         mapped[key] = item
 
     missing = sorted(expected - set(mapped))
-
     if missing:
         raise RuntimeError(f"Missing required narration scenes: {missing}")
 
@@ -260,13 +249,13 @@ def make_record(source, settings):
     text_hash = digest(text)
 
     duration = source.get("duration")
-
     if duration is None or not str(duration).strip():
         duration = settings["scene_duration"]
 
     return {
         "part": key[0],
         "scene": key[1],
+        "scene_id": f"part_{key[0]:02d}_scene_{key[1]:02d}",
         "text": text,
         "text_sha256": text_hash,
         "word_count": count_words(text),
@@ -283,55 +272,35 @@ def make_record(source, settings):
 
 def load_reusable(settings_hash, source_map, settings):
     old = read_json(OUTPUT_FILE, required=False)
-
     if not old or old.get("status") not in {"in_progress", "completed"}:
         return {}
 
     if old.get("settings_sha256") != settings_hash:
-        print("Settings changed; old narration checkpoint will not be reused.")
+        print("Settings or source changed; previous narration will not be reused.")
         return {}
 
     rows = old.get("scenes", [])
-
     if not isinstance(rows, list):
         return {}
 
     reusable = {}
-
     for row in rows:
         if not isinstance(row, dict) or row.get("status") != "completed":
             continue
 
         key = scene_key(row)
-
         if key not in source_map:
             continue
 
         expected = make_record(source_map[key], settings)
 
-        # The exact text hash is required. Stale audio jobs will be invalidated
-        # downstream by the TTS stage when this text changes.
-        if row.get("text_sha256") != expected["text_sha256"]:
-            continue
-
-        if row.get("text") != expected["text"]:
-            continue
-
         fields = (
-            "voice",
-            "speed",
-            "captions",
-            "format",
-            "audience",
-            "duration",
-            "estimated_duration",
-            "word_count",
+            "scene_id", "text_sha256", "text", "voice", "speed",
+            "captions", "format", "audience", "duration",
+            "estimated_duration", "word_count",
         )
-
-        if any(row.get(field) != expected.get(field) for field in fields):
-            continue
-
-        reusable[key] = expected
+        if all(row.get(field) == expected.get(field) for field in fields):
+            reusable[key] = expected
 
     return reusable
 
@@ -339,13 +308,16 @@ def load_reusable(settings_hash, source_map, settings):
 def main():
     print("=" * 56)
     print("KATHA LOK AI — NARRATION PREPARATION")
-    print("New story-generation API calls: 0")
+    print("Story/TTS API calls in this stage: 0")
     print("=" * 56)
 
     config = load_and_validate(CONFIG_FILE)
     settings = normalize_settings(config)
-    total = settings["parts"] * settings["scenes_per_part"]
 
+    if settings["parts"] < 1 or settings["scenes_per_part"] < 1:
+        raise RuntimeError("PARTS and SCENES must both be positive.")
+
+    total = settings["parts"] * settings["scenes_per_part"]
     source, source_path = load_source_scenes()
     source_map = validate_scenes(source, settings)
 
@@ -358,10 +330,12 @@ def main():
         story = read_json(AI_STORY_FILE, required=False) or {}
         topic = str(story.get("title") or story.get("topic") or "").strip()
 
+    # Include every scene's exact text and source mapping in the fingerprint.
     source_fingerprint = digest(canonical_json([
         {
             "part": part,
             "scene": scene,
+            "scene_id": source_map[(part, scene)].get("scene_id"),
             "text_sha256": digest(narration_text(source_map[(part, scene)])),
         }
         for part, scene in sorted(source_map)
@@ -371,6 +345,7 @@ def main():
         "version": VERSION,
         "settings": settings,
         "source_fingerprint": source_fingerprint,
+        "source_path": source_path,
     }))
 
     reusable = load_reusable(settings_hash, source_map, settings)
@@ -395,7 +370,6 @@ def main():
     }
 
     save_json(OUTPUT_FILE, output)
-
     print(f"Format: {settings['format']}")
     print(f"Expected scenes: {total}")
     print(f"Source: {source_path}")
@@ -413,6 +387,7 @@ def main():
         output["last_completed"] = {
             "part": key[0],
             "scene": key[1],
+            "scene_id": f"part_{key[0]:02d}_scene_{key[1]:02d}",
         }
         output["updated_at"] = now()
         save_json(OUTPUT_FILE, output)
@@ -423,8 +398,15 @@ def main():
     if len(final_rows) != total or len(set(final_keys)) != total:
         raise RuntimeError("Final narration mapping/count is invalid.")
 
-    if any(not row["text"].strip() for row in final_rows):
-        raise RuntimeError("Final narration contains empty text.")
+    for row in final_rows:
+        if not row["text"].strip():
+            raise RuntimeError(
+                f"Final narration is empty: {row['scene_id']}."
+            )
+        if row["text_sha256"] != digest(row["text"]):
+            raise RuntimeError(
+                f"Narration hash mismatch: {row['scene_id']}."
+            )
 
     output.update({
         "status": "completed",
@@ -433,15 +415,19 @@ def main():
         "api_calls": 0,
         "completed_at": now(),
         "updated_at": now(),
+        "validation": {
+            "exact_scene_count": True,
+            "unique_part_scene_mapping": True,
+            "narration_hashes_verified": True,
+        },
     })
 
     save_json(OUTPUT_FILE, output)
-
     print("=" * 56)
     print("NARRATION PREPARATION COMPLETED")
     print(f"Scenes prepared: {total}")
     print(f"Words across narration: {sum(row['word_count'] for row in final_rows)}")
-    print("Story-generation API calls: 0")
+    print("Story/TTS API calls in this stage: 0")
     print(f"Output: {OUTPUT_FILE}")
     print("=" * 56)
 
