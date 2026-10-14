@@ -111,6 +111,31 @@ INT_KEYS = {
     if isinstance(value, int) and not isinstance(value, bool)
 }
 
+_TRUE_VALUES = {"true", "yes", "on", "1", "enabled"}
+_FALSE_VALUES = {"false", "no", "off", "0", "disabled"}
+
+
+def parse_bool(value: Any, key: str = "value") -> bool:
+    """Parse a Boolean strictly; never treat the string 'false' as true."""
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, int) and value in (0, 1):
+        return value == 1
+
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+
+        if lowered in _TRUE_VALUES:
+            return True
+
+        if lowered in _FALSE_VALUES:
+            return False
+
+    raise ValueError(
+        f"{key} must be true/false, yes/no, on/off, enabled/disabled, or 1/0."
+    )
+
 
 def _strip_inline_comment(value: str) -> str:
     quote = None
@@ -157,15 +182,7 @@ def _parse_scalar(key: str, raw_value: str) -> Any:
     value = _unquote(_strip_inline_comment(raw_value).strip())
 
     if key in BOOL_KEYS:
-        lowered = str(value).strip().lower()
-
-        if lowered in {"true", "yes", "on", "1"}:
-            return True
-
-        if lowered in {"false", "no", "off", "0"}:
-            return False
-
-        raise ValueError(f"{key} must be true or false.")
+        return parse_bool(value, key)
 
     if key in INT_KEYS:
         try:
@@ -361,19 +378,15 @@ def get_max_retries(config: dict[str, Any]) -> int:
 
 
 def get_caption_font(config: dict[str, Any]) -> str:
-    raw = str(
-        config.get("CAPTION_FONT", "Hind")
-    ).strip().lower()
+    raw = str(config.get("CAPTION_FONT", "Hind")).strip().lower()
 
     if raw not in CAPTION_FONTS:
-        allowed = ", ".join(
-            [
-                "Noto Sans Devanagari",
-                "Mukta",
-                "Hind",
-                "Tiro Devanagari Hindi",
-            ]
-        )
+        allowed = ", ".join([
+            "Noto Sans Devanagari",
+            "Mukta",
+            "Hind",
+            "Tiro Devanagari Hindi",
+        ])
         raise ValueError(
             f"Unsupported CAPTION_FONT: {raw!r}. Allowed fonts: {allowed}"
         )
@@ -384,9 +397,7 @@ def get_caption_font(config: dict[str, Any]) -> str:
 
 
 def get_caption_font_size(config: dict[str, Any]) -> int | str:
-    raw = str(
-        config.get("CAPTION_FONT_SIZE", 28)
-    ).strip().lower()
+    raw = str(config.get("CAPTION_FONT_SIZE", 28)).strip().lower()
 
     if raw == "auto":
         config["CAPTION_FONT_SIZE"] = "auto"
@@ -422,9 +433,7 @@ def get_title_source(config: dict[str, Any]) -> str:
     if topic:
         return topic
 
-    story = get_story_text(config)
-
-    for line in story.splitlines():
+    for line in get_story_text(config).splitlines():
         cleaned = line.strip().strip("#").strip()
 
         if cleaned:
@@ -441,12 +450,10 @@ def normalize_provider(value: Any) -> str:
     provider = str(value or "").strip().lower().replace("-", "_")
     spaced = provider.replace("_", " ")
 
-    provider = PROVIDER_ALIASES.get(
+    return PROVIDER_ALIASES.get(
         spaced,
         PROVIDER_ALIASES.get(provider, provider),
     )
-
-    return provider
 
 
 def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
@@ -474,12 +481,10 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
                 f"Allowed: {', '.join(ALL_TTS_PROVIDERS)}"
             )
 
-    fallback_enabled = config.get("TTS_FALLBACK_ENABLED", True)
-
-    if isinstance(fallback_enabled, str):
-        fallback_enabled = fallback_enabled.strip().lower() in {
-            "true", "yes", "on", "1"
-        }
+    fallback_enabled = parse_bool(
+        config.get("TTS_FALLBACK_ENABLED", True),
+        "TTS_FALLBACK_ENABLED",
+    )
 
     fallback: list[str] = []
 
@@ -514,7 +519,14 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
+    # Work on the supplied dictionary for backward compatibility with callers.
     normalize_format(config)
+
+    for key in BOOL_KEYS:
+        config[key] = parse_bool(
+            config.get(key, DEFAULT_CONFIG[key]),
+            key,
+        )
 
     config["PARTS"] = get_parts(config)
     config["SCENES"] = get_scenes(config)
@@ -549,11 +561,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if config["TTS_MAX_PROVIDER_ATTEMPTS"] > 3:
         raise ValueError("TTS_MAX_PROVIDER_ATTEMPTS cannot exceed 3.")
 
-    config["TTS_ALLOW_PAID"] = bool(
-        config.get("TTS_ALLOW_PAID", False)
+    # Explicit opt-in is required here. The workflow/provider layer must
+    # independently allow billable services before any paid provider is used.
+    config["TTS_ALLOW_PAID"] = parse_bool(
+        config.get("TTS_ALLOW_PAID", False),
+        "TTS_ALLOW_PAID",
     )
-    config["TTS_FALLBACK_ENABLED"] = bool(
-        config.get("TTS_FALLBACK_ENABLED", True)
+    config["TTS_FALLBACK_ENABLED"] = parse_bool(
+        config.get("TTS_FALLBACK_ENABLED", True),
+        "TTS_FALLBACK_ENABLED",
     )
     config["TTS_PROVIDER_ORDER"] = get_tts_provider_order(config)
 
@@ -568,17 +584,13 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 
     config["FAILURE_POLICY"] = policy
 
-    captions = str(
-        config.get("CAPTIONS", "hindi")
-    ).strip().lower()
+    captions = str(config.get("CAPTIONS", "hindi")).strip().lower()
 
     if captions not in {"hindi", "english", "hinglish"}:
         raise ValueError("CAPTIONS must be hindi, english, or hinglish.")
 
     config["CAPTIONS"] = captions
-    config["QUALITY"] = str(
-        config.get("QUALITY", "high")
-    ).strip().lower()
+    config["QUALITY"] = str(config.get("QUALITY", "high")).strip().lower()
     config["VISUAL_STYLE"] = str(
         config.get("VISUAL_STYLE", "cinematic_realistic")
     ).strip()
@@ -615,20 +627,31 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "STORY_LENGTH": str(config.get("STORY_LENGTH", "")),
         "SCENE_DURATION": str(config.get("SCENE_DURATION", "")),
         "FAILURE_POLICY": str(config.get("FAILURE_POLICY", "")),
-        "RESUME_ENABLED": bool(config.get("RESUME_ENABLED", True)),
-        "SAVE_CHECKPOINT_AFTER_EACH_SCENE": bool(
-            config.get("SAVE_CHECKPOINT_AFTER_EACH_SCENE", True)
+        "RESUME_ENABLED": parse_bool(
+            config.get("RESUME_ENABLED", True), "RESUME_ENABLED"
         ),
-        "SKIP_COMPLETED_SCENES": bool(
-            config.get("SKIP_COMPLETED_SCENES", True)
+        "SAVE_CHECKPOINT_AFTER_EACH_SCENE": parse_bool(
+            config.get("SAVE_CHECKPOINT_AFTER_EACH_SCENE", True),
+            "SAVE_CHECKPOINT_AFTER_EACH_SCENE",
+        ),
+        "SKIP_COMPLETED_SCENES": parse_bool(
+            config.get("SKIP_COMPLETED_SCENES", True),
+            "SKIP_COMPLETED_SCENES",
         ),
         "TTS_PROVIDER_ORDER": get_tts_provider_order(config),
-        "TTS_ALLOW_PAID": bool(config.get("TTS_ALLOW_PAID", False)),
+        "TTS_ALLOW_PAID": parse_bool(
+            config.get("TTS_ALLOW_PAID", False), "TTS_ALLOW_PAID"
+        ),
+        "TTS_FALLBACK_ENABLED": parse_bool(
+            config.get("TTS_FALLBACK_ENABLED", True),
+            "TTS_FALLBACK_ENABLED",
+        ),
         "TTS_CHUNK_MAX_CHARS": int(
             config.get("TTS_CHUNK_MAX_CHARS", 500)
         ),
-        "TTS_CHUNK_CHECKPOINT": bool(
-            config.get("TTS_CHUNK_CHECKPOINT", True)
+        "TTS_CHUNK_CHECKPOINT": parse_bool(
+            config.get("TTS_CHUNK_CHECKPOINT", True),
+            "TTS_CHUNK_CHECKPOINT",
         ),
     }
 
