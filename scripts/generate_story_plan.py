@@ -2,12 +2,13 @@
 #!/usr/bin/env python3
 """Generate resumable AI story scenes with per-part response checkpoints."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
 import re
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +21,10 @@ from input_config import (
     get_topic,
     get_story_text,
 )
+from gemini_api_guard import (
+    require_gemini_generation,
+    GeminiBillingBlocked,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 STORY_DIR = ROOT / "output" / "story"
@@ -28,8 +33,13 @@ OUTPUT = STORY_DIR / "ai_story.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 CHECKPOINT_DIR = STORY_DIR / "ai_story_checkpoints"
 
-API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+API_KEY = (
+    os.getenv("GEMINI_API_KEY", "").strip()
+    or os.getenv("GOOGLE_API_KEY", "").strip()
+)
 TIMEOUT = max(30, int(os.getenv("SCENE_REQUEST_TIMEOUT", "120")))
+
+# Keep version 3 so existing compatible checkpoints remain reusable.
 VERSION = 3
 
 SCENE_FIELDS = (
@@ -51,8 +61,10 @@ def log(message):
 
 def fingerprint(data):
     raw = json.dumps(
-        data, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":")
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -62,6 +74,7 @@ def read_json(path, required=True):
         if required:
             raise RuntimeError(f"Required file missing: {path}")
         return None
+
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -92,6 +105,7 @@ def get_bool(config, key, default=False):
     value = config.get(key, default)
     if isinstance(value, bool):
         return value
+
     text = str(value).strip().lower()
     if text in {"true", "1", "yes", "on"}:
         return True
@@ -168,6 +182,7 @@ def validate_source(story, expected_parts, expected_scenes):
     parts = story.get("parts")
     if not isinstance(parts, list) or not parts:
         raise RuntimeError("story.json must contain a non-empty parts list.")
+
     if len(parts) != expected_parts:
         raise RuntimeError(
             f"Story parts mismatch: got {len(parts)}, "
@@ -178,29 +193,48 @@ def validate_source(story, expected_parts, expected_scenes):
     for pnum, part in enumerate(parts, 1):
         if not isinstance(part, dict) or part.get("part") != pnum:
             raise RuntimeError(f"Invalid part numbering at part {pnum}.")
+
         scenes = part.get("scenes")
         if not isinstance(scenes, list) or len(scenes) != expected_scenes:
             raise RuntimeError(
                 f"Part {pnum} must contain exactly {expected_scenes} scenes."
             )
+
         for snum, scene in enumerate(scenes, 1):
             if not isinstance(scene, dict) or scene.get("scene") != snum:
                 raise RuntimeError(
                     f"Invalid scene numbering at part {pnum}, scene {snum}."
                 )
+
         total += len(scenes)
+
     return total
 
 
 def call_gemini(model, prompt):
-    if not API_KEY:
-        raise RuntimeError("GEMINI_API_KEY secret is missing.")
+    # Only called when a compatible saved response is not available.
+    # Enforce authorization immediately before making a real API request.
+    try:
+        guarded_api_key = require_gemini_generation(
+            "generate_story_plan",
+            api_key=API_KEY,
+        )
+    except GeminiBillingBlocked as exc:
+        raise RuntimeError(
+            f"{exc}\n"
+            "No scene-planning generation request was sent. "
+            "To explicitly authorize potentially billable Gemini usage, set "
+            "ALLOW_GEMINI_GENERATION to "
+            "I_ACCEPT_POTENTIAL_GEMINI_CHARGES in the workflow environment. "
+            "Leave it unset for the safe default."
+        ) from exc
 
     encoded_model = urllib.parse.quote(model, safe="-._")
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{encoded_model}:generateContent"
     )
+
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -210,12 +244,13 @@ def call_gemini(model, prompt):
             "responseMimeType": "application/json",
         },
     }
+
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "x-goog-api-key": API_KEY,
+            "x-goog-api-key": guarded_api_key,
         },
         method="POST",
     )
@@ -235,35 +270,47 @@ def call_gemini(model, prompt):
             "Gemini request timed out; provider may have processed it."
         ) from exc
 
+    if not isinstance(result, dict):
+        raise RuntimeError("Gemini returned an unexpected API response.")
+
     candidates = result.get("candidates", [])
     if not candidates:
         error = result.get("error", {})
-        raise RuntimeError(
-            str(error.get("message", "Gemini returned no candidates."))
+        message = (
+            error.get("message", "Gemini returned no candidates.")
+            if isinstance(error, dict)
+            else "Gemini returned no candidates."
         )
+        raise RuntimeError(str(message))
 
     candidate = candidates[0]
-    if str(candidate.get("finishReason", "")).upper() in {
-        "MAX_TOKENS", "LENGTH"
-    }:
+    if not isinstance(candidate, dict):
+        raise RuntimeError("Gemini returned an invalid candidate.")
+
+    finish_reason = str(candidate.get("finishReason", "")).upper()
+    if finish_reason in {"MAX_TOKENS", "LENGTH"}:
         raise RuntimeError("Gemini response was truncated.")
 
-    text = "\n".join(
-        p.get("text", "")
-        for p in candidate.get("content", {}).get("parts", [])
-        if isinstance(p, dict) and isinstance(p.get("text"), str)
+    content = candidate.get("content", {})
+    parts = content.get("parts", []) if isinstance(content, dict) else []
+
+    response_text = "\n".join(
+        item.get("text", "")
+        for item in parts
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
     ).strip()
 
-    if not text:
+    if not response_text:
         raise RuntimeError("Gemini returned empty response text.")
 
     try:
-        data = json.loads(text)
+        data = json.loads(response_text)
     except json.JSONDecodeError as exc:
         raise RuntimeError("Gemini returned invalid JSON.") from exc
 
     if not isinstance(data, dict) or not isinstance(data.get("scenes"), list):
         raise RuntimeError("Gemini response must contain a scenes array.")
+
     return data
 
 
@@ -303,6 +350,7 @@ def make_prompt(story, part, config, topic, story_text):
         if config["part_suspense"]
         else "Use suspense only when it fits the source story."
     )
+
     ending_rule = (
         "This is the final part: resolve the central conflict clearly."
         if last_part and config["final_resolution"]
@@ -381,6 +429,7 @@ def validate_generated(generated, source_part, config, hook):
         )
 
     output = []
+
     for index, (source, scene) in enumerate(
         zip(source_scenes, generated), 1
     ):
@@ -411,6 +460,7 @@ def validate_generated(generated, source_part, config, hook):
 
         if not item["narration"]:
             raise RuntimeError(f"Part {pnum}, scene {index}: empty narration.")
+
         if len(item["visual_prompt"]) < 30:
             raise RuntimeError(
                 f"Part {pnum}, scene {index}: visual prompt too short."
@@ -420,6 +470,7 @@ def validate_generated(generated, source_part, config, hook):
             minimum = (
                 7 if config["format"] == "short" else 14
             ) if pnum == 1 else 7
+
             if word_count(item["narration"]) < minimum:
                 raise RuntimeError(
                     f"Part {pnum}, scene 1 hook needs at least {minimum} words."
@@ -429,7 +480,9 @@ def validate_generated(generated, source_part, config, hook):
             if not normalize_text(item["narration"]).startswith(
                 normalize_text(hook)
             ):
-                raise RuntimeError("First narration does not start with exact hook.")
+                raise RuntimeError(
+                    "First narration does not start with exact hook."
+                )
 
         if config["part_suspense"] and index == len(source_scenes):
             if word_count(item["suspense_prompt"]) < 4:
@@ -439,6 +492,7 @@ def validate_generated(generated, source_part, config, hook):
 
         if not config["sfx"]:
             item["sfx_prompt"] = ""
+
         if not config["music"]:
             item["music_prompt"] = ""
 
@@ -460,8 +514,11 @@ def main():
     if not isinstance(story, dict) or story.get("status") != "completed":
         raise RuntimeError("story.json is missing or not marked completed.")
 
-    parts_requested = int(source_config.get("PARTS", len(story.get("parts", []))))
+    parts_requested = int(
+        source_config.get("PARTS", len(story.get("parts", [])))
+    )
     scenes_requested = int(source_config.get("SCENES", 0))
+
     if parts_requested < 1 or scenes_requested < 1:
         raise RuntimeError("PARTS and SCENES must both be positive integers.")
 
@@ -474,6 +531,7 @@ def main():
 
     hook = str(story.get("hook", "")).strip()
     minimum_hook = 7 if config["format"] == "short" else 14
+
     if word_count(hook) < minimum_hook:
         raise RuntimeError(
             f"story.json hook needs at least {minimum_hook} words."
@@ -490,6 +548,7 @@ def main():
 
     existing = read_json(OUTPUT, required=False)
     saved_parts = {}
+
     if (
         isinstance(existing, dict)
         and existing.get("source_fingerprint") == source_fp
@@ -521,7 +580,7 @@ def main():
     log(f"Format: {config['format']}")
     log(f"Parts: {parts_requested}; scenes per part: {scenes_requested}")
     log(f"Total scenes: {total}")
-    log("A valid raw response checkpoint is reused before another API call.")
+    log("Completed parts and matching raw responses are reused when valid.")
 
     global_number = 0
 
@@ -531,6 +590,7 @@ def main():
             "source_fingerprint": source_fp,
             "part": source_part,
         })
+
         saved = saved_parts.get(pnum)
         scenes = None
 
@@ -564,12 +624,18 @@ def main():
 
             if response is None:
                 if not API_KEY:
-                    raise RuntimeError("GEMINI_API_KEY secret is missing.")
+                    raise RuntimeError(
+                        "GEMINI_API_KEY or GOOGLE_API_KEY secret is missing."
+                    )
 
+                # Only one generation attempt per run. A later run can reuse
+                # checkpoints; uncertain network outcomes must not auto-retry.
+                max_attempts = 1
                 last_error = None
-                max_attempts = config["max_retries"]
+
                 for attempt in range(1, max_attempts + 1):
                     log(f"Part {pnum}: Gemini request {attempt}/{max_attempts}.")
+
                     try:
                         response = call_gemini(
                             model,
@@ -577,7 +643,8 @@ def main():
                                 story, source_part, config, topic, story_text
                             ),
                         )
-                        # Save raw successful response before schema validation.
+
+                        # Save raw response before schema validation.
                         write_json(checkpoint_path, {
                             "status": "response_saved",
                             "mapping_version": VERSION,
@@ -587,16 +654,18 @@ def main():
                             "response": response,
                         })
                         break
+
                     except RuntimeError as exc:
                         last_error = exc
                         log(f"Part {pnum}: {exc}")
 
-                        # A timeout/network failure may still have consumed
-                        # provider quota. Do not automatically retry it.
                         message = str(exc).lower()
                         uncertain = any(word in message for word in (
-                            "timed out", "network error", "urlopen error"
+                            "timed out",
+                            "network error",
+                            "urlopen error",
                         ))
+
                         if uncertain:
                             raise RuntimeError(
                                 f"Part {pnum}: request outcome is uncertain; "
@@ -604,9 +673,6 @@ def main():
                                 "If a response was received, rerun to reuse its "
                                 "checkpoint; otherwise inspect quota before retrying."
                             ) from exc
-
-                        if attempt < max_attempts:
-                            time.sleep(min(2 ** attempt, 4))
 
                 if response is None:
                     write_json(OUTPUT, result)
@@ -622,8 +688,8 @@ def main():
                     hook,
                 )
             except (RuntimeError, TypeError, ValueError, KeyError) as exc:
-                # Keep the raw response. A corrected script can revalidate it
-                # without generating the story again.
+                # Keep the raw response so code/schema fixes can be validated
+                # without sending another generation request.
                 write_json(OUTPUT, result)
                 raise RuntimeError(
                     f"Part {pnum} response failed validation. Raw response "
@@ -634,6 +700,7 @@ def main():
         for scene in scenes:
             global_number += 1
             source_global = scene.get("global_scene_number")
+
             if not isinstance(source_global, int):
                 scene["global_scene_number"] = global_number
 
@@ -651,14 +718,17 @@ def main():
             ),
             "scenes": scenes,
         }
+
         result["parts"].append(part_result)
         write_json(OUTPUT, result)
+
         log(
             f"Part {pnum} checkpointed: "
             f"{sum(len(p['scenes']) for p in result['parts'])}/{total} scenes."
         )
 
     actual = sum(len(part["scenes"]) for part in result["parts"])
+
     if actual != total:
         raise RuntimeError(f"Final scene count mismatch: {actual}/{total}.")
 
@@ -667,11 +737,13 @@ def main():
         for p, part in enumerate(result["parts"], 1)
         for s in range(1, len(part["scenes"]) + 1)
     ]
+
     actual_ids = [
         scene["scene_id"]
         for part in result["parts"]
         for scene in part["scenes"]
     ]
+
     if actual_ids != expected_ids:
         raise RuntimeError("Stable scene ID sequence validation failed.")
 
@@ -684,6 +756,7 @@ def main():
         "opening_hook_validated": True,
         "part_suspense_validated": config["part_suspense"],
     }
+
     write_json(OUTPUT, result)
 
     log("AI STORY GENERATION: SUCCESS")
