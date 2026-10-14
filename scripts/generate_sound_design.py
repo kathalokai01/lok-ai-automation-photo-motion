@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Free, resumable local sound design with validator-compatible manifests."""
+"""Resumable, local-only sound design with strict scene/audio validation."""
 
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SCENES_PATH = OUTPUT / "scenes" / "scenes.json"
 AUDIO_MANIFEST = OUTPUT / "narration" / "audio_jobs.json"
 
-VERSION = "free-sound-design-v7-validator-compatible"
+VERSION = "free-sound-design-v8-strict-narration-timing"
 RATE = 22050
 BACKGROUND_SECONDS = 30
 SFX_SECONDS = 1.6
@@ -66,7 +67,9 @@ def sha256_file(path):
 
 def digest(data):
     return hashlib.sha256(
-        json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        json.dumps(
+            data, sort_keys=True, ensure_ascii=False
+        ).encode("utf-8")
     ).hexdigest()
 
 
@@ -80,7 +83,9 @@ def settings():
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        result[key.strip().upper()] = value.split("#", 1)[0].strip().strip("'\"")
+        result[key.strip().upper()] = (
+            value.split("#", 1)[0].strip().strip("'\"")
+        )
     return result
 
 
@@ -101,7 +106,9 @@ def positive_int(config, key, default):
     try:
         value = int(config.get(key, default))
     except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"{key} must be a positive integer") from exc
+        raise RuntimeError(
+            f"{key} must be a positive integer"
+        ) from exc
     if value < 1:
         raise RuntimeError(f"{key} must be a positive integer")
     return value
@@ -162,7 +169,7 @@ def track_record(path, signature, minimum_seconds):
 
 
 def ensure_track(path, category, generator, duration, previous_tracks):
-    sig = digest({
+    signature = digest({
         "version": VERSION,
         "category": category,
         "sample_rate": RATE,
@@ -172,9 +179,9 @@ def ensure_track(path, category, generator, duration, previous_tracks):
 
     if path.is_file():
         try:
-            record = track_record(path, sig, duration)
+            record = track_record(path, signature, duration)
             if (
-                previous.get("signature") == sig
+                previous.get("signature") == signature
                 and previous.get("sha256") == record["sha256"]
             ):
                 log("RESUME:", path.relative_to(ROOT))
@@ -183,7 +190,7 @@ def ensure_track(path, category, generator, duration, previous_tracks):
             pass
 
     write_wav(path, generator())
-    return track_record(path, sig, duration)
+    return track_record(path, signature, duration)
 
 
 def music_samples():
@@ -198,7 +205,9 @@ def music_samples():
         swell = 0.78 + 0.22 * math.sin(2 * math.pi * t / 12)
         tone = sum(
             0.22 * math.sin(2 * math.pi * root * ratio * t)
-            + 0.035 * math.sin(2 * math.pi * root * ratio * 2.003 * t)
+            + 0.035 * math.sin(
+                2 * math.pi * root * ratio * 2.003 * t
+            )
             for ratio in ratios
         )
         yield tone * 0.22 * max(0.0, fade) * swell
@@ -211,7 +220,10 @@ def ambient_samples():
     for index in range(RATE * BACKGROUND_SECONDS):
         t = index / RATE
         filtered = filtered * 0.96 + rng.uniform(-1, 1) * 0.04
-        fade = max(0.0, min(1.0, t / 1.5, (BACKGROUND_SECONDS - t) / 1.5))
+        fade = max(
+            0.0,
+            min(1.0, t / 1.5, (BACKGROUND_SECONDS - t) / 1.5),
+        )
         value = (
             0.08 * math.sin(2 * math.pi * 55 * t)
             + 0.04 * math.sin(2 * math.pi * 82.41 * t + 0.4)
@@ -249,8 +261,13 @@ def sfx_samples(kind):
                 + 0.10 * filtered
             )
         elif kind == "heartbeat":
-            beat = max(0.0, math.sin(2 * math.pi * 1.6 * t)) ** 10
-            value = beat * math.sin(2 * math.pi * 65 * t) + filtered * 0.025
+            beat = max(
+                0.0, math.sin(2 * math.pi * 1.6 * t)
+            ) ** 10
+            value = (
+                beat * math.sin(2 * math.pi * 65 * t)
+                + filtered * 0.025
+            )
         else:
             value = (
                 0.40 * math.sin(2 * math.pi * 880 * t)
@@ -266,28 +283,41 @@ def scene_rows():
     if not isinstance(data, dict):
         raise RuntimeError(f"Missing or invalid scenes file: {SCENES_PATH}")
 
-    parts = data.get("parts")
-    if isinstance(parts, list):
+    parts_data = data.get("parts")
+    if isinstance(parts_data, list):
         rows = []
-        for part_index, part in enumerate(parts, 1):
-            if not isinstance(part, dict):
+        for part_index, part_data in enumerate(parts_data, 1):
+            if not isinstance(part_data, dict):
                 continue
-            part_number = int(part.get("part", part_index))
-            scenes = part.get("scenes", [])
-            if not isinstance(scenes, list):
-                continue
-            for scene_index, scene in enumerate(scenes, 1):
-                if isinstance(scene, dict):
-                    row = dict(scene)
-                    row.setdefault("part", part_number)
-                    row.setdefault("scene", scene_index)
-                    rows.append(row)
+            try:
+                part_number = int(part_data.get("part", part_index))
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"Invalid part number at part index {part_index}"
+                )
+
+            scene_list = part_data.get("scenes", [])
+            if not isinstance(scene_list, list):
+                raise RuntimeError(
+                    f"Scenes for part {part_number} must be a list"
+                )
+
+            for scene_index, scene_data in enumerate(scene_list, 1):
+                if not isinstance(scene_data, dict):
+                    continue
+                row = dict(scene_data)
+                row.setdefault("part", part_number)
+                row.setdefault("scene", scene_index)
+                rows.append(row)
+
         if rows:
             return rows
 
-    rows = data.get("scenes")
-    if isinstance(rows, list):
-        return [row for row in rows if isinstance(row, dict)]
+    scene_list = data.get("scenes")
+    if isinstance(scene_list, list):
+        return [
+            row for row in scene_list if isinstance(row, dict)
+        ]
 
     raise RuntimeError("scenes.json contains no supported scene list")
 
@@ -295,24 +325,28 @@ def scene_rows():
 def choose_sfx(scene):
     text = " ".join(
         str(scene.get(key, ""))
-        for key in ("sfx", "title", "narration", "mood", "suspense_prompt")
+        for key in (
+            "sfx", "title", "narration", "mood", "suspense_prompt"
+        )
     ).casefold()
 
     groups = [
         ("heartbeat", (
-            "heartbeat", "heart beat", "pulse", "धड़कन", "धड़कन", "दिल जोर",
+            "heartbeat", "heart beat", "pulse",
+            "धड़कन", "धड़कन", "दिल जोर",
         )),
         ("impact", (
             "impact", "crash", "slam", "bang", "explosion",
             "धमाका", "टकराया", "गिर पड़ा", "टूट गया", "गोली",
         )),
         ("chime", (
-            "bell", "chime", "ring", "घंटी", "फोन बज", "अलार्म",
-            "खुशखबरी",
+            "bell", "chime", "ring", "घंटी", "फोन बज",
+            "अलार्म", "खुशखबरी",
         )),
         ("mystery", (
-            "mystery", "secret", "suspense", "डर", "भूत", "रहस्य",
-            "अंधेरा", "साया", "खौफ", "चौंक", "अनजान आवाज",
+            "mystery", "secret", "suspense", "डर", "भूत",
+            "रहस्य", "अंधेरा", "साया", "खौफ", "चौंक",
+            "अनजान आवाज",
         )),
     ]
 
@@ -320,40 +354,63 @@ def choose_sfx(scene):
         if any(keyword in text for keyword in keywords):
             return kind
 
-    if any(word in text for word in ("transition", "दौड़ा", "भागा", "चल पड़ा")):
+    if any(
+        word in text
+        for word in ("transition", "दौड़ा", "भागा", "चल पड़ा")
+    ):
         return "whoosh"
 
     return "mystery" if scene.get("suspense_required") else "whoosh"
 
 
 def narration_durations():
-    data = read_json(AUDIO_MANIFEST, {})
-    rows = data if isinstance(data, list) else (
-        data.get("jobs") or data.get("audio_jobs") or []
-        if isinstance(data, dict) else []
-    )
-    result = {}
-    ffprobe = shutil.which("ffprobe")
+    data = read_json(AUDIO_MANIFEST)
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = data.get("jobs") or data.get("audio_jobs") or []
+    else:
+        raise RuntimeError(
+            f"Missing or invalid narration manifest: {AUDIO_MANIFEST}"
+        )
 
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError(
+            "Narration manifest has no jobs; run TTS before sound design."
+        )
+
+    ffprobe = shutil.which("ffprobe")
     if not ffprobe:
-        log("WARNING: ffprobe missing; cue timing cannot use actual audio durations")
-        return result
+        raise RuntimeError(
+            "ffprobe is required to verify actual narration durations."
+        )
+
+    result = {}
+    errors = []
 
     for row in rows:
-        if not isinstance(row, dict) or row.get("status") != "completed":
+        if not isinstance(row, dict):
             continue
 
         try:
-            key = (int(row["part"]), int(row["scene"]))
+            part = int(row["part"])
+            scene = int(row.get("scene", row.get("local_scene")))
         except (KeyError, TypeError, ValueError):
+            continue
+
+        if row.get("status") != "completed":
             continue
 
         value = next((
             row.get(name)
-            for name in ("output", "audio_path", "path", "file", "audio")
+            for name in (
+                "output", "audio_path", "path", "file", "audio"
+            )
             if isinstance(row.get(name), str) and row[name].strip()
         ), None)
+
         if not value:
+            errors.append(f"{part}/{scene}: missing audio path")
             continue
 
         path = Path(value)
@@ -362,6 +419,7 @@ def narration_durations():
         path = path.resolve()
 
         if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
+            errors.append(f"{part}/{scene}: audio file missing or unsafe")
             continue
 
         try:
@@ -377,11 +435,27 @@ def narration_durations():
                 timeout=30,
                 check=False,
             )
-            duration = float(probe.stdout.strip()) if probe.returncode == 0 else 0
-            if math.isfinite(duration) and duration > 0:
-                result[key] = duration
+            duration = (
+                float(probe.stdout.strip())
+                if probe.returncode == 0 else 0.0
+            )
+            if not math.isfinite(duration) or duration <= 0:
+                errors.append(f"{part}/{scene}: invalid audio duration")
+                continue
         except (OSError, ValueError, subprocess.TimeoutExpired):
+            errors.append(f"{part}/{scene}: ffprobe failed")
             continue
+
+        key = (part, scene)
+        if key in result:
+            errors.append(f"{part}/{scene}: duplicate narration job")
+            continue
+        result[key] = duration
+
+    if errors:
+        raise RuntimeError(
+            "Narration validation failed: " + "; ".join(errors[:20])
+        )
 
     return result
 
@@ -390,49 +464,72 @@ def build_cues(rows, parts, scenes_per_part, durations, enabled):
     if not enabled:
         return []
 
-    cues = []
-    seen = set()
+    expected = {
+        (part, scene)
+        for part in range(1, parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    }
+    scene_map = {}
 
     for row in rows:
         try:
             part = int(row.get("part"))
-            scene_value = row.get("scene")
-            if scene_value is None:
-                scene_value = row.get("local_scene")
+            scene_value = row.get("scene", row.get("local_scene"))
             scene = int(scene_value)
         except (TypeError, ValueError):
             continue
 
-        if not (1 <= part <= parts and 1 <= scene <= scenes_per_part):
+        key = (part, scene)
+        if key not in expected:
             continue
-        if (part, scene) in seen:
-            raise RuntimeError(f"Duplicate scene mapping: {part}/{scene}")
-        seen.add((part, scene))
+        if key in scene_map:
+            raise RuntimeError(
+                f"Duplicate scene mapping: {part}/{scene}"
+            )
+        scene_map[key] = row
 
-        duration = durations.get((part, scene))
-        cue_time = 0.08
+    missing_scenes = sorted(expected - set(scene_map))
+    if missing_scenes:
+        preview = ", ".join(
+            f"{part}/{scene}" for part, scene in missing_scenes[:20]
+        )
+        raise RuntimeError(
+            "Scene list is incomplete; missing mappings: " + preview
+        )
 
-        if duration is not None:
-            if duration <= cue_time:
-                log(f"Skipping cue beyond short narration: {part}/{scene}")
-                continue
-            cue_time = min(cue_time, duration * 0.1)
+    missing_audio = sorted(expected - set(durations))
+    if missing_audio:
+        preview = ", ".join(
+            f"{part}/{scene}" for part, scene in missing_audio[:20]
+        )
+        raise RuntimeError(
+            "Actual narration duration missing for: " + preview
+        )
 
-        kind = choose_sfx(row)
+    cues = []
+    for part, scene in sorted(expected):
+        duration = durations[(part, scene)]
+        if duration <= 0:
+            raise RuntimeError(
+                f"Invalid narration duration for {part}/{scene}"
+            )
+
+        # Start at zero: valid even for very short narration clips.
+        # Never guess duration or schedule cues after narration ends.
+        cue_time = 0.0
+        kind = choose_sfx(scene_map[(part, scene)])
         path = SFX_DIR / f"{kind}.wav"
 
         cues.append({
             "part": part,
             "scene": scene,
-            "time": round(cue_time, 3),
+            "time": cue_time,
             "file": path.relative_to(ROOT).as_posix(),
             "gain": 0.045 if kind in {"mystery", "heartbeat"} else 0.06,
             "kind": kind,
             "selection_basis": "scene_text_keyword_rules",
-            "timing_basis": (
-                "actual_narration_duration_checked"
-                if duration is not None else "scene_start_fallback"
-            ),
+            "timing_basis": "ffprobe_actual_narration_duration_verified",
+            "narration_duration_seconds": round(duration, 3),
         })
 
     return cues
@@ -445,16 +542,19 @@ def main():
 
     enabled = {
         "music": as_bool(
-            config, ("MUSIC_ENABLED", "MUSIC", "BACKGROUND_MUSIC", "SOUNDTRACK_ENABLED")
+            config,
+            ("MUSIC_ENABLED", "MUSIC", "BACKGROUND_MUSIC",
+             "SOUNDTRACK_ENABLED"),
         ),
         "ambient": as_bool(
-            config, (
-                "AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND",
-                "ENVIRONMENT_SOUND", "AMBIENCE_ENABLED",
-            )
+            config,
+            ("AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND",
+             "ENVIRONMENT_SOUND", "AMBIENCE_ENABLED"),
         ),
         "sfx": as_bool(
-            config, ("SFX_ENABLED", "SFX", "SOUND_EFFECTS", "SOUND_EFFECTS_ENABLED")
+            config,
+            ("SFX_ENABLED", "SFX", "SOUND_EFFECTS",
+             "SOUND_EFFECTS_ENABLED"),
         ),
     }
 
@@ -469,7 +569,6 @@ def main():
         old_tracks = {}
 
     tracks = {}
-
     definitions = {
         "music": (MUSIC_PATH, music_samples, BACKGROUND_SECONDS),
         "ambient": (AMBIENT_PATH, ambient_samples, BACKGROUND_SECONDS),
@@ -480,7 +579,6 @@ def main():
             path.unlink(missing_ok=True)
             tracks[category] = None
             continue
-
         tracks[category] = ensure_track(
             path, category, generator, duration, old_tracks
         )
@@ -495,7 +593,7 @@ def main():
             sfx_tracks[kind] = None
             continue
 
-        sig = digest({
+        signature = digest({
             "version": VERSION,
             "category": category,
             "sample_rate": RATE,
@@ -505,8 +603,11 @@ def main():
 
         if path.is_file():
             try:
-                record = track_record(path, sig, SFX_SECONDS)
-                if old.get("signature") == sig and old.get("sha256") == record["sha256"]:
+                record = track_record(path, signature, SFX_SECONDS)
+                if (
+                    old.get("signature") == signature
+                    and old.get("sha256") == record["sha256"]
+                ):
                     sfx_tracks[kind] = record
                     log("RESUME:", path.relative_to(ROOT))
                     continue
@@ -514,34 +615,33 @@ def main():
                 pass
 
         write_wav(path, sfx_samples(kind))
-        sfx_tracks[kind] = track_record(path, sig, SFX_SECONDS)
+        sfx_tracks[kind] = track_record(path, signature, SFX_SECONDS)
 
-    # The final validator expects tracks["sfx"], not only sfx_whoosh/etc.
-    # Use the actual first SFX asset as the compatible summary track.
-    if enabled["sfx"]:
-        tracks["sfx"] = sfx_tracks["whoosh"]
-    else:
-        # A null track is valid when the manifest explicitly disables SFX.
-        tracks["sfx"] = None
-
+    # Preserve the legacy track key required by final validation.
+    tracks["sfx"] = sfx_tracks["whoosh"] if enabled["sfx"] else None
     for kind, record in sfx_tracks.items():
         tracks[f"sfx_{kind}"] = record
 
-    rows = scene_rows() if enabled["sfx"] else []
-    durations = narration_durations()
-    cues = build_cues(rows, parts, scenes_per_part, durations, enabled["sfx"])
+    cues = []
+    if enabled["sfx"]:
+        rows = scene_rows()
+        durations = narration_durations()
+        cues = build_cues(
+            rows, parts, scenes_per_part, durations, True
+        )
 
-    for cue in cues:
-        path = (ROOT / cue["file"]).resolve()
-        if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
-            raise RuntimeError(f"SFX cue asset missing: {path}")
-        validate_audio(path, SFX_SECONDS)
+        for cue in cues:
+            path = (ROOT / cue["file"]).resolve()
+            if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
+                raise RuntimeError(f"SFX cue asset missing: {path}")
+            validate_audio(path, SFX_SECONDS)
 
-        duration = durations.get((cue["part"], cue["scene"]))
-        if duration is not None and cue["time"] >= duration:
-            raise RuntimeError(
-                f"SFX cue starts outside narration: {cue['part']}/{cue['scene']}"
-            )
+            duration = cue["narration_duration_seconds"]
+            if not 0 <= cue["time"] < duration:
+                raise RuntimeError(
+                    "SFX cue outside narration: "
+                    f"{cue['part']}/{cue['scene']}"
+                )
 
     write_json(CUES_PATH, {
         "status": "completed",
@@ -549,8 +649,13 @@ def main():
         "parts": parts,
         "scenes_per_part": scenes_per_part,
         "cue_count": len(cues),
-        "cue_policy": "Deterministic scene-text keyword selection; locally synthesized SFX.",
-        "timing_basis": "Scene-relative seconds; actual narration duration used when available.",
+        "cue_policy": (
+            "Deterministic scene-text selection; locally synthesized SFX."
+        ),
+        "timing_basis": (
+            "Every cue is checked against ffprobe narration duration."
+            if enabled["sfx"] else "SFX disabled by input configuration."
+        ),
         "external_api_calls": 0,
         "paid_services_used": False,
         "cues": cues,
