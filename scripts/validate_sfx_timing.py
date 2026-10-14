@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Validate SFX timing against actual narration and renderer trim behavior."""
+"""Validate SFX cues against actual narration durations and report trimming."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-timing-validator-v4-effective-trim"
+VERSION = "sfx-timing-validator-v5-aliases-scene-audit"
 MIN_AUDIO_BYTES = 100
 TIME_EPSILON = 0.001
 MAX_GAIN = 1.0
@@ -34,9 +34,14 @@ def log(*items):
 
 def read_json(path):
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Cannot read JSON file {path}: {exc}") from exc
+
+    if not isinstance(value, (dict, list)):
+        raise RuntimeError(f"Unexpected JSON structure in {path}")
+
+    return value
 
 
 def write_json(path, data):
@@ -63,11 +68,26 @@ def rows_from(data, *keys):
 
 
 def first_path(row, names):
+    if not isinstance(row, dict):
+        return None
+
     for name in names:
         value = row.get(name)
         if isinstance(value, str) and value.strip():
             return value.strip()
+
     return None
+
+
+def first_value(row, names, default=None):
+    if not isinstance(row, dict):
+        return default
+
+    for name in names:
+        if name in row and row[name] is not None:
+            return row[name]
+
+    return default
 
 
 def safe_file(value, label, minimum_bytes=1):
@@ -90,6 +110,10 @@ def safe_file(value, label, minimum_bytes=1):
         raise RuntimeError(f"{label}: file is too small: {path.name}")
 
     return path
+
+
+def relative(path):
+    return path.resolve().relative_to(ROOT.resolve()).as_posix()
 
 
 def sha256_file(path):
@@ -119,13 +143,13 @@ def media_info(path):
         ],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=90,
         check=False,
     )
 
-    if result.returncode != 0:
+    if result.returncode:
         raise RuntimeError(
-            f"ffprobe failed for {path.name}: {result.stderr[-800:]}"
+            f"ffprobe failed for {path.name}: {result.stderr[-1000:]}"
         )
 
     try:
@@ -148,7 +172,11 @@ def media_info(path):
     if not has_audio:
         raise RuntimeError(f"No audio stream found in {path.name}")
 
-    return {"duration": duration, "has_audio": True}
+    return {
+        "duration": duration,
+        "has_audio": True,
+        "bytes": path.stat().st_size,
+    }
 
 
 def expected_scene_keys(parts, scenes):
@@ -197,7 +225,9 @@ def load_narration(parts, scenes):
         info = media_info(path)
         mapping[key] = {
             "path": path,
+            "relative_path": relative(path),
             "duration": info["duration"],
+            "bytes": info["bytes"],
             "sha256": sha256_file(path),
         }
 
@@ -214,6 +244,39 @@ def load_narration(parts, scenes):
     return mapping
 
 
+def cue_timestamp(row):
+    """Read common timestamp aliases without silently accepting bad values."""
+    value = first_value(
+        row,
+        ("time", "time_seconds", "timestamp", "start_seconds", "start"),
+        0,
+    )
+
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid SFX timestamp: {value!r}") from exc
+
+    if not math.isfinite(result) or result < 0:
+        raise RuntimeError(f"SFX timestamp must be finite and non-negative")
+
+    return result
+
+
+def cue_gain(row):
+    value = first_value(row, ("gain", "volume", "volume_gain"), 0.075)
+
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid SFX gain: {value!r}") from exc
+
+    if not math.isfinite(result) or not 0 <= result <= MAX_GAIN:
+        raise RuntimeError("SFX gain must be between 0 and 1")
+
+    return result
+
+
 def validate_cues(parts, scenes, narration):
     data = read_json(CUES_FILE)
 
@@ -228,6 +291,7 @@ def validate_cues(parts, scenes, narration):
     reports = []
     warnings = []
     cue_scenes = set()
+    per_scene = {}
 
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
@@ -236,11 +300,9 @@ def validate_cues(parts, scenes, narration):
         try:
             part = int(row["part"])
             scene = int(row["scene"])
-            timestamp = float(row.get("time", 0))
-            gain = float(row.get("gain", 0.075))
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError(
-                f"Invalid SFX mapping, timestamp or gain at row {index}"
+                f"Invalid SFX scene mapping at row {index}"
             ) from exc
 
         key = (part, scene)
@@ -251,20 +313,14 @@ def validate_cues(parts, scenes, narration):
         if key not in narration:
             raise RuntimeError(f"SFX cue references unknown narration: {key}")
 
+        timestamp = cue_timestamp(row)
+        gain = cue_gain(row)
         kind = str(row.get("kind", "unspecified")).strip() or "unspecified"
-        cue_id = (part, scene, round(timestamp, 6), kind)
 
+        cue_id = (part, scene, round(timestamp, 6), kind)
         if cue_id in seen:
             raise RuntimeError(f"Duplicate SFX cue: {cue_id}")
         seen.add(cue_id)
-
-        if not math.isfinite(timestamp) or timestamp < 0:
-            raise RuntimeError(f"Invalid SFX timestamp at row {index}")
-
-        if not math.isfinite(gain) or not 0 <= gain <= MAX_GAIN:
-            raise RuntimeError(
-                f"SFX gain must be between 0 and 1: row {index}"
-            )
 
         narration_duration = narration[key]["duration"]
 
@@ -284,8 +340,8 @@ def validate_cues(parts, scenes, narration):
         info = media_info(path)
         remaining = max(0.0, narration_duration - timestamp)
 
-        # Renderer delays the SFX by its cue timestamp and trims the final
-        # mixed scene to narration duration. Only this much SFX can remain.
+        # This is the maximum duration that can fit before the narration/
+        # scene ends. The validator does not modify the audio file.
         effective_duration = min(info["duration"], remaining)
         truncated_duration = max(0.0, info["duration"] - effective_duration)
 
@@ -295,18 +351,26 @@ def validate_cues(parts, scenes, narration):
                 "part": part,
                 "scene": scene,
                 "kind": kind,
+                "cue_time_seconds": round(timestamp, 3),
                 "sfx_file_duration_seconds": round(info["duration"], 3),
                 "effective_duration_seconds": round(effective_duration, 3),
                 "truncated_seconds": round(truncated_duration, 3),
                 "note": (
-                    "The renderer's scene-duration trim cuts off the SFX "
-                    "at the narration end; the original SFX file is unchanged."
+                    "The SFX extends beyond the remaining narration duration. "
+                    "This is a timing warning, not proof of the final mix."
                 ),
             })
         else:
             timing_status = "fits_remaining_narration"
 
         cue_scenes.add(key)
+        per_scene.setdefault(key, []).append({
+            "time_seconds": timestamp,
+            "kind": kind,
+            "gain": gain,
+            "duration_seconds": effective_duration,
+        })
+
         reports.append({
             "part": part,
             "scene": scene,
@@ -319,9 +383,49 @@ def validate_cues(parts, scenes, narration):
             "effective_duration_seconds": round(effective_duration, 3),
             "truncated_seconds": round(truncated_duration, 3),
             "timing_status": timing_status,
-            "file": path.relative_to(ROOT).as_posix(),
+            "file": relative(path),
+            "bytes": info["bytes"],
             "sha256": sha256_file(path),
         })
+
+    reports.sort(
+        key=lambda item: (
+            item["part"],
+            item["scene"],
+            item["time_seconds"],
+            item["kind"],
+        )
+    )
+
+    scene_report = []
+
+    for part in range(1, parts + 1):
+        for scene in range(1, scenes + 1):
+            key = (part, scene)
+            scene_cues = sorted(
+                per_scene.get(key, []),
+                key=lambda item: item["time_seconds"],
+            )
+
+            narration_duration = narration[key]["duration"]
+            effective_total = sum(
+                item["duration_seconds"] for item in scene_cues
+            )
+
+            scene_report.append({
+                "part": part,
+                "scene": scene,
+                "narration_duration_seconds": round(narration_duration, 3),
+                "sfx_cue_count": len(scene_cues),
+                "effective_sfx_seconds_sum": round(effective_total, 3),
+                "sfx_time_sum_exceeds_scene_duration": (
+                    effective_total > narration_duration + TIME_EPSILON
+                ),
+                "note": (
+                    "Summed SFX durations may overlap and therefore do not "
+                    "represent unique audible coverage."
+                ),
+            })
 
     return {
         "status": "valid",
@@ -329,6 +433,7 @@ def validate_cues(parts, scenes, narration):
         "scenes_with_sfx": len(cue_scenes),
         "scenes_without_sfx": len(narration) - len(cue_scenes),
         "cues": reports,
+        "scene_audit": scene_report,
         "warnings": warnings,
     }
 
@@ -368,15 +473,16 @@ def main():
             "scene_duration_source": "actual narration file duration",
             "sfx_end_limit": "narration/scene end",
             "note": (
-                "This validator reports SFX that will be cut short. "
-                "It does not modify SFX audio files or cue manifests."
+                "This validator reports potential SFX trimming. It does not "
+                "modify the source audio, cue manifest or final video."
             ),
         },
         "sfx": sfx_report,
         "limitations": [
-            "This validates file paths and timing, not subjective sound quality.",
+            "This validates file paths, stream presence and declared timing.",
             "It does not measure perceived loudness or narration masking.",
-            "Long SFX are trimmed in the final scene; their source files remain unchanged.",
+            "Summed SFX durations can overlap and must not be treated as unique coverage.",
+            "A valid cue does not prove the final renderer mixed it correctly.",
             "This script makes no external API calls and generates no audio.",
         ],
     }
@@ -387,14 +493,13 @@ def main():
     log("Narration scenes checked:", len(narration))
     log("SFX cues checked:", sfx_report["cue_count"])
     log("Scenes without SFX:", sfx_report["scenes_without_sfx"])
-    log("SFX cues trimmed by scene end:", len(sfx_report["warnings"]))
-    log("Report:", OUTPUT_FILE.relative_to(ROOT))
+    log("Potentially trimmed cues:", len(sfx_report["warnings"]))
+    log("Report:", relative(OUTPUT_FILE))
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        log("SFX TIMING VALIDATION: FAILED")
-        log(str(exc))
+        log("SFX TIMING VALIDATION: FAILED:", str(exc))
         sys.exit(1)
