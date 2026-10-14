@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Create a resumable, topic-based thumbnail without external API calls."""
+"""Generate a topic-specific thumbnail with validated resumable caching."""
 
 from __future__ import annotations
 
@@ -10,7 +9,13 @@ import re
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import (
+    Image,
+    ImageDraw,
+    ImageEnhance,
+    ImageFilter,
+    ImageFont,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -24,7 +29,7 @@ THUMBNAIL_DIR = OUTPUT / "thumbnail"
 MANIFEST = THUMBNAIL_DIR / "thumbnail_manifest.json"
 
 MIN_IMAGE_BYTES = 1000
-VERSION = "thumbnail-v6"
+VERSION = "thumbnail-v7"
 
 FONT_DIRS = (
     ROOT / "assets" / "fonts",
@@ -54,7 +59,8 @@ def log(*args):
 
 def read_json(path):
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        return data
     except (OSError, ValueError):
         return None
 
@@ -82,21 +88,31 @@ def safe_image(value):
         return None
 
     path = Path(value.strip())
+
     if not path.is_absolute():
         path = ROOT / path
 
     try:
         path = path.resolve()
+
         if not path.is_relative_to(ROOT.resolve()):
             return None
+
         if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
             return None
+
         if path.suffix.lower() not in {
             ".png", ".jpg", ".jpeg", ".webp", ".bmp"
         }:
             return None
+
+        # Reject corrupt or non-image files before using them.
+        with Image.open(path) as image:
+            image.verify()
+
         return path
-    except OSError:
+
+    except (OSError, ValueError):
         return None
 
 
@@ -107,22 +123,23 @@ def find_font(names):
 
         for name in names:
             direct = base / name
+
             if direct.is_file():
                 return direct
 
             try:
-                matches = list(base.rglob(name))
+                for candidate in base.rglob(name):
+                    if candidate.is_file():
+                        return candidate
             except OSError:
-                matches = []
-
-            if matches:
-                return matches[0]
+                continue
 
     return None
 
 
 def load_font(size, bold=False):
     path = find_font(FONT_CANDIDATES[bold])
+
     if path is None:
         raise RuntimeError(
             "Hindi font not found. Run scripts/install_caption_fonts.py first."
@@ -145,6 +162,7 @@ def get_title(config):
 
     if not title:
         title_file = OUTPUT / "story" / "final_title.txt"
+
         if title_file.is_file():
             lines = title_file.read_text(
                 encoding="utf-8-sig"
@@ -152,12 +170,13 @@ def get_title(config):
             title = lines[0].strip() if lines else ""
 
     title = re.sub(r"\s+", " ", title).strip()
+
     if not title:
         raise RuntimeError(
             "Title missing. Set TOPIC or provide a story title."
         )
 
-    # Never use the entire story as a thumbnail title.
+    # Avoid putting an entire story into the thumbnail.
     return title[:160]
 
 
@@ -171,18 +190,29 @@ def collect_images():
     )
 
     fields = (
-        "image_path", "image", "image_file", "output_image", "path"
+        "image_path",
+        "image",
+        "image_file",
+        "output_image",
+        "path",
     )
+
     row_keys = (
-        "images", "jobs", "visual_jobs", "completed_images", "items"
+        "images",
+        "jobs",
+        "visual_jobs",
+        "completed_images",
+        "items",
     )
 
     for manifest_path in manifest_paths:
         data = read_json(manifest_path)
+
         if data is None:
             continue
 
         rows = data if isinstance(data, list) else []
+
         if isinstance(data, dict):
             for key in row_keys:
                 if isinstance(data.get(key), list):
@@ -192,8 +222,10 @@ def collect_images():
         for row in rows:
             if not isinstance(row, dict):
                 continue
+
             for field in fields:
                 image_path = safe_image(row.get(field))
+
                 if image_path:
                     candidates.append(image_path)
                     break
@@ -202,7 +234,9 @@ def collect_images():
         for path in sorted(VISUAL_DIR.rglob("*")):
             if "depth" in str(path).lower():
                 continue
+
             image_path = safe_image(str(path))
+
             if image_path:
                 candidates.append(image_path)
 
@@ -211,6 +245,7 @@ def collect_images():
 
     for path in candidates:
         key = str(path.resolve())
+
         if key not in seen:
             seen.add(key)
             unique.append(path)
@@ -220,6 +255,10 @@ def collect_images():
 
 def fit_cover(image, width, height):
     image = image.convert("RGB")
+
+    if image.width < 1 or image.height < 1:
+        raise RuntimeError("Background image has invalid dimensions")
+
     source_ratio = image.width / image.height
     target_ratio = width / height
 
@@ -234,8 +273,10 @@ def fit_cover(image, width, height):
         (new_width, new_height),
         Image.Resampling.LANCZOS,
     )
+
     left = (new_width - width) // 2
     top = (new_height - height) // 2
+
     return image.crop((left, top, left + width, top + height))
 
 
@@ -245,22 +286,22 @@ def text_width(draw, text, font):
 
 
 def wrap_title(draw, title, font, max_width):
-    """Wrap every word; split oversized tokens instead of clipping them."""
+    """Wrap text while splitting oversized words without clipping."""
     words = title.split()
     lines = []
     current = ""
 
     for original_word in words:
         word = original_word
-
-        # If one unbroken token is wider than the canvas, split it safely.
         pieces = []
+
         while word and text_width(draw, word, font) > max_width:
             low, high = 1, len(word)
             best = 1
 
             while low <= high:
                 middle = (low + high) // 2
+
                 if text_width(draw, word[:middle], font) <= max_width:
                     best = middle
                     low = middle + 1
@@ -275,6 +316,7 @@ def wrap_title(draw, title, font, max_width):
 
         for piece in pieces:
             candidate = f"{current} {piece}".strip()
+
             if current and text_width(draw, candidate, font) > max_width:
                 lines.append(current)
                 current = piece
@@ -292,29 +334,32 @@ def choose_title_layout(draw, title, width, height, max_lines):
     initial_size = int(height * (0.065 if height > width else 0.105))
     minimum_size = max(18, int(height * 0.025))
 
-    # Prefer a readable font and a small number of lines.
     for size in range(initial_size, minimum_size - 1, -2):
         font = load_font(size, bold=True)
         lines = wrap_title(draw, title, font, max_width)
 
         if len(lines) <= max_lines and all(
-            text_width(draw, line, font) <= max_width for line in lines
+            text_width(draw, line, font) <= max_width
+            for line in lines
         ):
-            heights = [
-                draw.textbbox((0, 0), line, font=font, stroke_width=2)[3]
-                - draw.textbbox((0, 0), line, font=font, stroke_width=2)[1]
-                for line in lines
-            ]
+            heights = []
+
+            for line in lines:
+                box = draw.textbbox(
+                    (0, 0), line, font=font, stroke_width=2
+                )
+                heights.append(box[3] - box[1])
+
             return font, lines, heights
 
-    # Extremely long titles: keep all text, with more lines at a smaller size.
     font = load_font(minimum_size, bold=True)
     lines = wrap_title(draw, title, font, int(width * 0.88))
-    heights = [
-        draw.textbbox((0, 0), line, font=font, stroke_width=2)[3]
-        - draw.textbbox((0, 0), line, font=font, stroke_width=2)[1]
-        for line in lines
-    ]
+    heights = []
+
+    for line in lines:
+        box = draw.textbbox((0, 0), line, font=font, stroke_width=2)
+        heights.append(box[3] - box[1])
+
     return font, lines, heights
 
 
@@ -327,7 +372,7 @@ def create_thumbnail(title, mode, image_path):
         with Image.open(image_path) as source:
             background = fit_cover(source, width, height)
     else:
-        # Offline fallback: no paid or external image API.
+        # Offline fallback: no paid provider or external API call.
         background = Image.new(
             "RGB", (width, height), (22, 24, 34)
         )
@@ -337,11 +382,13 @@ def create_thumbnail(title, mode, image_path):
 
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
+
     panel_top = int(height * (0.55 if mode == "short" else 0.40))
 
     for y in range(panel_top, height):
         ratio = (y - panel_top) / max(1, height - panel_top)
         alpha = min(225, int(20 + 205 * ratio))
+
         overlay_draw.line(
             (0, y, width, y),
             fill=(0, 0, 0, alpha),
@@ -352,13 +399,19 @@ def create_thumbnail(title, mode, image_path):
     ).convert("RGB")
 
     draw = ImageDraw.Draw(background)
+
     max_lines = 4 if mode == "short" else 3
+
     font, lines, line_heights = choose_title_layout(
         draw, title, width, height, max_lines
     )
 
     line_gap = max(8, int(height * 0.010))
-    total_height = sum(line_heights) + line_gap * max(0, len(lines) - 1)
+    total_height = (
+        sum(line_heights)
+        + line_gap * max(0, len(lines) - 1)
+    )
+
     text_y = max(
         panel_top + 12,
         height - total_height - int(height * 0.075),
@@ -375,31 +428,42 @@ def create_thumbnail(title, mode, image_path):
 
     shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     shadow_draw = ImageDraw.Draw(shadow)
+
     shadow_draw.rounded_rectangle(
         (
-            plaque_left + 5, plaque_top + 7,
-            plaque_right + 5, plaque_bottom + 7,
+            plaque_left + 5,
+            plaque_top + 7,
+            plaque_right + 5,
+            plaque_bottom + 7,
         ),
         radius=max(16, int(width * 0.02)),
         fill=(0, 0, 0, 120),
     )
+
     shadow = shadow.filter(
         ImageFilter.GaussianBlur(radius=max(4, width // 180))
     )
-    background = Image.alpha_composite(background.convert("RGBA"), shadow)
+
+    background = Image.alpha_composite(
+        background.convert("RGBA"), shadow
+    )
 
     draw = ImageDraw.Draw(background)
+
     draw.rounded_rectangle(
         (plaque_left, plaque_top, plaque_right, plaque_bottom),
         radius=max(16, int(width * 0.02)),
-        fill=(10, 12, 18, 215),
+        fill=(10, 12, 18, 225),
         outline=(238, 190, 94, 230),
         width=max(2, width // 360),
     )
 
     y = text_y
+
     for line, line_height in zip(lines, line_heights):
-        box = draw.textbbox((0, 0), line, font=font, stroke_width=2)
+        box = draw.textbbox(
+            (0, 0), line, font=font, stroke_width=2
+        )
         line_width = box[2] - box[0]
         x = max(8, (width - line_width) // 2)
 
@@ -411,6 +475,7 @@ def create_thumbnail(title, mode, image_path):
             stroke_width=4,
             stroke_fill=(0, 0, 0),
         )
+
         draw.text(
             (x, y),
             line,
@@ -419,6 +484,7 @@ def create_thumbnail(title, mode, image_path):
             stroke_width=2,
             stroke_fill=(30, 20, 15),
         )
+
         y += line_height + line_gap
 
     THUMBNAIL.parent.mkdir(parents=True, exist_ok=True)
@@ -431,13 +497,20 @@ def create_thumbnail(title, mode, image_path):
         optimize=True,
         progressive=True,
     )
+
     temporary.replace(THUMBNAIL)
 
     with Image.open(THUMBNAIL) as check:
         check.verify()
+
     with Image.open(THUMBNAIL) as check:
         if check.size != (width, height):
-            raise RuntimeError("Thumbnail dimensions failed verification")
+            raise RuntimeError(
+                "Thumbnail dimensions failed verification"
+            )
+
+    if THUMBNAIL.stat().st_size < MIN_IMAGE_BYTES:
+        raise RuntimeError("Generated thumbnail is unexpectedly small")
 
     return width, height, font.size, len(lines)
 
@@ -445,6 +518,7 @@ def create_thumbnail(title, mode, image_path):
 def main():
     config = load_and_validate(ROOT / "Input" / "topic.txt")
     mode = get_format(config)
+
     if mode not in ("short", "full"):
         raise RuntimeError(f"Unsupported thumbnail format: {mode}")
 
@@ -452,13 +526,38 @@ def main():
     images = collect_images()
     image_path = images[0] if images else None
 
-    title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()
-    source_hash = sha256_file(image_path) if image_path else "no-local-image"
+    title_hash = hashlib.sha256(
+        title.encode("utf-8")
+    ).hexdigest()
+
+    image_hash = (
+        sha256_file(image_path)
+        if image_path
+        else "no-local-image"
+    )
+
+    # Include every available image's content hash so a changed visual
+    # set cannot accidentally reuse an old thumbnail.
+    image_set_hash = hashlib.sha256(
+        "\n".join(
+            f"{path.relative_to(ROOT).as_posix()}:{sha256_file(path)}"
+            for path in images
+        ).encode("utf-8")
+    ).hexdigest()
+
+    width, height = (
+        (1080, 1920) if mode == "short" else (1280, 720)
+    )
+
     fingerprint = hashlib.sha256(
-        f"{VERSION}|{mode}|{title_hash}|{source_hash}".encode("utf-8")
+        (
+            f"{VERSION}|{mode}|{width}x{height}|"
+            f"{title_hash}|{image_hash}|{image_set_hash}"
+        ).encode("utf-8")
     ).hexdigest()
 
     old = read_json(MANIFEST)
+
     if (
         isinstance(old, dict)
         and old.get("fingerprint") == fingerprint
@@ -469,9 +568,12 @@ def main():
         try:
             with Image.open(THUMBNAIL) as image:
                 image.verify()
-            log("RESUME: valid thumbnail reused; no regeneration")
-            return
-        except Exception:
+
+            with Image.open(THUMBNAIL) as image:
+                if image.size == (width, height):
+                    log("RESUME: valid thumbnail reused; no regeneration")
+                    return
+        except (OSError, ValueError):
             pass
 
     width, height, font_size, line_count = create_thumbnail(
@@ -491,7 +593,8 @@ def main():
                 image_path.relative_to(ROOT).as_posix()
                 if image_path else None
             ),
-            "background_sha256": source_hash,
+            "background_sha256": image_hash,
+            "image_set_sha256": image_set_hash,
             "thumbnail": THUMBNAIL.relative_to(ROOT).as_posix(),
             "width": width,
             "height": height,
