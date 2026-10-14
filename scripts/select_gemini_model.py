@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Billing-conscious Gemini text model selection.
-
-Default:
-- Reuse an existing verified selection.
-- If none exists, save a configured but UNVERIFIED model.
-- Make no network requests unless ALLOW_GEMINI_MODEL_TEST=true.
-
-A model configured locally is not proof that the provider currently
-supports it or that the account has access to it.
-"""
+"""Select a Gemini model with explicit live-test opt-in and no retries."""
 
 from __future__ import annotations
 
@@ -30,7 +21,9 @@ PREFERRED_MODEL = "gemini-3.5-flash-lite"
 EXPECTED_RESPONSE = "GEMINI_OK"
 REQUEST_TIMEOUT = 30
 MAX_MODEL_PAGES = 5
-VERSION = "safe-gemini-selector-v2"
+VERSION = "safe-gemini-selector-v3"
+
+TEST_OPT_IN = "I_ACCEPT_POTENTIAL_GEMINI_CHARGES"
 
 
 def log(*items: object) -> None:
@@ -77,7 +70,6 @@ def read_verified_selection() -> dict[str, Any] | None:
         return None
 
     model = str(data.get("model", "")).strip()
-
     if (
         data.get("status") == "selected"
         and data.get("test") == EXPECTED_RESPONSE
@@ -109,7 +101,7 @@ def save_selection(
         "verified": verified,
         "test": EXPECTED_RESPONSE if verified else None,
         "selection_policy": (
-            "single_model_live_test"
+            "explicitly_authorized_live_test"
             if verified
             else "local_default_no_network"
         ),
@@ -119,7 +111,6 @@ def save_selection(
     }
 
     temporary = OUTPUT_FILE.with_name(OUTPUT_FILE.name + ".tmp")
-
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -132,12 +123,10 @@ def save_selection(
         temporary.unlink(missing_ok=True)
 
     saved = read_json(OUTPUT_FILE)
-
     if not saved or saved.get("model") != model:
         raise RuntimeError("Model selection failed read-back validation.")
-
     if saved.get("verified") is not verified:
-        raise RuntimeError("Model verification status was not saved correctly.")
+        raise RuntimeError("Verification status was not saved correctly.")
 
     return saved
 
@@ -160,15 +149,14 @@ def api_request(
         headers={
             "x-goog-api-key": api_key,
             "Content-Type": "application/json",
-            "User-Agent": "Katha-Lok-AI-Model-Selector/4.0",
+            "User-Agent": "Katha-Lok-AI-Model-Selector/5.0",
         },
         method=method,
     )
 
     try:
         with urllib.request.urlopen(
-            request,
-            timeout=REQUEST_TIMEOUT,
+            request, timeout=REQUEST_TIMEOUT
         ) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
@@ -178,12 +166,12 @@ def api_request(
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise RuntimeError(
-            f"Gemini request failed; automatic retries are disabled: {exc}"
+            "Gemini request failed. Automatic retries are disabled because "
+            f"the request outcome may be uncertain: {exc}"
         ) from exc
 
     if not isinstance(result, dict):
         raise RuntimeError("Gemini returned an unexpected response.")
-
     return result
 
 
@@ -240,7 +228,6 @@ def list_compatible_models(api_key: str) -> list[dict[str, str]]:
             })
 
         token = str(result.get("nextPageToken", "")).strip()
-
         if not token:
             break
         if token in seen_tokens:
@@ -257,13 +244,9 @@ def list_compatible_models(api_key: str) -> list[dict[str, str]]:
     return compatible
 
 
-def choose_model(
-    models: list[dict[str, str]],
-) -> dict[str, str]:
+def choose_model(models: list[dict[str, str]]) -> dict[str, str]:
     if not models:
-        raise RuntimeError(
-            "No compatible Gemini text models were returned."
-        )
+        raise RuntimeError("No compatible Gemini text models were returned.")
 
     for item in models:
         if item["model"] == PREFERRED_MODEL:
@@ -271,7 +254,6 @@ def choose_model(
 
     def priority(item: dict[str, str]) -> tuple[int, str]:
         name = item["model"].lower()
-
         if "flash" in name and "lite" in name:
             return (0, name)
         if "flash" in name:
@@ -294,9 +276,7 @@ def test_model(item: dict[str, str], api_key: str) -> None:
             "contents": [{
                 "role": "user",
                 "parts": [{
-                    "text": (
-                        "Reply with exactly GEMINI_OK and no other text."
-                    )
+                    "text": "Reply with exactly GEMINI_OK and no other text."
                 }],
             }],
             "generationConfig": {
@@ -307,7 +287,6 @@ def test_model(item: dict[str, str], api_key: str) -> None:
     )
 
     candidates = result.get("candidates", [])
-
     if not isinstance(candidates, list) or not candidates:
         raise RuntimeError("Gemini test returned no candidates.")
 
@@ -317,7 +296,6 @@ def test_model(item: dict[str, str], api_key: str) -> None:
 
     content = candidate.get("content", {})
     parts = content.get("parts", []) if isinstance(content, dict) else []
-
     answer = "".join(
         part.get("text", "")
         for part in parts
@@ -326,27 +304,28 @@ def test_model(item: dict[str, str], api_key: str) -> None:
 
     if answer != EXPECTED_RESPONSE:
         raise RuntimeError(
-            f"Gemini test did not return the expected response: "
-            f"{answer[:100]!r}"
+            f"Gemini test did not return the expected response: {answer[:100]!r}"
         )
 
 
 def main() -> int:
     log("===== SAFE GEMINI MODEL SELECTION =====")
 
-    force_test = env_true("ALLOW_GEMINI_MODEL_TEST")
+    # The old ALLOW_GEMINI_MODEL_TEST flag alone is intentionally insufficient.
+    live_test_authorized = (
+        env_true("ALLOW_GEMINI_MODEL_TEST")
+        and os.getenv("ALLOW_GEMINI_GENERATION", "").strip() == TEST_OPT_IN
+    )
     force_rescan = env_true("FORCE_GEMINI_MODEL_RESCAN")
 
-    if not force_test:
+    if not live_test_authorized:
         saved = read_verified_selection()
-
         if saved and not force_rescan:
             log("Reusing previously verified model:", saved["model"])
             log("New API requests: 0")
             return 0
 
         existing = read_json(OUTPUT_FILE)
-
         if (
             existing
             and existing.get("status") == "configured_unverified"
@@ -354,7 +333,7 @@ def main() -> int:
             and not force_rescan
         ):
             log("Reusing locally configured model:", PREFERRED_MODEL)
-            log("WARNING: This model has not been verified by a live test.")
+            log("WARNING: Model availability is not verified.")
             log("Network requests: 0")
             return 0
 
@@ -362,12 +341,11 @@ def main() -> int:
             PREFERRED_MODEL,
             verified=False,
             reason=(
-                "Local default only. No live availability test was made. "
-                "Set ALLOW_GEMINI_MODEL_TEST=true only after checking "
-                "current account access, pricing and usage limits."
+                "Local default only. No live test or network request was made. "
+                "Live testing requires both ALLOW_GEMINI_MODEL_TEST=true and "
+                "the explicit ALLOW_GEMINI_GENERATION opt-in."
             ),
         )
-
         log("Configured default model:", saved["model"])
         log("Verified:", saved["verified"])
         log("No Gemini API request was made.")
@@ -375,16 +353,11 @@ def main() -> int:
         return 0
 
     api_key = get_api_key()
-
     if not api_key:
-        log(
-            "ERROR: Set GEMINI_API_KEY or GOOGLE_API_KEY to run "
-            "the explicitly requested test."
-        )
+        log("ERROR: Explicit test requested but no Gemini API key is set.")
         return 1
 
-    # One model-listing sequence and one minimal generation test.
-    # There are no automatic retries.
+    log("WARNING: Live model listing and a generation test will use the API.")
     models = list_compatible_models(api_key)
     selected = choose_model(models)
 
@@ -395,9 +368,8 @@ def main() -> int:
         selected["model"],
         verified=True,
         display_name=selected.get("display_name", ""),
-        reason="One explicit live compatibility test succeeded.",
+        reason="One explicitly authorized live compatibility test succeeded.",
     )
-
     log("Verified model:", saved["model"])
     log("Saved to:", OUTPUT_FILE)
     return 0
