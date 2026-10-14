@@ -1,16 +1,20 @@
-
 #!/usr/bin/env python3
-"""Select one compatible Gemini text model with minimal API requests.
+"""Billing-conscious Gemini text model selection.
 
-Reuses a previously verified selection unless an explicit rescan is requested.
-A fresh selection sends only one generation test request.
-No API keys are stored in the output file.
+Default:
+- Reuse an existing verified selection.
+- If none exists, save a configured but UNVERIFIED model.
+- Make no network requests unless ALLOW_GEMINI_MODEL_TEST=true.
+
+A model configured locally is not proof that the provider currently
+supports it or that the account has access to it.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,69 +22,163 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_FILE = ROOT / "output" / "config" / "selected_model.json"
+
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-OUTPUT_FILE = Path("output/config/selected_model.json")
 PREFERRED_MODEL = "gemini-3.5-flash-lite"
 EXPECTED_RESPONSE = "GEMINI_OK"
-TEST_MAX_OUTPUT_TOKENS = 12
-REQUEST_TIMEOUT = 45
+REQUEST_TIMEOUT = 30
+MAX_MODEL_PAGES = 5
+VERSION = "safe-gemini-selector-v2"
 
 
 def log(*items: object) -> None:
     print(*items, flush=True)
 
 
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def env_true(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {
+        "1", "true", "yes", "y", "on"
+    }
+
+
 def get_api_key() -> str:
-    key = (
+    return (
         os.environ.get("GEMINI_API_KEY", "").strip()
         or os.environ.get("GOOGLE_API_KEY", "").strip()
     )
-    if not key:
-        raise RuntimeError(
-            "GEMINI_API_KEY or GOOGLE_API_KEY secret is required."
-        )
-    return key
+
+
+def read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def valid_model_name(model: str) -> bool:
+    return bool(
+        model
+        and "/" not in model
+        and ":" not in model
+        and not any(char.isspace() for char in model)
+    )
+
+
+def read_verified_selection() -> dict[str, Any] | None:
+    data = read_json(OUTPUT_FILE)
+    if not data:
+        return None
+
+    model = str(data.get("model", "")).strip()
+
+    if (
+        data.get("status") == "selected"
+        and data.get("test") == EXPECTED_RESPONSE
+        and data.get("verified") is True
+        and valid_model_name(model)
+        and data.get("model_resource") == f"models/{model}"
+    ):
+        return data
+
+    return None
+
+
+def save_selection(
+    model: str,
+    *,
+    verified: bool,
+    display_name: str = "",
+    reason: str = "",
+) -> dict[str, Any]:
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict[str, Any] = {
+        "version": VERSION,
+        "status": "selected" if verified else "configured_unverified",
+        "model": model,
+        "model_resource": f"models/{model}",
+        "display_name": display_name,
+        "selected_at": utc_now(),
+        "verified": verified,
+        "test": EXPECTED_RESPONSE if verified else None,
+        "selection_policy": (
+            "single_model_live_test"
+            if verified
+            else "local_default_no_network"
+        ),
+        "reason": reason,
+        "external_api_calls": None if verified else 0,
+        "paid_services_used": None if verified else False,
+    }
+
+    temporary = OUTPUT_FILE.with_name(OUTPUT_FILE.name + ".tmp")
+
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, OUTPUT_FILE)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    saved = read_json(OUTPUT_FILE)
+
+    if not saved or saved.get("model") != model:
+        raise RuntimeError("Model selection failed read-back validation.")
+
+    if saved.get("verified") is not verified:
+        raise RuntimeError("Model verification status was not saved correctly.")
+
+    return saved
 
 
 def api_request(
     url: str,
     api_key: str,
-    method: str = "GET",
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    headers = {
-        "x-goog-api-key": api_key,
-        "Content-Type": "application/json",
-        "User-Agent": "Katha-Lok-AI-Model-Selector/3.0",
-    }
-
     body = None
+    method = "GET"
+
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
+        method = "POST"
 
     request = urllib.request.Request(
         url=url,
         data=body,
-        headers=headers,
+        headers={
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+            "User-Agent": "Katha-Lok-AI-Model-Selector/4.0",
+        },
         method=method,
     )
 
     try:
         with urllib.request.urlopen(
-            request, timeout=REQUEST_TIMEOUT
+            request,
+            timeout=REQUEST_TIMEOUT,
         ) as response:
             result = json.loads(response.read().decode("utf-8"))
-
     except urllib.error.HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(
             f"Gemini HTTP {exc.code}: {details[:500]}"
         ) from exc
-
-    except (urllib.error.URLError, TimeoutError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise RuntimeError(
-            f"Gemini connection failed: {exc}. "
-            "The request was not automatically retried."
+            f"Gemini request failed; automatic retries are disabled: {exc}"
         ) from exc
 
     if not isinstance(result, dict):
@@ -89,60 +187,64 @@ def api_request(
     return result
 
 
-def read_saved_selection() -> dict[str, Any] | None:
-    if not OUTPUT_FILE.is_file():
-        return None
-
-    try:
-        data = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        log("Saved model selection is unreadable; a fresh selection is needed.")
-        return None
-
-    if not isinstance(data, dict):
-        return None
-
-    model = str(data.get("model", "")).strip()
-    resource = str(data.get("model_resource", "")).strip()
-
-    if (
-        data.get("status") != "selected"
-        or data.get("test") != EXPECTED_RESPONSE
-        or not model
-        or "/" in model
-        or ":" in model
-        or any(char.isspace() for char in model)
-        or resource != f"models/{model}"
-    ):
-        log("Saved model selection failed local validation.")
-        return None
-
-    return data
-
-
 def list_compatible_models(api_key: str) -> list[dict[str, str]]:
-    """List compatible models; do not generate-test every model."""
     url = BASE_URL + "/models?pageSize=100"
-    entries: list[dict[str, Any]] = []
+    compatible: list[dict[str, str]] = []
     seen_tokens: set[str] = set()
+    seen_models: set[str] = set()
 
-    for _ in range(10):
+    for _ in range(MAX_MODEL_PAGES):
         result = api_request(url, api_key)
-        models = result.get("models", [])
+        entries = result.get("models", [])
 
-        if not isinstance(models, list):
+        if not isinstance(entries, list):
             raise RuntimeError("Invalid Gemini model-list response.")
 
-        entries.extend(
-            item for item in models if isinstance(item, dict)
-        )
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+
+            resource = str(item.get("name", "")).strip()
+            methods = item.get("supportedGenerationMethods", [])
+
+            if not resource.startswith("models/"):
+                continue
+            if not isinstance(methods, list):
+                continue
+            if "generateContent" not in methods:
+                continue
+
+            model = resource.split("/", 1)[1]
+            lowered = model.lower()
+
+            if not valid_model_name(model):
+                continue
+            if "gemini" not in lowered:
+                continue
+            if any(
+                word in lowered
+                for word in (
+                    "embedding", "image", "vision",
+                    "audio", "tts", "robotics", "aqa",
+                )
+            ):
+                continue
+            if model in seen_models:
+                continue
+
+            seen_models.add(model)
+            compatible.append({
+                "model": model,
+                "model_resource": resource,
+                "display_name": str(item.get("displayName", "")),
+            })
 
         token = str(result.get("nextPageToken", "")).strip()
+
         if not token:
             break
-
         if token in seen_tokens:
-            raise RuntimeError("Gemini repeated a model-list page token.")
+            raise RuntimeError("Gemini repeated a page token.")
 
         seen_tokens.add(token)
         url = BASE_URL + "/models?" + urllib.parse.urlencode({
@@ -152,56 +254,15 @@ def list_compatible_models(api_key: str) -> list[dict[str, str]]:
     else:
         raise RuntimeError("Gemini model listing exceeded the page limit.")
 
-    excluded_terms = (
-        "embedding",
-        "image",
-        "vision",
-        "audio",
-        "tts",
-        "robotics",
-        "aqa",
-    )
-
-    compatible: list[dict[str, str]] = []
-    seen_models: set[str] = set()
-
-    for item in entries:
-        resource = str(item.get("name", "")).strip()
-        methods = item.get("supportedGenerationMethods", [])
-
-        if not resource.startswith("models/"):
-            continue
-        if not isinstance(methods, list):
-            continue
-        if "generateContent" not in methods:
-            continue
-
-        model = resource.split("/", 1)[1].strip()
-        lowered = model.lower()
-
-        if "gemini" not in lowered:
-            continue
-        if any(term in lowered for term in excluded_terms):
-            continue
-        if model in seen_models:
-            continue
-
-        seen_models.add(model)
-        compatible.append({
-            "model": model,
-            "model_resource": resource,
-            "display_name": str(item.get("displayName", "")),
-        })
-
     return compatible
 
 
-def choose_one_model(
+def choose_model(
     models: list[dict[str, str]],
 ) -> dict[str, str]:
     if not models:
         raise RuntimeError(
-            "No listed Gemini text model supports generateContent."
+            "No compatible Gemini text models were returned."
         )
 
     for item in models:
@@ -222,8 +283,31 @@ def choose_one_model(
     return sorted(models, key=priority)[0]
 
 
-def response_text(result: dict[str, Any]) -> str:
+def test_model(item: dict[str, str], api_key: str) -> None:
+    model = item["model"]
+    encoded = urllib.parse.quote(model, safe="-._")
+
+    result = api_request(
+        f"{BASE_URL}/models/{encoded}:generateContent",
+        api_key,
+        payload={
+            "contents": [{
+                "role": "user",
+                "parts": [{
+                    "text": (
+                        "Reply with exactly GEMINI_OK and no other text."
+                    )
+                }],
+            }],
+            "generationConfig": {
+                "temperature": 0,
+                "maxOutputTokens": 12,
+            },
+        },
+    )
+
     candidates = result.get("candidates", [])
+
     if not isinstance(candidates, list) or not candidates:
         raise RuntimeError("Gemini test returned no candidates.")
 
@@ -231,140 +315,100 @@ def response_text(result: dict[str, Any]) -> str:
     if not isinstance(candidate, dict):
         raise RuntimeError("Gemini returned an invalid candidate.")
 
-    finish_reason = str(candidate.get("finishReason", "")).upper()
-    if finish_reason in {
-        "MAX_TOKENS",
-        "SAFETY",
-        "RECITATION",
-        "BLOCKLIST",
-    }:
-        raise RuntimeError(
-            f"Gemini test did not finish normally: {finish_reason}"
-        )
-
     content = candidate.get("content", {})
     parts = content.get("parts", []) if isinstance(content, dict) else []
 
     answer = "".join(
         part.get("text", "")
         for part in parts
-        if isinstance(part, dict)
-        and isinstance(part.get("text"), str)
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
     ).strip()
 
-    if not answer:
-        raise RuntimeError("Gemini test returned no text.")
-
-    return answer
-
-
-def test_selected_model(
-    item: dict[str, str],
-    api_key: str,
-) -> None:
-    model = item["model"]
-    encoded = urllib.parse.quote(model, safe="-._")
-    url = f"{BASE_URL}/models/{encoded}:generateContent"
-
-    payload = {
-        "contents": [{
-            "role": "user",
-            "parts": [{
-                "text": "Reply with exactly GEMINI_OK and no other text."
-            }],
-        }],
-        "generationConfig": {
-            "temperature": 0,
-            "maxOutputTokens": TEST_MAX_OUTPUT_TOKENS,
-        },
-    }
-
-    result = api_request(
-        url=url,
-        api_key=api_key,
-        method="POST",
-        payload=payload,
-    )
-
-    answer = response_text(result)
     if answer != EXPECTED_RESPONSE:
         raise RuntimeError(
-            f"Selected model returned an unexpected test response: "
-            f"{answer[:150]!r}. No other models were tested."
+            f"Gemini test did not return the expected response: "
+            f"{answer[:100]!r}"
         )
 
 
-def save_selection(item: dict[str, str]) -> None:
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+def main() -> int:
+    log("===== SAFE GEMINI MODEL SELECTION =====")
 
-    data = {
-        "status": "selected",
-        "model": item["model"],
-        "model_resource": item["model_resource"],
-        "display_name": item.get("display_name", ""),
-        "selected_at": datetime.now(timezone.utc).isoformat(),
-        "test": EXPECTED_RESPONSE,
-        "selection_policy": "single_model_live_test",
-    }
+    force_test = env_true("ALLOW_GEMINI_MODEL_TEST")
+    force_rescan = env_true("FORCE_GEMINI_MODEL_RESCAN")
 
-    temporary = OUTPUT_FILE.with_name(OUTPUT_FILE.name + ".tmp")
+    if not force_test:
+        saved = read_verified_selection()
 
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, OUTPUT_FILE)
-    finally:
-        temporary.unlink(missing_ok=True)
+        if saved and not force_rescan:
+            log("Reusing previously verified model:", saved["model"])
+            log("New API requests: 0")
+            return 0
 
-    saved = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
-    if (
-        saved.get("status") != "selected"
-        or saved.get("model") != item["model"]
-        or saved.get("test") != EXPECTED_RESPONSE
-    ):
-        raise RuntimeError("Saved model selection failed read-back validation.")
+        existing = read_json(OUTPUT_FILE)
 
+        if (
+            existing
+            and existing.get("status") == "configured_unverified"
+            and existing.get("model") == PREFERRED_MODEL
+            and not force_rescan
+        ):
+            log("Reusing locally configured model:", PREFERRED_MODEL)
+            log("WARNING: This model has not been verified by a live test.")
+            log("Network requests: 0")
+            return 0
 
-def main() -> None:
-    log("===== GEMINI MODEL SELECTION =====")
+        saved = save_selection(
+            PREFERRED_MODEL,
+            verified=False,
+            reason=(
+                "Local default only. No live availability test was made. "
+                "Set ALLOW_GEMINI_MODEL_TEST=true only after checking "
+                "current account access, pricing and usage limits."
+            ),
+        )
 
-    force_rescan = os.environ.get(
-        "FORCE_GEMINI_MODEL_RESCAN", ""
-    ).strip().lower() in {"1", "true", "yes"}
-
-    if not force_rescan:
-        saved = read_saved_selection()
-        if saved:
-            log("Reusing previously verified Gemini model.")
-            log("Selected model:", saved["model"])
-            log("New generation test requests: 0")
-            return
+        log("Configured default model:", saved["model"])
+        log("Verified:", saved["verified"])
+        log("No Gemini API request was made.")
+        log("Saved to:", OUTPUT_FILE)
+        return 0
 
     api_key = get_api_key()
 
-    log("Listing compatible text models.")
+    if not api_key:
+        log(
+            "ERROR: Set GEMINI_API_KEY or GOOGLE_API_KEY to run "
+            "the explicitly requested test."
+        )
+        return 1
+
+    # One model-listing sequence and one minimal generation test.
+    # There are no automatic retries.
     models = list_compatible_models(api_key)
-    selected = choose_one_model(models)
+    selected = choose_model(models)
 
-    log("Candidate selected:", selected["model"])
-    log("Sending one minimal compatibility test.")
+    log("Testing one candidate:", selected["model"])
+    test_model(selected, api_key)
 
-    # Preserve any older saved selection if this new test fails.
-    test_selected_model(selected, api_key)
-    save_selection(selected)
+    saved = save_selection(
+        selected["model"],
+        verified=True,
+        display_name=selected.get("display_name", ""),
+        reason="One explicit live compatibility test succeeded.",
+    )
 
-    log("Model verified and saved:", selected["model"])
+    log("Verified model:", saved["model"])
     log("Saved to:", OUTPUT_FILE)
-    log("===== SELECTION COMPLETE =====")
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except KeyboardInterrupt:
-        raise SystemExit("Gemini model selection cancelled.")
+        log("Gemini model selection cancelled.")
+        raise SystemExit(130)
     except Exception as exc:
-        raise SystemExit(f"GEMINI MODEL SELECTION FAILED: {exc}")
+        log("GEMINI MODEL SELECTION FAILED:", exc)
+        raise SystemExit(1)
