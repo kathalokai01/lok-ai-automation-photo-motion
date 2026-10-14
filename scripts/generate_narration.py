@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Prepare validated, resumable narration records without API calls."""
+"""Prepare validated narration records and preserve caption-language fields."""
 
 from __future__ import annotations
 
@@ -29,17 +29,32 @@ SCENES_FILE = ROOT / "output" / "scenes" / "scenes.json"
 AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
 OUTPUT_FILE = ROOT / "output" / "narration" / "narration.json"
 
-VERSION = 5
+VERSION = 6
+
+# Preserve explicitly authored translations. This script does not translate.
+CAPTION_FIELDS = (
+    "caption_hindi",
+    "hindi_caption",
+    "caption_hi",
+    "caption_english",
+    "english_caption",
+    "caption_en",
+    "caption_hinglish",
+    "hinglish_caption",
+    "caption_mixed",
+    "caption_text",
+    "display_caption",
+    "caption_language",
+    "caption_lang",
+    "language",
+    "narration_language",
+    "translations",
+    "caption_texts",
+)
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
-
-
-def digest(value):
-    if not isinstance(value, bytes):
-        value = str(value).encode("utf-8")
-    return hashlib.sha256(value).hexdigest()
 
 
 def canonical_json(data):
@@ -52,10 +67,15 @@ def canonical_json(data):
     )
 
 
+def digest(value):
+    if not isinstance(value, bytes):
+        value = str(value).encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
+
+
 def save_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
-
     try:
         with temp.open("w", encoding="utf-8") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -85,7 +105,6 @@ def read_json(path, required=True):
         if required:
             raise RuntimeError(f"Expected a JSON object: {path}")
         return None
-
     return data
 
 
@@ -109,11 +128,7 @@ def scene_key(item):
         scene = int(item.get("scene", item.get("local_scene")))
     except (KeyError, TypeError, ValueError):
         return None
-
-    if part < 1 or scene < 1:
-        return None
-
-    return part, scene
+    return (part, scene) if part >= 1 and scene >= 1 else None
 
 
 def narration_text(item):
@@ -125,20 +140,15 @@ def narration_text(item):
 
 
 def count_words(text):
-    """Count Latin words/numbers and Devanagari word groups."""
-    return len(
-        re.findall(
-            r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*|"
-            r"[\u0900-\u097F]+",
-            str(text or ""),
-        )
-    )
+    return len(re.findall(
+        r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*|[\u0900-\u097F]+",
+        str(text or ""),
+    ))
 
 
 def extract_ai_story(data):
     result = []
     parts = data.get("parts", [])
-
     if not isinstance(parts, list):
         raise RuntimeError("ai_story.json parts must be a list.")
 
@@ -149,9 +159,7 @@ def extract_ai_story(data):
         try:
             part_number = int(part_data.get("part", expected_part))
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "AI story contains an invalid part number."
-            ) from exc
+            raise RuntimeError("Invalid AI story part number.") from exc
 
         if part_number != expected_part:
             raise RuntimeError(f"Unexpected part number: {part_number}.")
@@ -160,48 +168,34 @@ def extract_ai_story(data):
         if not isinstance(scenes, list):
             raise RuntimeError("AI story part scenes must be a list.")
 
-        for item in scenes:
-            if not isinstance(item, dict):
+        for scene in scenes:
+            if not isinstance(scene, dict):
                 raise RuntimeError("AI story contains an invalid scene.")
-            row = dict(item)
+            row = dict(scene)
             row["part"] = part_number
             result.append(row)
-
     return result
 
 
 def load_source_scenes():
-    # Prefer the scene-level output when it exists.
     if SCENES_FILE.is_file():
         data = read_json(SCENES_FILE, required=False)
-
         if isinstance(data, dict):
             scenes = data.get("scenes", [])
-
             if not isinstance(scenes, list):
                 raise RuntimeError("scenes.json scenes must be a list.")
-
             if scenes:
                 if not all(isinstance(item, dict) for item in scenes):
-                    raise RuntimeError(
-                        "scenes.json contains an invalid scene."
-                    )
-
-                return (
-                    scenes,
-                    SCENES_FILE.relative_to(ROOT).as_posix(),
-                )
+                    raise RuntimeError("scenes.json contains an invalid scene.")
+                return scenes, SCENES_FILE.relative_to(ROOT).as_posix()
 
     data = read_json(AI_STORY_FILE)
-
     if data.get("status") != "completed":
         raise RuntimeError("AI story is not marked completed.")
 
     scenes = extract_ai_story(data)
-
     if not scenes:
         raise RuntimeError("No scenes found in the AI story.")
-
     return scenes, AI_STORY_FILE.relative_to(ROOT).as_posix()
 
 
@@ -214,19 +208,25 @@ def normalize_settings(config):
         "speed": str(config.get("SPEED", "+0%")).strip(),
         "captions": str(config.get("CAPTIONS", "hindi")).strip().lower(),
         "audience": str(config.get("AUDIENCE", "adult")).strip(),
-        "scene_duration": str(
-            config.get("SCENE_DURATION", "auto")
-        ).strip(),
-        "story_length": str(
-            config.get("STORY_LENGTH", "auto")
-        ).strip(),
+        "scene_duration": str(config.get("SCENE_DURATION", "auto")).strip(),
+        "story_length": str(config.get("STORY_LENGTH", "auto")).strip(),
         "music": parse_bool(config.get("MUSIC"), True),
         "sfx": parse_bool(config.get("SFX"), True),
         "ambient_sound": parse_bool(config.get("AMBIENT_SOUND"), True),
-        "transitions": str(
-            config.get("TRANSITIONS", "cinematic")
-        ).strip(),
+        "transitions": str(config.get("TRANSITIONS", "cinematic")).strip(),
     }
+
+
+def caption_metadata(source):
+    """Copy only explicitly supplied caption/language fields."""
+    result = {}
+    for field in CAPTION_FIELDS:
+        if field in source:
+            value = source[field]
+            if isinstance(value, str):
+                value = re.sub(r"\s+", " ", value).strip()
+            result[field] = value
+    return result
 
 
 def validate_scenes(source, settings):
@@ -237,58 +237,44 @@ def validate_scenes(source, settings):
     }
     mapped = {}
 
-    for index, item in enumerate(source, start=1):
+    for index, item in enumerate(source, 1):
         key = scene_key(item)
-
         if key is None:
-            raise RuntimeError(
-                f"Invalid scene mapping at source row {index}."
-            )
-
+            raise RuntimeError(f"Invalid scene mapping at source row {index}.")
         if key in mapped:
             raise RuntimeError(f"Duplicate scene mapping: {key}.")
-
         if key not in expected:
             raise RuntimeError(f"Unexpected scene mapping: {key}.")
 
         text = narration_text(item)
-
         if not text:
             raise RuntimeError(
                 f"Empty narration for part {key[0]}, scene {key[1]}."
             )
-
         mapped[key] = item
 
     missing = sorted(expected - set(mapped))
-
     if missing:
-        raise RuntimeError(
-            f"Missing required narration scenes: {missing}"
-        )
-
+        raise RuntimeError(f"Missing required narration scenes: {missing}")
     return mapped
 
 
 def estimate_narration_seconds(text, voice, speed):
-    """Planning estimate only; final timing must come from rendered audio."""
+    """Planning estimate only; actual timing comes from rendered audio."""
     words = count_words(text)
-    voice_key = str(voice or "").strip().lower()
-    wpm = 135.0 if voice_key in {"female", "woman"} else 125.0
+    wpm = 135.0 if str(voice).lower() in {"female", "woman"} else 125.0
 
     match = re.fullmatch(
         r"([+-]?)\s*(\d+(?:\.\d+)?)\s*%",
         str(speed or "").strip(),
     )
-
     if match:
         amount = float(match.group(2)) / 100.0
-
-        if match.group(1) == "-":
-            factor = max(0.5, 1.0 - amount)
-        else:
-            factor = min(1.75, 1.0 + amount)
-
+        factor = (
+            max(0.5, 1.0 - amount)
+            if match.group(1) == "-"
+            else min(1.75, 1.0 + amount)
+        )
         wpm *= factor
 
     return round(words * 60.0 / max(wpm, 1.0), 2)
@@ -297,25 +283,21 @@ def estimate_narration_seconds(text, voice, speed):
 def make_record(source, settings):
     key = scene_key(source)
     text = narration_text(source)
-    text_hash = digest(text)
-
     duration = source.get("duration")
-
     if duration is None or not str(duration).strip():
         duration = settings["scene_duration"]
 
-    estimated_seconds = estimate_narration_seconds(
-        text,
-        settings["voice"],
-        settings["speed"],
+    metadata = caption_metadata(source)
+    estimated = estimate_narration_seconds(
+        text, settings["voice"], settings["speed"]
     )
 
-    return {
+    record = {
         "part": key[0],
         "scene": key[1],
         "scene_id": f"part_{key[0]:02d}_scene_{key[1]:02d}",
         "text": text,
-        "text_sha256": text_hash,
+        "text_sha256": digest(text),
         "word_count": count_words(text),
         "voice": settings["voice"],
         "speed": settings["speed"],
@@ -324,65 +306,44 @@ def make_record(source, settings):
         "audience": settings["audience"],
         "duration": duration,
         "estimated_duration": duration,
-        "estimated_duration_seconds": estimated_seconds,
+        "estimated_duration_seconds": estimated,
         "duration_estimate_note": (
             "Planning estimate only; use measured rendered audio duration "
             "for final captions and scene timing."
         ),
+        "caption_fields_sha256": digest(canonical_json(metadata)),
         "status": "completed",
     }
+    record.update(metadata)
+    return record
 
 
 def load_reusable(settings_hash, source_map, settings):
     old = read_json(OUTPUT_FILE, required=False)
-
     if not old or old.get("status") not in {"in_progress", "completed"}:
         return {}
 
     if old.get("settings_sha256") != settings_hash:
-        print(
-            "Settings or source changed; previous narration "
-            "will not be reused."
-        )
+        print("Settings or source changed; previous records will not be reused.")
         return {}
 
     rows = old.get("scenes", [])
-
     if not isinstance(rows, list):
         return {}
 
     reusable = {}
-
     for row in rows:
         if not isinstance(row, dict) or row.get("status") != "completed":
             continue
-
         key = scene_key(row)
-
         if key not in source_map:
             continue
 
         expected = make_record(source_map[key], settings)
-
-        fields = (
-            "scene_id",
-            "text_sha256",
-            "text",
-            "voice",
-            "speed",
-            "captions",
-            "format",
-            "audience",
-            "duration",
-            "estimated_duration",
-            "estimated_duration_seconds",
-            "duration_estimate_note",
-            "word_count",
-        )
-
+        # Include all caption metadata so changed translations invalidate cache.
+        fields = set(expected)
         if all(row.get(field) == expected.get(field) for field in fields):
             reusable[key] = expected
-
     return reusable
 
 
@@ -403,25 +364,18 @@ def main():
     source_map = validate_scenes(source, settings)
 
     topic = get_topic(config)
-
     if not topic:
         story_text = get_story_text(config)
         topic = story_text.splitlines()[0].strip() if story_text else ""
-
     if not topic:
         story = read_json(AI_STORY_FILE, required=False) or {}
-        topic = str(
-            story.get("title") or story.get("topic") or ""
-        ).strip()
+        topic = str(story.get("title") or story.get("topic") or "").strip()
 
     source_fingerprint = digest(canonical_json([
         {
             "part": part,
             "scene": scene,
-            "scene_id": source_map[(part, scene)].get("scene_id"),
-            "text_sha256": digest(
-                narration_text(source_map[(part, scene)])
-            ),
+            "source": source_map[(part, scene)],
         }
         for part, scene in sorted(source_map)
     ]))
@@ -453,28 +407,21 @@ def main():
         "completed_scenes": len(records),
         "updated_at": now(),
     }
-
     save_json(OUTPUT_FILE, output)
 
-    print(f"Format: {settings['format']}")
-    print(f"Expected scenes: {total}")
-    print(f"Source: {source_path}")
-    print(f"Reusable scenes: {len(reusable)}")
+    print("Format:", settings["format"])
+    print("Expected scenes:", total)
+    print("Source:", source_path)
+    print("Reusable scenes:", len(reusable))
 
-    for index, key in enumerate(sorted(source_map), start=1):
+    for index, key in enumerate(sorted(source_map), 1):
         if key in records:
-            print(
-                f"[{index}/{total}] Reuse Part {key[0]} Scene {key[1]}"
-            )
+            print(f"[{index}/{total}] Reuse Part {key[0]} Scene {key[1]}")
         else:
             records[key] = make_record(source_map[key], settings)
-            print(
-                f"[{index}/{total}] Prepare Part {key[0]} Scene {key[1]}"
-            )
+            print(f"[{index}/{total}] Prepare Part {key[0]} Scene {key[1]}")
 
-        output["scenes"] = [
-            records[item] for item in sorted(records)
-        ]
+        output["scenes"] = [records[item] for item in sorted(records)]
         output["completed_scenes"] = len(records)
         output["last_completed"] = {
             "part": key[0],
@@ -485,31 +432,23 @@ def main():
         save_json(OUTPUT_FILE, output)
 
     final_rows = [records[key] for key in sorted(source_map)]
-    final_keys = [scene_key(row) for row in final_rows]
-
-    if len(final_rows) != total or len(set(final_keys)) != total:
+    if len(final_rows) != total or len({
+        scene_key(row) for row in final_rows
+    }) != total:
         raise RuntimeError("Final narration mapping/count is invalid.")
 
     for row in final_rows:
         if not row["text"].strip():
-            raise RuntimeError(
-                f"Final narration is empty: {row['scene_id']}."
-            )
-
+            raise RuntimeError(f"Empty narration: {row['scene_id']}")
         if row["word_count"] != count_words(row["text"]):
-            raise RuntimeError(
-                f"Narration word-count mismatch: {row['scene_id']}."
-            )
-
+            raise RuntimeError(f"Word-count mismatch: {row['scene_id']}")
         if row["estimated_duration_seconds"] <= 0:
-            raise RuntimeError(
-                f"Invalid duration estimate: {row['scene_id']}."
-            )
-
+            raise RuntimeError(f"Invalid duration estimate: {row['scene_id']}")
         if row["text_sha256"] != digest(row["text"]):
-            raise RuntimeError(
-                f"Narration hash mismatch: {row['scene_id']}."
-            )
+            raise RuntimeError(f"Text hash mismatch: {row['scene_id']}")
+        metadata = caption_metadata(row)
+        if row["caption_fields_sha256"] != digest(canonical_json(metadata)):
+            raise RuntimeError(f"Caption metadata hash mismatch: {row['scene_id']}")
 
     output.update({
         "status": "completed",
@@ -523,21 +462,19 @@ def main():
             "unique_part_scene_mapping": True,
             "narration_hashes_verified": True,
             "word_counts_verified": True,
+            "caption_language_fields_preserved": True,
             "duration_estimates_are_not_actual_audio_timings": True,
         },
     })
-
     save_json(OUTPUT_FILE, output)
 
     print("=" * 56)
     print("NARRATION PREPARATION COMPLETED")
-    print(f"Scenes prepared: {total}")
-    print(
-        "Words across narration: "
-        f"{sum(row['word_count'] for row in final_rows)}"
-    )
+    print("Scenes prepared:", total)
+    print("Caption-language fields are preserved when present.")
+    print("Automatic translation: not performed.")
     print("Story/TTS API calls in this stage: 0")
-    print(f"Output: {OUTPUT_FILE}")
+    print("Output:", OUTPUT_FILE)
     print("=" * 56)
 
 
