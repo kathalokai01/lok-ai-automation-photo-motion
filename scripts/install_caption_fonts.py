@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Install and verify the four free Hindi caption font families."""
+"""Install, cache and verify free Hindi caption fonts."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
 
 FONT_DIR = (
     Path.home()
@@ -17,8 +22,11 @@ FONT_DIR = (
     / "katha-caption"
 )
 
+MANIFEST = FONT_DIR / "font_install_manifest.json"
+
 MAX_FONT_BYTES = 20 * 1024 * 1024
 MIN_FONT_BYTES = 1024
+VERSION = "caption-font-installer-v3"
 
 FONT_FILES = {
     "NotoSansDevanagari-Regular.ttf": {
@@ -60,7 +68,11 @@ VALID_FONT_SIGNATURES = {
 }
 
 
-def run(command: list[str], timeout: int = 30):
+def log(*args):
+    print(*args, flush=True)
+
+
+def run(command, timeout=30):
     return subprocess.run(
         command,
         capture_output=True,
@@ -70,7 +82,17 @@ def run(command: list[str], timeout: int = 30):
     )
 
 
-def validate_font_file(path: Path) -> None:
+def sha256_file(path):
+    digest = hashlib.sha256()
+
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+
+    return digest.hexdigest()
+
+
+def validate_font_file(path):
     if not path.is_file():
         raise RuntimeError(f"Font file does not exist: {path}")
 
@@ -78,7 +100,7 @@ def validate_font_file(path: Path) -> None:
 
     if not MIN_FONT_BYTES <= size <= MAX_FONT_BYTES:
         raise RuntimeError(
-            f"Unexpected font file size for {path.name}: {size} bytes"
+            f"Unexpected font size for {path.name}: {size} bytes"
         )
 
     with path.open("rb") as handle:
@@ -87,58 +109,21 @@ def validate_font_file(path: Path) -> None:
     if signature not in VALID_FONT_SIGNATURES:
         raise RuntimeError(
             f"Invalid font signature in {path.name}; "
-            "the URL may have returned an error page instead of a font."
+            "the download may be an error page."
         )
 
 
-def download_font(filename: str, details: dict) -> Path:
-    destination = FONT_DIR / filename
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
+def scan_font(path):
+    scanner = shutil.which("fc-scan")
 
-    request = urllib.request.Request(
-        details["url"],
-        headers={
-            "User-Agent": "KathaLokAI-CaptionFontInstaller/2.0",
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = response.read(MAX_FONT_BYTES + 1)
-
-        if len(data) > MAX_FONT_BYTES:
-            raise RuntimeError(f"Font download is too large: {filename}")
-
-        temporary.write_bytes(data)
-        validate_font_file(temporary)
-        temporary.replace(destination)
-
-        print(
-            f"FONT DOWNLOADED: {filename} "
-            f"({destination.stat().st_size} bytes)"
-        )
-        return destination
-
-    except (
-        urllib.error.URLError,
-        TimeoutError,
-        OSError,
-        RuntimeError,
-    ) as exc:
-        temporary.unlink(missing_ok=True)
-        raise RuntimeError(f"{filename}: {exc}") from exc
-
-
-def scan_font(path: Path) -> str:
-    """Read the actual family metadata stored in this font file."""
-    if not shutil_which("fc-scan"):
+    if not scanner:
         raise RuntimeError(
-            "fc-scan is unavailable; install fontconfig in the workflow."
+            "fc-scan is missing; install fontconfig first."
         )
 
     result = run(
         [
-            "fc-scan",
+            scanner,
             "--format",
             "%{family}\n",
             str(path),
@@ -148,153 +133,306 @@ def scan_font(path: Path) -> str:
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"Could not inspect font metadata for {path.name}: "
-            f"{result.stderr.strip()}"
+            f"Cannot inspect {path.name}: {result.stderr.strip()}"
         )
 
     return result.stdout.strip()
 
 
-def shutil_which(name: str) -> str | None:
-    # Keep this module's imports minimal.
-    import shutil
-    return shutil.which(name)
+def family_matches(actual, expected):
+    actual_families = [
+        item.strip().casefold()
+        for item in actual.split(",")
+        if item.strip()
+    ]
+
+    expected = expected.casefold()
+
+    return any(
+        family == expected
+        or family.startswith(expected + " ")
+        for family in actual_families
+    )
 
 
-def verify_font(filename: str, details: dict) -> None:
+def verify_font(filename, details):
     path = FONT_DIR / filename
+
     validate_font_file(path)
 
     actual_family = scan_font(path)
-    expected_family = details["family"].casefold()
 
-    actual_families = [
-        family.strip().casefold()
-        for family in actual_family.split(",")
-        if family.strip()
-    ]
-
-    if not any(
-        family == expected_family
-        or family.startswith(expected_family + " ")
-        for family in actual_families
-    ):
+    if not family_matches(actual_family, details["family"]):
         raise RuntimeError(
-            f"Wrong font family in {filename}. "
-            f"Expected {details['family']!r}; "
-            f"found {actual_family!r}."
+            f"Wrong family in {filename}: expected "
+            f"{details['family']!r}, found {actual_family!r}"
         )
 
-    print(f"FONT FILE VERIFIED: {details['family']} -> {actual_family}")
+    # Ask Pillow to load the font as an additional sanity check.
+    try:
+        from PIL import ImageFont
+
+        font = ImageFont.truetype(str(path), size=28)
+
+        if font.getbbox("Hindi 123") is None:
+            raise RuntimeError(
+                f"Pillow could not measure text using {filename}"
+            )
+
+    except ImportError as exc:
+        raise RuntimeError(
+            "Pillow is required to verify caption fonts."
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"Pillow cannot load {filename}: {exc}"
+        ) from exc
+
+    log(
+        "FONT VERIFIED:",
+        details["family"],
+        "|",
+        filename,
+        "|",
+        path.stat().st_size,
+        "bytes",
+    )
+
+    return {
+        "filename": filename,
+        "family": details["family"],
+        "bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+        "path": str(path),
+    }
 
 
-def verify_fontconfig(details: dict) -> None:
-    family = details["family"]
+def download_font(filename, details):
+    destination = FONT_DIR / filename
+    temporary = destination.with_suffix(
+        destination.suffix + ".download"
+    )
+
+    request = urllib.request.Request(
+        details["url"],
+        headers={
+            "User-Agent": "KathaLokAI-CaptionFontInstaller/3.0",
+        },
+    )
+
+    try:
+        log("Downloading font:", details["family"])
+
+        with urllib.request.urlopen(request, timeout=60) as response:
+            data = response.read(MAX_FONT_BYTES + 1)
+
+        if len(data) > MAX_FONT_BYTES:
+            raise RuntimeError(
+                f"Font download exceeds size limit: {filename}"
+            )
+
+        if len(data) < MIN_FONT_BYTES:
+            raise RuntimeError(
+                f"Font download is unexpectedly small: {filename}"
+            )
+
+        temporary.write_bytes(data)
+        validate_font_file(temporary)
+
+        # Check the family before replacing an existing valid file.
+        actual_family = scan_font(temporary)
+
+        if not family_matches(actual_family, details["family"]):
+            raise RuntimeError(
+                f"Downloaded font family mismatch for {filename}: "
+                f"{actual_family!r}"
+            )
+
+        temporary.replace(destination)
+
+        log("FONT DOWNLOADED:", filename)
+
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        RuntimeError,
+    ) as exc:
+        raise RuntimeError(f"{filename}: {exc}") from exc
+
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    return destination
+
+
+def verify_fontconfig(details):
+    matcher = shutil.which("fc-match")
+
+    if not matcher:
+        raise RuntimeError("fc-match is missing.")
 
     result = run(
         [
-            "fc-match",
+            matcher,
             "-f",
             "%{family}\n%{file}\n",
-            family,
+            details["family"],
         ],
         timeout=20,
     )
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"fontconfig lookup failed for {family}: "
+            f"fontconfig failed for {details['family']}: "
             f"{result.stderr.strip()}"
         )
 
     lines = result.stdout.strip().splitlines()
 
-    if len(lines) < 2 or not lines[0].strip() or not lines[1].strip():
+    if len(lines) < 2:
         raise RuntimeError(
-            f"fontconfig could not resolve a font for {family}."
+            f"fontconfig returned incomplete data for {details['family']}"
         )
 
-    matched_families = [
-        item.strip().casefold()
-        for item in lines[0].split(",")
-        if item.strip()
-    ]
+    actual_family = lines[0].strip()
+    actual_path = Path(lines[1].strip())
 
-    expected = family.casefold()
-
-    if not any(
-        item == expected or item.startswith(expected + " ")
-        for item in matched_families
-    ):
+    if not family_matches(actual_family, details["family"]):
         raise RuntimeError(
-            f"fontconfig substituted another family for {family}: "
-            f"{lines[0]}"
+            f"fontconfig substituted a different font for "
+            f"{details['family']}: {actual_family}"
         )
 
-    matched_path = Path(lines[1])
-
-    if not matched_path.is_file():
+    if not actual_path.is_file():
         raise RuntimeError(
-            f"fontconfig returned a missing font file for {family}: "
-            f"{matched_path}"
+            f"fontconfig returned a missing file: {actual_path}"
         )
 
-    print(f"FONTCONFIG VERIFIED: {family} -> {matched_path}")
+    log("FONTCONFIG VERIFIED:", details["family"])
 
 
-def main() -> int:
-    import shutil
+def load_old_manifest():
+    try:
+        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
-    FONT_DIR.mkdir(parents=True, exist_ok=True)
 
+def save_manifest(font_records):
+    MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+
+    manifest = {
+        "status": "completed",
+        "version": VERSION,
+        "font_directory": str(FONT_DIR),
+        "fonts": font_records,
+        "external_api_calls": 0,
+        "paid_services_used": False,
+    }
+
+    temporary = MANIFEST.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(MANIFEST)
+
+
+def require_tools():
     for command in ("fc-cache", "fc-match", "fc-scan"):
         if not shutil.which(command):
-            print(
-                f"ERROR: Required font tool is missing: {command}",
-                file=sys.stderr,
+            raise RuntimeError(
+                f"Required command missing: {command}"
             )
-            return 1
 
-    failures = []
+
+def main():
+    require_tools()
+    FONT_DIR.mkdir(parents=True, exist_ok=True)
+
+    old_manifest = load_old_manifest()
+    old_records = old_manifest.get("fonts", {})
+
+    verified_records = {}
+    downloaded = []
+    reused = []
 
     for filename, details in FONT_FILES.items():
-        try:
-            download_font(filename, details)
-        except Exception as exc:
-            failures.append(str(exc))
-            print(f"DOWNLOAD ERROR: {exc}", file=sys.stderr)
+        path = FONT_DIR / filename
+        old_record = old_records.get(filename, {})
+        can_reuse = False
 
-    if failures:
-        print(
-            "ERROR: Font downloads failed. Caption rendering must not "
-            "continue with an incomplete font set.",
-            file=sys.stderr,
+        # Reuse only when the installed file still matches the previous
+        # manifest and its font family remains valid.
+        if path.is_file() and isinstance(old_record, dict):
+            try:
+                current_hash = sha256_file(path)
+
+                if (
+                    old_manifest.get("status") == "completed"
+                    and old_record.get("sha256") == current_hash
+                    and old_record.get("family") == details["family"]
+                ):
+                    record = verify_font(filename, details)
+                    can_reuse = True
+                    reused.append(filename)
+                    verified_records[filename] = record
+                    log("CACHE HIT:", filename)
+
+            except (OSError, RuntimeError) as exc:
+                log("CACHE INVALID:", filename, "|", exc)
+
+        if can_reuse:
+            continue
+
+        # Even without a manifest, a valid existing font can be reused.
+        if path.is_file():
+            try:
+                record = verify_font(filename, details)
+                verified_records[filename] = record
+                reused.append(filename)
+                log("EXISTING VALID FONT REUSED:", filename)
+                continue
+            except (OSError, RuntimeError) as exc:
+                log("EXISTING FONT NEEDS REPAIR:", filename, "|", exc)
+
+        download_font(filename, details)
+        record = verify_font(filename, details)
+        verified_records[filename] = record
+        downloaded.append(filename)
+
+    result = run(
+        ["fc-cache", "-f", str(FONT_DIR)],
+        timeout=60,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"fc-cache failed: {result.stderr.strip()}"
         )
-        return 1
 
-    try:
-        result = run(
-            ["fc-cache", "-f", str(FONT_DIR)],
-            timeout=60,
-        )
+    for filename, details in FONT_FILES.items():
+        verify_fontconfig(details)
 
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"fc-cache failed: {result.stderr.strip()}"
-            )
+    save_manifest(verified_records)
 
-        for filename, details in FONT_FILES.items():
-            verify_font(filename, details)
-            verify_fontconfig(details)
-
-    except Exception as exc:
-        print(f"FONT VERIFICATION FAILED: {exc}", file=sys.stderr)
-        return 1
-
-    print("SUCCESS: All four Hindi caption font files were verified.")
-    print(f"Font directory: {FONT_DIR}")
-    return 0
+    log("======================================")
+    log("CAPTION FONT INSTALLATION COMPLETE")
+    log("FONT COUNT:", len(verified_records))
+    log("DOWNLOADED:", len(downloaded))
+    log("REUSED:", len(reused))
+    log("FONT DIRECTORY:", FONT_DIR)
+    log("MANIFEST:", MANIFEST)
+    log("EXTERNAL API CALLS: 0")
+    log("PAID SERVICES USED: false")
+    log("======================================")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        main()
+    except Exception as exc:
+        log("CAPTION FONT INSTALLATION FAILED:", str(exc))
+        sys.exit(1)
