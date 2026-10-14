@@ -1,8 +1,14 @@
-#!/usr/bin/env python3
-"""Create a validated, deterministic story/part/scene plan."""
 
+#!/usr/bin/env python3
+"""Create a deterministic, validated, resumable story plan."""
+
+from __future__ import annotations
+
+import hashlib
 import json
+import os
 from pathlib import Path
+from typing import Any
 
 from input_config import (
     load_and_validate,
@@ -13,32 +19,31 @@ from input_config import (
     get_scenes,
 )
 
-OUT = Path("output/story/story_plan.json")
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "output" / "story" / "story_plan.json"
+SCRIPT_VERSION = "story-plan-3"
 
 
-def as_bool(config, key, default=True):
+def as_bool(config: dict, key: str, default: bool = True) -> bool:
     value = config.get(key, default)
 
     if isinstance(value, bool):
         return value
 
     text = str(value).strip().lower()
-
     if text in {"true", "yes", "on", "1"}:
         return True
-
-    if text in {"false", "no", "off", "0"}:
+    if text in {"false", "no", "off", "0", ""}:
         return False
-
     return default
 
 
-def as_text(config, key, default=""):
+def as_text(config: dict, key: str, default: str = "") -> str:
     value = config.get(key, default)
     return str(default if value is None else value).strip()
 
 
-def positive_int(value, name):
+def positive_int(value: Any, name: str) -> int:
     try:
         result = int(value)
     except (TypeError, ValueError) as exc:
@@ -46,11 +51,128 @@ def positive_int(value, name):
 
     if result < 1:
         raise ValueError(f"{name} must be greater than zero.")
-
     return result
 
 
-def main():
+def sha256_json(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def load_json(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def validate_plan(
+    plan: dict,
+    format_type: str,
+    topic: str,
+    parts_count: int,
+    scenes_per_part: int,
+) -> None:
+    if plan.get("status") != "planned":
+        raise RuntimeError("Plan status must be 'planned'.")
+
+    if str(plan.get("format", "")).strip().lower() != format_type:
+        raise RuntimeError("Plan format mismatch.")
+
+    if str(plan.get("topic", "")).strip() != topic:
+        raise RuntimeError("Plan topic mismatch.")
+
+    expected_total = parts_count * scenes_per_part
+
+    try:
+        actual_parts = int(plan.get("parts_count", -1))
+        actual_scenes = int(plan.get("scenes_per_part", -1))
+        actual_total = int(plan.get("total_scenes", -1))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Plan counts are invalid.") from exc
+
+    if (
+        actual_parts != parts_count
+        or actual_scenes != scenes_per_part
+        or actual_total != expected_total
+    ):
+        raise RuntimeError("Plan counts do not match current input.")
+
+    parts = plan.get("parts")
+    if not isinstance(parts, list) or len(parts) != parts_count:
+        raise RuntimeError("Plan parts list is invalid.")
+
+    seen_ids = set()
+    global_number = 0
+
+    for part_number, part in enumerate(parts, 1):
+        if not isinstance(part, dict):
+            raise RuntimeError(f"Invalid part {part_number}.")
+
+        if part.get("part") != part_number:
+            raise RuntimeError(f"Part ordering error at part {part_number}.")
+
+        if part.get("part_id") != f"part_{part_number:02d}":
+            raise RuntimeError(f"Invalid part ID at part {part_number}.")
+
+        scenes = part.get("scenes")
+        if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
+            raise RuntimeError(
+                f"Part {part_number} must contain {scenes_per_part} scenes."
+            )
+
+        for scene_number, scene in enumerate(scenes, 1):
+            global_number += 1
+
+            if not isinstance(scene, dict):
+                raise RuntimeError("Plan contains an invalid scene.")
+
+            scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
+
+            if scene.get("scene") != scene_number:
+                raise RuntimeError(f"Scene numbering error at {scene_id}.")
+
+            if scene.get("part") != part_number:
+                raise RuntimeError(f"Wrong part mapping at {scene_id}.")
+
+            if scene.get("scene_id") != scene_id:
+                raise RuntimeError(f"Wrong scene ID at {scene_id}.")
+
+            if scene.get("global_scene_number") != global_number:
+                raise RuntimeError(f"Global scene order error at {scene_id}.")
+
+            if scene_id in seen_ids:
+                raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
+
+            seen_ids.add(scene_id)
+
+    if len(seen_ids) != expected_total:
+        raise RuntimeError("Total scene mapping validation failed.")
+
+
+def main() -> None:
     config = load_and_validate()
 
     format_type = get_format(config)
@@ -75,9 +197,7 @@ def main():
     world_consistency = as_bool(config, "WORLD_CONSISTENCY", True)
     scene_continuity = as_bool(config, "SCENE_CONTINUITY", True)
 
-    visual_style = as_text(
-        config, "VISUAL_STYLE", "cinematic_realistic"
-    )
+    visual_style = as_text(config, "VISUAL_STYLE", "cinematic_realistic")
     realism = as_text(config, "REALISM", "high")
     camera_style = as_text(config, "CAMERA_STYLE", "cinematic")
     cinematic_camera = as_bool(config, "CINEMATIC_CAMERA", True)
@@ -129,8 +249,41 @@ def main():
 
     roles = scene_roles_short if format_type == "short" else scene_roles_full
 
+    generation_notes = {
+        "part_hook": part_hook,
+        "part_suspense": part_suspense,
+        "final_resolution": final_resolution,
+        "opening_hook_required": True,
+        "final_scene_suspense_required": part_suspense,
+        "resolve_main_conflict_before_final_suspense": True,
+        "character_bible": character_bible,
+        "character_consistency": character_consistency,
+        "world_consistency": world_consistency,
+        "scene_continuity": scene_continuity,
+        "visual_style": visual_style,
+        "realism": realism,
+        "cinematic_camera": cinematic_camera,
+        "camera_style": camera_style,
+        "lighting": lighting,
+        "realistic_lighting": realistic_lighting,
+        "mood": mood,
+        "quality": quality,
+        "natural_motion": natural_motion,
+        "negative_prompt": negative_prompt_enabled,
+        "avoid_cartoon_look": avoid_cartoon,
+        "avoid_neon": avoid_neon,
+        "avoid_glitch_effects": avoid_glitch,
+        "music": music_enabled,
+        "music_style": music_style,
+        "sfx": sfx_enabled,
+        "ambient_sound": ambient_enabled,
+        "transitions": transitions,
+        "fps": fps,
+    }
+
     plan = {
         "status": "planned",
+        "script_version": SCRIPT_VERSION,
         "topic": topic,
         "story_text": story_text,
         "title_source": "TOPIC" if topic else "STORY_TEXT",
@@ -142,74 +295,45 @@ def main():
         "scenes_per_part": scenes_per_part,
         "total_scenes": total_scenes,
         "caption_mode": caption_mode,
-        "mapping_version": 2,
+        "mapping_version": 3,
         "scene_order": "part_then_scene",
+        "generation_notes": generation_notes,
         "parts": [],
-        "generation_notes": {
-            "part_hook": part_hook,
-            "part_suspense": part_suspense,
-            "final_resolution": final_resolution,
-            "opening_hook_required": True,
-            "final_scene_suspense_required": part_suspense,
-            "resolve_main_conflict_before_final_suspense": True,
-            "character_bible": character_bible,
-            "character_consistency": character_consistency,
-            "world_consistency": world_consistency,
-            "scene_continuity": scene_continuity,
-            "visual_style": visual_style,
-            "realism": realism,
-            "cinematic_camera": cinematic_camera,
-            "camera_style": camera_style,
-            "lighting": lighting,
-            "realistic_lighting": realistic_lighting,
-            "mood": mood,
-            "quality": quality,
-            "natural_motion": natural_motion,
-            "negative_prompt": negative_prompt_enabled,
-            "avoid_cartoon_look": avoid_cartoon,
-            "avoid_neon": avoid_neon,
-            "avoid_glitch_effects": avoid_glitch,
-            "music": music_enabled,
-            "music_style": music_style,
-            "sfx": sfx_enabled,
-            "ambient_sound": ambient_enabled,
-            "transitions": transitions,
-            "fps": fps,
-        },
     }
 
-    global_scene_number = 0
-
-    for part_no in range(1, parts_count + 1):
+    for part_number in range(1, parts_count + 1):
         part = {
-            "part": part_no,
-            "part_id": f"part_{part_no:02d}",
+            "part": part_number,
+            "part_id": f"part_{part_number:02d}",
             "hook_required": part_hook,
             "suspense_required": part_suspense,
             "final_resolution": (
-                final_resolution and part_no == parts_count
+                final_resolution and part_number == parts_count
             ),
-            "final_suspense_required": (
-                part_suspense and part_no == parts_count
-            ),
+            "final_suspense_required": part_suspense,
             "expected_scene_count": scenes_per_part,
             "scenes": [],
         }
 
-        for scene_no in range(1, scenes_per_part + 1):
-            global_scene_number += 1
-            role = roles[min(scene_no - 1, len(roles) - 1)]
-            is_first = scene_no == 1
-            is_last = scene_no == scenes_per_part
+        for scene_number in range(1, scenes_per_part + 1):
+            global_number = (
+                (part_number - 1) * scenes_per_part + scene_number
+            )
+            is_first = scene_number == 1
+            is_last = scene_number == scenes_per_part
             is_final_story_scene = (
-                part_no == parts_count and is_last
+                part_number == parts_count and is_last
             )
 
-            scene = {
-                "scene": scene_no,
-                "scene_id": f"part_{part_no:02d}_scene_{scene_no:02d}",
-                "global_scene_number": global_scene_number,
-                "part": part_no,
+            role = roles[min(scene_number - 1, len(roles) - 1)]
+
+            part["scenes"].append({
+                "scene": scene_number,
+                "scene_id": (
+                    f"part_{part_number:02d}_scene_{scene_number:02d}"
+                ),
+                "global_scene_number": global_number,
+                "part": part_number,
                 "status": "pending",
                 "role": role,
                 "opening_hook_required": part_hook and is_first,
@@ -233,90 +357,81 @@ def main():
                 "character_consistency": character_consistency,
                 "world_consistency": world_consistency,
                 "scene_continuity": scene_continuity,
-            }
-
-            part["scenes"].append(scene)
-
-        if len(part["scenes"]) != scenes_per_part:
-            raise RuntimeError(
-                f"Part {part_no} scene count mismatch."
-            )
+            })
 
         plan["parts"].append(part)
 
-    # Validate all part/scene IDs before writing.
-    seen_ids = set()
-    seen_global_numbers = set()
-
-    for expected_part, part in enumerate(plan["parts"], start=1):
-        if part["part"] != expected_part:
-            raise RuntimeError("Part ordering validation failed.")
-
-        if len(part["scenes"]) != scenes_per_part:
-            raise RuntimeError(
-                f"Part {expected_part} does not have exactly "
-                f"{scenes_per_part} scenes."
-            )
-
-        for expected_scene, scene in enumerate(
-            part["scenes"], start=1
-        ):
-            expected_id = (
-                f"part_{expected_part:02d}_scene_{expected_scene:02d}"
-            )
-
-            if scene["part"] != expected_part:
-                raise RuntimeError(
-                    f"Wrong part mapping for {expected_id}."
-                )
-
-            if scene["scene"] != expected_scene:
-                raise RuntimeError(
-                    f"Wrong scene order for {expected_id}."
-                )
-
-            if scene["scene_id"] != expected_id:
-                raise RuntimeError(
-                    f"Invalid scene ID: {scene['scene_id']}."
-                )
-
-            if scene["scene_id"] in seen_ids:
-                raise RuntimeError(
-                    f"Duplicate scene ID: {scene['scene_id']}."
-                )
-
-            if scene["global_scene_number"] in seen_global_numbers:
-                raise RuntimeError("Duplicate global scene number.")
-
-            seen_ids.add(scene["scene_id"])
-            seen_global_numbers.add(scene["global_scene_number"])
-
-    if len(seen_ids) != total_scenes:
-        raise RuntimeError(
-            f"Expected {total_scenes} scenes, found {len(seen_ids)}."
-        )
-
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(
-        json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    validate_plan(
+        plan, format_type, topic, parts_count, scenes_per_part
     )
+
+    # The fingerprint excludes generated metadata such as timestamps.
+    plan["input_fingerprint"] = sha256_json({
+        "script_version": SCRIPT_VERSION,
+        "format": format_type,
+        "topic": topic,
+        "story_text": story_text,
+        "parts_count": parts_count,
+        "scenes_per_part": scenes_per_part,
+        "story_length": story_length,
+        "scene_duration": scene_duration,
+        "audience": audience,
+        "caption_mode": caption_mode,
+        "generation_notes": generation_notes,
+    })
+
+    existing = load_json(OUT)
+    if (
+        isinstance(existing, dict)
+        and existing.get("input_fingerprint") == plan["input_fingerprint"]
+    ):
+        try:
+            validate_plan(
+                existing, format_type, topic, parts_count, scenes_per_part
+            )
+            print("RESUME: Existing story plan is valid and unchanged.")
+            print("No story-generation API call was made by this script.")
+            print("Plan:", OUT)
+            print("Parts:", parts_count, "| Scenes:", total_scenes)
+            return
+        except Exception as exc:
+            print("Existing plan failed validation; rebuilding:", exc)
+
+    atomic_write_json(OUT, plan)
+
+    # Read back the written file to verify it is valid JSON and correctly mapped.
+    saved = load_json(OUT)
+    if not isinstance(saved, dict):
+        raise RuntimeError("Saved plan could not be read back.")
+
+    validate_plan(
+        saved, format_type, topic, parts_count, scenes_per_part
+    )
+    if saved.get("input_fingerprint") != plan["input_fingerprint"]:
+        raise RuntimeError("Saved plan fingerprint verification failed.")
 
     print("=" * 60)
     print("STORY PLAN CREATED AND VALIDATED")
     print("=" * 60)
-    print(f"Output            : {OUT}")
-    print(f"Format            : {format_type}")
-    print(f"Topic             : {topic or '(using story text)'}")
-    print(f"Story text        : {'provided' if story_text else 'not provided'}")
-    print(f"Parts             : {parts_count}")
-    print(f"Scenes per part   : {scenes_per_part}")
-    print(f"Expected total    : {total_scenes}")
-    print(f"Validated IDs     : {len(seen_ids)}")
-    print(f"Mapping version   : {plan['mapping_version']}")
-    print("Part/scene mapping: PASS")
+    print("Output             :", OUT)
+    print("Format             :", format_type)
+    print("Topic              :", topic or "(using story text)")
+    print("Story text         :", "provided" if story_text else "not provided")
+    print("Parts              :", parts_count)
+    print("Scenes per part    :", scenes_per_part)
+    print("Expected total     :", total_scenes)
+    print("Validated IDs      :", total_scenes)
+    print("Mapping version    :", plan["mapping_version"])
+    print("Fingerprint        :", plan["input_fingerprint"][:16] + "...")
+    print("Part/scene mapping : PASS")
     print("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit("Story planning cancelled.")
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
