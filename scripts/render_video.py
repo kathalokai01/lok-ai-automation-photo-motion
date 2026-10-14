@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Resumable scene renderer with duration-safe audio/video and checkpoints."""
+"""Resume-safe scene renderer with narration-first audio mixing."""
 
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ AUDIO_MANIFEST = AUDIO_DIR / "audio_jobs.json"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 
 MIN_MEDIA_BYTES = 1000
-DURATION_TOLERANCE = 0.30
-RENDERER_VERSION = "render-video-v12"
+DURATION_TOLERANCE = 0.35
+RENDERER_VERSION = "render-video-v13"
 
 
 def log(*args):
@@ -112,11 +112,9 @@ def run_probe(path, audio_only=False):
 
     result = subprocess.run(
         [
-            executable,
-            "-v", "error",
+            executable, "-v", "error",
             "-show_entries", entries,
-            "-of", "json",
-            str(path),
+            "-of", "json", str(path),
         ],
         capture_output=True,
         text=True,
@@ -177,7 +175,6 @@ def audio_job_map():
     for row in rows:
         if not isinstance(row, dict):
             continue
-
         if str(row.get("status", "")).lower() != "completed":
             continue
 
@@ -193,20 +190,17 @@ def audio_job_map():
             (
                 row.get(field)
                 for field in ("output", "audio_path", "path", "file", "audio")
-                if isinstance(row.get(field), str)
-                and row[field].strip()
+                if isinstance(row.get(field), str) and row[field].strip()
             ),
             None,
         )
 
         audio = safe_path(value, f"Narration {key}", 100)
-        info = probe_audio(audio)
-
         mapping[key] = {
             "part": key[0],
             "scene": key[1],
             "path": audio,
-            "duration": info["duration"],
+            "duration": probe_audio(audio)["duration"],
             "sha256": sha256_file(audio),
         }
 
@@ -214,9 +208,8 @@ def audio_job_map():
 
 
 def optional_background_files():
-    """Reuse existing local music, ambience and effects only."""
+    """Find local tracks and classify them by category."""
     result = {"music": [], "ambient": [], "sfx": []}
-
     roots = [
         OUTPUT / "audio",
         OUTPUT / "sound",
@@ -244,10 +237,32 @@ def optional_background_files():
             else:
                 continue
 
-            result[category].append(path.resolve())
+            resolved = path.resolve()
+            if resolved not in result[category]:
+                result[category].append(resolved)
 
-    # One existing track per category avoids accidental duplicate layering.
+    # Avoid unintentionally stacking multiple tracks from old checkpoints.
     return {key: paths[:1] for key, paths in result.items()}
+
+
+def background_gain(category):
+    # Keep spoken narration clearly in front of background audio.
+    return {
+        "music": 0.10,
+        "ambient": 0.045,
+        "sfx": 0.075,
+    }[category]
+
+
+def track_category(path):
+    lower = str(path).lower()
+    if any(token in lower for token in ("ambient", "environment")):
+        return "ambient"
+    if any(token in lower for token in ("sfx", "effect", "foley")):
+        return "sfx"
+    if any(token in lower for token in ("music", "bgm", "background")):
+        return "music"
+    raise RuntimeError(f"Cannot classify background track: {path}")
 
 
 def cache_signature(source, narration, backgrounds, fps, resolution, duration):
@@ -256,7 +271,12 @@ def cache_signature(source, narration, backgrounds, fps, resolution, duration):
         "source_sha256": sha256_file(source),
         "narration_sha256": narration["sha256"],
         "background": [
-            {"path": relative(path), "sha256": sha256_file(path)}
+            {
+                "path": relative(path),
+                "sha256": sha256_file(path),
+                "category": track_category(path),
+                "gain": background_gain(track_category(path)),
+            }
             for path in backgrounds
         ],
         "fps": fps,
@@ -273,11 +293,9 @@ def validate_rendered_file(path, resolution, expected_duration):
     info = ffprobe(path)
 
     if not info["has_audio"]:
-        raise RuntimeError(f"Rendered video has no audio: {path.name}")
-
+        raise RuntimeError(f"Rendered file has no audio: {path.name}")
     if (info["width"], info["height"]) != resolution:
         raise RuntimeError(f"Resolution mismatch: {path.name}")
-
     if abs(info["duration"] - expected_duration) > DURATION_TOLERANCE:
         raise RuntimeError(
             f"Duration mismatch for {path.name}: "
@@ -302,7 +320,6 @@ def render_scene(
         source, narration, backgrounds, fps, resolution, duration
     )
 
-    # Reuse only a valid cache from this exact input signature.
     if destination.is_file() and sidecar.is_file():
         try:
             cached = read_json(sidecar)
@@ -323,14 +340,10 @@ def render_scene(
     temporary = destination.with_name(destination.stem + ".tmp.mp4")
 
     inputs = ["-i", str(source), "-i", str(narration["path"])]
-
     for background in backgrounds:
         inputs.extend(["-stream_loop", "-1", "-i", str(background)])
 
     width, height = resolution
-
-    # Extend short visual clips by cloning the last frame. Trim longer clips
-    # so the visual duration exactly matches the selected scene duration.
     filters = [
         f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
         f"crop={width}:{height},fps={fps},setsar=1,"
@@ -338,7 +351,7 @@ def render_scene(
         f"trim=duration={duration:.3f},setpts=PTS-STARTPTS[v]"
     ]
 
-    # Pad narration if needed, then trim it to the final scene duration.
+    # Narration is padded rather than cut short.
     filters.append(
         "[1:a]aresample=44100,"
         f"apad,atrim=duration={duration:.3f},"
@@ -346,31 +359,35 @@ def render_scene(
     )
 
     audio_labels = ["[narr]"]
+    audio_weights = ["1.0"]
 
     for index, background in enumerate(backgrounds, start=2):
+        category = track_category(background)
+        gain = background_gain(category)
         label = f"bg{index}"
+
         filters.append(
             f"[{index}:a]aresample=44100,"
-            "volume=0.12,"
+            f"volume={gain:.4f},"
             f"apad,atrim=duration={duration:.3f},"
             f"asetpts=PTS-STARTPTS[{label}]"
         )
         audio_labels.append(f"[{label}]")
+        audio_weights.append("1.0")
 
-    # Use longest after all streams have been padded and trimmed to the same
-    # target length. Narration is never intentionally shortened by amix.
+    # Disable amix auto-normalization so background tracks do not reduce
+    # narration volume merely because extra inputs were added.
     filters.append(
         "".join(audio_labels)
         + f"amix=inputs={len(audio_labels)}:duration=longest:"
-        "dropout_transition=2,"
-        "alimiter=limit=0.95,"
+        "dropout_transition=2:normalize=0,"
+        "alimiter=limit=0.95:level=false,"
         f"atrim=duration={duration:.3f},"
         "asetpts=PTS-STARTPTS[a]"
     )
 
     command = [
-        ffmpeg,
-        "-hide_banner", "-loglevel", "error", "-y",
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         *inputs,
         "-filter_complex", ";".join(filters),
         "-map", "[v]", "-map", "[a]",
@@ -401,15 +418,10 @@ def render_scene(
                 f"{result.stderr[-1800:]}"
             )
 
-        if (
-            not temporary.is_file()
-            or temporary.stat().st_size < MIN_MEDIA_BYTES
-        ):
+        if not temporary.is_file() or temporary.stat().st_size < MIN_MEDIA_BYTES:
             raise RuntimeError(f"Rendered file is empty: {destination.name}")
 
         info = validate_rendered_file(temporary, resolution, duration)
-
-        # Replace the old output only after the new file validates.
         os.replace(temporary, destination)
 
         write_json(
@@ -419,7 +431,14 @@ def render_scene(
                 "signature": signature,
                 "source": relative(source),
                 "narration": relative(narration["path"]),
-                "background_tracks": [relative(path) for path in backgrounds],
+                "background_tracks": [
+                    {
+                        "path": relative(path),
+                        "category": track_category(path),
+                        "gain": background_gain(track_category(path)),
+                    }
+                    for path in backgrounds
+                ],
                 "video": relative(destination),
                 "duration": info["duration"],
                 "target_duration": duration,
@@ -428,7 +447,6 @@ def render_scene(
                 "renderer": RENDERER_VERSION,
             },
         )
-
         return info, signature
 
     finally:
@@ -450,7 +468,6 @@ def concat_videos(videos, destination):
     temporary = destination.with_name(destination.stem + ".tmp.mp4")
 
     lines = []
-
     for path in videos:
         resolved = str(path.resolve())
         if "\n" in resolved or "\r" in resolved:
@@ -462,8 +479,7 @@ def concat_videos(videos, destination):
     try:
         result = subprocess.run(
             [
-                ffmpeg,
-                "-hide_banner", "-loglevel", "error", "-y",
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "concat", "-safe", "0",
                 "-i", str(concat_file),
                 "-c:v", "libx264",
@@ -486,15 +502,10 @@ def concat_videos(videos, destination):
                 f"Merge failed for {destination.name}: "
                 f"{result.stderr[-1800:]}"
             )
-
-        if (
-            not temporary.is_file()
-            or temporary.stat().st_size < MIN_MEDIA_BYTES
-        ):
+        if not temporary.is_file() or temporary.stat().st_size < MIN_MEDIA_BYTES:
             raise RuntimeError(f"Merged file is empty: {destination.name}")
 
         info = ffprobe(temporary)
-
         if not info["has_audio"]:
             raise RuntimeError(f"Merged video has no audio: {destination.name}")
 
@@ -510,8 +521,10 @@ def concat_videos(videos, destination):
 
 
 def main():
-    config = load_and_validate(ROOT / "Input" / "topic.txt")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError("Both ffmpeg and ffprobe are required")
 
+    config = load_and_validate(ROOT / "Input" / "topic.txt")
     mode = get_format(config)
     parts = int(get_parts(config))
     scenes_per_part = int(get_scenes(config))
@@ -548,25 +561,17 @@ def main():
             local_scene = int(row["local_scene"])
             global_scene = int(row.get("global_scene", row.get("scene", index)))
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid scene mapping at row {index}"
-            ) from exc
+            raise RuntimeError(f"Invalid scene mapping at row {index}") from exc
 
         expected_part = ((index - 1) // scenes_per_part) + 1
-        expected_local_scene = ((index - 1) % scenes_per_part) + 1
+        expected_local = ((index - 1) % scenes_per_part) + 1
 
-        if (
-            global_scene != index
-            or part != expected_part
-            or local_scene != expected_local_scene
+        if (global_scene, part, local_scene) != (
+            index, expected_part, expected_local
         ):
-            raise RuntimeError(
-                f"Non-contiguous scene mapping at row {index}: "
-                f"part={part}, scene={local_scene}, global={global_scene}"
-            )
+            raise RuntimeError(f"Non-contiguous scene mapping at row {index}")
 
         key = (part, local_scene)
-
         if key in photo_map:
             raise RuntimeError(f"Duplicate photo-motion mapping: {key}")
 
@@ -578,17 +583,11 @@ def main():
             ),
             None,
         )
-
-        source = safe_path(
-            value, f"Photo-motion scene {key}", MIN_MEDIA_BYTES
-        )
+        source = safe_path(value, f"Photo-motion scene {key}", MIN_MEDIA_BYTES)
         info = ffprobe(source)
 
         if (info["width"], info["height"]) != resolution:
-            raise RuntimeError(
-                f"Photo-motion resolution mismatch for {key}: "
-                f"{info['width']}x{info['height']}"
-            )
+            raise RuntimeError(f"Photo-motion resolution mismatch for {key}")
 
         photo_map[key] = {
             "part": part,
@@ -599,7 +598,6 @@ def main():
         }
 
     narration_map = audio_job_map()
-
     if len(narration_map) != expected_count:
         raise RuntimeError(
             f"Expected {expected_count} completed narration jobs; "
@@ -608,43 +606,42 @@ def main():
 
     missing = sorted(set(photo_map) - set(narration_map))
     extra = sorted(set(narration_map) - set(photo_map))
-
     if missing or extra:
         raise RuntimeError(
             f"Scene mapping mismatch; missing={missing}, extra={extra}"
         )
 
-    backgrounds = optional_background_files()
+    background_map = optional_background_files()
     background_files = [
-        backgrounds[category][0]
+        background_map[category][0]
         for category in ("music", "ambient", "sfx")
-        if backgrounds[category]
+        if background_map[category]
     ]
 
     log("FORMAT:", mode)
     log("EXPECTED SCENES:", expected_count)
-    log("BACKGROUND TRACKS:", [relative(path) for path in background_files])
+    log("BACKGROUND TRACKS:", [
+        {
+            "path": relative(path),
+            "category": track_category(path),
+            "gain": background_gain(track_category(path)),
+        }
+        for path in background_files
+    ])
 
     RENDER_DIR.mkdir(parents=True, exist_ok=True)
     scene_rows = []
 
-    # Persist only scenes that have actually rendered successfully.
     for global_scene in range(1, expected_count + 1):
-        row = photo_map[
-            (
-                ((global_scene - 1) // scenes_per_part) + 1,
-                ((global_scene - 1) % scenes_per_part) + 1,
-            )
-        ]
-
-        key = (row["part"], row["scene"])
+        part = ((global_scene - 1) // scenes_per_part) + 1
+        local_scene = ((global_scene - 1) % scenes_per_part) + 1
+        row = photo_map[(part, local_scene)]
+        key = (part, local_scene)
         source = row["path"]
         narration = narration_map[key]
 
-        # Retain the entire source clip if it is longer than narration;
-        # otherwise extend the last visual frame to cover the narration.
+        # Keep the visual clip if longer; otherwise extend its final frame.
         duration = max(row["duration"], narration["duration"])
-
         destination = RENDER_DIR / f"scene_{global_scene:04d}.mp4"
 
         info, signature = render_scene(
@@ -657,11 +654,11 @@ def main():
             duration=duration,
         )
 
-        scene_row = {
+        scene_rows.append({
             "scene": global_scene,
             "global_scene": global_scene,
-            "part": row["part"],
-            "local_scene": row["scene"],
+            "part": part,
+            "local_scene": local_scene,
             "source_photo_motion_video": relative(source),
             "source_rendered_video": relative(destination),
             "video": relative(destination),
@@ -674,11 +671,9 @@ def main():
             "rendered_with_narration": True,
             "captions_burned": False,
             "status": "completed",
-        }
+        })
 
-        scene_rows.append(scene_row)
-
-        # Checkpoint immediately after each successful scene.
+        # Save each successful scene immediately for checkpoint recovery.
         write_json(
             RENDER_MANIFEST,
             {
@@ -691,11 +686,15 @@ def main():
                 "completed_scenes": scene_rows,
                 "parts": [],
                 "background_tracks": [
-                    relative(path) for path in background_files
+                    {
+                        "path": relative(path),
+                        "category": track_category(path),
+                        "gain": background_gain(track_category(path)),
+                    }
+                    for path in background_files
                 ],
             },
         )
-
         log(f"RENDERED {global_scene}/{expected_count}")
 
     part_paths = []
@@ -705,7 +704,6 @@ def main():
             [row for row in scene_rows if row["part"] == part],
             key=lambda row: row["local_scene"],
         )
-
         if len(part_rows) != scenes_per_part:
             raise RuntimeError(f"Part {part} scene count mismatch")
 
@@ -713,7 +711,6 @@ def main():
             safe_path(row["video"], f"Part {part} scene", MIN_MEDIA_BYTES)
             for row in part_rows
         ]
-
         part_path = PART_DIR / f"part_{part:02d}.mp4"
         info = concat_videos(videos, part_path)
 
@@ -724,7 +721,6 @@ def main():
         log(f"MERGED PART {part}/{parts}")
 
     final_path = VIDEO_DIR / "katha_lok_ai_final.mp4"
-
     final_info = concat_videos(
         [
             safe_path(row["video"], "Final scene", MIN_MEDIA_BYTES)
@@ -736,13 +732,12 @@ def main():
     if (final_info["width"], final_info["height"]) != resolution:
         raise RuntimeError("Final video resolution mismatch")
 
+    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
     alias = VIDEO_DIR / (
         "katha_lok_ai_short.mp4"
         if mode == "short"
         else "katha_lok_ai_full.mp4"
     )
-
-    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(final_path, alias)
 
     opposite = VIDEO_DIR / (
@@ -750,12 +745,9 @@ def main():
         if mode == "short"
         else "katha_lok_ai_short.mp4"
     )
-
     if opposite.exists():
         opposite.unlink()
 
-    # Final manifest contains rendered scene rows only; no planned or
-    # unprocessed photo-motion rows are ever marked completed.
     write_json(
         RENDER_MANIFEST,
         {
@@ -776,7 +768,12 @@ def main():
             },
             "fps": fps,
             "background_tracks": [
-                relative(path) for path in background_files
+                {
+                    "path": relative(path),
+                    "category": track_category(path),
+                    "gain": background_gain(track_category(path)),
+                }
+                for path in background_files
             ],
         },
     )
