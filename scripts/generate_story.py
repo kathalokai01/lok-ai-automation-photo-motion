@@ -29,6 +29,7 @@ from input_config import (
     get_parts,
     get_scenes,
 )
+from gemini_api_guard import require_gemini_generation, GeminiBillingBlocked
 
 ROOT = Path(__file__).resolve().parent.parent
 STORY_DIR = ROOT / "output" / "story"
@@ -46,7 +47,7 @@ API_KEY = (
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 MAX_RETRIES = 2
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
-SCRIPT_VERSION = "story-checkpoint-4"
+SCRIPT_VERSION = "story-checkpoint-5-cost-guard"
 
 
 def read_json(path: Path) -> Any:
@@ -520,8 +521,22 @@ Return JSON with this structure:
 
 
 def call_gemini(model: str, prompt: str, fingerprint: str) -> dict:
-    if not API_KEY:
-        raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY secret is missing.")
+    # Guard is called immediately before a real API request, not when a
+    # completed story or matching response checkpoint can be reused.
+    try:
+        guarded_api_key = require_gemini_generation(
+            "generate_story",
+            api_key=API_KEY,
+        )
+    except GeminiBillingBlocked as exc:
+        raise RuntimeError(
+            f"{exc}\n"
+            "Story generation was not sent to Gemini. "
+            "To explicitly authorize potentially billable generation, set "
+            "ALLOW_GEMINI_GENERATION to "
+            "I_ACCEPT_POTENTIAL_GEMINI_CHARGES in the workflow environment. "
+            "Do not set this if you require strict no-billing operation."
+        ) from exc
 
     url_model = urllib.parse.quote(model, safe="-._")
     url = f"{BASE_URL}/models/{url_model}:generateContent"
@@ -542,8 +557,8 @@ def call_gemini(model: str, prompt: str, fingerprint: str) -> dict:
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "x-goog-api-key": API_KEY,
-                "User-Agent": "Katha-Lok-AI-Story/4.0",
+                "x-goog-api-key": guarded_api_key,
+                "User-Agent": "Katha-Lok-AI-Story/5.0",
             },
             method="POST",
         )
@@ -559,7 +574,9 @@ def call_gemini(model: str, prompt: str, fingerprint: str) -> dict:
             if exc.code not in RETRYABLE_HTTP_CODES or attempt >= MAX_RETRIES:
                 raise last_error from exc
             delay = min(5 * (2 ** (attempt - 1)), 15)
-            print(f"Temporary Gemini HTTP {exc.code}; retrying once after {delay}s.")
+            print(
+                f"Temporary Gemini HTTP {exc.code}; retrying once after {delay}s."
+            )
             time.sleep(delay)
             continue
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
@@ -685,8 +702,7 @@ def main() -> None:
         except Exception as exc:
             print("Saved story is not reusable:", exc)
 
-    # If the API response was already saved for this exact input, validate
-    # that response instead of requesting another story from Gemini.
+    # Reuse a matching API response before considering any new request.
     response_checkpoint = read_json(RESPONSE_FILE)
     if (
         isinstance(response_checkpoint, dict)
@@ -702,7 +718,7 @@ def main() -> None:
             parts_count, scenes_per_part,
         )
         print("Selected model:", model)
-        print("No matching saved response; requesting one story.")
+        print("No matching saved response; checking generation authorization.")
         data = call_gemini(model, prompt, fingerprint)
 
     # Validation failures stop here. A matching response checkpoint remains
