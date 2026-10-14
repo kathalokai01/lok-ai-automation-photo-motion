@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Generate resumable, source-aligned cinematic scenes with response checkpoints."""
+"""Generate resumable, source-aligned cinematic scenes with guarded API calls."""
 
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ from input_config import (
     normalize_format,
     get_parts,
     get_scenes,
-    get_max_retries,
     get_topic,
     get_story_text,
 )
+from gemini_api_guard import require_gemini_generation
 
 ROOT = Path(__file__).resolve().parent.parent
 STORY_DIR = ROOT / "output" / "story"
@@ -34,9 +34,12 @@ RESPONSE_DIR = ROOT / "output" / "checkpoints" / "scene_responses"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 BIBLE_FILE = STORY_DIR / "character_bible.json"
 
-API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+API_KEY = (
+    os.getenv("GEMINI_API_KEY", "").strip()
+    or os.getenv("GOOGLE_API_KEY", "").strip()
+)
 TIMEOUT = max(30, int(os.getenv("SCENE_REQUEST_TIMEOUT", "120")))
-VERSION = 3
+VERSION = 4
 
 
 def log(message=""):
@@ -45,7 +48,9 @@ def log(message=""):
 
 def digest(value):
     raw = json.dumps(
-        value, ensure_ascii=False, sort_keys=True,
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -129,7 +134,10 @@ def load_bible(config):
         return {"characters": [], "world": data.get("world", {})}
     if data.get("status") != "completed":
         raise RuntimeError("Character Bible is not marked completed.")
-    return {"characters": data.get("characters", []), "world": data.get("world", {})}
+    return {
+        "characters": data.get("characters", []),
+        "world": data.get("world", {}),
+    }
 
 
 def build_settings(config):
@@ -178,7 +186,10 @@ def validate_layout(story, parts_count, scenes_per_part):
             raise RuntimeError(f"Invalid part numbering at part {p}.")
 
         source_scenes = part.get("scenes")
-        if not isinstance(source_scenes, list) or len(source_scenes) != scenes_per_part:
+        if (
+            not isinstance(source_scenes, list)
+            or len(source_scenes) != scenes_per_part
+        ):
             raise RuntimeError(
                 f"Part {p}: expected {scenes_per_part} source scenes, "
                 f"found {len(source_scenes) if isinstance(source_scenes, list) else 0}."
@@ -189,9 +200,13 @@ def validate_layout(story, parts_count, scenes_per_part):
             try:
                 scene_number = int(source.get("scene", s))
             except (TypeError, ValueError) as exc:
-                raise RuntimeError(f"Invalid scene number at {p}/{s}.") from exc
+                raise RuntimeError(
+                    f"Invalid scene number at {p}/{s}."
+                ) from exc
             if scene_number != s:
-                raise RuntimeError(f"Invalid scene numbering in part {p}, scene {s}.")
+                raise RuntimeError(
+                    f"Invalid scene numbering in part {p}, scene {s}."
+                )
 
 
 def scene_key(part, scene):
@@ -247,7 +262,9 @@ def validate_scene(item, part, scene, scene_count, settings):
     if not item["narration"]:
         raise RuntimeError(f"{stable_scene_id(part, scene)} has empty narration.")
     if len(item["visual_prompt"]) < 30:
-        raise RuntimeError(f"{stable_scene_id(part, scene)} has a short visual prompt.")
+        raise RuntimeError(
+            f"{stable_scene_id(part, scene)} has a short visual prompt."
+        )
 
     if needs_hook(part, scene, settings):
         minimum = 7 if settings["format"] == "short" else 14
@@ -291,7 +308,8 @@ def scene_valid(item, part, scene, scene_count, settings):
         checked = validate_scene(item, part, scene, scene_count, settings)
         return (
             checked.get("scene_id") == stable_scene_id(part, scene)
-            and checked.get("global_scene_number") == (part - 1) * scene_count + scene
+            and checked.get("global_scene_number")
+            == (part - 1) * scene_count + scene
         )
     except (RuntimeError, TypeError, ValueError):
         return False
@@ -299,7 +317,13 @@ def scene_valid(item, part, scene, scene_count, settings):
 
 def call_gemini(model, prompt):
     if not API_KEY:
-        raise RuntimeError("GEMINI_API_KEY secret is missing.")
+        raise RuntimeError(
+            "GEMINI_API_KEY or GOOGLE_API_KEY secret is missing."
+        )
+
+    # Billing guard is deliberately immediately before the network request.
+    # Existing validated scenes and saved responses do not need this call.
+    require_gemini_generation("scene generation", api_key=API_KEY)
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -339,11 +363,15 @@ def call_gemini(model, prompt):
     candidates = data.get("candidates", [])
     if not candidates:
         raise RuntimeError(
-            str(data.get("error", {}).get("message", "No Gemini candidate returned."))
+            str(data.get("error", {}).get(
+                "message", "No Gemini candidate returned."
+            ))
         )
 
     candidate = candidates[0]
-    if str(candidate.get("finishReason", "")).upper() in {"MAX_TOKENS", "LENGTH"}:
+    if str(candidate.get("finishReason", "")).upper() in {
+        "MAX_TOKENS", "LENGTH"
+    }:
         raise RuntimeError("Gemini response was truncated.")
 
     text = "\n".join(
@@ -522,7 +550,9 @@ def main():
     bible = load_bible(config)
     model = selected_model()
     topic = str(get_topic(config) or story.get("topic", "")).strip()
-    story_text = str(get_story_text(config) or story.get("story_text", "")).strip()
+    story_text = str(
+        get_story_text(config) or story.get("story_text", "")
+    ).strip()
 
     if not topic and not story_text:
         raise RuntimeError("TOPIC and STORY_TEXT are both empty.")
@@ -621,7 +651,8 @@ def main():
                         "before manually retrying an uncertain request."
                     ) from exc
 
-                # Persist the raw successful response before validating it.
+                # Save the response before validating it, avoiding a second
+                # generation request if the schema needs later correction.
                 write_json(checkpoint_path, {
                     "status": "response_saved",
                     "mapping_version": VERSION,
@@ -635,7 +666,9 @@ def main():
                 log(f"{stable_scene_id(p, s)}: raw response checkpoint saved.")
 
             try:
-                item = validate_scene(response, p, s, scene_count, settings)
+                item = validate_scene(
+                    response, p, s, scene_count, settings
+                )
             except (RuntimeError, TypeError, ValueError, KeyError) as exc:
                 save_outputs(
                     scenes, source_fp, settings, model, topic, story_text,
