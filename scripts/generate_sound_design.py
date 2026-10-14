@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Generate free local music, ambience and resumable scene SFX cues."""
+"""Free local music, ambience and resumable scene sound effects."""
 
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ DESIGN_DIR = OUTPUT / "sound_design"
 MANIFEST_PATH = DESIGN_DIR / "sound_design_manifest.json"
 CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 
-VERSION = "free-sound-design-v4"
+VERSION = "free-sound-design-v5"
 SAMPLE_RATE = 22050
 BACKGROUND_SECONDS = 30
 SFX_SECONDS = 1.6
@@ -72,12 +73,15 @@ def setting_bool(values, keys, default=True):
     for key in keys:
         if key not in values:
             continue
+
         value = values[key].strip().lower()
         if value in {"true", "yes", "on", "1", "enabled"}:
             return True
         if value in {"false", "no", "off", "0", "disabled"}:
             return False
+
         raise RuntimeError(f"{key} must be true or false")
+
     return default
 
 
@@ -89,6 +93,7 @@ def positive_int(values, key, default):
 
     if value < 1:
         raise RuntimeError(f"{key} must be a positive integer")
+
     return value
 
 
@@ -108,31 +113,36 @@ def make_signature(data):
 
 
 def write_wav(path, samples):
-    """Write mono 16-bit PCM in blocks to avoid large temporary lists."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
 
-    with wave.open(str(temporary), "wb") as audio:
-        audio.setnchannels(1)
-        audio.setsampwidth(2)
-        audio.setframerate(SAMPLE_RATE)
+    try:
+        with wave.open(str(temporary), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(SAMPLE_RATE)
 
-        block = bytearray()
-        for sample in samples:
-            value = max(-1.0, min(1.0, float(sample)))
-            block.extend(struct.pack("<h", int(value * 32767)))
+            block = bytearray()
+            for sample in samples:
+                value = max(-1.0, min(1.0, float(sample)))
+                block.extend(struct.pack("<h", int(value * 32767)))
 
-            if len(block) >= BLOCK_SIZE * 2:
+                if len(block) >= BLOCK_SIZE * 2:
+                    audio.writeframesraw(block)
+                    block.clear()
+
+            if block:
                 audio.writeframesraw(block)
-                block.clear()
 
-        if block:
-            audio.writeframesraw(block)
-
-    temporary.replace(path)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def validate_wav(path, minimum_seconds):
+    if not path.is_file() or path.stat().st_size < MIN_AUDIO_BYTES:
+        raise RuntimeError(f"Audio file is missing or too small: {path}")
+
     with wave.open(str(path), "rb") as audio:
         if audio.getnchannels() != 1:
             raise RuntimeError(f"Unexpected channel count: {path}")
@@ -144,8 +154,6 @@ def validate_wav(path, minimum_seconds):
         duration = audio.getnframes() / audio.getframerate()
         if duration < minimum_seconds:
             raise RuntimeError(f"Audio is too short: {path}")
-        if path.stat().st_size < MIN_AUDIO_BYTES:
-            raise RuntimeError(f"Audio file is too small: {path}")
 
         return duration
 
@@ -225,7 +233,7 @@ def create_or_resume_track(category, path, generator, minimum_seconds):
     if previous_manifest.get("version") == VERSION:
         previous_tracks = previous_manifest.get("tracks", {})
 
-    track_signature = make_signature({
+    signature = make_signature({
         "version": VERSION,
         "category": category,
         "sample_rate": SAMPLE_RATE,
@@ -233,6 +241,7 @@ def create_or_resume_track(category, path, generator, minimum_seconds):
             SFX_SECONDS if category == "sfx" else BACKGROUND_SECONDS
         ),
     })
+
     previous = previous_tracks.get(category, {})
 
     if path.is_file():
@@ -241,14 +250,14 @@ def create_or_resume_track(category, path, generator, minimum_seconds):
             digest = sha256_file(path)
 
             if (
-                previous.get("signature") == track_signature
+                previous.get("signature") == signature
                 and previous.get("sha256") == digest
             ):
                 log("RESUME:", path.relative_to(ROOT))
                 return {
                     "status": "completed",
                     "path": path.relative_to(ROOT).as_posix(),
-                    "signature": track_signature,
+                    "signature": signature,
                     "sha256": digest,
                     "duration_seconds": round(duration, 3),
                     "generation": "local_synthesis_no_external_api",
@@ -264,7 +273,7 @@ def create_or_resume_track(category, path, generator, minimum_seconds):
     return {
         "status": "completed",
         "path": path.relative_to(ROOT).as_posix(),
-        "signature": track_signature,
+        "signature": signature,
         "sha256": digest,
         "duration_seconds": round(duration, 3),
         "generation": "local_synthesis_no_external_api",
@@ -275,17 +284,20 @@ def remove_if_present(path):
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
-        raise RuntimeError(f"Cannot remove disabled track {path}: {exc}") from exc
+        raise RuntimeError(
+            f"Cannot remove disabled track {path}: {exc}"
+        ) from exc
 
 
 def build_cues(parts, scenes, enabled):
     cues = []
+
     if not enabled:
         return cues
 
     sfx_relative = SFX_PATH.relative_to(ROOT).as_posix()
 
-    # Avoid a whoosh at the very start of the entire video.
+    # One subtle transition cue at each scene start except the first.
     for global_scene in range(2, parts * scenes + 1):
         part = (global_scene - 1) // scenes + 1
         local_scene = (global_scene - 1) % scenes + 1
@@ -331,13 +343,6 @@ def main():
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    previous_manifest = read_json(MANIFEST_PATH, {})
-    previous_tracks = (
-        previous_manifest.get("tracks", {})
-        if previous_manifest.get("version") == VERSION
-        else {}
-    )
-
     definitions = {
         "music": (MUSIC_PATH, music_samples, BACKGROUND_SECONDS),
         "ambient": (AMBIENT_PATH, ambient_samples, BACKGROUND_SECONDS),
@@ -368,9 +373,8 @@ def main():
         "scenes_per_part": scenes,
         "cue_count": len(cues),
         "cue_policy": (
-            "One generic transition whoosh at 0.08 seconds into each "
-            "scene except the first scene of the entire video. "
-            "Not story-event-aware."
+            "Generic transition whoosh at 0.08 seconds into each scene "
+            "except the first scene. These cues are not story-event-aware."
         ),
         "external_api_calls": 0,
         "paid_services_used": False,
