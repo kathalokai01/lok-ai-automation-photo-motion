@@ -29,10 +29,18 @@ THUMBNAIL = OUT / "thumbnail.jpg"
 METADATA = OUT / "youtube_metadata.txt"
 REPORT = OUT / "validation_report.json"
 
-VERSION = "final-validator-v14-sfx-narration-timing"
+VERSION = "final-validator-v15-sfx-aliases"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.0
+
+SFX_TIME_KEYS = (
+    "time",
+    "time_seconds",
+    "timestamp",
+    "start_seconds",
+    "start",
+)
 
 
 def log(*args):
@@ -69,6 +77,7 @@ def safe_file(value, label, minimum_bytes=1):
     path = Path(value.strip())
     if not path.is_absolute():
         path = ROOT / path
+
     path = path.resolve()
 
     if not path.is_relative_to(ROOT.resolve()):
@@ -103,6 +112,35 @@ def first_path(row, keys):
     return None
 
 
+def first_number(row, keys, label):
+    """Read the first usable, non-empty numeric field."""
+    for key in keys:
+        if key not in row or row[key] is None:
+            continue
+
+        value = row[key]
+        if isinstance(value, str) and not value.strip():
+            continue
+
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                f"{label}: invalid numeric value in field {key!r}"
+            )
+
+        if not math.isfinite(number):
+            raise RuntimeError(
+                f"{label}: non-finite numeric value in field {key!r}"
+            )
+
+        return number
+
+    raise RuntimeError(
+        f"{label}: none of these timing fields exists: {', '.join(keys)}"
+    )
+
+
 def media_info(path):
     executable = shutil.which("ffprobe")
     if not executable:
@@ -110,10 +148,12 @@ def media_info(path):
 
     result = subprocess.run(
         [
-            executable, "-v", "error",
+            executable,
+            "-v", "error",
             "-show_entries",
             "format=duration:stream=codec_type,width,height",
-            "-of", "json", str(path),
+            "-of", "json",
+            str(path),
         ],
         capture_output=True,
         text=True,
@@ -180,6 +220,7 @@ def expected_keys(parts, scenes):
 
 def check_scene_order(rows, parts, scenes, label):
     expected_count = parts * scenes
+
     if len(rows) != expected_count:
         raise RuntimeError(
             f"{label}: expected {expected_count} scenes, found {len(rows)}"
@@ -238,16 +279,23 @@ def validate_photo_motion(parts, scenes, resolution):
             first_path(
                 row,
                 (
-                    "source_video", "video", "output", "video_path",
-                    "rendered_video", "path", "file",
+                    "source_video",
+                    "video",
+                    "output",
+                    "video_path",
+                    "rendered_video",
+                    "path",
+                    "file",
                 ),
             ),
             f"Photo-motion scene {key}",
             MIN_VIDEO_BYTES,
         )
         require_video(
-            path, f"Photo-motion scene {key}",
-            resolution, require_audio=False,
+            path,
+            f"Photo-motion scene {key}",
+            resolution,
+            require_audio=False,
         )
 
     return {"status": "valid", "scene_count": len(mapping)}
@@ -293,6 +341,7 @@ def validate_narration(parts, scenes):
         }
 
     expected = expected_keys(parts, scenes)
+
     if set(mapping) != expected:
         raise RuntimeError(
             "Narration mapping mismatch: "
@@ -310,6 +359,18 @@ def validate_narration(parts, scenes):
     }
 
 
+def srt_to_seconds(value):
+    hours, minutes, remainder = value.split(":")
+    seconds, millis = remainder.split(",")
+
+    return (
+        int(hours) * 3600
+        + int(minutes) * 60
+        + int(seconds)
+        + int(millis) / 1000
+    )
+
+
 def validate_captions(parts, scenes):
     data = read_json(CAPTION_MANIFEST)
 
@@ -317,6 +378,7 @@ def validate_captions(parts, scenes):
         raise RuntimeError("Caption manifest is incomplete")
 
     mapping = {}
+
     for row in data.get("captions", []):
         if not isinstance(row, dict):
             raise RuntimeError("Invalid caption row")
@@ -334,6 +396,7 @@ def validate_captions(parts, scenes):
         mapping[key] = True
 
     expected = expected_keys(parts, scenes)
+
     if set(mapping) != expected:
         raise RuntimeError(
             "Caption mapping mismatch: "
@@ -343,6 +406,7 @@ def validate_captions(parts, scenes):
 
     srt = safe_file(relative(FINAL_SRT), "Final SRT", 10)
     content = srt.read_text(encoding="utf-8-sig")
+
     pattern = re.compile(
         r"(?m)^\d+\s*\n"
         r"(\d{2}:\d{2}:\d{2},\d{3}) --> "
@@ -356,19 +420,12 @@ def validate_captions(parts, scenes):
             f"SRT cue mismatch: expected {expected_count}, found {len(cues)}"
         )
 
-    def to_seconds(value):
-        hours, minutes, remainder = value.split(":")
-        seconds, millis = remainder.split(",")
-        return (
-            int(hours) * 3600
-            + int(minutes) * 60
-            + int(seconds)
-            + int(millis) / 1000
-        )
-
     previous_end = -1.0
+
     for index, cue in enumerate(cues, start=1):
-        start, end = (to_seconds(value) for value in cue.groups())
+        start, end = (
+            srt_to_seconds(value) for value in cue.groups()
+        )
 
         if end <= start:
             raise RuntimeError(f"SRT cue {index} has invalid duration")
@@ -382,6 +439,10 @@ def validate_captions(parts, scenes):
         "scene_count": len(mapping),
         "srt_cues": len(cues),
         "last_caption_end_seconds": round(previous_end, 3),
+        "note": (
+            "This checks SRT structure and non-overlap, not word-level "
+            "alignment with the narration waveform."
+        ),
     }
 
 
@@ -390,6 +451,7 @@ def validate_sound_design(parts, scenes, narration):
         raise RuntimeError("Sound-design manifest missing")
 
     data = read_json(SOUND_MANIFEST)
+
     if not isinstance(data, dict) or data.get("status") != "completed":
         raise RuntimeError("Sound-design manifest is incomplete")
     if data.get("external_api_calls", 0) != 0:
@@ -409,15 +471,26 @@ def validate_sound_design(parts, scenes, narration):
 
     for name in ("music", "ambient", "sfx"):
         track = tracks.get(name)
-        is_enabled = enabled.get(name, True)
+
+        # If an enabled flag is explicitly present, respect it.
+        # Otherwise, infer availability from the actual track entry.
+        is_enabled = (
+            bool(enabled[name])
+            if name in enabled
+            else track is not None
+        )
+
+        if not is_enabled:
+            track_report[name] = {
+                "status": "disabled",
+                "manifest_entry_present": track is not None,
+            }
+            continue
 
         if track is None:
-            if is_enabled:
-                raise RuntimeError(
-                    f"Track {name!r} is enabled but its manifest entry is missing"
-                )
-            track_report[name] = {"status": "disabled"}
-            continue
+            raise RuntimeError(
+                f"Track {name!r} is enabled but its manifest entry is missing"
+            )
 
         if not isinstance(track, dict):
             raise RuntimeError(f"Invalid sound-design track: {name}")
@@ -449,6 +522,7 @@ def validate_sound_design(parts, scenes, narration):
 
     if CUE_MANIFEST.is_file():
         cue_data = read_json(CUE_MANIFEST)
+
         if isinstance(cue_data, dict):
             if cue_data.get("status") not in (None, "completed"):
                 raise RuntimeError("SFX cue manifest is incomplete")
@@ -467,32 +541,49 @@ def validate_sound_design(parts, scenes, narration):
             try:
                 part = int(cue["part"])
                 scene = int(cue["scene"])
-                timestamp = float(cue.get("time", 0))
-                gain = float(cue.get("gain", 0.06))
             except (KeyError, TypeError, ValueError) as exc:
                 raise RuntimeError(
-                    f"Invalid SFX cue mapping/timing at row {index}"
+                    f"Invalid SFX cue scene mapping at row {index}"
+                ) from exc
+
+            timestamp = first_number(
+                cue, SFX_TIME_KEYS, f"SFX cue row {index}"
+            )
+
+            try:
+                gain = float(cue.get("gain", 0.06))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Invalid SFX gain at row {index}"
                 ) from exc
 
             key = (part, scene)
+
             if key not in narration:
                 raise RuntimeError(
                     f"SFX cue points outside configured scenes: {key}"
                 )
 
-            if not math.isfinite(timestamp) or timestamp < 0:
+            if timestamp < 0:
                 raise RuntimeError(f"Invalid SFX cue time at row {index}")
             if not math.isfinite(gain) or not 0 <= gain <= 1:
                 raise RuntimeError(
                     f"SFX cue gain must be between 0 and 1: row {index}"
                 )
 
-            cue_id = (part, scene, round(timestamp, 6), str(cue.get("kind", "")))
+            cue_id = (
+                part,
+                scene,
+                round(timestamp, 6),
+                str(cue.get("kind", cue.get("type", ""))),
+            )
+
             if cue_id in seen:
                 raise RuntimeError(f"Duplicate SFX cue: {cue_id}")
             seen.add(cue_id)
 
             narration_duration = narration[key]["duration"]
+
             if timestamp >= narration_duration:
                 raise RuntimeError(
                     f"SFX starts after narration ends for {key}: "
@@ -518,24 +609,45 @@ def validate_sound_design(parts, scenes, narration):
                     "part": part,
                     "scene": scene,
                     "cue_time_seconds": round(timestamp, 3),
-                    "narration_duration_seconds": round(narration_duration, 3),
+                    "narration_duration_seconds": round(
+                        narration_duration, 3
+                    ),
                     "sfx_duration_seconds": round(info["duration"], 3),
-                    "effective_duration_seconds": round(effective_duration, 3),
+                    "effective_duration_seconds": round(
+                        effective_duration, 3
+                    ),
                     "note": (
-                        "The SFX asset is longer than the remaining narration. "
-                        "This validator reports the overrun; it does not trim "
-                        "the source asset or prove the renderer's exact mix."
+                        "SFX asset exceeds the remaining narration time. "
+                        "This validator reports the overrun; it does not "
+                        "trim the source or verify the exact final mix."
                     ),
                 })
 
             valid_cues.append({
                 "part": part,
                 "scene": scene,
+                "kind": str(cue.get("kind", cue.get("type", ""))),
                 "time_seconds": round(timestamp, 3),
+                "time_field_used": next(
+                    (
+                        field for field in SFX_TIME_KEYS
+                        if field in cue
+                        and cue[field] is not None
+                        and not (
+                            isinstance(cue[field], str)
+                            and not cue[field].strip()
+                        )
+                    ),
+                    None,
+                ),
                 "gain": gain,
-                "narration_duration_seconds": round(narration_duration, 3),
+                "narration_duration_seconds": round(
+                    narration_duration, 3
+                ),
                 "sfx_duration_seconds": round(info["duration"], 3),
-                "effective_duration_seconds": round(effective_duration, 3),
+                "effective_duration_seconds": round(
+                    effective_duration, 3
+                ),
                 "file": relative(path),
             })
 
@@ -545,8 +657,10 @@ def validate_sound_design(parts, scenes, narration):
             "cues": valid_cues,
             "warnings": warnings,
             "note": (
-                "Timing is checked against actual narration files. A warning "
-                "means the SFX file exceeds the remaining narration time."
+                "SFX timestamps accept time, time_seconds, timestamp, "
+                "start_seconds or start. Times are checked against actual "
+                "narration duration. The validator does not prove that "
+                "the SFX is audible or correctly mixed in the final video."
             ),
         }
 
@@ -570,10 +684,12 @@ def validate_render(mode, parts, scenes, resolution):
         raise RuntimeError("Render manifest does not confirm burned captions")
 
     rows = data.get("completed_scenes")
+
     if not isinstance(rows, list):
         raise RuntimeError("Rendered scene list missing")
 
     mapping = check_scene_order(rows, parts, scenes, "Rendered")
+
     if int(data.get("completed_count", -1)) != len(mapping):
         raise RuntimeError("Render completed_count mismatch")
 
@@ -586,7 +702,10 @@ def validate_render(mode, parts, scenes, resolution):
             raise RuntimeError(f"Captions not burned for scene {key}")
 
         source = safe_file(
-            first_path(row, ("source_rendered_video", "source_video", "source")),
+            first_path(
+                row,
+                ("source_rendered_video", "source_video", "source"),
+            ),
             f"Original scene {key}",
             MIN_VIDEO_BYTES,
         )
@@ -614,6 +733,7 @@ def validate_render(mode, parts, scenes, resolution):
         scene_durations.append(info["duration"])
 
     part_values = data.get("parts")
+
     if not isinstance(part_values, list) or len(part_values) != parts:
         raise RuntimeError(f"Expected {parts} part videos")
 
@@ -625,14 +745,20 @@ def validate_render(mode, parts, scenes, resolution):
 
         path = safe_file(value, f"Part {index}", MIN_VIDEO_BYTES)
         info = require_video(path, f"Part {index}", resolution)
+
         part_report.append({
             "path": relative(path),
             "duration_seconds": round(info["duration"], 3),
             "bytes": path.stat().st_size,
         })
 
-    final_path = safe_file(data.get("final_video"), "Final video", MIN_VIDEO_BYTES)
-    alias_path = safe_file(data.get("alias"), "Final alias", MIN_VIDEO_BYTES)
+    final_path = safe_file(
+        data.get("final_video"), "Final video", MIN_VIDEO_BYTES
+    )
+    alias_path = safe_file(
+        data.get("alias"), "Final alias", MIN_VIDEO_BYTES
+    )
+
     final_info = require_video(final_path, "Final video", resolution)
     alias_info = require_video(alias_path, "Final alias", resolution)
 
@@ -640,6 +766,7 @@ def validate_render(mode, parts, scenes, resolution):
         raise RuntimeError("Final video and alias durations differ")
 
     scene_sum = sum(scene_durations)
+
     if abs(final_info["duration"] - scene_sum) > max(
         2.0, DURATION_TOLERANCE * len(scene_durations)
     ):
@@ -665,11 +792,13 @@ def validate_optional_deliverables():
 
     if THUMBNAIL.is_file():
         path = safe_file(relative(THUMBNAIL), "Thumbnail", 1000)
+
         try:
             from PIL import Image
 
             with Image.open(path) as image:
                 image.verify()
+
             with Image.open(path) as image:
                 width, height = image.size
                 image_format = image.format
@@ -686,6 +815,7 @@ def validate_optional_deliverables():
                 "width": width,
                 "height": height,
             }
+
         except ImportError:
             result["thumbnail"] = {
                 "status": "present",
@@ -732,6 +862,7 @@ def main():
     resolution = (1280, 720) if mode == "full" else (720, 1280)
 
     log("FINAL OUTPUT VALIDATION")
+    log("VERSION:", VERSION)
     log("FORMAT:", mode, "| PARTS:", parts, "| SCENES/PART:", scenes)
 
     narration_report = validate_narration(parts, scenes)
@@ -753,14 +884,18 @@ def main():
         "parts": parts,
         "scenes_per_part": scenes,
         "expected_scenes": parts * scenes,
-        "resolution": {"width": resolution[0], "height": resolution[1]},
+        "resolution": {
+            "width": resolution[0],
+            "height": resolution[1],
+        },
         "validator_external_api_calls": 0,
         "checks": checks,
         "limitations": [
-            "This validates assets and declared timing; it cannot prove sound quality.",
+            "This validates files and declared timing, not perceptual quality.",
             "SFX duration warnings do not modify audio files.",
-            "A successful file check does not prove that music, ambience, or SFX "
-            "are perceptually audible in the final mix.",
+            "This does not prove that music, ambience or SFX are audible "
+            "in the final mix.",
+            "SRT non-overlap does not prove word-level narration alignment.",
             "Thumbnail and metadata may be optional depending on the pipeline.",
         ],
     }
@@ -772,9 +907,10 @@ def main():
     log("FINAL VIDEO:", checks["render"]["final_video"])
     log("DURATION:", checks["render"]["final_duration_seconds"], "seconds")
     log("SFX CUES:", checks["sound_design"]["sfx_cues"]["cue_count"])
-    log("SFX TIMING WARNINGS:", len(
-        checks["sound_design"]["sfx_cues"].get("warnings", [])
-    ))
+    log(
+        "SFX TIMING WARNINGS:",
+        len(checks["sound_design"]["sfx_cues"].get("warnings", [])),
+    )
     log("REPORT:", relative(REPORT))
     log("=" * 54)
 
@@ -788,9 +924,11 @@ if __name__ == "__main__":
             "version": VERSION,
             "error": str(exc),
         }
+
         try:
             write_json(REPORT, failure)
         except Exception:
             pass
+
         log("FINAL OUTPUT VALIDATION: FAILED:", str(exc))
         sys.exit(1)
