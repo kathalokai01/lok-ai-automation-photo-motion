@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Resumable, billing-safe scene image generation for Katha Lok AI."""
+"""Resumable, free-first and billing-safe scene image generation."""
 
 from __future__ import annotations
 
@@ -58,8 +59,9 @@ HF_SPACES = list(dict.fromkeys(
 REQUEST_TIMEOUT = 180
 BASE_SEED = 20261009
 MIN_IMAGE_BYTES = 5000
+MANIFEST_VERSION = "photo-motion-safe-11.0"
 
-# Keep these values identical to generate_visuals.py.
+# This text MUST remain identical to generate_visuals.py.
 QUALITY = (
     "Photorealistic live-action cinematic photography. Realistic Indian "
     "people, clothing, locations and architecture. Natural skin texture, "
@@ -71,7 +73,7 @@ QUALITY = (
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "KathaLokAI-PhotoMotion/4.0"
+    "User-Agent": "KathaLokAI-PhotoMotion/5.0"
 })
 
 
@@ -90,6 +92,7 @@ def read_json(path, default=None):
 
 
 def save_json(path, data):
+    """Write manifests atomically so interrupted writes do not corrupt them."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
 
@@ -153,7 +156,7 @@ def get_number(job, fallback):
 def get_size(job):
     try:
         width, height = map(
-            int, str(job.get("image_size", "720x1280")).split("x", 1)
+            int, str(job.get("image_size", "720x1280")).lower().split("x", 1)
         )
     except (TypeError, ValueError) as exc:
         raise RuntimeError("Invalid image_size in visual job.") from exc
@@ -219,6 +222,9 @@ def save_image(image, destination, size):
 
 
 def save_image_bytes(raw, destination, size):
+    if not raw:
+        raise ValueError("Provider returned empty image data.")
+
     with Image.open(BytesIO(raw)) as image:
         image.load()
         save_image(image, destination, size)
@@ -248,14 +254,12 @@ def prompt_for(job):
 
     negative = str(job.get("negative_prompt", "")).strip()
 
-    # This exact structure must match generate_visuals.py.
+    # Do not change this structure without changing generate_visuals.py too.
     return f"{prompt}\n\nQuality: {QUALITY}\n\nAvoid: {negative}"
 
 
 def get_hash(job):
-    return hashlib.sha256(
-        prompt_for(job).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(prompt_for(job).encode("utf-8")).hexdigest()
 
 
 def get_old_rows():
@@ -287,6 +291,7 @@ def is_access_or_quota_error(message):
         "429", "401", "403", "402", "quota", "rate limit",
         "billing", "payment required", "insufficient credit",
         "unauthorized", "forbidden", "exceeded your",
+        "resource exhausted",
     ))
 
 
@@ -297,17 +302,12 @@ def check_image(destination, size):
 
 
 def generate_hf(prompt, destination, size, seed, space):
+    """Use a public Hugging Face Space without transmitting the user's token."""
     if Client is None:
         raise RuntimeError("gradio_client is not installed.")
 
-    kwargs = {"verbose": False}
-
-    # Avoid sending an account token to public Spaces unless billing
-    # or authenticated access was explicitly enabled.
-    if HF_TOKEN and ALLOW_BILLABLE_PROVIDERS:
-        kwargs["token"] = HF_TOKEN
-
-    client = Client(space, **kwargs)
+    # Intentionally do not pass HF_TOKEN to a public third-party Space.
+    client = Client(space, verbose=False)
     width, height = size
 
     result = client.predict(
@@ -536,6 +536,62 @@ def generate_authenticated_pollinations(prompt, destination, size, seed):
     save_image_bytes(response.content, destination, size)
 
 
+def build_image_manifest(jobs, records, metadata, mode):
+    rows = []
+
+    for job, record in zip(jobs, records):
+        try:
+            duration = float(job.get("duration", 5.0))
+            if not 0.5 <= duration <= 3600:
+                duration = 5.0
+        except (TypeError, ValueError):
+            duration = 5.0
+
+        try:
+            part = int(job.get("part", 1))
+            if part < 1:
+                part = 1
+        except (TypeError, ValueError):
+            part = 1
+
+        try:
+            local_scene = int(job.get("local_scene", record["scene"]))
+            if local_scene < 1:
+                local_scene = record["scene"]
+        except (TypeError, ValueError):
+            local_scene = record["scene"]
+
+        rows.append({
+            "scene": record["scene"],
+            "global_scene": record["scene"],
+            "part": part,
+            "local_scene": local_scene,
+            "image": record["file"],
+            "image_path": record["file"],
+            "duration": duration,
+            "status": record["status"],
+            "provider": record.get("provider"),
+            "prompt_sha256": record["prompt_sha256"],
+        })
+
+    result = {
+        "version": MANIFEST_VERSION,
+        "format": mode,
+        "total_scenes": len(rows),
+        "images_ready": sum(
+            row["status"] in ("existing", "generated") for row in rows
+        ),
+        "images_required": len(rows),
+        "scenes": rows,
+    }
+
+    for key in ("story_topic", "story_title", "story_category"):
+        if metadata.get(key):
+            result[key] = metadata[key]
+
+    return result
+
+
 def main():
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -565,8 +621,7 @@ def main():
             "attempts": [],
         }
 
-        # Reuse only when the prompt fingerprint matches and the image
-        # is readable and has the required dimensions.
+        # Reuse only if the prompt fingerprint AND dimensions match.
         if (
             previous.get("prompt_sha256") == digest
             and valid_image(destination, size)
@@ -582,14 +637,16 @@ def main():
         records.append(record)
 
     manifest = {
-        "version": "photo-motion-safe-10.0",
+        "version": MANIFEST_VERSION,
         "policy": {
             "paid_providers_enabled": ALLOW_BILLABLE_PROVIDERS,
             "opt_in_required": PAID_OPT_IN,
+            "huggingface_public_spaces_first": True,
             "legacy_pollinations_endpoint_enabled": False,
             "note": (
-                "Provider quotas, free-tier availability and pricing can change. "
-                "Potentially billable providers remain disabled without opt-in."
+                "Free-tier availability and provider pricing can change. "
+                "Potentially billable providers remain disabled without "
+                "the exact opt-in environment value."
             ),
         },
         "total_scenes": len(records),
@@ -608,47 +665,10 @@ def main():
         }
 
         save_json(GENERATION_MANIFEST, manifest)
-
-        rows = []
-        for job, record in zip(jobs, records):
-            try:
-                duration = float(job.get("duration", 5.0))
-                if not 0.5 <= duration <= 3600:
-                    duration = 5.0
-            except (TypeError, ValueError):
-                duration = 5.0
-
-            rows.append({
-                "scene": record["scene"],
-                "global_scene": record["scene"],
-                "part": job.get("part", 1),
-                "local_scene": job.get("local_scene", record["scene"]),
-                "image": record["file"],
-                "image_path": record["file"],
-                "duration": duration,
-                "status": record["status"],
-                "provider": record.get("provider"),
-                "prompt_sha256": record["prompt_sha256"],
-            })
-
-        # Keep story fields if they exist in the upstream visual job file.
-        image_manifest = {
-            "version": "photo-motion-safe-10.0",
-            "format": mode,
-            "total_scenes": len(rows),
-            "images_ready": sum(
-                row["status"] in ("existing", "generated")
-                for row in rows
-            ),
-            "images_required": len(rows),
-            "scenes": rows,
-        }
-
-        for key in ("story_topic", "story_title", "story_category"):
-            if job_document.get(key):
-                image_manifest[key] = job_document[key]
-
-        save_json(IMAGE_MANIFEST, image_manifest)
+        save_json(
+            IMAGE_MANIFEST,
+            build_image_manifest(jobs, records, job_document, mode),
+        )
 
     checkpoint()
 
@@ -665,7 +685,7 @@ def main():
         log("No legacy Pollinations endpoint will be called.")
 
     if not pending:
-        log("All images are valid and match their prompt hashes; no calls needed.")
+        log("All images match their prompt hashes; no provider calls needed.")
         return
 
     blocked_hf = set()
@@ -752,6 +772,7 @@ def main():
                     "error": last_error[:500],
                 })
 
+                # Stop retrying providers whose credentials or quotas failed.
                 if is_access_or_quota_error(last_error):
                     if provider_key.startswith("hf:"):
                         blocked_hf.add(provider_key[3:])
@@ -762,8 +783,8 @@ def main():
             record["status"] = "failed"
             record["error"] = last_error[:800]
             log(
-                f"Scene {record['scene']} failed; successful image "
-                "checkpoints are preserved."
+                f"Scene {record['scene']} failed; previously completed "
+                "scene checkpoints are preserved."
             )
 
         checkpoint()
@@ -772,8 +793,7 @@ def main():
         row["scene"] for row in records if row["status"] == "failed"
     ]
     ready = sum(
-        row["status"] in ("existing", "generated")
-        for row in records
+        row["status"] in ("existing", "generated") for row in records
     )
 
     log("=" * 60)
