@@ -1,3 +1,4 @@
+
 name: Generate Katha Lok AI Photo Motion Video
 
 on:
@@ -221,6 +222,7 @@ jobs:
             scripts/depth_parallax.py \
             scripts/photo_motion.py \
             scripts/generate_sound_design.py \
+            scripts/validate_sfx_timing.py \
             scripts/render_video.py \
             scripts/install_caption_fonts.py \
             scripts/preview_caption_fonts.py \
@@ -283,6 +285,9 @@ jobs:
 
       - name: Generate free background audio and timed SFX cues
         run: python scripts/generate_sound_design.py
+
+      - name: Validate SFX timing against actual narration
+        run: python scripts/validate_sfx_timing.py
 
       - name: Render scene audio, parts and final video
         run: python scripts/render_video.py
