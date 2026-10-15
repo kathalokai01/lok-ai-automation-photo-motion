@@ -247,11 +247,37 @@ jobs:
       - name: Select Gemini model
         run: python scripts/select_gemini_model.py
 
-      - name: Generate story plan
-        run: python scripts/generate_story_plan.py
-
+      # Story must exist before the story planner reads story.json.
       - name: Generate story
         run: python scripts/generate_story.py
+
+      - name: Verify completed story exists
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/story/story.json")
+          if not path.is_file() or path.stat().st_size == 0:
+              raise SystemExit("Story generation did not create output/story/story.json")
+
+          try:
+              story = json.loads(path.read_text(encoding="utf-8-sig"))
+          except Exception as exc:
+              raise SystemExit(f"Generated story JSON is invalid: {exc}")
+
+          if not isinstance(story, dict) or story.get("status") != "completed":
+              raise SystemExit(
+                  "Generated story is not marked completed; "
+                  "story planning will not run."
+              )
+
+          print("Completed story verified.")
+          PY
+
+      - name: Generate story plan
+        run: python scripts/generate_story_plan.py
 
       - name: Generate AI story
         run: python scripts/generate_ai_story.py
