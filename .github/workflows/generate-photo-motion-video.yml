@@ -1,4 +1,3 @@
-
 name: Generate Katha Lok AI Photo Motion Video
 
 on:
@@ -50,7 +49,12 @@ jobs:
       POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
       REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
 
-      ALLOW_BILLABLE_PROVIDERS: "false"
+      # Try the configured image providers in fallback order.
+      POLLINATIONS_FREE_IMAGE_MODELS: "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"
+
+      # Explicitly allow configured Gemini and Replicate fallbacks.
+      # These providers and some image models may incur charges.
+      ALLOW_BILLABLE_PROVIDERS: "true"
 
     steps:
       - name: Checkout repository
@@ -71,6 +75,7 @@ jobs:
             scripts/select_gemini_model.py \
             scripts/generate_story_plan.py \
             scripts/generate_story.py \
+            scripts/verify_story.py \
             scripts/generate_ai_story.py \
             scripts/generate_character_bible.py \
             scripts/generate_scenes.py \
@@ -280,11 +285,7 @@ jobs:
         run: python scripts/generate_story.py
 
       - name: Verify completed story exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/verify_story.py
-       
+        run: python scripts/verify_story.py
 
       - name: Generate AI story
         run: python scripts/generate_ai_story.py
