@@ -1,772 +1,392 @@
 
 #!/usr/bin/env python3
-"""Generate resumable AI story scenes with per-part response checkpoints."""
+"""Create the deterministic scene plan required before story generation.
+
+This step is intentionally offline: it does not call Gemini or any other API.
+It creates output/story/story_plan.json from Input/topic.txt so that
+generate_story.py can safely run after this script.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import re
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from input_config import (
-    load_input_config,
-    normalize_format,
-    get_max_retries,
+    load_and_validate,
+    get_format,
+    get_parts,
+    get_scenes,
     get_topic,
     get_story_text,
-)
-from gemini_api_guard import (
-    require_gemini_generation,
-    GeminiBillingBlocked,
+    get_title_source,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_DIR = ROOT / "output" / "story"
-INPUT = STORY_DIR / "story.json"
-OUTPUT = STORY_DIR / "ai_story.json"
-MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
-CHECKPOINT_DIR = STORY_DIR / "ai_story_checkpoints"
+OUTPUT_FILE = STORY_DIR / "story_plan.json"
 
-API_KEY = (
-    os.getenv("GEMINI_API_KEY", "").strip()
-    or os.getenv("GOOGLE_API_KEY", "").strip()
-)
-TIMEOUT = max(30, int(os.getenv("SCENE_REQUEST_TIMEOUT", "120")))
+SCRIPT_VERSION = "offline-structural-story-plan-v1"
 
-# Keep version 3 so existing compatible checkpoints remain reusable.
-VERSION = 3
-
-SCENE_FIELDS = (
-    "narration",
-    "dialogue",
-    "visual_prompt",
-    "negative_prompt",
-    "camera_prompt",
-    "lighting_prompt",
-    "sfx_prompt",
-    "music_prompt",
-    "suspense_prompt",
+# Story beats are guidance for the story generator, not extra scenes.
+SHORT_BEATS = (
+    ("hook", "Open with an immediate question, danger, mystery, or surprise."),
+    ("setup", "Establish the character, place, goal, and immediate stakes."),
+    ("discovery", "Reveal a clue, unusual event, or important new information."),
+    ("escalation", "Increase the pressure and make the situation harder."),
+    ("obstacle", "Introduce a credible obstacle, conflict, or complication."),
+    ("reversal", "Change the audience's understanding with a meaningful turn."),
+    ("choice", "Force a character to make a consequential choice."),
+    ("confrontation", "Bring the main conflict into direct confrontation."),
+    ("reveal", "Reveal a significant truth while preserving continuity."),
+    ("climax", "Deliver the strongest action or emotional turning point."),
+    ("payoff", "Pay off an earlier clue or promise in the story."),
+    ("suspense", "End on a compelling unresolved question or consequence."),
 )
 
+FULL_BEATS = (
+    ("hook", "Open with a strong cinematic hook and clear story tension."),
+    ("establishing", "Establish the world, characters, relationships, and stakes."),
+    ("inciting_event", "Introduce the event that disrupts ordinary life."),
+    ("goal", "Clarify the protagonist's goal and what is at risk."),
+    ("investigation", "Develop clues, motivations, and relevant story context."),
+    ("first_obstacle", "Introduce the first meaningful obstacle or opposition."),
+    ("complication", "Make the original goal harder and raise the stakes."),
+    ("relationship", "Develop character relationships through consequential action."),
+    ("discovery", "Reveal new information that changes the situation."),
+    ("midpoint", "Create a major reversal or shift in the conflict."),
+    ("pressure", "Increase urgency and the cost of failure."),
+    ("setback", "Deliver a believable setback with lasting consequences."),
+    ("reassessment", "Force the protagonist to reconsider their approach."),
+    ("preparation", "Prepare the characters for the decisive confrontation."),
+    ("approach", "Move the story toward its central confrontation."),
+    ("confrontation", "Bring opposing goals into direct conflict."),
+    ("crisis", "Force a difficult choice with meaningful consequences."),
+    ("climax", "Resolve the central struggle through decisive action."),
+    ("aftermath", "Show the immediate consequences of the climax."),
+    ("resolution", "Resolve the central story and provide emotional closure."),
+    ("final_suspense", "If the input calls for a continuation, end with a story-relevant question."),
+)
 
-def log(message):
-    print(message, flush=True)
+
+def log(*values: Any) -> None:
+    print(*values, flush=True)
 
 
-def fingerprint(data):
+def read_json(path: Path) -> Any:
+    if not path.is_file():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def write_json(path: Path, data: dict) -> None:
+    atomic_write(
+        path,
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def sha256_data(data: Any) -> str:
     raw = json.dumps(
         data,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        default=str,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
-def read_json(path, required=True):
-    if not path.is_file():
-        if required:
-            raise RuntimeError(f"Required file missing: {path}")
-        return None
+def select_beat(format_type: str, scene_number: int, total_scenes: int):
+    """Spread story beats across any configured scene count."""
+    beats = SHORT_BEATS if format_type == "short" else FULL_BEATS
 
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid JSON at {path}: {exc}") from exc
+    if total_scenes <= 1:
+        return beats[0]
 
-
-def write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    # Evenly distribute the available beats over the requested scene count.
+    index = round(
+        (scene_number - 1) * (len(beats) - 1) / (total_scenes - 1)
     )
-    temp.replace(path)
+    index = max(0, min(index, len(beats) - 1))
+    return beats[index]
 
 
-def normalize_text(value):
-    value = str(value or "").lower()
-    value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", value).strip()
+def build_plan(
+    config: dict,
+    format_type: str,
+    topic: str,
+    story_text: str,
+    parts_count: int,
+    scenes_per_part: int,
+) -> dict:
+    total_scenes = parts_count * scenes_per_part
+    parts = []
+    global_scene_number = 0
 
+    for part_number in range(1, parts_count + 1):
+        part_scenes = []
 
-def word_count(value):
-    return len(normalize_text(value).split())
-
-
-def get_bool(config, key, default=False):
-    value = config.get(key, default)
-    if isinstance(value, bool):
-        return value
-
-    text = str(value).strip().lower()
-    if text in {"true", "1", "yes", "on"}:
-        return True
-    if text in {"false", "0", "no", "off"}:
-        return False
-    return default
-
-
-def get_text(config, key, default=""):
-    value = config.get(key, default)
-    return str(default if value is None else value).strip()
-
-
-def selected_model():
-    data = read_json(MODEL_FILE)
-
-    if not isinstance(data, dict):
-        raise RuntimeError(
-            "Gemini model configuration is missing. "
-            "Run scripts/select_gemini_model.py first."
-        )
-
-    status = str(data.get("status", "")).strip()
-    if status not in {"selected", "configured_unverified"}:
-        raise RuntimeError(
-            f"Unsupported Gemini model status: {status!r}. "
-            "Run scripts/select_gemini_model.py first."
-        )
-
-    model = str(data.get("model", "")).strip()
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
-        raise RuntimeError(f"Invalid Gemini model ID: {model!r}")
-
-    if status == "configured_unverified":
-        log(
-            "WARNING: Using a locally configured Gemini model "
-            "without a live compatibility test. "
-            "Availability and billing status are not verified."
-        )
-
-    return model
-
-
-def build_config(source):
-    try:
-        retries = int(get_max_retries(source))
-    except (TypeError, ValueError):
-        retries = 1
-
-    return {
-        "format": normalize_format(source),
-        "audience": get_text(source, "AUDIENCE", "adult"),
-        "story_length": get_text(source, "STORY_LENGTH", "auto"),
-        "scene_duration": get_text(source, "SCENE_DURATION", "auto"),
-        "part_hook": get_bool(source, "PART_HOOK", True),
-        "part_suspense": get_bool(source, "PART_SUSPENSE", True),
-        "final_resolution": get_bool(source, "FINAL_RESOLUTION", True),
-        "visual_style": get_text(
-            source, "VISUAL_STYLE", "cinematic_realistic"
-        ),
-        "realism": get_text(source, "REALISM", "high"),
-        "camera_style": get_text(source, "CAMERA_STYLE", "cinematic"),
-        "lighting": get_text(source, "LIGHTING", "cinematic"),
-        "mood": get_text(source, "MOOD", "dramatic"),
-        "music": get_bool(source, "MUSIC", True),
-        "music_style": get_text(source, "MUSIC_STYLE", "cinematic"),
-        "sfx": get_bool(source, "SFX", True),
-        "ambient_sound": get_bool(source, "AMBIENT_SOUND", True),
-        "max_retries": max(1, min(3, retries)),
-    }
-
-
-def validate_source(story, expected_parts, expected_scenes):
-    parts = story.get("parts")
-    if not isinstance(parts, list) or not parts:
-        raise RuntimeError("story.json must contain a non-empty parts list.")
-
-    if len(parts) != expected_parts:
-        raise RuntimeError(
-            f"Story parts mismatch: got {len(parts)}, "
-            f"expected {expected_parts}."
-        )
-
-    total = 0
-    for pnum, part in enumerate(parts, 1):
-        if not isinstance(part, dict) or part.get("part") != pnum:
-            raise RuntimeError(f"Invalid part numbering at part {pnum}.")
-
-        scenes = part.get("scenes")
-        if not isinstance(scenes, list) or len(scenes) != expected_scenes:
-            raise RuntimeError(
-                f"Part {pnum} must contain exactly {expected_scenes} scenes."
+        for scene_number in range(1, scenes_per_part + 1):
+            global_scene_number += 1
+            beat_name, beat_description = select_beat(
+                format_type,
+                global_scene_number,
+                total_scenes,
             )
 
-        for snum, scene in enumerate(scenes, 1):
-            if not isinstance(scene, dict) or scene.get("scene") != snum:
-                raise RuntimeError(
-                    f"Invalid scene numbering at part {pnum}, scene {snum}."
+            if scene_number == 1 and (
+                part_number == 1
+                or bool(config.get("PART_HOOK", True))
+            ):
+                role = "part_opening"
+                beat_name = "hook" if part_number == 1 else "part_hook"
+                beat_description = (
+                    "Start with an immediate, story-specific hook. "
+                    "For later parts, connect the hook to the previous part."
+                )
+            elif (
+                scene_number == scenes_per_part
+                and bool(config.get("PART_SUSPENSE", True))
+            ):
+                role = "part_ending"
+                beat_name = "suspense"
+                beat_description = (
+                    "End with a meaningful story-specific suspense beat "
+                    "that encourages the viewer to continue."
+                )
+            else:
+                role = "story_progression"
+
+            if (
+                part_number == parts_count
+                and scene_number == scenes_per_part
+                and bool(config.get("FINAL_RESOLUTION", True))
+            ):
+                role = "finale"
+                beat_name = "finale"
+                beat_description = (
+                    "Resolve the central conflict and provide a satisfying "
+                    "ending. Preserve any suspense only if it does not "
+                    "undermine the main resolution."
                 )
 
-        total += len(scenes)
+            scene_id = (
+                f"part_{part_number:02d}_scene_{scene_number:02d}"
+            )
 
-    return total
+            part_scenes.append({
+                "scene": scene_number,
+                "global_scene_number": global_scene_number,
+                "scene_id": scene_id,
+                "role": role,
+                "beat": beat_name,
+                "beat_description": beat_description,
+                "purpose": beat_description,
+            })
 
-
-def call_gemini(model, prompt):
-    # Only called when a compatible saved response is not available.
-    # Enforce authorization immediately before making a real API request.
-    try:
-        guarded_api_key = require_gemini_generation(
-            "generate_story_plan",
-            api_key=API_KEY,
-        )
-    except GeminiBillingBlocked as exc:
-        raise RuntimeError(
-            f"{exc}\n"
-            "No scene-planning generation request was sent. "
-            "To explicitly authorize potentially billable Gemini usage, set "
-            "ALLOW_GEMINI_GENERATION to "
-            "I_ACCEPT_POTENTIAL_GEMINI_CHARGES in the workflow environment. "
-            "Leave it unset for the safe default."
-        ) from exc
-
-    encoded_model = urllib.parse.quote(model, safe="-._")
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{encoded_model}:generateContent"
-    )
-
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.65,
-            "topP": 0.9,
-            "maxOutputTokens": 16000,
-            "responseMimeType": "application/json",
-        },
-    }
-
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": guarded_api_key,
-        },
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:600]
-        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"Gemini network error; request may have reached provider: {exc}"
-        ) from exc
-    except TimeoutError as exc:
-        raise RuntimeError(
-            "Gemini request timed out; provider may have processed it."
-        ) from exc
-
-    if not isinstance(result, dict):
-        raise RuntimeError("Gemini returned an unexpected API response.")
-
-    candidates = result.get("candidates", [])
-    if not candidates:
-        error = result.get("error", {})
-        message = (
-            error.get("message", "Gemini returned no candidates.")
-            if isinstance(error, dict)
-            else "Gemini returned no candidates."
-        )
-        raise RuntimeError(str(message))
-
-    candidate = candidates[0]
-    if not isinstance(candidate, dict):
-        raise RuntimeError("Gemini returned an invalid candidate.")
-
-    finish_reason = str(candidate.get("finishReason", "")).upper()
-    if finish_reason in {"MAX_TOKENS", "LENGTH"}:
-        raise RuntimeError("Gemini response was truncated.")
-
-    content = candidate.get("content", {})
-    parts = content.get("parts", []) if isinstance(content, dict) else []
-
-    response_text = "\n".join(
-        item.get("text", "")
-        for item in parts
-        if isinstance(item, dict) and isinstance(item.get("text"), str)
-    ).strip()
-
-    if not response_text:
-        raise RuntimeError("Gemini returned empty response text.")
-
-    try:
-        data = json.loads(response_text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Gemini returned invalid JSON.") from exc
-
-    if not isinstance(data, dict) or not isinstance(data.get("scenes"), list):
-        raise RuntimeError("Gemini response must contain a scenes array.")
-
-    return data
-
-
-def make_prompt(story, part, config, topic, story_text):
-    pnum = int(part["part"])
-    sources = part["scenes"]
-    first_part = pnum == 1
-    last_part = pnum == len(story["parts"])
-    source_context = []
-
-    for scene in sources:
-        source_context.append({
-            "scene": scene["scene"],
-            "scene_id": scene.get("scene_id", ""),
-            "global_scene_number": scene.get("global_scene_number"),
-            "purpose": scene.get("purpose", scene.get("role", "")),
-            "narration": scene.get("narration", ""),
-            "visual_prompt": scene.get(
-                "visual_prompt", scene.get("visual", "")
-            ),
-            "dialogue": scene.get("dialogue", ""),
-            "suspense_prompt": scene.get("suspense_prompt", ""),
+        parts.append({
+            "part": part_number,
+            "part_id": f"part_{part_number:02d}",
+            "title": f"भाग {part_number}",
+            "scenes": part_scenes,
         })
 
-    if first_part:
-        hook_rule = (
-            "Scene 1 narration must begin with the exact story hook below."
-        )
-    elif config["part_hook"]:
-        hook_rule = "Scene 1 must have a distinct, natural part-opening hook."
-    else:
-        hook_rule = "Continue naturally from the previous part."
+    source = {
+        "script_version": SCRIPT_VERSION,
+        "input_file": str(INPUT_FILE.relative_to(ROOT)),
+        "format": format_type,
+        "topic": topic,
+        "story_text": story_text,
+        "parts_count": parts_count,
+        "scenes_per_part": scenes_per_part,
+        "total_scenes": total_scenes,
+        "part_hook": bool(config.get("PART_HOOK", True)),
+        "part_suspense": bool(config.get("PART_SUSPENSE", True)),
+        "final_resolution": bool(config.get("FINAL_RESOLUTION", True)),
+        "parts": parts,
+    }
 
-    suspense_rule = (
-        "The final scene needs a story-specific suspense_prompt with "
-        "at least four words."
-        if config["part_suspense"]
-        else "Use suspense only when it fits the source story."
-    )
-
-    ending_rule = (
-        "This is the final part: resolve the central conflict clearly."
-        if last_part and config["final_resolution"]
-        else "Preserve continuity and lead naturally into the next part."
-    )
-
-    return f"""
-You are the Hindi cinematic story writer for Katha Lok AI.
-Return only valid JSON. No Markdown or extra commentary.
-
-TOPIC: {topic}
-USER STORY TEXT: {story_text or "(not supplied)"}
-TITLE: {story.get("title", topic)}
-EXACT STORY HOOK: {story.get("hook", "")}
-FORMAT: {config["format"]}
-AUDIENCE: {config["audience"]}
-STORY LENGTH: {config["story_length"]}
-SCENE DURATION: {config["scene_duration"]}
-PART: {pnum} of {len(story["parts"])}
-
-SOURCE SCENES:
-{json.dumps(source_context, ensure_ascii=False, indent=2)}
-
-HOOK RULE:
-{hook_rule}
-For the first short-format hook use at least 7 words.
-For the first full-format hook use at least 14 words.
-No greetings, channel introductions, or subscribe requests.
-
-ENDING RULES:
-{suspense_rule}
-{ending_rule}
-
-CONTINUITY:
-- Return exactly {len(sources)} scenes, in source order.
-- Never merge, omit, duplicate, or add scenes.
-- Preserve characters, names, ages, relationships, clothing, and timeline.
-- Narration must be natural Hindi and dialogue believable.
-- Every scene must match its source event.
-- Photorealistic live-action only; no cartoon or slideshow look.
-- Describe plausible actions, lighting, framing, and camera movement.
-- Use empty strings for optional dialogue/audio prompts when unnecessary.
-
-STYLE SETTINGS:
-visual_style={config["visual_style"]}
-realism={config["realism"]}
-camera={config["camera_style"]}
-lighting={config["lighting"]}
-mood={config["mood"]}
-music_enabled={config["music"]}
-music_style={config["music_style"]}
-sfx_enabled={config["sfx"]}
-ambient_sound_enabled={config["ambient_sound"]}
-
-Every scene needs these string fields:
-narration, dialogue, visual_prompt, negative_prompt, camera_prompt,
-lighting_prompt, sfx_prompt, music_prompt, suspense_prompt.
-The scene field must be its integer scene number.
-
-Required JSON shape:
-{{"scenes":[{{"scene":1,"narration":"...","dialogue":"",
-"visual_prompt":"...","negative_prompt":"","camera_prompt":"",
-"lighting_prompt":"","sfx_prompt":"","music_prompt":"",
-"suspense_prompt":""}}]}}
-""".strip()
+    return {
+        "status": "planned",
+        "script_version": SCRIPT_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "format": format_type,
+        "topic": topic,
+        "title": get_title_source(config),
+        "parts_count": parts_count,
+        "scenes_per_part": scenes_per_part,
+        "total_scenes": total_scenes,
+        "scene_order": "part_then_scene",
+        "mapping_version": 3,
+        "source_fingerprint": sha256_data(source),
+        "source": {
+            "input_file": "Input/topic.txt",
+            "story_text_provided": bool(story_text),
+            "planning_mode": "offline_structural",
+            "api_calls": 0,
+        },
+        "parts": parts,
+    }
 
 
-def validate_generated(generated, source_part, config, hook):
-    source_scenes = source_part["scenes"]
-    pnum = int(source_part["part"])
+def validate_plan(
+    plan: dict,
+    format_type: str,
+    topic: str,
+    parts_count: int,
+    scenes_per_part: int,
+) -> None:
+    if plan.get("format") != format_type:
+        raise RuntimeError("Generated plan format mismatch.")
 
-    if not isinstance(generated, list) or len(generated) != len(source_scenes):
-        count = len(generated) if isinstance(generated, list) else "invalid"
-        raise RuntimeError(
-            f"Part {pnum}: expected {len(source_scenes)} scenes, got {count}."
-        )
+    if str(plan.get("topic", "")).strip() != topic:
+        raise RuntimeError("Generated plan topic mismatch.")
 
-    output = []
+    if int(plan.get("parts_count", -1)) != parts_count:
+        raise RuntimeError("Generated plan part count mismatch.")
 
-    for index, (source, scene) in enumerate(
-        zip(source_scenes, generated), 1
-    ):
-        if not isinstance(scene, dict) or scene.get("scene") != index:
-            raise RuntimeError(f"Part {pnum}: scene {index} mapping mismatch.")
+    if int(plan.get("scenes_per_part", -1)) != scenes_per_part:
+        raise RuntimeError("Generated plan scenes-per-part mismatch.")
 
-        item = {
-            "part": pnum,
-            "scene": index,
-            "part_id": f"part_{pnum:02d}",
-            "scene_id": f"part_{pnum:02d}_scene_{index:02d}",
-            "global_scene_number": source.get("global_scene_number"),
-            "mapping_version": VERSION,
-            "source_scene_id": source.get(
-                "scene_id", f"part_{pnum:02d}_scene_{index:02d}"
-            ),
-            "role": str(source.get("role", source.get("purpose", ""))),
-            "status": "completed",
-        }
+    if int(plan.get("total_scenes", -1)) != parts_count * scenes_per_part:
+        raise RuntimeError("Generated plan total scene count mismatch.")
 
-        for field in SCENE_FIELDS:
-            value = scene.get(field, "")
-            if not isinstance(value, str):
-                raise RuntimeError(
-                    f"Part {pnum}, scene {index}: {field} must be text."
-                )
-            item[field] = value.strip()
+    parts = plan.get("parts")
+    if not isinstance(parts, list) or len(parts) != parts_count:
+        raise RuntimeError("Generated plan has an invalid parts list.")
 
-        if not item["narration"]:
-            raise RuntimeError(f"Part {pnum}, scene {index}: empty narration.")
+    expected_global = 0
 
-        if len(item["visual_prompt"]) < 30:
+    for part_number, part in enumerate(parts, 1):
+        if not isinstance(part, dict):
+            raise RuntimeError(f"Invalid plan part {part_number}.")
+
+        if int(part.get("part", -1)) != part_number:
+            raise RuntimeError(f"Incorrect part number at part {part_number}.")
+
+        scenes = part.get("scenes")
+        if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
             raise RuntimeError(
-                f"Part {pnum}, scene {index}: visual prompt too short."
+                f"Part {part_number} must contain exactly "
+                f"{scenes_per_part} scenes."
             )
 
-        if index == 1 and (pnum == 1 or config["part_hook"]):
-            minimum = (
-                7 if config["format"] == "short" else 14
-            ) if pnum == 1 else 7
+        for scene_number, scene in enumerate(scenes, 1):
+            expected_global += 1
 
-            if word_count(item["narration"]) < minimum:
+            if not isinstance(scene, dict):
+                raise RuntimeError("Plan contains an invalid scene.")
+
+            expected_id = (
+                f"part_{part_number:02d}_scene_{scene_number:02d}"
+            )
+
+            if int(scene.get("scene", -1)) != scene_number:
+                raise RuntimeError(f"Scene numbering mismatch: {expected_id}.")
+
+            if int(scene.get("global_scene_number", -1)) != expected_global:
                 raise RuntimeError(
-                    f"Part {pnum}, scene 1 hook needs at least {minimum} words."
+                    f"Global scene numbering mismatch: {expected_id}."
                 )
 
-        if pnum == 1 and index == 1 and hook:
-            if not normalize_text(item["narration"]).startswith(
-                normalize_text(hook)
-            ):
-                raise RuntimeError(
-                    "First narration does not start with exact hook."
-                )
+            if scene.get("scene_id") != expected_id:
+                raise RuntimeError(f"Scene ID mismatch: {expected_id}.")
 
-        if config["part_suspense"] and index == len(source_scenes):
-            if word_count(item["suspense_prompt"]) < 4:
-                raise RuntimeError(
-                    f"Part {pnum}, final scene needs a specific suspense prompt."
-                )
-
-        if not config["sfx"]:
-            item["sfx_prompt"] = ""
-
-        if not config["music"]:
-            item["music_prompt"] = ""
-
-        output.append(item)
-
-    return output
+            if not str(scene.get("purpose", "")).strip():
+                raise RuntimeError(f"Missing purpose for {expected_id}.")
 
 
-def part_checkpoint_path(part_number):
-    return CHECKPOINT_DIR / f"part_{part_number:02d}.json"
+def main() -> None:
+    if not INPUT_FILE.is_file():
+        raise RuntimeError(f"Input file is missing: {INPUT_FILE}")
 
-
-def main():
-    source_config = load_input_config()
-    config = build_config(source_config)
-    model = selected_model()
-    story = read_json(INPUT)
-
-    if not isinstance(story, dict) or story.get("status") != "completed":
-        raise RuntimeError("story.json is missing or not marked completed.")
-
-    parts_requested = int(
-        source_config.get("PARTS", len(story.get("parts", [])))
-    )
-    scenes_requested = int(source_config.get("SCENES", 0))
-
-    if parts_requested < 1 or scenes_requested < 1:
-        raise RuntimeError("PARTS and SCENES must both be positive integers.")
-
-    total = validate_source(story, parts_requested, scenes_requested)
-    topic = str(get_topic(source_config) or story.get("topic", "")).strip()
-    story_text = str(get_story_text(source_config) or "").strip()
+    config = load_and_validate(str(INPUT_FILE))
+    format_type = get_format(config)
+    topic = get_topic(config)
+    story_text = get_story_text(config)
+    parts_count = get_parts(config)
+    scenes_per_part = get_scenes(config)
 
     if not topic and not story_text:
         raise RuntimeError("TOPIC and STORY_TEXT are both empty.")
 
-    hook = str(story.get("hook", "")).strip()
-    minimum_hook = 7 if config["format"] == "short" else 14
+    plan = build_plan(
+        config=config,
+        format_type=format_type,
+        topic=topic,
+        story_text=story_text,
+        parts_count=parts_count,
+        scenes_per_part=scenes_per_part,
+    )
 
-    if word_count(hook) < minimum_hook:
-        raise RuntimeError(
-            f"story.json hook needs at least {minimum_hook} words."
-        )
+    validate_plan(
+        plan,
+        format_type,
+        topic,
+        parts_count,
+        scenes_per_part,
+    )
 
-    source_fp = fingerprint({
-        "mapping_version": VERSION,
-        "story": story,
-        "topic": topic,
-        "story_text": story_text,
-        "config": config,
-        "model": model,
-    })
-
-    existing = read_json(OUTPUT, required=False)
-    saved_parts = {}
-
+    old_plan = read_json(OUTPUT_FILE)
     if (
-        isinstance(existing, dict)
-        and existing.get("source_fingerprint") == source_fp
-        and existing.get("mapping_version") == VERSION
-        and isinstance(existing.get("parts"), list)
+        isinstance(old_plan, dict)
+        and old_plan.get("source_fingerprint") == plan["source_fingerprint"]
+        and old_plan.get("format") == format_type
+        and old_plan.get("topic", "") == topic
+        and old_plan.get("parts_count") == parts_count
+        and old_plan.get("scenes_per_part") == scenes_per_part
     ):
-        for part in existing["parts"]:
-            if isinstance(part, dict):
-                try:
-                    saved_parts[int(part["part"])] = part
-                except (KeyError, TypeError, ValueError):
-                    pass
+        log("Matching story plan already exists; preserving its checkpoint.")
+        log("No API request was made.")
+        return
 
-    result = {
-        "status": "in_progress",
-        "mapping_version": VERSION,
-        "scene_order": "part_then_scene",
-        "topic": topic,
-        "story_text": story_text,
-        "format": config["format"],
-        "model": model,
-        "source_fingerprint": source_fp,
-        "total_scenes": total,
-        "parts": [],
-    }
+    write_json(OUTPUT_FILE, plan)
 
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    log(f"Model: {model}")
-    log(f"Format: {config['format']}")
-    log(f"Parts: {parts_requested}; scenes per part: {scenes_requested}")
-    log(f"Total scenes: {total}")
-    log("Completed parts and matching raw responses are reused when valid.")
-
-    global_number = 0
-
-    for source_part in story["parts"]:
-        pnum = int(source_part["part"])
-        part_fp = fingerprint({
-            "source_fingerprint": source_fp,
-            "part": source_part,
-        })
-
-        saved = saved_parts.get(pnum)
-        scenes = None
-
-        if (
-            isinstance(saved, dict)
-            and saved.get("status") == "completed"
-            and saved.get("part_fingerprint") == part_fp
-            and isinstance(saved.get("scenes"), list)
-        ):
-            try:
-                scenes = validate_generated(
-                    saved["scenes"], source_part, config, hook
-                )
-                log(f"Part {pnum}: validated completed checkpoint reused.")
-            except (RuntimeError, TypeError, ValueError, KeyError):
-                scenes = None
-
-        if scenes is None:
-            checkpoint_path = part_checkpoint_path(pnum)
-            raw_checkpoint = read_json(checkpoint_path, required=False)
-            response = None
-
-            if (
-                isinstance(raw_checkpoint, dict)
-                and raw_checkpoint.get("part_fingerprint") == part_fp
-                and isinstance(raw_checkpoint.get("response"), dict)
-                and isinstance(raw_checkpoint["response"].get("scenes"), list)
-            ):
-                response = raw_checkpoint["response"]
-                log(f"Part {pnum}: reusing saved raw Gemini response.")
-
-            if response is None:
-                if not API_KEY:
-                    raise RuntimeError(
-                        "GEMINI_API_KEY or GOOGLE_API_KEY secret is missing."
-                    )
-
-                # Only one generation attempt per run. A later run can reuse
-                # checkpoints; uncertain network outcomes must not auto-retry.
-                max_attempts = 1
-                last_error = None
-
-                for attempt in range(1, max_attempts + 1):
-                    log(f"Part {pnum}: Gemini request {attempt}/{max_attempts}.")
-
-                    try:
-                        response = call_gemini(
-                            model,
-                            make_prompt(
-                                story, source_part, config, topic, story_text
-                            ),
-                        )
-
-                        # Save raw response before schema validation.
-                        write_json(checkpoint_path, {
-                            "status": "response_saved",
-                            "mapping_version": VERSION,
-                            "part": pnum,
-                            "part_fingerprint": part_fp,
-                            "model": model,
-                            "response": response,
-                        })
-                        break
-
-                    except RuntimeError as exc:
-                        last_error = exc
-                        log(f"Part {pnum}: {exc}")
-
-                        message = str(exc).lower()
-                        uncertain = any(word in message for word in (
-                            "timed out",
-                            "network error",
-                            "urlopen error",
-                        ))
-
-                        if uncertain:
-                            raise RuntimeError(
-                                f"Part {pnum}: request outcome is uncertain; "
-                                "stopping to avoid duplicate API charges. "
-                                "If a response was received, rerun to reuse its "
-                                "checkpoint; otherwise inspect quota before retrying."
-                            ) from exc
-
-                if response is None:
-                    write_json(OUTPUT, result)
-                    raise RuntimeError(
-                        f"Part {pnum} failed: {last_error}"
-                    )
-
-            try:
-                scenes = validate_generated(
-                    response.get("scenes", []),
-                    source_part,
-                    config,
-                    hook,
-                )
-            except (RuntimeError, TypeError, ValueError, KeyError) as exc:
-                # Keep the raw response so code/schema fixes can be validated
-                # without sending another generation request.
-                write_json(OUTPUT, result)
-                raise RuntimeError(
-                    f"Part {pnum} response failed validation. Raw response "
-                    f"saved at {checkpoint_path}; no automatic second "
-                    f"generation request was made. Details: {exc}"
-                ) from exc
-
-        for scene in scenes:
-            global_number += 1
-            source_global = scene.get("global_scene_number")
-
-            if not isinstance(source_global, int):
-                scene["global_scene_number"] = global_number
-
-        part_result = {
-            "part": pnum,
-            "part_id": f"part_{pnum:02d}",
-            "status": "completed",
-            "part_fingerprint": part_fp,
-            "title": str(source_part.get("title") or f"Part {pnum}"),
-            "hook_required": pnum == 1 or config["part_hook"],
-            "suspense_required": config["part_suspense"],
-            "final_resolution": (
-                config["final_resolution"]
-                and pnum == len(story["parts"])
-            ),
-            "scenes": scenes,
-        }
-
-        result["parts"].append(part_result)
-        write_json(OUTPUT, result)
-
-        log(
-            f"Part {pnum} checkpointed: "
-            f"{sum(len(p['scenes']) for p in result['parts'])}/{total} scenes."
-        )
-
-    actual = sum(len(part["scenes"]) for part in result["parts"])
-
-    if actual != total:
-        raise RuntimeError(f"Final scene count mismatch: {actual}/{total}.")
-
-    expected_ids = [
-        f"part_{p:02d}_scene_{s:02d}"
-        for p, part in enumerate(result["parts"], 1)
-        for s in range(1, len(part["scenes"]) + 1)
-    ]
-
-    actual_ids = [
-        scene["scene_id"]
-        for part in result["parts"]
-        for scene in part["scenes"]
-    ]
-
-    if actual_ids != expected_ids:
-        raise RuntimeError("Stable scene ID sequence validation failed.")
-
-    result["status"] = "completed"
-    result["validation"] = {
-        "mapping_version": VERSION,
-        "total_scenes": actual,
-        "stable_scene_ids": True,
-        "sequential_scene_mapping": True,
-        "opening_hook_validated": True,
-        "part_suspense_validated": config["part_suspense"],
-    }
-
-    write_json(OUTPUT, result)
-
-    log("AI STORY GENERATION: SUCCESS")
-    log(f"Output: {OUTPUT}")
-    log(f"Validated scenes: {actual}")
+    log("STORY PLAN: SUCCESS")
+    log(f"Format: {format_type}")
+    log(f"Topic: {topic or '(story text only)'}")
+    log(f"Parts: {parts_count}")
+    log(f"Scenes per part: {scenes_per_part}")
+    log(f"Total scenes: {parts_count * scenes_per_part}")
+    log(f"Saved: {OUTPUT_FILE}")
+    log("Planning mode: offline; API calls: 0")
 
 
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        log("Cancelled.")
+        sys.exit(130)
     except Exception as exc:
         log(f"ERROR: {exc}")
         sys.exit(1)
