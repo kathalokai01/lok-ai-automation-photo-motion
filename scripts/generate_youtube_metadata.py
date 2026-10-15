@@ -1,5 +1,8 @@
+
 #!/usr/bin/env python3
-"""Generate topic-specific YouTube metadata with resumable checkpoints."""
+"""Generate concise, story-specific YouTube metadata with safe caching."""
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -10,36 +13,68 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-INPUT_TOPIC = Path("Input/topic.txt")
-INPUT_STORY = Path("output/story/ai_story.json")
-MODEL_FILE = Path("output/config/selected_model.json")
+ROOT = Path(__file__).resolve().parents[1]
 
-OUTPUT_DIR = Path("output/publish")
+INPUT_TOPIC = ROOT / "Input" / "topic.txt"
+INPUT_STORY = ROOT / "output" / "story" / "ai_story.json"
+MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
+
+OUTPUT_DIR = ROOT / "output" / "publish"
 OUTPUT_JSON = OUTPUT_DIR / "youtube_metadata.json"
 OUTPUT_TITLE = OUTPUT_DIR / "youtube_title.txt"
 OUTPUT_DESCRIPTION = OUTPUT_DIR / "youtube_description.txt"
 OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 CHECKPOINT = OUTPUT_DIR / "metadata_checkpoint.json"
 
+# Required by the final-output validator and packaging pipeline.
+PACKAGE_METADATA = ROOT / "output" / "youtube_metadata.txt"
+
 MAX_RETRIES = 3
 MAX_TITLE_LENGTH = 100
 MAX_DESCRIPTION_LENGTH = 1000
 MAX_TAGS = 20
+VERSION = "metadata-v3-validator-compatible"
+
+
+def log(message):
+    print(message, flush=True)
 
 
 def read_json(path):
     if not path.is_file():
-        raise SystemExit(f"ERROR: Required file missing: {path}")
+        raise RuntimeError(f"Required file missing: {path.relative_to(ROOT)}")
 
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"ERROR: Cannot read {path}: {exc}")
+        raise RuntimeError(f"Cannot read {path.name}: {exc}") from exc
+
+    if not isinstance(data, (dict, list, str)):
+        raise RuntimeError(f"Unexpected JSON structure: {path.name}")
+
+    return data
+
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def clean_text(value, limit=None):
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    if limit is not None:
+        value = value[:limit].rstrip()
+    return value
 
 
 def read_topic():
     if not INPUT_TOPIC.is_file():
-        raise SystemExit(f"ERROR: Missing {INPUT_TOPIC}")
+        raise RuntimeError(f"Missing input file: {INPUT_TOPIC.relative_to(ROOT)}")
 
     values = {}
 
@@ -60,46 +95,80 @@ def read_topic():
             "FORMAT",
             "LANGUAGE",
             "CAPTIONS",
+            "AUDIENCE",
         }:
             values[key] = value.strip().strip("\"'")
 
-    topic = values.get("TOPIC", "").strip()
-    title = values.get("TITLE", "").strip()
+    topic = clean_text(values.get("TOPIC") or values.get("TITLE"))
 
-    if not topic and not title:
-        raise SystemExit(
-            "ERROR: Set TOPIC or TITLE in Input/topic.txt"
-        )
+    if not topic:
+        raise RuntimeError("Set TOPIC or TITLE in Input/topic.txt")
 
-    return values, topic or title
+    return values, topic
 
 
 def load_model():
     if not MODEL_FILE.is_file():
-        raise SystemExit(
-            f"ERROR: Selected-model configuration missing: {MODEL_FILE}"
-        )
+        log("Selected-model file missing; metadata will use local fallback.")
+        return ""
 
     try:
-        config = json.loads(
-            MODEL_FILE.read_text(encoding="utf-8")
-        )
+        data = json.loads(MODEL_FILE.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"ERROR: Invalid model configuration: {exc}")
+        log(f"Invalid model configuration; using local fallback: {exc}")
+        return ""
 
-    model = str(config.get("model", "")).strip()
+    if not isinstance(data, dict):
+        return ""
 
-    if not model:
-        raise SystemExit(
-            "ERROR: No model configured in selected_model.json"
-        )
+    model = clean_text(data.get("model"))
 
-    if config.get("status") not in (None, "", "selected"):
-        raise SystemExit(
-            "ERROR: Selected-model configuration is not marked selected"
-        )
+    if data.get("status") not in (None, "", "selected"):
+        log("Model is not marked selected; using local fallback.")
+        return ""
 
     return model
+
+
+def story_text(story):
+    """Extract useful context without exposing all story data in metadata."""
+    preferred = (
+        "title",
+        "topic",
+        "summary",
+        "story",
+        "full_story",
+        "narration",
+        "text",
+        "content",
+        "parts",
+        "scenes",
+    )
+
+    chunks = []
+
+    def walk(value, depth=0):
+        if depth > 5 or len(chunks) >= 80:
+            return
+
+        if isinstance(value, str):
+            text = clean_text(value)
+            if text:
+                chunks.append(text[:2500])
+            return
+
+        if isinstance(value, list):
+            for item in value[:40]:
+                walk(item, depth + 1)
+            return
+
+        if isinstance(value, dict):
+            for key in preferred:
+                if key in value:
+                    walk(value[key], depth + 1)
+
+    walk(story)
+    return "\n".join(chunks)[:18000]
 
 
 def canonical_json(data):
@@ -113,108 +182,15 @@ def canonical_json(data):
 
 def fingerprint(topic_values, topic, story, model):
     payload = {
+        "version": VERSION,
         "topic_values": topic_values,
         "topic": topic,
         "story": story,
         "model": model,
-        "version": "metadata-v2",
     }
     return hashlib.sha256(
         canonical_json(payload).encode("utf-8")
     ).hexdigest()
-
-
-def clean_text(value, limit=None):
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if limit is not None:
-        text = text[:limit].rstrip()
-    return text
-
-
-def story_text(story):
-    """Extract useful story text without dumping all internal metadata."""
-    if isinstance(story, str):
-        return story[:30000]
-
-    if isinstance(story, list):
-        return "\n".join(
-            story_text(item) for item in story
-        )[:30000]
-
-    if isinstance(story, dict):
-        preferred = (
-            "title",
-            "topic",
-            "story",
-            "full_story",
-            "narration",
-            "text",
-            "content",
-            "summary",
-            "parts",
-            "scenes",
-        )
-
-        chunks = []
-        for key in preferred:
-            if key in story:
-                value = story[key]
-                if isinstance(value, (str, list, dict)):
-                    rendered = story_text(value)
-                    if rendered:
-                        chunks.append(f"{key}: {rendered}")
-
-        if chunks:
-            return "\n".join(chunks)[:30000]
-
-        return json.dumps(
-            story, ensure_ascii=False
-        )[:30000]
-
-    return str(story)
-
-
-def local_fallback(topic, story, language):
-    """Create usable metadata without an extra external API call."""
-    title = clean_text(topic, MAX_TITLE_LENGTH)
-    content = clean_text(story_text(story), 700)
-
-    if content and content.lower() != title.lower():
-        description = (
-            f"{title} — एक कहानी। "
-            f"{content[:500]}"
-        )
-    else:
-        description = (
-            f"{title} — हिंदी कहानी और सिनेमैटिक कहानी-कथन।"
-        )
-
-    tags = [
-        title,
-        "Hindi story",
-        "Hindi kahani",
-        "हिंदी कहानी",
-        "Hindi storytelling",
-        "cinematic story",
-    ]
-
-    if any(word in (title + " " + content).lower()
-           for word in ("mystery", "rahasya", "रहस्य", "रहस्यमय")):
-        tags.extend(["mystery story", "रहस्य कहानी"])
-
-    if any(word in (title + " " + content).lower()
-           for word in ("horror", " डरावनी", "भूत", "हॉरर")):
-        tags.extend(["horror story", "डरावनी कहानी"])
-
-    return normalize_metadata(
-        {
-            "title": title,
-            "description": description,
-            "tags": tags,
-        },
-        topic,
-        language,
-    )
 
 
 def normalize_metadata(data, topic, language):
@@ -225,7 +201,7 @@ def normalize_metadata(data, topic, language):
     description = clean_text(
         data.get("description"), MAX_DESCRIPTION_LENGTH
     )
-    tags = data.get("tags", [])
+    raw_tags = data.get("tags", [])
 
     if not title:
         title = clean_text(topic, MAX_TITLE_LENGTH)
@@ -233,37 +209,81 @@ def normalize_metadata(data, topic, language):
     if not description:
         description = f"{title} — कहानी और सिनेमैटिक कहानी-कथन।"
 
-    if not isinstance(tags, list):
-        tags = []
+    if not isinstance(raw_tags, list):
+        raw_tags = []
 
-    normalized_tags = []
+    tags = []
     seen = set()
 
-    for tag in tags:
-        tag = clean_text(tag, 100).strip(" ,#")
-        key = tag.casefold()
+    for item in raw_tags:
+        tag = clean_text(item, 100).strip(" ,#")
+        normalized = tag.casefold()
 
-        if tag and key not in seen:
-            seen.add(key)
-            normalized_tags.append(tag)
+        if tag and normalized not in seen:
+            seen.add(normalized)
+            tags.append(tag)
 
-        if len(normalized_tags) >= MAX_TAGS:
+        if len(tags) >= MAX_TAGS:
             break
 
-    if not normalized_tags:
-        normalized_tags = [
+    if not tags:
+        tags = [
             topic,
             "Hindi story",
-            "Hindi storytelling",
+            "Hindi kahani",
             "हिंदी कहानी",
         ]
 
     return {
         "title": title,
         "description": description,
-        "tags": normalized_tags[:MAX_TAGS],
-        "language": language,
+        "tags": tags[:MAX_TAGS],
+        "language": clean_text(language, 40) or "Hindi",
     }
+
+
+def local_fallback(topic, story, language):
+    """Create useful metadata without spending an API request."""
+    context = story_text(story).casefold()
+    title = clean_text(topic, MAX_TITLE_LENGTH)
+
+    # Do not reveal story events or endings in the description.
+    description = (
+        f"{title} — एक सिनेमैटिक कहानी, "
+        "जिसमें कहानी-कथन और रहस्य का अनुभव मिलेगा।"
+    )
+
+    tags = [
+        title,
+        "Hindi story",
+        "Hindi kahani",
+        "हिंदी कहानी",
+        "Hindi storytelling",
+        "cinematic story",
+    ]
+
+    topic_context = (title + " " + context).casefold()
+
+    topic_tags = [
+        (("mystery", "रहस्य", "rahasya"), ["mystery story", "रहस्य कहानी"]),
+        (("horror", "horrifying", "भूत", "डरावनी", "हॉरर"), ["horror story", "डरावनी कहानी"]),
+        (("love", "romance", "प्रेम", "प्यार"), ["love story", "प्रेम कहानी"]),
+        (("crime", "criminal", "अपराध", "जुर्म"), ["crime story", "अपराध कहानी"]),
+        (("inspiration", "motivational", "प्रेरणा", "प्रेरणादायक"), ["inspirational story", "प्रेरणादायक कहानी"]),
+        (("thriller", "suspense", "सस्पेंस", "रोमांच"), ["suspense story", "thriller kahani"]),
+        (("historical", "history", "इतिहास", "ऐतिहासिक"), ["historical story", "ऐतिहासिक कहानी"]),
+        (("comedy", "funny", "हास्य", "मजेदार"), ["comedy story", "हास्य कहानी"]),
+    ]
+
+    for keywords, additions in topic_tags:
+        if any(word in topic_context for word in keywords):
+            tags.extend(additions)
+
+    return normalize_metadata(
+        {"title": title, "description": description, "tags": tags},
+        topic,
+        language,
+    )
 
 
 def generate_metadata(api_key, model, topic, story, language):
@@ -281,38 +301,36 @@ def generate_metadata(api_key, model, topic, story, language):
     }
 
     prompt = f"""
-You create honest YouTube metadata for a Hindi cinematic
-storytelling channel.
+You create accurate YouTube metadata for a Hindi cinematic storytelling channel.
 
 TOPIC:
 {topic}
 
-STORY CONTENT:
+STORY CONTEXT:
 {story_text(story)}
 
-LANGUAGE PREFERENCE:
+LANGUAGE:
 {language or "Hindi"}
 
 Rules:
-- Produce one accurate, interesting title, maximum 100 characters.
+- Make one engaging, truthful title, maximum 100 characters.
 - Use natural Hindi or Hinglish suited to the topic.
 - Do not invent events, claims, real people, or outcomes.
-- Description must be brief, around 2-4 sentences, maximum 1000 characters.
-- Do not reveal the entire story or its ending.
-- Do not include URLs, keyword stuffing, or unrelated tags.
-- Return 10-15 relevant tags when appropriate.
-- Do not add subscribe/like requests.
-- Return only the JSON matching the schema.
+- Description: 2-3 short sentences, maximum 1000 characters.
+- Do not reveal the plot, major twists, or ending.
+- Do not paste the story or narration into the description.
+- Do not include URLs, generic keyword stuffing, or unrelated tags.
+- Return 8-15 relevant tags when possible.
+- No subscribe/like requests.
+- Return only JSON matching the supplied schema.
 """
 
     payload = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": schema,
-            "temperature": 0.4,
+            "temperature": 0.35,
         },
     }
 
@@ -326,7 +344,7 @@ Rules:
     for attempt in range(1, MAX_RETRIES + 1):
         request = urllib.request.Request(
             url,
-            data=json.dumps(payload).encode("utf-8"),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": api_key,
@@ -335,31 +353,21 @@ Rules:
         )
 
         try:
-            print(
-                f"Generating metadata with configured model "
-                f"(attempt {attempt}/{MAX_RETRIES})"
-            )
+            log(f"Generating metadata (attempt {attempt}/{MAX_RETRIES})")
 
-            with urllib.request.urlopen(
-                request, timeout=90
-            ) as response:
-                result = json.loads(
-                    response.read().decode("utf-8")
-                )
+            with urllib.request.urlopen(request, timeout=75) as response:
+                result = json.loads(response.read().decode("utf-8"))
 
             candidates = result.get("candidates", [])
             if not candidates:
                 raise ValueError("API returned no candidates")
 
-            parts = candidates[0].get(
-                "content", {}
-            ).get("parts", [])
-
+            parts = candidates[0].get("content", {}).get("parts", [])
             response_text = next(
                 (
-                    part["text"]
-                    for part in parts
-                    if isinstance(part, dict) and part.get("text")
+                    item.get("text", "")
+                    for item in parts
+                    if isinstance(item, dict) and item.get("text")
                 ),
                 "",
             )
@@ -367,8 +375,8 @@ Rules:
             if not response_text:
                 raise ValueError("API response contained no text")
 
-            data = json.loads(response_text)
-            return normalize_metadata(data, topic, language)
+            parsed = json.loads(response_text)
+            return normalize_metadata(parsed, topic, language)
 
         except (
             urllib.error.HTTPError,
@@ -381,7 +389,7 @@ Rules:
             json.JSONDecodeError,
         ) as exc:
             last_error = exc
-            print(f"Metadata attempt failed: {exc}")
+            log(f"Metadata attempt failed: {exc}")
 
             if isinstance(exc, urllib.error.HTTPError):
                 if exc.code in (400, 401, 403, 404):
@@ -390,51 +398,60 @@ Rules:
             if attempt < MAX_RETRIES:
                 time.sleep(attempt * 2)
 
-    raise RuntimeError(
-        f"Metadata API failed after retries: {last_error}"
+    raise RuntimeError(f"Metadata API failed: {last_error}")
+
+
+def package_text(metadata):
+    """Plain-text deliverable consumed by final validation and packaging."""
+    return (
+        "TITLE\n"
+        f"{metadata['title']}\n\n"
+        "DESCRIPTION\n"
+        f"{metadata['description']}\n\n"
+        "TAGS\n"
+        f"{', '.join(metadata['tags'])}\n\n"
+        f"LANGUAGE\n{metadata['language']}\n"
     )
 
 
-def save_outputs(metadata, fingerprint_value, source):
+def save_outputs(metadata, input_fingerprint, source):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    PACKAGE_METADATA.parent.mkdir(parents=True, exist_ok=True)
 
     result = {
         "status": "completed",
-        "version": "metadata-v2",
+        "version": VERSION,
         "source": source,
-        "input_fingerprint": fingerprint_value,
+        "input_fingerprint": input_fingerprint,
         **metadata,
     }
 
-    temporary = OUTPUT_JSON.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(OUTPUT_JSON)
+    write_json(OUTPUT_JSON, result)
 
     OUTPUT_TITLE.write_text(
-        metadata["title"] + "\n", encoding="utf-8"
-    )
-    OUTPUT_DESCRIPTION.write_text(
-        metadata["description"] + "\n", encoding="utf-8"
-    )
-    OUTPUT_TAGS.write_text(
-        ", ".join(metadata["tags"]) + "\n", encoding="utf-8"
-    )
-
-    CHECKPOINT.write_text(
-        json.dumps(
-            {
-                "status": "completed",
-                "input_fingerprint": fingerprint_value,
-                "source": source,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ) + "\n",
+        metadata["title"] + "\n",
         encoding="utf-8",
     )
+    OUTPUT_DESCRIPTION.write_text(
+        metadata["description"] + "\n",
+        encoding="utf-8",
+    )
+    OUTPUT_TAGS.write_text(
+        ", ".join(metadata["tags"]) + "\n",
+        encoding="utf-8",
+    )
+
+    # Write atomically so a failed job cannot leave a partial package file.
+    temporary = PACKAGE_METADATA.with_suffix(".txt.tmp")
+    temporary.write_text(package_text(metadata), encoding="utf-8")
+    temporary.replace(PACKAGE_METADATA)
+
+    write_json(CHECKPOINT, {
+        "status": "completed",
+        "version": VERSION,
+        "input_fingerprint": input_fingerprint,
+        "source": source,
+    })
 
 
 def load_cached_metadata(expected_fingerprint):
@@ -442,43 +459,36 @@ def load_cached_metadata(expected_fingerprint):
         return None
 
     try:
-        data = json.loads(
-            OUTPUT_JSON.read_text(encoding="utf-8")
-        )
+        data = json.loads(OUTPUT_JSON.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(data, dict):
         return None
 
     if data.get("status") != "completed":
         return None
 
+    if data.get("version") != VERSION:
+        return None
+
     if data.get("input_fingerprint") != expected_fingerprint:
         return None
 
-    title = clean_text(data.get("title"), MAX_TITLE_LENGTH)
-    description = clean_text(
-        data.get("description"), MAX_DESCRIPTION_LENGTH
-    )
-    tags = data.get("tags")
-
-    if not title or not description or not isinstance(tags, list):
+    try:
+        metadata = normalize_metadata(data, data.get("title", ""), data.get("language", "Hindi"))
+    except (ValueError, TypeError):
         return None
 
-    if not all(
-        path.is_file()
-        for path in (
-            OUTPUT_TITLE,
-            OUTPUT_DESCRIPTION,
-            OUTPUT_TAGS,
-        )
-    ):
+    required_files = (OUTPUT_TITLE, OUTPUT_DESCRIPTION, OUTPUT_TAGS)
+    if not all(path.is_file() for path in required_files):
         return None
 
-    return {
-        "title": title,
-        "description": description,
-        "tags": tags[:MAX_TAGS],
-        "language": data.get("language", "Hindi"),
-    }
+    # Verify the package-facing output too; regenerate if it was deleted.
+    if not PACKAGE_METADATA.is_file():
+        return metadata
+
+    return metadata
 
 
 def main():
@@ -492,51 +502,49 @@ def main():
         or "Hindi"
     )
 
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    input_hash = fingerprint(
-        topic_values, topic, story, model
-    )
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    input_fingerprint = fingerprint(topic_values, topic, story, model)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    cached = load_cached_metadata(input_hash)
+    cached = load_cached_metadata(input_fingerprint)
     if cached:
-        print("Matching metadata checkpoint found; skipping API call.")
-        # Recreate the JSON/checkpoint only if it was otherwise removed.
-        save_outputs(cached, input_hash, "cache")
-        print(f"Title: {cached['title']}")
-        print("Metadata reused; no Gemini request made.")
+        log("Matching metadata checkpoint found; skipping API request.")
+        save_outputs(cached, input_fingerprint, "cache")
+        log(f"Title: {cached['title']}")
+        log("Metadata reused without another API request.")
         return
 
-    if not key:
-        print(
-            "GEMINI_API_KEY is unavailable; using local metadata fallback."
-        )
+    if not api_key or not model:
+        log("Gemini key or selected model unavailable; using local fallback.")
         metadata = local_fallback(topic, story, language)
         source = "local_fallback"
     else:
         try:
             metadata = generate_metadata(
-                key, model, topic, story, language
+                api_key, model, topic, story, language
             )
             source = "gemini"
         except RuntimeError as exc:
-            print(f"WARNING: {exc}")
-            print("Using local fallback; no further API calls.")
+            log(f"WARNING: {exc}")
+            log("Using local fallback; no further API requests.")
             metadata = local_fallback(topic, story, language)
             source = "local_fallback"
 
-    save_outputs(metadata, input_hash, source)
+    save_outputs(metadata, input_fingerprint, source)
 
-    print("======================================")
-    print("YOUTUBE METADATA READY")
-    print(f"Source: {source}")
-    print(f"Title: {metadata['title']}")
-    print(f"Tags: {len(metadata['tags'])}")
-    print(f"JSON: {OUTPUT_JSON}")
-    print(f"Checkpoint: {CHECKPOINT}")
-    print("======================================")
+    log("======================================")
+    log("YOUTUBE METADATA READY")
+    log(f"Source: {source}")
+    log(f"Title: {metadata['title']}")
+    log(f"Tags: {len(metadata['tags'])}")
+    log(f"Package file: {PACKAGE_METADATA.relative_to(ROOT)}")
+    log("======================================")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        log(f"ERROR: {exc}")
+        raise SystemExit(1)
