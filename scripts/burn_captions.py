@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Resume-safe caption burning, landscape rendering and final SRT generation."""
+"""Resume-safe caption burning with phrase-level timed cues."""
 
 from __future__ import annotations
 
@@ -32,15 +31,15 @@ AUDIO_MANIFEST = OUT / "narration" / "audio_jobs.json"
 PROGRESS_FILE = OUT / "captions" / "burn_progress.json"
 FINAL_SRT = OUT / "captions" / "final_captions.srt"
 
-VERSION = "burn-captions-v20-landscape-all-formats"
+VERSION = "burn-captions-v21-phrase-timing"
 RESOLUTION = (1280, 720)
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.0
 
 
-def log(*args):
-    print(*args, flush=True)
+def log(*values):
+    print(*values, flush=True)
 
 
 def read_json(path, default=None):
@@ -111,7 +110,9 @@ def run(command, label, timeout=300):
         check=False,
     )
     if result.returncode:
-        raise RuntimeError(f"{label} failed: {result.stderr[-2000:]}")
+        raise RuntimeError(
+            f"{label} failed: {result.stderr[-2500:]}"
+        )
     return result
 
 
@@ -280,16 +281,13 @@ def load_audio_mapping(parts, scenes):
 
 
 def wrap_caption(text, max_chars=38):
-    """Wrap captions without dropping words."""
     clean = re.sub(r"\s+", " ", str(text)).strip()
     if not clean:
         return ""
 
-    words = clean.split()
     lines = []
     current = ""
-
-    for word in words:
+    for word in clean.split():
         candidate = word if not current else current + " " + word
         if len(candidate) <= max_chars:
             current = candidate
@@ -297,11 +295,86 @@ def wrap_caption(text, max_chars=38):
             if current:
                 lines.append(current)
             current = word
-
     if current:
         lines.append(current)
-
     return r"\N".join(lines)
+
+
+def phrase_cues(text, duration):
+    """Split text into readable phrase cues with proportional durations.
+
+    Timing is estimated from phrase word counts, not forced alignment.
+    """
+    clean = re.sub(r"\s+", " ", str(text)).strip()
+    if not clean or duration <= 0:
+        raise RuntimeError("Cannot time empty caption or invalid duration")
+
+    # Prefer sentence/punctuation boundaries, then split long segments.
+    sentences = re.split(r"(?<=[.!?।…])\s+", clean)
+    chunks = []
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        words = sentence.split()
+        current = []
+        char_count = 0
+
+        for word in words:
+            extra = len(word) + (1 if current else 0)
+            if current and (
+                char_count + extra > 42 or len(current) >= 7
+            ):
+                chunks.append(" ".join(current))
+                current = []
+                char_count = 0
+
+            current.append(word)
+            char_count += len(word) + (1 if len(current) > 1 else 0)
+
+        if current:
+            chunks.append(" ".join(current))
+
+    if not chunks:
+        chunks = [clean]
+
+    # Avoid cues too short to read when there are many tiny phrases.
+    if len(chunks) > 1 and duration / len(chunks) < 0.75:
+        merged = []
+        pending = ""
+        for chunk in chunks:
+            candidate = (pending + " " + chunk).strip()
+            if pending and len(candidate) > 48:
+                merged.append(pending)
+                pending = chunk
+            else:
+                pending = candidate
+        if pending:
+            merged.append(pending)
+        chunks = merged or [clean]
+
+    weights = [max(1, len(chunk.split())) for chunk in chunks]
+    total_weight = sum(weights)
+    cues = []
+    cursor = 0.0
+
+    for index, (chunk, weight) in enumerate(zip(chunks, weights)):
+        start = cursor
+        if index == len(chunks) - 1:
+            end = duration
+        else:
+            end = cursor + duration * weight / total_weight
+
+        cues.append({
+            "start": max(0.0, start),
+            "end": min(duration, end),
+            "text": chunk,
+        })
+        cursor = end
+
+    return cues
 
 
 def srt_time(seconds):
@@ -347,7 +420,6 @@ def estimate_frame_luma(video, timestamp):
 
 
 def choose_contrast(video, duration):
-    # Sample more than one moment to reduce one-frame bias.
     samples = [
         estimate_frame_luma(video, duration * fraction)
         for fraction in (0.25, 0.50, 0.75)
@@ -395,24 +467,30 @@ def caption_filter(srt_path, family, font_path, size, height, contrast):
     )
 
 
+def write_scene_srt(path, text, duration):
+    cues = phrase_cues(text, duration)
+    blocks = []
+    for index, cue in enumerate(cues, start=1):
+        blocks.extend([
+            str(index),
+            f"{srt_time(cue['start'])} --> {srt_time(cue['end'])}",
+            wrap_caption(cue["text"]).replace(r"\N", "\n"),
+            "",
+        ])
+    path.write_text("\n".join(blocks), encoding="utf-8")
+    return cues
+
+
 def burn_scene(
     source, output, text, family, font_path, size,
     duration, resolution, contrast,
 ):
     output.parent.mkdir(parents=True, exist_ok=True)
-
     temporary_srt = output.with_suffix(".srt")
     temporary_video = output.with_name(output.stem + ".tmp.mp4")
     temporary_video.unlink(missing_ok=True)
 
-    caption_text = wrap_caption(text).replace(r"\N", "\n")
-    temporary_srt.write_text(
-        "1\n"
-        f"{srt_time(0)} --> {srt_time(duration)}\n"
-        f"{caption_text}\n",
-        encoding="utf-8",
-    )
-
+    write_scene_srt(temporary_srt, text, duration)
     filter_value = caption_filter(
         temporary_srt, family, font_path, size, resolution[1], contrast
     )
@@ -523,16 +601,15 @@ def build_final_srt(captions, audio, rendered, parts, scenes):
                 rendered[key]["duration"],
                 audio[key]["duration"],
             )
-            if duration <= 0:
-                raise RuntimeError(f"Invalid caption duration: {key}")
-
-            lines.extend([
-                str(cue_number),
-                f"{srt_time(cursor)} --> {srt_time(cursor + duration)}",
-                wrap_caption(captions[key]).replace(r"\N", "\n"),
-                "",
-            ])
-            cue_number += 1
+            for cue in phrase_cues(captions[key], duration):
+                lines.extend([
+                    str(cue_number),
+                    f"{srt_time(cursor + cue['start'])} --> "
+                    f"{srt_time(cursor + cue['end'])}",
+                    cue["text"],
+                    "",
+                ])
+                cue_number += 1
             cursor += rendered[key]["duration"]
 
     FINAL_SRT.parent.mkdir(parents=True, exist_ok=True)
@@ -558,15 +635,12 @@ def main():
 
     family = get_caption_font(config)
     configured_size = get_caption_font_size(config)
+    font_size = 30 if str(configured_size).lower() == "auto" else int(
+        configured_size
+    )
 
-    # Use the same readable landscape caption size for both formats.
-    if str(configured_size).strip().lower() == "auto":
-        font_size = 30
-    else:
-        font_size = int(configured_size)
-
-    if not 8 <= font_size <= 160:
-        raise RuntimeError("Caption font size outside safe limits")
+    if not 16 <= font_size <= 64:
+        raise RuntimeError("Caption font size must be between 16 and 64")
 
     font_path = resolve_font(family)
     font_hash = digest_file(font_path)
@@ -621,8 +695,8 @@ def main():
     log("OUTPUT RESOLUTION: 1280x720")
     log("CAPTION FONT:", family)
     log("FONT SIZE:", font_size)
+    log("TIMING: phrase-level proportional estimates")
     log("ADAPTIVE CONTRAST: enabled")
-    log("CAPTION TRUNCATION: disabled")
 
     for index in range(1, expected_count + 1):
         part = (index - 1) // scenes + 1
@@ -641,9 +715,7 @@ def main():
         source_info = media_info(source)
 
         if not source_info["has_video"] or not source_info["has_audio"]:
-            raise RuntimeError(
-                f"Source scene missing audio/video: {key}"
-            )
+            raise RuntimeError(f"Source scene missing audio/video: {key}")
         if (source_info["width"], source_info["height"]) != RESOLUTION:
             raise RuntimeError(
                 f"Source scene must be 1280x720; got "
@@ -691,15 +763,8 @@ def main():
 
         if not reused:
             burn_scene(
-                source,
-                target,
-                captions[key],
-                family,
-                font_path,
-                font_size,
-                duration,
-                RESOLUTION,
-                contrast,
+                source, target, captions[key], family, font_path,
+                font_size, duration, RESOLUTION, contrast,
             )
 
         target_hash = digest_file(target)
@@ -719,6 +784,7 @@ def main():
             "sha256": target_hash,
             "cache_reused": reused,
             "caption_contrast": contrast,
+            "caption_timing": "phrase-level-proportional",
         }
 
         cached[f"{part}:{scene}"] = {
@@ -785,7 +851,11 @@ def main():
         "version": VERSION,
         "format": mode,
         "captions_burned": True,
-        "caption_style": "adaptive-contrast;no-text-truncation;bottom-centered",
+        "caption_style": (
+            "adaptive-contrast;phrase-timed;no-text-truncation;"
+            "bottom-centered"
+        ),
+        "caption_timing": "phrase-level-proportional-estimates",
         "caption_font": family,
         "caption_font_file": str(font_path),
         "caption_font_size": font_size,
