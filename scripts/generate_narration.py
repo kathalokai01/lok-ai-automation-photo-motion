@@ -305,7 +305,7 @@ def make_record(source, settings):
         "format": settings["format"],
         "audience": settings["audience"],
         "duration": duration,
-        "estimated_duration": duration,
+        "estimated_duration": estimated,
         "estimated_duration_seconds": estimated,
         "duration_estimate_note": (
             "Planning estimate only; use measured rendered audio duration "
