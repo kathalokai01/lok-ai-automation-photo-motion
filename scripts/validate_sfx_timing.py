@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Strict, free and resumeless SFX timing audit against real narration files."""
+"""Validate narration and SFX timing using actual audio durations."""
 
 from __future__ import annotations
 
@@ -22,12 +22,13 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-timing-validator-v6-strict-timestamps-overlap-audit"
+VERSION = "sfx-timing-validator-v7-config-aware-empty-cue-guard"
 MIN_AUDIO_BYTES = 100
 EPSILON = 0.001
 MAX_GAIN = 1.0
 TIME_KEYS = ("time", "time_seconds", "timestamp", "start_seconds", "start")
 PATH_KEYS = ("file", "path", "audio", "output", "audio_path")
+SFX_KEYS = ("SFX_ENABLED", "SFX", "SOUND_EFFECTS", "SOUND_EFFECTS_ENABLED")
 
 
 def log(*values):
@@ -49,11 +50,14 @@ def read_json(path):
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temp.replace(path)
+    try:
+        temp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def rows_from(data, *keys):
@@ -73,6 +77,27 @@ def first_value(row, keys):
         if key in row and row[key] is not None:
             return row[key]
     return None
+
+
+def config_bool(config, keys, default=True):
+    """Read boolean settings consistently with sound-design generation."""
+    for key in keys:
+        if key not in config:
+            continue
+
+        value = config[key]
+        if isinstance(value, bool):
+            return value
+
+        value = str(value).strip().lower()
+        if value in {"true", "yes", "1", "on", "enabled"}:
+            return True
+        if value in {"false", "no", "0", "off", "disabled"}:
+            return False
+
+        raise RuntimeError(f"{key} must be true or false")
+
+    return default
 
 
 def required_number(row, keys, label, minimum=None, maximum=None):
@@ -133,9 +158,11 @@ def media_info(path):
 
     result = subprocess.run(
         [
-            executable, "-v", "error",
+            executable,
+            "-v", "error",
             "-show_entries", "format=duration:stream=codec_type",
-            "-of", "json", str(path),
+            "-of", "json",
+            str(path),
         ],
         capture_output=True,
         text=True,
@@ -165,10 +192,7 @@ def media_info(path):
     if not has_audio:
         raise RuntimeError(f"Audio stream missing: {path.name}")
 
-    return {
-        "duration": duration,
-        "bytes": path.stat().st_size,
-    }
+    return {"duration": duration, "bytes": path.stat().st_size}
 
 
 def expected_keys(parts, scenes):
@@ -231,7 +255,7 @@ def load_narration(parts, scenes):
     return mapping
 
 
-def validate_cues(parts, scenes, narration):
+def validate_cues(parts, scenes, narration, sfx_enabled):
     data = read_json(CUES_FILE)
 
     if not isinstance(data, dict):
@@ -240,6 +264,20 @@ def validate_cues(parts, scenes, narration):
         raise RuntimeError("SFX cue manifest is incomplete")
 
     cues = rows_from(data, "cues", "items")
+
+    if sfx_enabled and not cues:
+        raise RuntimeError(
+            "SFX is enabled in Input/topic.txt, but the cue manifest "
+            "contains zero cues. Check scene data and sound-design output."
+        )
+
+    if not sfx_enabled and cues:
+        raise RuntimeError(
+            "SFX is disabled in Input/topic.txt, but the cue manifest "
+            f"still contains {len(cues)} cues. Regenerate sound design "
+            "to remove stale effects before continuing."
+        )
+
     seen = set()
     reports = []
     warnings = []
@@ -265,8 +303,11 @@ def validate_cues(parts, scenes, narration):
             cue, TIME_KEYS, f"SFX cue {index} timestamp", minimum=0
         )
         gain = required_number(
-            cue, ("gain", "volume", "volume_gain"),
-            f"SFX cue {index} gain", minimum=0, maximum=MAX_GAIN,
+            cue,
+            ("gain", "volume", "volume_gain"),
+            f"SFX cue {index} gain",
+            minimum=0,
+            maximum=MAX_GAIN,
         )
         kind = str(cue.get("kind", "unspecified")).strip() or "unspecified"
 
@@ -340,9 +381,7 @@ def validate_cues(parts, scenes, narration):
             overlaps = []
 
             for previous, current in zip(scene_cues, scene_cues[1:]):
-                overlap = (
-                    previous["end_seconds"] - current["start_seconds"]
-                )
+                overlap = previous["end_seconds"] - current["start_seconds"]
                 if overlap > EPSILON:
                     item = {
                         "part": part,
@@ -370,13 +409,16 @@ def validate_cues(parts, scenes, narration):
 
     reports.sort(
         key=lambda item: (
-            item["part"], item["scene"],
-            item["start_seconds"], item["kind"],
+            item["part"],
+            item["scene"],
+            item["start_seconds"],
+            item["kind"],
         )
     )
 
     return {
         "status": "valid",
+        "enabled": sfx_enabled,
         "cue_count": len(reports),
         "scenes_with_sfx": sum(bool(v) for v in per_scene.values()),
         "scenes_without_sfx": len(narration) - len(per_scene),
@@ -411,14 +453,16 @@ def main():
     if parts < 1 or scenes < 1:
         raise RuntimeError("PARTS and SCENES must be positive")
 
+    sfx_enabled = config_bool(config, SFX_KEYS, default=True)
     narration = load_narration(parts, scenes)
-    sfx = validate_cues(parts, scenes, narration)
+    sfx = validate_cues(parts, scenes, narration, sfx_enabled)
 
     report = {
         "status": "completed",
         "version": VERSION,
         "external_api_calls": 0,
         "paid_services_used": False,
+        "sfx_enabled": sfx_enabled,
         "expected_scenes": parts * scenes,
         "narration_scenes_checked": len(narration),
         "narration_total_seconds": round(
@@ -431,6 +475,7 @@ def main():
     write_json(OUTPUT_FILE, report)
 
     log("SFX TIMING VALIDATION: PASSED")
+    log("SFX enabled:", sfx_enabled)
     log("Narration scenes:", len(narration))
     log("SFX cues:", sfx["cue_count"])
     log("Scenes without SFX:", sfx["scenes_without_sfx"])
