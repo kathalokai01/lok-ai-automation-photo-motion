@@ -1,11 +1,13 @@
+
 #!/usr/bin/env python3
-"""Resumable depth-map generation with validated AI and fallback outputs."""
+"""Resumable depth-map generation with truthful fallback labelling."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -16,10 +18,17 @@ DEPTH_DIR = VISUALS_DIR / "depth_maps"
 MANIFEST_FILE = DEPTH_DIR / "depth_manifest.json"
 
 MODEL_ID = "depth-anything/Depth-Anything-V2-Small-hf"
-FALLBACK_MODEL_ID = "fallback-radial-pseudo-depth-v4"
-VERSION = "depth-checkpoint-v5"
+FALLBACK_MODEL_ID = "fallback-radial-pseudo-depth-v5"
+VERSION = "depth-checkpoint-v6"
 MIN_IMAGE_BYTES = 1000
 MIN_DEPTH_BYTES = 100
+
+# Default: preserve successful fallback checkpoints and avoid repeated model
+# downloads. Set DEPTH_UPGRADE_FALLBACK=true to retry AI for old fallbacks.
+UPGRADE_FALLBACK = (
+    os.environ.get("DEPTH_UPGRADE_FALLBACK", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 
 def log(*args):
@@ -38,7 +47,6 @@ def read_json(path, default=None):
     path = Path(path)
     if not path.is_file():
         return default
-
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
@@ -49,7 +57,6 @@ def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-
     try:
         temporary.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -71,14 +78,13 @@ def safe_path(value, label):
     path = path.resolve()
     if not path.is_relative_to(ROOT.resolve()):
         raise RuntimeError(f"{label} points outside the project.")
-
     return path
 
 
 def load_jobs():
     from PIL import Image
 
-    document = read_json(JOBS_FILE)
+    document = read_json(JOBS_FILE, {})
     if isinstance(document, list):
         jobs = document
     elif isinstance(document, dict):
@@ -106,7 +112,9 @@ def load_jobs():
         try:
             number = int(job.get("global_scene", job.get("scene", index)))
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid scene number in job {index}.") from exc
+            raise RuntimeError(
+                f"Invalid scene number in job {index}."
+            ) from exc
 
         if number < 1 or number in seen:
             raise RuntimeError(f"Duplicate or invalid scene number: {number}")
@@ -117,8 +125,13 @@ def load_jobs():
             f"source image for scene {number}",
         )
 
-        if not image_path.is_file() or image_path.stat().st_size < MIN_IMAGE_BYTES:
-            raise RuntimeError(f"Missing or too-small image for scene {number}.")
+        if (
+            not image_path.is_file()
+            or image_path.stat().st_size < MIN_IMAGE_BYTES
+        ):
+            raise RuntimeError(
+                f"Missing or too-small source image for scene {number}."
+            )
 
         try:
             with Image.open(image_path) as image:
@@ -143,7 +156,6 @@ def load_jobs():
 
     result.sort(key=lambda item: item["scene"])
     numbers = [item["scene"] for item in result]
-
     if numbers != list(range(1, len(result) + 1)):
         raise RuntimeError(
             f"Global scene numbers must be continuous from 1: {numbers}"
@@ -153,7 +165,7 @@ def load_jobs():
 
 
 def load_previous():
-    document = read_json(MANIFEST_FILE, [])
+    document = read_json(MANIFEST_FILE, {})
     if isinstance(document, dict):
         rows = document.get("scenes", document.get("depth_maps", []))
     elif isinstance(document, list):
@@ -172,7 +184,6 @@ def load_previous():
                 continue
             if number > 0:
                 previous[number] = row
-
     return previous
 
 
@@ -186,7 +197,6 @@ def validate_depth(path):
 
         with Image.open(path) as image:
             image.verify()
-
         with Image.open(path) as image:
             image.load()
             if image.width < 64 or image.height < 64:
@@ -227,9 +237,11 @@ def try_reuse(item, old):
     if old.get("image_sha256") != item["image_sha256"]:
         return None
 
-    raw_path = old.get("depth_map") or old.get("path") or old.get("file")
     try:
-        path = safe_path(raw_path, "previous depth map")
+        path = safe_path(
+            old.get("depth_map") or old.get("path") or old.get("file"),
+            "previous depth map",
+        )
     except RuntimeError:
         return None
 
@@ -255,19 +267,18 @@ def try_reuse(item, old):
         }
     )
 
-    entry = create_entry(
-        item,
-        path,
-        model or FALLBACK_MODEL_ID,
-        "reused" if is_ai else "fallback_reused",
-    )
+    if is_ai:
+        status = "reused"
+    else:
+        status = "fallback_reused"
+
+    entry = create_entry(item, path, model or FALLBACK_MODEL_ID, status)
     entry["_is_ai"] = is_ai
     return entry
 
 
 def load_depth_model():
     from transformers import pipeline
-
     return pipeline(
         task="depth-estimation",
         model=MODEL_ID,
@@ -279,7 +290,6 @@ def generate_ai_depth(estimator, item, destination):
     from PIL import Image, ImageOps
 
     temporary = destination.with_name(destination.stem + ".tmp.png")
-
     try:
         with Image.open(item["image_path"]) as image:
             source = image.convert("RGB")
@@ -307,13 +317,12 @@ def generate_ai_depth(estimator, item, destination):
 
         temporary.replace(destination)
         return create_entry(item, destination, MODEL_ID, "generated")
-
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def radial_depth(width, height):
-    """Produce an explicitly labelled approximation, not real depth geometry."""
+    """Create an approximation, explicitly not AI-estimated geometry."""
     import numpy as np
     from PIL import Image
 
@@ -327,7 +336,6 @@ def radial_depth(width, height):
 
 def generate_fallback(item, destination):
     temporary = destination.with_name(destination.stem + ".tmp.png")
-
     try:
         depth = radial_depth(item["width"], item["height"])
         depth.save(temporary, format="PNG")
@@ -337,10 +345,9 @@ def generate_fallback(item, destination):
 
         temporary.replace(destination)
         log(
-            f"WARNING: Scene {item['scene']} uses radial pseudo-depth. "
-            "This is not AI-estimated geometry."
+            f"WARNING: Scene {item['scene']} uses radial pseudo-depth; "
+            "this is not AI-estimated geometry."
         )
-
         return create_entry(
             item,
             destination,
@@ -353,7 +360,6 @@ def generate_fallback(item, destination):
 
 def save_manifest(entries, metadata):
     rows = []
-
     for number in sorted(entries):
         row = dict(entries[number])
         row.pop("_is_ai", None)
@@ -387,38 +393,52 @@ def main():
 
     entries = {}
     pending = []
+    upgrade_candidates = []
 
     for item in prepared:
-        old = try_reuse(item, previous.get(item["scene"]))
+        number = item["scene"]
+        old = try_reuse(item, previous.get(number))
 
         if old is not None and old.get("_is_ai"):
-            entries[item["scene"]] = old
-            log(f"Scene {item['scene']}: reusing validated AI depth map.")
+            entries[number] = old
+            log(f"Scene {number}: reusing validated AI depth map.")
+        elif old is not None and not UPGRADE_FALLBACK:
+            entries[number] = old
+            log(
+                f"Scene {number}: reusing validated pseudo-depth; "
+                "AI upgrade is disabled."
+            )
+        elif old is not None:
+            upgrade_candidates.append((item, old))
         else:
-            pending.append((item, old))
+            pending.append((item, None))
 
-    save_manifest(entries, metadata)
-
+    # Only load the AI model when a scene actually needs a new map or an
+    # explicitly requested upgrade. Do not download a model for pure reuse.
+    ai_work = pending + upgrade_candidates
     estimator = None
-    if pending:
+
+    if ai_work:
         try:
             log("Loading depth model:", MODEL_ID)
             estimator = load_depth_model()
             log("Depth model ready.")
         except Exception as exc:
             log("WARNING: AI depth model unavailable:", exc)
-            log("Remaining scenes will use labelled pseudo-depth.")
+            log("Missing maps will use labelled pseudo-depth.")
 
     generated_ai = 0
     generated_fallback = 0
-    reused_fallback = 0
+    reused_fallback = sum(
+        row.get("model") != MODEL_ID for row in entries.values()
+    )
 
-    for index, (item, old_fallback) in enumerate(pending, start=1):
+    for index, (item, old_fallback) in enumerate(ai_work, start=1):
         number = item["scene"]
         destination = DEPTH_DIR / f"depth_{number:04d}.png"
         entry = None
 
-        log(f"[{index}/{len(pending)}] Scene {number}")
+        log(f"[{index}/{len(ai_work)}] Scene {number}")
 
         if estimator is not None:
             try:
