@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Build validated story.json offline, with checkpoints and correct endings."""
+"""Offline story builder with topic fallback, validation and resumability."""
 
 from __future__ import annotations
 
@@ -26,7 +25,7 @@ OUTPUT_FILE = STORY_DIR / "story.json"
 TITLE_FILE = STORY_DIR / "final_title.txt"
 FINGERPRINT_FILE = STORY_DIR / "story.fingerprint"
 
-VERSION = "offline-story-builder-v2"
+VERSION = "offline-story-builder-v3"
 
 
 def log(*items):
@@ -34,8 +33,6 @@ def log(*items):
 
 
 def read_json(path):
-    if not path.is_file():
-        return None
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
@@ -44,16 +41,19 @@ def read_json(path):
 
 def atomic_write(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
+    temp = path.with_name(path.name + ".tmp")
     try:
-        temp.write_text(content, encoding="utf-8", newline="\n")
+        temp.write_text(content, encoding="utf-8")
         temp.replace(path)
     finally:
         temp.unlink(missing_ok=True)
 
 
 def write_json(path, data):
-    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    atomic_write(
+        path,
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def digest(value):
@@ -63,26 +63,30 @@ def digest(value):
     return hashlib.sha256(raw).hexdigest()
 
 
-def normalize_text(value):
-    value = str(value or "").lower()
-    value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", value).strip()
+def clean(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def word_count(value):
-    return len(normalize_text(value).split())
+    return len(re.findall(r"\S+", clean(value)))
 
 
 def clean_title(value):
-    value = str(value or "").strip()
-    value = re.sub(r"^['\"]+|['\"]+$", "", value)
+    value = clean(value).strip("'\"")
     value = re.sub(
         r"^(title|शीर्षक)\s*:\s*",
         "",
         value,
         flags=re.IGNORECASE,
     )
-    return re.sub(r"\s+", " ", value).strip()
+    return clean(value)
+
+
+def as_int(value, label):
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label} must be an integer.") from exc
 
 
 def bool_value(config, key, default=True):
@@ -100,28 +104,25 @@ def bool_value(config, key, default=True):
 def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
     if not isinstance(plan, dict):
         raise RuntimeError(
-            "Story plan missing or invalid. Run "
+            "Story plan is missing or invalid. Run "
             "scripts/generate_story_plan.py first."
         )
 
-    if str(plan.get("format", "")).strip().lower() != format_type:
-        raise RuntimeError("Story plan format does not match Input/topic.txt.")
+    if clean(plan.get("format")).lower() != format_type:
+        raise RuntimeError("Story plan format differs from Input/topic.txt.")
 
-    plan_topic = str(plan.get("topic", "")).strip()
+    plan_topic = clean(plan.get("topic"))
     if topic and plan_topic and topic != plan_topic:
-        raise RuntimeError("Story plan topic does not match current input.")
+        raise RuntimeError("Story plan topic differs from current input.")
 
     expected_total = parts_count * scenes_per_part
-    try:
-        actual = (
-            int(plan.get("parts_count", -1)),
-            int(plan.get("scenes_per_part", -1)),
-            int(plan.get("total_scenes", -1)),
-        )
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("Story plan scene counts are invalid.") from exc
-
     expected = (parts_count, scenes_per_part, expected_total)
+
+    actual = (
+        as_int(plan.get("parts_count"), "plan.parts_count"),
+        as_int(plan.get("scenes_per_part"), "plan.scenes_per_part"),
+        as_int(plan.get("total_scenes"), "plan.total_scenes"),
+    )
     if actual != expected:
         raise RuntimeError(
             f"Story plan counts {actual} do not match input {expected}. "
@@ -133,87 +134,35 @@ def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
         raise RuntimeError("Story plan has an invalid parts list.")
 
     global_number = 0
-    for part_number, part in enumerate(parts, 1):
+    for p, part in enumerate(parts, 1):
         if not isinstance(part, dict):
-            raise RuntimeError(f"Invalid plan part {part_number}.")
-        if int(part.get("part", -1)) != part_number:
-            raise RuntimeError(f"Incorrect plan part number: {part_number}.")
+            raise RuntimeError(f"Plan part {p} is not an object.")
+        if as_int(part.get("part"), f"plan part {p}.part") != p:
+            raise RuntimeError(f"Plan part numbering error at part {p}.")
 
         scenes = part.get("scenes")
         if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
             raise RuntimeError(
-                f"Plan part {part_number} must have {scenes_per_part} scenes."
+                f"Plan part {p} must have {scenes_per_part} scenes."
             )
 
-        for scene_number, scene in enumerate(scenes, 1):
+        for s, scene in enumerate(scenes, 1):
             global_number += 1
             if not isinstance(scene, dict):
-                raise RuntimeError("Plan contains an invalid scene.")
+                raise RuntimeError(f"Invalid plan scene {p}:{s}.")
 
-            scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
-            try:
-                actual_scene = int(scene.get("scene", -1))
-                actual_global = int(scene.get("global_scene_number", -1))
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError("Invalid plan scene numbering.") from exc
+            expected_id = f"part_{p:02d}_scene_{s:02d}"
+            if clean(scene.get("scene_id")) != expected_id:
+                raise RuntimeError(f"Plan scene ID mismatch: {expected_id}.")
+            if as_int(scene.get("scene"), expected_id + ".scene") != s:
+                raise RuntimeError(f"Plan scene number mismatch: {expected_id}.")
+            if as_int(
+                scene.get("global_scene_number"),
+                expected_id + ".global_scene_number",
+            ) != global_number:
+                raise RuntimeError(f"Plan global number mismatch: {expected_id}.")
 
-            if (
-                actual_scene != scene_number
-                or actual_global != global_number
-                or scene.get("scene_id") != scene_id
-            ):
-                raise RuntimeError(
-                    f"Scene mapping mismatch at {scene_id}. "
-                    "Regenerate the story plan."
-                )
     return plan
-
-
-def split_story_into_units(text):
-    text = re.sub(r"\r\n?", "\n", str(text or "")).strip()
-    text = re.sub(r"[ \t]+", " ", text)
-    if not text:
-        return []
-    units = re.split(r"(?<=[।.!?])\s+|\n+", text)
-    return [re.sub(r"\s+", " ", item).strip() for item in units if item.strip()]
-
-
-def distribute_text(text, total_scenes):
-    """Split existing prose in order; never call an external generation API."""
-    units = split_story_into_units(text)
-    if not units:
-        raise RuntimeError("STORY_TEXT is empty after cleanup.")
-
-    if len(units) >= total_scenes:
-        return [
-            " ".join(
-                units[
-                    round(i * len(units) / total_scenes):
-                    round((i + 1) * len(units) / total_scenes)
-                ]
-            ).strip()
-            for i in range(total_scenes)
-        ]
-
-    words = re.findall(r"\S+", " ".join(units))
-    if len(words) >= total_scenes:
-        return [
-            " ".join(
-                words[
-                    round(i * len(words) / total_scenes):
-                    round((i + 1) * len(words) / total_scenes)
-                ]
-            ).strip()
-            for i in range(total_scenes)
-        ]
-
-    # There is insufficient source text for distinct narration in every scene.
-    # Preserve the user's text rather than fabricate additional plot details.
-    log(
-        "WARNING: STORY_TEXT is very short for the requested scene count; "
-        "some narration units will repeat."
-    )
-    return [units[i % len(units)] for i in range(total_scenes)]
 
 
 def make_hook(format_type):
@@ -225,89 +174,170 @@ def make_hook(format_type):
     )
 
 
+def split_text(text, count):
+    """Distribute supplied text in order without external API calls."""
+    text = re.sub(r"\r\n?", "\n", str(text or "")).strip()
+    units = [
+        clean(x)
+        for x in re.split(r"(?<=[।.!?])\s+|\n+", text)
+        if clean(x)
+    ]
+    if not units:
+        return [""] * count
+
+    if len(units) >= count:
+        return [
+            " ".join(
+                units[
+                    round(i * len(units) / count):
+                    round((i + 1) * len(units) / count)
+                ]
+            ).strip()
+            for i in range(count)
+        ]
+
+    words = re.findall(r"\S+", " ".join(units))
+    if len(words) >= count:
+        return [
+            " ".join(
+                words[
+                    round(i * len(words) / count):
+                    round((i + 1) * len(words) / count)
+                ]
+            ).strip()
+            for i in range(count)
+        ]
+
+    # Do not silently invent plot details from insufficient supplied prose.
+    raise RuntimeError(
+        f"STORY_TEXT has only {len(words)} words for {count} scenes. "
+        "Provide more story text, or leave STORY_TEXT empty to use the "
+        "explicitly labelled offline topic-story template."
+    )
+
+
+def topic_story_beats(topic, count):
+    """Create a transparent generic story skeleton from a topic, offline."""
+    subject = clean(topic)
+    if not subject:
+        raise RuntimeError("TOPIC is empty; cannot create a topic story.")
+
+    beats = [
+        f"{subject} से जुड़ी एक असामान्य घटना ने सबका ध्यान खींचा।",
+        f"शुरुआत में किसी को समझ नहीं आया कि {subject} के पीछे क्या कारण था।",
+        "मुख्य पात्र ने घटनाओं को ध्यान से देखना और सवाल पूछना शुरू किया।",
+        "पहला सुराग मिला, लेकिन उससे स्थिति और उलझ गई।",
+        "कुछ लोगों ने चेतावनी दी कि इस मामले में आगे बढ़ना ठीक नहीं होगा।",
+        "फिर एक ऐसी जानकारी सामने आई जिसने पुरानी धारणा बदल दी।",
+        "मुख्य पात्र ने जोखिम उठाकर सच्चाई तक पहुँचने का फैसला किया।",
+        "रास्ते में एक भरोसेमंद साथी की मदद मिली, पर भरोसे की परीक्षा भी हुई।",
+        "दूसरा सुराग पहले सुराग से मेल नहीं खाता था।",
+        "जाँच के दौरान एक छिपा हुआ संबंध सामने आया।",
+        "अब समय कम था और गलत फैसला सब कुछ बिगाड़ सकता था।",
+        "मुख्य पात्र ने तथ्यों को जोड़कर एक नई संभावना पहचानी।",
+        "सबसे अहम सबूत ठीक उसी समय गायब हो गया।",
+        "एक अप्रत्याशित व्यक्ति ने घटना के बारे में नई बात बताई।",
+        "उस बयान की पुष्टि करने पर कहानी का रुख बदल गया।",
+        "मुख्य पात्र को तय करना था कि किस पर भरोसा किया जाए।",
+        "एक अंतिम कोशिश ने छिपे हुए सच तक पहुँचने का रास्ता खोला।",
+        "सामना होने पर विरोधी पक्ष की बातों में बड़ा विरोधाभास मिला।",
+        "अब तक के संकेत एक ही निष्कर्ष की ओर इशारा कर रहे थे।",
+        "आखिरी खुलासे ने घटना का असली कारण स्पष्ट कर दिया।",
+    ]
+
+    if count <= len(beats):
+        return beats[:count]
+
+    # Expand the outline transparently, not by repeating the same scene.
+    result = list(beats)
+    while len(result) < count:
+        n = len(result) + 1
+        result.append(
+            f"{subject} की जाँच में अगला चरण सामने आया। "
+            f"पात्र ने उपलब्ध संकेतों की दोबारा पड़ताल की और "
+            f"चरण {n} में अपनी योजना को नए सबूतों के अनुसार बदला।"
+        )
+    return result
+
+
 def make_story(
     config, plan, format_type, title, topic, story_text,
     parts_count, scenes_per_part,
 ):
     total = parts_count * scenes_per_part
-    chunks = distribute_text(story_text, total)
-    hook = make_hook(format_type)
+    if clean(story_text):
+        chunks = split_text(story_text, total)
+        story_type = "user_supplied_story_offline_mapping"
+    else:
+        chunks = topic_story_beats(topic or title, total)
+        story_type = "offline_topic_template_not_ai_generated"
 
+    hook = make_hook(format_type)
     part_hook = bool_value(config, "PART_HOOK", True)
     part_suspense = bool_value(config, "PART_SUSPENSE", True)
     final_resolution = bool_value(config, "FINAL_RESOLUTION", True)
 
-    result_parts = []
+    parts = []
     global_number = 0
 
-    for part_number, plan_part in enumerate(plan["parts"], 1):
-        result_scenes = []
+    for p, plan_part in enumerate(plan["parts"], 1):
+        scenes = []
 
-        for scene_number, plan_scene in enumerate(plan_part["scenes"], 1):
+        for s, plan_scene in enumerate(plan_part["scenes"], 1):
             global_number += 1
-            scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
-            narration = chunks[global_number - 1].strip()
+            scene_id = f"part_{p:02d}_scene_{s:02d}"
+            narration = clean(chunks[global_number - 1])
 
-            if part_number == 1 and scene_number == 1:
+            if p == 1 and s == 1:
                 narration = f"{hook} {narration}".strip()
-            elif scene_number == 1 and part_hook:
+            elif s == 1 and part_hook:
                 narration = f"एक नया मोड़ सामने आया। {narration}".strip()
 
-            if not narration:
-                narration = (
-                    f"{title} की कहानी में आगे बढ़ते हुए घटनाएँ "
-                    "एक नया मोड़ लेती हैं।"
+            visual = clean(
+                plan_scene.get("visual")
+                or plan_scene.get("visual_prompt")
+            )
+            if not visual:
+                visual = (
+                    "Photorealistic live-action cinematic scene showing: "
+                    + narration[:450]
+                    + ". Natural expressions, realistic lighting, "
+                    "consistent characters, no cartoon style."
                 )
 
-            is_part_ending = scene_number == scenes_per_part
-            is_final_part = part_number == parts_count
-            suspense = ""
+            purpose = clean(plan_scene.get("purpose"))
+            if not purpose:
+                purpose = "कहानी को आगे बढ़ाना"
 
-            # The final part's requested resolution takes precedence over
-            # the generic cliffhanger; this fixes the previously unreachable
-            # FINAL_RESOLUTION branch.
-            if is_part_ending and is_final_part and final_resolution:
+            suspense = ""
+            is_ending = s == scenes_per_part
+            is_final = p == parts_count
+
+            if is_ending and is_final and final_resolution:
                 suspense = (
                     "आखिरकार मुख्य संघर्ष का परिणाम सामने आया और "
                     "कहानी के केंद्रीय प्रश्न का उत्तर मिल गया।"
                 )
-            elif is_part_ending and part_suspense:
-                suspense = (
-                    "लेकिन सबसे बड़ा रहस्य अभी सामने आना बाकी था।"
-                )
+            elif is_ending and part_suspense:
+                suspense = "लेकिन सबसे बड़ा रहस्य अभी सामने आना बाकी था।"
 
-            source_visual = str(
-                plan_scene.get("visual")
-                or plan_scene.get("visual_prompt")
-                or ""
-            ).strip()
-
-            visual = source_visual or (
-                f"Realistic live-action cinematic scene illustrating: "
-                f"{narration[:450]}. Natural expressions, believable setting, "
-                "consistent characters, realistic lighting, no cartoon look."
-            )
-
-            purpose = str(plan_scene.get("purpose") or "").strip()
-            if not purpose:
-                purpose = "कहानी को आगे बढ़ाना और घटनाक्रम स्पष्ट करना"
-
-            result_scenes.append({
-                "scene": scene_number,
+            scenes.append({
+                "part": p,
+                "scene": s,
                 "scene_id": scene_id,
                 "global_scene_number": global_number,
                 "purpose": purpose,
                 "narration": narration,
                 "visual": visual,
-                "dialogue": str(plan_scene.get("dialogue") or "").strip(),
+                "dialogue": clean(plan_scene.get("dialogue")),
                 "suspense": suspense,
             })
 
-        result_parts.append({
-            "part": part_number,
-            "part_id": f"part_{part_number:02d}",
-            "title": str(plan_part.get("title") or f"भाग {part_number}").strip(),
-            "scenes": result_scenes,
+        parts.append({
+            "part": p,
+            "part_id": f"part_{p:02d}",
+            "title": clean(plan_part.get("title")) or f"भाग {p}",
+            "scenes": scenes,
         })
 
     return {
@@ -315,14 +345,12 @@ def make_story(
         "format": format_type,
         "title": title,
         "topic": topic,
-        "story_type": "user_supplied_story_offline_mapping",
+        "story_type": story_type,
         "hook": hook,
-        "ending_type": (
-            "resolution" if final_resolution else "suspense"
-        ),
-        "parts": result_parts,
+        "ending_type": "resolution" if final_resolution else "suspense",
+        "parts": parts,
         "source_text_sha256": hashlib.sha256(
-            story_text.encode("utf-8")
+            clean(story_text).encode("utf-8")
         ).hexdigest(),
         "generation_method": "offline_no_api",
         "mapping_version": 4,
@@ -337,116 +365,112 @@ def make_story(
             "part_hook_required": part_hook,
             "part_suspense_required": part_suspense,
             "final_resolution_requested": final_resolution,
-            "final_resolution_precedes_cliffhanger": True,
             "scene_order": "part_then_scene",
             "api_calls": 0,
         },
     }
 
 
-def validate_story(
-    data, format_type, title, topic, parts_count, scenes_per_part,
-):
+def validate_story(data, format_type, title, topic, parts_count, scenes_per_part):
     if not isinstance(data, dict):
-        raise RuntimeError("Story must be a JSON object.")
+        raise RuntimeError("Story root must be a JSON object.")
     if data.get("status") != "completed":
         raise RuntimeError("Story status must be completed.")
-    if str(data.get("format", "")).lower() != format_type:
+    if clean(data.get("format")).lower() != format_type:
         raise RuntimeError("Story format mismatch.")
 
     parts = data.get("parts")
     if not isinstance(parts, list) or len(parts) != parts_count:
         raise RuntimeError(f"Expected exactly {parts_count} parts.")
 
-    hook = str(data.get("hook") or "").strip()
+    hook = clean(data.get("hook"))
     if word_count(hook) < (7 if format_type == "short" else 14):
-        raise RuntimeError("Opening hook does not meet minimum word count.")
+        raise RuntimeError("Opening hook is shorter than the configured minimum.")
 
     seen = set()
-    first_narration = ""
     global_number = 0
+    first_narration = ""
 
-    for part_number, part in enumerate(parts, 1):
-        if not isinstance(part, dict) or int(part.get("part", -1)) != part_number:
-            raise RuntimeError(f"Invalid part numbering at {part_number}.")
+    for p, part in enumerate(parts, 1):
+        if not isinstance(part, dict):
+            raise RuntimeError(f"Invalid story part {p}.")
+        if as_int(part.get("part"), f"part {p}") != p:
+            raise RuntimeError(f"Incorrect part numbering at {p}.")
 
         scenes = part.get("scenes")
         if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
             raise RuntimeError(
-                f"Part {part_number} must contain {scenes_per_part} scenes."
+                f"Part {p} must contain exactly {scenes_per_part} scenes."
             )
 
-        part["part_id"] = f"part_{part_number:02d}"
-        part["title"] = str(part.get("title") or f"भाग {part_number}").strip()
+        part["part_id"] = f"part_{p:02d}"
+        part["title"] = clean(part.get("title")) or f"भाग {p}"
 
-        for scene_number, scene in enumerate(scenes, 1):
+        for s, scene in enumerate(scenes, 1):
             global_number += 1
             if not isinstance(scene, dict):
-                raise RuntimeError("Invalid scene object.")
+                raise RuntimeError(f"Invalid scene {p}:{s}.")
 
-            if int(scene.get("scene", -1)) != scene_number:
-                raise RuntimeError("Scene numbering is not sequential.")
+            if as_int(scene.get("scene"), f"scene {p}:{s}") != s:
+                raise RuntimeError(f"Scene numbering error at {p}:{s}.")
 
-            scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
-            scene["part"] = part_number
+            scene_id = f"part_{p:02d}_scene_{s:02d}"
+            scene["part"] = p
             scene["scene_id"] = scene_id
             scene["global_scene_number"] = global_number
 
-            for field in (
-                "purpose", "narration", "visual", "dialogue", "suspense"
-            ):
+            for field in ("purpose", "narration", "visual", "dialogue", "suspense"):
                 value = scene.get(field, "")
                 if not isinstance(value, str):
                     raise RuntimeError(f"{scene_id}: {field} must be text.")
                 scene[field] = value.strip()
 
-            if not scene["narration"] or not scene["visual"]:
-                raise RuntimeError(
-                    f"{scene_id}: narration and visual are required."
-                )
+            if not scene["narration"]:
+                raise RuntimeError(f"{scene_id}: narration is empty.")
+            if not scene["visual"]:
+                raise RuntimeError(f"{scene_id}: visual is empty.")
             if scene_id in seen:
-                raise RuntimeError(f"Duplicate scene ID: {scene_id}")
+                raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
             seen.add(scene_id)
 
-            if part_number == 1 and scene_number == 1:
+            if p == 1 and s == 1:
                 first_narration = scene["narration"]
 
     if len(seen) != parts_count * scenes_per_part:
-        raise RuntimeError("Scene mapping count validation failed.")
+        raise RuntimeError("Total scene mapping validation failed.")
 
-    if not normalize_text(first_narration).startswith(normalize_text(hook)):
-        raise RuntimeError("Scene 1 narration must start with the exact hook.")
+    if not first_narration.startswith(hook):
+        raise RuntimeError("Scene 1 narration must start with the opening hook.")
 
-    data["status"] = "completed"
-    data["format"] = format_type
     data["title"] = title
     data["topic"] = topic
+    data["status"] = "completed"
     return data
 
 
 def main():
     log("=" * 60)
     log("KATHA LOK AI — OFFLINE STORY BUILDER")
-    log("Story-generation API calls: 0")
+    log("External API calls: 0")
     log("=" * 60)
 
     config = load_and_validate()
-    format_type = get_format(config)
-    topic = get_topic(config)
-    story_text = get_story_text(config)
-    parts_count = get_parts(config)
-    scenes_per_part = get_scenes(config)
+    format_type = clean(get_format(config)).lower()
+    topic = clean(get_topic(config))
+    story_text = clean(get_story_text(config))
+    parts_count = as_int(get_parts(config), "PARTS")
+    scenes_per_part = as_int(get_scenes(config), "SCENES")
 
-    if not story_text.strip():
-        raise RuntimeError(
-            "STORY_TEXT is empty. This offline script maps supplied prose; "
-            "it does not generate a full story from TOPIC alone. Add STORY_TEXT "
-            "or use an explicitly authorized generation stage."
-        )
+    if format_type not in {"short", "full"}:
+        raise RuntimeError("FORMAT must be short or full.")
+    if parts_count < 1 or scenes_per_part < 1:
+        raise RuntimeError("PARTS and SCENES must be positive integers.")
+    if not topic and not story_text:
+        raise RuntimeError("Provide TOPIC or STORY_TEXT in Input/topic.txt.")
 
     title = clean_title(topic or story_text.splitlines()[0][:100])
     if not title:
-        raise RuntimeError("Could not determine the story title.")
+        raise RuntimeError("Could not determine a title.")
 
     plan = validate_plan(
         read_json(PLAN_FILE),
@@ -463,8 +487,7 @@ def main():
             "PART_HOOK", "PART_SUSPENSE", "FINAL_RESOLUTION",
         )
     }
-
-    source_fingerprint = digest({
+    fingerprint = digest({
         "version": VERSION,
         "format": format_type,
         "topic": topic,
@@ -480,29 +503,28 @@ def main():
     log("Parts:", parts_count)
     log("Scenes per part:", scenes_per_part)
     log("Total scenes:", parts_count * scenes_per_part)
-    log("Source text words:", word_count(story_text))
+    log("Source:", "STORY_TEXT" if story_text else "offline topic template")
 
-    saved_fingerprint = ""
-    if FINGERPRINT_FILE.is_file():
-        try:
-            saved_fingerprint = FINGERPRINT_FILE.read_text(
-                encoding="utf-8"
-            ).strip()
-        except OSError:
-            pass
+    try:
+        saved_fingerprint = FINGERPRINT_FILE.read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        saved_fingerprint = ""
 
-    if saved_fingerprint == source_fingerprint:
+    if saved_fingerprint == fingerprint:
         saved = read_json(OUTPUT_FILE)
         if isinstance(saved, dict):
             try:
-                saved = validate_story(
+                validate_story(
                     saved, format_type, title, topic,
                     parts_count, scenes_per_part,
                 )
-                log("RESUME: Matching completed story reused; API calls: 0")
+                log("RESUME: matching validated story reused.")
+                log("API calls: 0")
                 return
-            except Exception as exc:
-                log("Saved story is not reusable:", exc)
+            except (RuntimeError, TypeError, ValueError) as exc:
+                log("Saved checkpoint invalid; rebuilding:", exc)
 
     data = make_story(
         config, plan, format_type, title, topic, story_text,
@@ -515,20 +537,24 @@ def main():
 
     write_json(OUTPUT_FILE, data)
     atomic_write(TITLE_FILE, title + "\n")
-    atomic_write(FINGERPRINT_FILE, source_fingerprint + "\n")
+    atomic_write(FINGERPRINT_FILE, fingerprint + "\n")
 
-    log("STORY BUILD SUCCESS")
-    log("Validated output:", OUTPUT_FILE)
+    log("STORY BUILD: SUCCESS")
+    log("Output:", OUTPUT_FILE.relative_to(ROOT))
+    log("Story type:", data["story_type"])
     log("API calls: 0")
-    log("Final resolution enabled:", bool_value(config, "FINAL_RESOLUTION", True))
-    log("Note: This maps existing prose; it does not AI-expand or rewrite it.")
+    if not story_text:
+        log(
+            "WARNING: topic-only mode creates a generic offline story "
+            "outline, not a fully AI-written, topic-specific narrative."
+        )
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        raise SystemExit("Story generation cancelled.")
+        raise SystemExit("Story build cancelled.")
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1)
