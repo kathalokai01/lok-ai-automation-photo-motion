@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Validated, resumable-compatible depth-guided 2.5D parallax renderer."""
+"""Validated depth-aligned 2.5D parallax renderer."""
 
 from __future__ import annotations
 
@@ -14,10 +13,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-
+VERSION = "depth-parallax-v3"
 MIN_BYTES = 1000
 MAX_FPS = 60
 MAX_SECONDS = 600
+MIN_DIMENSION = 64
+MAX_DIMENSION = 4096
 
 
 def positive_int(value):
@@ -41,14 +42,24 @@ def bounded_float(value):
         raise argparse.ArgumentTypeError("Must be a number.") from exc
 
     if not math.isfinite(number) or not 0.0 <= number <= 0.04:
-        raise argparse.ArgumentTypeError(
-            "Must be between 0 and 0.04."
-        )
+        raise argparse.ArgumentTypeError("Must be between 0 and 0.04.")
 
     return number
 
 
-def validate_video(path, expected_width, expected_height, expected_frames, fps):
+def validate_dimensions(width, height):
+    if not MIN_DIMENSION <= width <= MAX_DIMENSION:
+        raise RuntimeError(
+            f"Width must be between {MIN_DIMENSION} and {MAX_DIMENSION}."
+        )
+
+    if not MIN_DIMENSION <= height <= MAX_DIMENSION:
+        raise RuntimeError(
+            f"Height must be between {MIN_DIMENSION} and {MAX_DIMENSION}."
+        )
+
+
+def validate_video(path, width, height, expected_frames, fps):
     path = Path(path)
 
     if not path.is_file() or path.stat().st_size < MIN_BYTES:
@@ -60,28 +71,21 @@ def validate_video(path, expected_width, expected_height, expected_frames, fps):
         if not cap.isOpened():
             raise RuntimeError("Cannot reopen generated video.")
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         actual_fps = float(cap.get(cv2.CAP_PROP_FPS))
 
-        if (width, height) != (expected_width, expected_height):
+        if (actual_width, actual_height) != (width, height):
             raise RuntimeError(
-                f"Wrong dimensions: {width}x{height}; "
-                f"expected {expected_width}x{expected_height}."
+                f"Wrong dimensions: {actual_width}x{actual_height}; "
+                f"expected {width}x{height}."
             )
 
-        # Some containers report one frame less than expected; never accept
-        # a materially incomplete render.
-        if frame_count < expected_frames:
+        # A truncated clip must not be accepted as a completed scene.
+        if frame_count != expected_frames:
             raise RuntimeError(
-                f"Video has {frame_count} frames; "
-                f"expected {expected_frames}."
-            )
-
-        if frame_count > expected_frames + max(2, round(fps * 0.1)):
-            raise RuntimeError(
-                f"Video has unexpected extra frames: {frame_count}."
+                f"Frame count is {frame_count}; expected {expected_frames}."
             )
 
         if not math.isfinite(actual_fps) or actual_fps <= 0:
@@ -92,25 +96,153 @@ def validate_video(path, expected_width, expected_height, expected_frames, fps):
                 f"Unexpected FPS: {actual_fps}; expected {fps}."
             )
 
-        # Decode the first and last frames so a corrupt container is not
-        # accepted merely because its header reports plausible metadata.
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         ok_first, first = cap.read()
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_count - 1))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count - 1)
         ok_last, last = cap.read()
 
         if not ok_first or first is None:
-            raise RuntimeError("Could not decode the first output frame.")
+            raise RuntimeError("Could not decode first output frame.")
 
         if not ok_last or last is None:
-            raise RuntimeError("Could not decode the last output frame.")
+            raise RuntimeError("Could not decode last output frame.")
 
     finally:
         cap.release()
 
 
-def encode_h264(source, destination, fps):
+def center_crop_parameters(source_width, source_height, target_width, target_height):
+    """Return one crop transform shared by RGB and depth images."""
+    source_ratio = source_width / source_height
+    target_ratio = target_width / target_height
+
+    if source_ratio > target_ratio:
+        crop_height = source_height
+        crop_width = max(1, round(source_height * target_ratio))
+        left = (source_width - crop_width) // 2
+        top = 0
+    else:
+        crop_width = source_width
+        crop_height = max(1, round(source_width / target_ratio))
+        left = 0
+        top = (source_height - crop_height) // 2
+
+    return left, top, crop_width, crop_height
+
+
+def apply_shared_crop(image, depth, target_width, target_height):
+    """Align depth to the original image before applying the same crop."""
+    source_height, source_width = image.shape[:2]
+
+    if depth.shape[:2] != image.shape[:2]:
+        depth = cv2.resize(
+            depth,
+            (source_width, source_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+    left, top, crop_width, crop_height = center_crop_parameters(
+        source_width,
+        source_height,
+        target_width,
+        target_height,
+    )
+
+    image_crop = image[
+        top:top + crop_height,
+        left:left + crop_width,
+    ]
+    depth_crop = depth[
+        top:top + crop_height,
+        left:left + crop_width,
+    ]
+
+    if image_crop.size == 0 or depth_crop.size == 0:
+        raise RuntimeError("Shared image/depth crop produced empty output.")
+
+    image_out = cv2.resize(
+        image_crop,
+        (target_width, target_height),
+        interpolation=cv2.INTER_LANCZOS4,
+    )
+
+    # Depth is a scalar field; avoid sharpening interpolation artifacts.
+    depth_out = cv2.resize(
+        depth_crop,
+        (target_width, target_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    if image_out.shape[:2] != depth_out.shape[:2]:
+        raise RuntimeError("Image/depth alignment failed.")
+
+    return image_out, depth_out
+
+
+def render_frames(image, depth, args, writer):
+    height, width = image.shape[:2]
+
+    depth = cv2.GaussianBlur(depth, (0, 0), 2.0)
+    depth_float = depth.astype(np.float32) / 255.0
+    displacement = (depth_float - 0.5) * 2.0
+
+    base_x, base_y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+
+    zoom = 1.035
+    zoom_x = (width - width / zoom) / 2.0
+    zoom_y = (height - height / zoom) / 2.0
+
+    map_x_base = (base_x - zoom_x) / zoom
+    map_y_base = (base_y - zoom_y) / zoom
+
+    for frame_index in range(args.frames):
+        progress = frame_index / max(args.frames - 1, 1)
+        phase = 2.0 * math.pi * progress
+
+        shift_x = args.strength * width * math.sin(phase)
+        shift_y = (
+            args.strength * height
+            * (math.cos(phase) - 1.0) / 2.0
+        )
+
+        map_x = (
+            map_x_base + shift_x * displacement
+        ).astype(np.float32)
+
+        map_y = (
+            map_y_base + shift_y * displacement
+        ).astype(np.float32)
+
+        frame = cv2.remap(
+            image,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT_101,
+        )
+
+        if frame is None or frame.shape != image.shape:
+            raise RuntimeError(
+                f"Invalid frame generated at {frame_index + 1}."
+            )
+
+        writer.write(frame)
+
+        if not writer.isOpened():
+            raise RuntimeError("Video writer stopped unexpectedly.")
+
+        if (frame_index + 1) % args.fps == 0:
+            print(
+                f"Rendered {frame_index + 1}/{args.frames} frames",
+                flush=True,
+            )
+
+
+def encode_h264(source, destination, fps, expected_frames):
     ffmpeg = shutil.which("ffmpeg")
 
     if not ffmpeg:
@@ -124,6 +256,7 @@ def encode_h264(source, destination, fps):
         "-i", str(source),
         "-map", "0:v:0",
         "-an",
+        "-frames:v", str(expected_frames),
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "20",
@@ -155,102 +288,9 @@ def encode_h264(source, destination, fps):
     return True
 
 
-def center_crop(image, width, height):
-    source_height, source_width = image.shape[:2]
-    target_ratio = width / height
-    source_ratio = source_width / source_height
-
-    if source_ratio > target_ratio:
-        new_height = height
-        new_width = max(
-            width,
-            round(source_width * height / source_height),
-        )
-    else:
-        new_width = width
-        new_height = max(
-            height,
-            round(source_height * width / source_width),
-        )
-
-    resized = cv2.resize(
-        image,
-        (new_width, new_height),
-        interpolation=cv2.INTER_LANCZOS4,
-    )
-
-    left = (new_width - width) // 2
-    top = (new_height - height) // 2
-
-    return resized[top:top + height, left:left + width]
-
-
-def render_frames(image, depth, args, writer):
-    height, width = image.shape[:2]
-
-    # Mild blur avoids noisy depth edges producing distracting warping.
-    depth = cv2.GaussianBlur(depth, (0, 0), 2.0)
-    depth_float = depth.astype(np.float32) / 255.0
-    displacement = (depth_float - 0.5) * 2.0
-
-    base_x, base_y = np.meshgrid(
-        np.arange(width, dtype=np.float32),
-        np.arange(height, dtype=np.float32),
-    )
-
-    # Overscan keeps movement from exposing empty borders.
-    zoom = 1.035
-    zoom_x = (width - width / zoom) / 2.0
-    zoom_y = (height - height / zoom) / 2.0
-
-    map_x_base = (base_x - zoom_x) / zoom
-    map_y_base = (base_y - zoom_y) / zoom
-
-    for frame_index in range(args.frames):
-        progress = frame_index / max(args.frames - 1, 1)
-        phase = 2.0 * math.pi * progress
-
-        # Subtle cyclical camera drift. Depth determines each pixel's
-        # displacement, creating a restrained 2.5D parallax effect.
-        shift_x = args.strength * width * math.sin(phase)
-        shift_y = (
-            args.strength * height
-            * (math.cos(phase) - 1.0) / 2.0
-        )
-
-        map_x = (
-            map_x_base + shift_x * displacement
-        ).astype(np.float32)
-
-        map_y = (
-            map_y_base + shift_y * displacement
-        ).astype(np.float32)
-
-        frame = cv2.remap(
-            image,
-            map_x,
-            map_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REFLECT_101,
-        )
-
-        if frame is None or frame.shape != image.shape:
-            raise RuntimeError(
-                f"Invalid frame generated at {frame_index + 1}."
-            )
-
-        writer.write(frame)
-
-        if (frame_index + 1) % args.fps == 0:
-            print(
-                f"Rendered {frame_index + 1}/{args.frames} frames",
-                flush=True,
-            )
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Render a validated depth-guided 2.5D parallax clip."
+        description="Render validated, depth-guided 2.5D parallax."
     )
 
     parser.add_argument("--image", required=True)
@@ -267,8 +307,10 @@ def main():
     if args.fps > MAX_FPS:
         parser.error(f"--fps must not exceed {MAX_FPS}.")
 
-    if args.width < 64 or args.height < 64:
-        parser.error("--width and --height must be at least 64.")
+    try:
+        validate_dimensions(args.width, args.height)
+    except RuntimeError as exc:
+        parser.error(str(exc))
 
     if args.frames > args.fps * MAX_SECONDS:
         parser.error("--frames cannot exceed ten minutes of video.")
@@ -288,8 +330,6 @@ def main():
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Temporary files live beside the destination so final replacement
-    # stays on the same filesystem and is atomic.
     temporary = output_path.with_name(
         output_path.stem + ".temporary.mp4"
     )
@@ -311,17 +351,15 @@ def main():
     if depth is None:
         raise RuntimeError("Could not decode depth map.")
 
-    if image.shape[0] < 64 or image.shape[1] < 64:
+    if image.shape[0] < MIN_DIMENSION or image.shape[1] < MIN_DIMENSION:
         raise RuntimeError("Source image is too small.")
 
     if depth.shape[0] < 16 or depth.shape[1] < 16:
         raise RuntimeError("Depth map is too small.")
 
-    image = center_crop(image, args.width, args.height)
-    depth = center_crop(depth, args.width, args.height)
-
-    if image.shape[:2] != depth.shape[:2]:
-        raise RuntimeError("Image and depth dimensions do not match.")
+    image, depth = apply_shared_crop(
+        image, depth, args.width, args.height
+    )
 
     temporary.unlink(missing_ok=True)
     converted.unlink(missing_ok=True)
@@ -352,7 +390,16 @@ def main():
         raise RuntimeError("Temporary parallax video is invalid.")
 
     try:
-        if encode_h264(temporary, converted, args.fps):
+        # First validate the OpenCV output before transcoding.
+        validate_video(
+            temporary,
+            args.width,
+            args.height,
+            args.frames,
+            args.fps,
+        )
+
+        if encode_h264(temporary, converted, args.fps, args.frames):
             validate_video(
                 converted,
                 args.width,
@@ -363,14 +410,7 @@ def main():
             converted.replace(output_path)
             temporary.unlink(missing_ok=True)
         else:
-            # Retain the OpenCV MP4 only if FFmpeg is unavailable.
-            validate_video(
-                temporary,
-                args.width,
-                args.height,
-                args.frames,
-                args.fps,
-            )
+            # If FFmpeg is absent, retain the validated OpenCV MP4.
             temporary.replace(output_path)
 
         validate_video(
@@ -387,6 +427,7 @@ def main():
         raise
 
     print("DEPTH PARALLAX SUCCESS")
+    print("Version:", VERSION)
     print("Output:", output_path)
     print("Frames:", args.frames)
     print("FPS:", args.fps)
