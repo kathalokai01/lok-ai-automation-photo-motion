@@ -283,40 +283,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path("output/story/story.json")
-          if not path.is_file() or path.stat().st_size == 0:
-              raise SystemExit(
-                  "Story generation did not create output/story/story.json"
-              )
-
-          try:
-              story = json.loads(path.read_text(encoding="utf-8-sig"))
-          except Exception as exc:
-              raise SystemExit(f"Generated story JSON is invalid: {exc}")
-
-          if not isinstance(story, dict) or story.get("status") != "completed":
-              raise SystemExit("Generated story is not marked completed.")
-
-          if not isinstance(story.get("parts"), list) or not story["parts"]:
-              raise SystemExit("Completed story has no parts.")
-
-          for index, part in enumerate(story["parts"], 1):
-              if not isinstance(part, dict):
-                  raise SystemExit(f"Story part {index} is not an object.")
-              if not any(
-                  isinstance(part.get(key), str) and part[key].strip()
-                  for key in ("text", "story", "content", "narration")
-              ):
-                  raise SystemExit(
-                      f"Story part {index} has no usable text field."
-                  )
-
-          print("Completed story verified.")
-          PY
+          python scripts/verify_story.py
+       
 
       - name: Generate AI story
         run: python scripts/generate_ai_story.py
