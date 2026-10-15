@@ -33,7 +33,7 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = 5
+VERSION = 6
 
 
 def log(*items):
@@ -126,10 +126,7 @@ def positive_int(value, label):
 
 
 def selected_story():
-    """
-    Prefer completed AI story data. Fall back to completed source story
-    only when AI story output is unavailable or incomplete.
-    """
+    """Prefer completed AI story data, then completed source story data."""
     candidates = (
         (AI_STORY_FILE, "ai_story"),
         (SOURCE_STORY_FILE, "story"),
@@ -176,7 +173,7 @@ def load_character_bible():
     return data
 
 
-def extract_scene_text(source, keys, required=False):
+def extract_scene_text(source, keys, required=False, default=""):
     value = text_value(source, *keys)
 
     if required and not value:
@@ -185,7 +182,7 @@ def extract_scene_text(source, keys, required=False):
             + "/".join(keys)
         )
 
-    return value
+    return value or default
 
 
 def normalize_scene(
@@ -313,12 +310,35 @@ def normalize_scene(
     if not bool_value(settings.get("AMBIENT_SOUND", True), True):
         ambient = ""
 
-    # Preserve source identity details when available.
     source_scene_id = text_value(
         source,
         "scene_id",
         default=scene_id,
     )
+
+    final_part = positive_int(settings["PARTS"], "PARTS")
+    last_scene = positive_int(settings["SCENES"], "SCENES")
+
+    final_resolution = bool_value(
+        settings.get("FINAL_RESOLUTION", True),
+        True,
+    )
+    part_suspense = bool_value(
+        settings.get("PART_SUSPENSE", True),
+        True,
+    )
+    part_hook = bool_value(
+        settings.get("PART_HOOK", True),
+        True,
+    )
+
+    # Only the final scene of the final part is exempt from the
+    # suspense requirement when final resolution is explicitly enabled.
+    is_final_scene = (
+        part_number == final_part
+        and scene_number == last_scene
+    )
+    resolution_at_ending = is_final_scene and final_resolution
 
     row = {
         "part": part_number,
@@ -356,21 +376,18 @@ def normalize_scene(
         "suspense_prompt": suspense,
         "opening_hook_required": (
             scene_number == 1
-            and (
-                part_number == 1
-                or bool_value(settings.get("PART_HOOK", True), True)
-            )
+            and (part_number == 1 or part_hook)
         ),
         "suspense_required": (
-            scene_number
-            == positive_int(settings["SCENES"], "SCENES")
-            and bool_value(settings.get("PART_SUSPENSE", True), True)
+            scene_number == last_scene
+            and part_suspense
+            and not resolution_at_ending
         ),
+        "final_resolution_required": resolution_at_ending,
         "character_bible_available": bool(bible),
         "status": "completed",
     }
 
-    # Keep explicitly supplied caption translations/language metadata.
     caption_fields = (
         "caption_hindi",
         "hindi_caption",
@@ -557,8 +574,6 @@ def main():
 
             previous = old_scenes.get(key)
 
-            # Reuse only if the entire normalized record matches current
-            # story data and settings. Otherwise replace it deterministically.
             if previous == expected:
                 row = previous
                 reused += 1
