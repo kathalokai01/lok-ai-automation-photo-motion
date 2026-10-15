@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Resume-safe photo-motion renderer with narration and sound mixing."""
+"""Resume-safe 16:9 photo-motion renderer with narration and sound mixing."""
 
 from __future__ import annotations
 
@@ -37,10 +38,11 @@ SOUND_MANIFEST = SOUND_DIR / "sound_design_manifest.json"
 SFX_MANIFEST = SOUND_DIR / "sfx_cues.json"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 
-VERSION = "render-video-v17-exact-mapping-sfx-aliases"
+VERSION = "render-video-v18-youtube-16x9"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.0
+OUTPUT_RESOLUTION = (1280, 720)
 
 SFX_TIME_KEYS = (
     "time",
@@ -71,11 +73,14 @@ def read_json(path):
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    try:
+        temporary.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def sha256_file(path):
@@ -205,9 +210,7 @@ def probe(path, audio_only=False):
 
 def enabled(config, key, default=True):
     aliases = {
-        "music": (
-            "MUSIC_ENABLED", "MUSIC", "BACKGROUND_MUSIC",
-        ),
+        "music": ("MUSIC_ENABLED", "MUSIC", "BACKGROUND_MUSIC"),
         "ambient": (
             "AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND",
             "ENVIRONMENT_SOUND", "AMBIENCE_ENABLED",
@@ -413,8 +416,13 @@ def load_backgrounds(config):
         record = manifest_tracks.get(category)
 
         if isinstance(record, dict) and record.get("status") == "completed":
+            track_value = (
+                record.get("path")
+                or record.get("file")
+                or record.get("output")
+            )
             track = safe_path(
-                record.get("path"),
+                track_value,
                 f"{category} sound-design track",
                 MIN_AUDIO_BYTES,
             )
@@ -626,7 +634,10 @@ def render_scene(
         try:
             cached = read_json(sidecar)
 
-            if isinstance(cached, dict) and cached.get("signature") == signature:
+            if (
+                isinstance(cached, dict)
+                and cached.get("signature") == signature
+            ):
                 info = validate_render(destination, resolution, duration)
                 log("RESUME: reused", destination.name)
                 return info, signature, cues
@@ -840,6 +851,11 @@ def concat_videos(videos, destination):
                 f"Merged output has no audio: {destination.name}"
             )
 
+        if (info["width"], info["height"]) != OUTPUT_RESOLUTION:
+            raise RuntimeError(
+                f"Merged output is not 1280x720: {destination.name}"
+            )
+
         os.replace(temporary, destination)
         return probe(destination)
 
@@ -897,7 +913,11 @@ def main():
         raise RuntimeError("PARTS, SCENES and FPS must be positive")
 
     expected_count = parts * scenes_per_part
-    resolution = (1280, 720) if mode == "full" else (720, 1280)
+
+    # Both formats now render in landscape 16:9.
+    # The renderer version changes the cache signature so old vertical renders
+    # are not mistakenly reused as new landscape renders.
+    resolution = OUTPUT_RESOLUTION
 
     if not PHOTO_MANIFEST.is_file():
         raise RuntimeError(f"Photo-motion manifest missing: {PHOTO_MANIFEST}")
@@ -1054,7 +1074,6 @@ def main():
         errors=errors,
     )
 
-    # Restore accurate mix settings after the common manifest writer.
     manifest = read_json(RENDER_MANIFEST)
     manifest["audio_mix"] = {
         "narration": True,
@@ -1069,6 +1088,7 @@ def main():
     log("RENDER COMPLETE")
     log("Final video:", relative(final_path))
     log("Mode:", mode)
+    log("Resolution:", f"{resolution[0]}x{resolution[1]}")
     log("Scenes:", len(completed_scenes))
     log("Parts:", len(part_records))
     log("Duration:", round(final_info["duration"], 2), "seconds")
