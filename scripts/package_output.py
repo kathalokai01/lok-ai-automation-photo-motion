@@ -1,11 +1,12 @@
 
 #!/usr/bin/env python3
-"""Package only successfully validated Katha Lok AI video deliverables."""
+"""Safely package validated Katha Lok AI photo-motion deliverables."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -19,16 +20,12 @@ ARCHIVE = ROOT / "katha-lok-ai-photo-motion-output.zip"
 REPORT = OUTPUT / "package_manifest.json"
 VALIDATION_REPORT = OUTPUT / "validation_report.json"
 
-VERSION = "output-packager-v6-youtube-16x9"
+VERSION = "output-packager-v7-strict-bool-and-archive-integrity"
+VIDEO_SIZE = (1280, 720)
+THUMBNAIL_SIZE = (1280, 720)
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from input_config import load_and_validate, get_format, get_parts, get_scenes
-
-MIN_VIDEO_BYTES = 1000
-MIN_IMAGE_BYTES = 1000
-MIN_TEXT_BYTES = 10
-EXPECTED_VIDEO_SIZE = (1280, 720)
-EXPECTED_THUMBNAIL_SIZE = (1280, 720)
 
 
 def log(*values):
@@ -46,40 +43,50 @@ def sha256_file(path):
 def read_json(path):
     if not path.is_file():
         raise RuntimeError(f"Required JSON file missing: {path}")
-
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid JSON file {path}: {exc}") from exc
-
-    if not isinstance(data, dict):
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Invalid JSON: {path}: {exc}") from exc
+    if not isinstance(value, dict):
         raise RuntimeError(f"Expected JSON object: {path}")
+    return value
 
-    return data
+
+def strict_bool(value, label, default=None):
+    if value is None:
+        if default is not None:
+            return default
+        raise RuntimeError(f"{label}: missing boolean value")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "yes", "1", "on", "enabled"}:
+        return True
+    if normalized in {"false", "no", "0", "off", "disabled"}:
+        return False
+    raise RuntimeError(f"{label}: invalid boolean {value!r}")
 
 
-def require_file(path, label, minimum_bytes=1):
+def require_file(path, label, minimum=1):
     if not path.is_file():
         raise RuntimeError(f"{label} missing: {path}")
-    if path.stat().st_size < minimum_bytes:
+    if path.stat().st_size < minimum:
         raise RuntimeError(f"{label} is too small: {path}")
     return path
 
 
-def safe_output_file(value, label, minimum_bytes=MIN_VIDEO_BYTES):
+def safe_output_file(value, label, minimum=1000):
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"{label}: file path is missing")
-
+        raise RuntimeError(f"{label}: file path missing")
     path = Path(value.strip())
     if not path.is_absolute():
         path = ROOT / path
-
     path = path.resolve()
-
     if not path.is_relative_to(OUTPUT.resolve()):
         raise RuntimeError(f"{label}: path escapes output/: {path}")
-
-    return require_file(path, label, minimum_bytes)
+    return require_file(path, label, minimum)
 
 
 def media_info(path):
@@ -89,22 +96,19 @@ def media_info(path):
 
     result = subprocess.run(
         [
-            ffprobe,
-            "-v", "error",
+            ffprobe, "-v", "error",
             "-show_entries",
             "format=duration:stream=codec_type,width,height",
-            "-of", "json",
-            str(path),
+            "-of", "json", str(path),
         ],
         capture_output=True,
         text=True,
         timeout=90,
         check=False,
     )
-
     if result.returncode:
         raise RuntimeError(
-            f"ffprobe failed for {path.name}: {result.stderr[-800:]}"
+            f"ffprobe failed for {path.name}: {result.stderr[-600:]}"
         )
 
     try:
@@ -113,19 +117,18 @@ def media_info(path):
     except (ValueError, KeyError, TypeError) as exc:
         raise RuntimeError(f"Invalid media metadata: {path.name}") from exc
 
-    if duration <= 0:
-        raise RuntimeError(f"Invalid duration: {path.name}")
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(f"Invalid media duration: {path.name}")
 
     streams = data.get("streams", [])
     video = next(
-        (stream for stream in streams if stream.get("codec_type") == "video"),
+        (item for item in streams if item.get("codec_type") == "video"),
         None,
     )
     audio = next(
-        (stream for stream in streams if stream.get("codec_type") == "audio"),
+        (item for item in streams if item.get("codec_type") == "audio"),
         None,
     )
-
     return {
         "duration": duration,
         "has_video": video is not None,
@@ -135,36 +138,27 @@ def media_info(path):
     }
 
 
-def require_av(path, label, mode=None):
+def require_av(path, label, resolution=VIDEO_SIZE):
     info = media_info(path)
-
     if not info["has_video"]:
         raise RuntimeError(f"{label}: video stream missing")
     if not info["has_audio"]:
         raise RuntimeError(f"{label}: audio stream missing")
-
-    if mode:
-        actual = (info["width"], info["height"])
-        if actual != EXPECTED_VIDEO_SIZE:
-            raise RuntimeError(
-                f"{label}: expected "
-                f"{EXPECTED_VIDEO_SIZE[0]}x{EXPECTED_VIDEO_SIZE[1]}, "
-                f"got {actual[0]}x{actual[1]}"
-            )
-
+    actual = (info["width"], info["height"])
+    if actual != resolution:
+        raise RuntimeError(
+            f"{label}: expected {resolution[0]}x{resolution[1]}, "
+            f"got {actual[0]}x{actual[1]}"
+        )
     return info
 
 
 def require_validation(mode, parts, scenes):
     data = read_json(VALIDATION_REPORT)
-
     if data.get("status") != "completed":
-        raise RuntimeError(
-            "Final validation has not passed. Packaging is blocked."
-        )
-
+        raise RuntimeError("Final validation has not passed")
     if data.get("format") != mode:
-        raise RuntimeError("Validation report format differs from input")
+        raise RuntimeError("Validation report format mismatch")
     if int(data.get("parts", -1)) != parts:
         raise RuntimeError("Validation report part count mismatch")
     if int(data.get("scenes_per_part", -1)) != scenes:
@@ -176,30 +170,18 @@ def require_validation(mode, parts, scenes):
     if not isinstance(checks, dict):
         raise RuntimeError("Validation report has no checks object")
 
-    required_checks = (
-        "photo_motion",
-        "narration",
-        "captions",
-        "sound_design",
-        "render",
-        "thumbnail",
-        "metadata",
-    )
-
-    for key in required_checks:
-        check = checks.get(key)
+    for name in (
+        "photo_motion", "narration", "captions", "sound_design",
+        "render", "thumbnail", "metadata",
+    ):
+        check = checks.get(name)
         if not isinstance(check, dict) or check.get("status") != "valid":
-            raise RuntimeError(
-                f"Final validation check is missing or invalid: {key}"
-            )
-
+            raise RuntimeError(f"Final validation check invalid: {name}")
     return data
 
 
 def validate_render(mode, parts, scenes):
-    manifest_path = OUTPUT / "scene_renders" / "render_manifest.json"
-    data = read_json(manifest_path)
-
+    data = read_json(OUTPUT / "scene_renders" / "render_manifest.json")
     if data.get("status") != "completed":
         raise RuntimeError("Render manifest is incomplete")
     if data.get("format") != mode:
@@ -207,50 +189,40 @@ def validate_render(mode, parts, scenes):
     if data.get("captions_burned") is not True:
         raise RuntimeError("Captions are not confirmed as burned")
 
-    rows = data.get("completed_scenes")
     expected_count = parts * scenes
-
-    if not isinstance(rows, list) or len(rows) != expected_count:
-        count = len(rows) if isinstance(rows, list) else 0
+    scene_rows = data.get("completed_scenes")
+    if not isinstance(scene_rows, list) or len(scene_rows) != expected_count:
         raise RuntimeError(
-            f"Expected {expected_count} rendered scenes; found {count}"
+            f"Expected {expected_count} rendered scenes; "
+            f"found {len(scene_rows) if isinstance(scene_rows, list) else 0}"
         )
-
     if int(data.get("completed_count", -1)) != expected_count:
         raise RuntimeError("Render completed_count mismatch")
 
     scene_files = []
-
-    for index, row in enumerate(rows, start=1):
+    for index, row in enumerate(scene_rows, 1):
         if not isinstance(row, dict):
             raise RuntimeError(f"Invalid render row {index}")
-
         expected_part = (index - 1) // scenes + 1
         expected_scene = (index - 1) % scenes + 1
-
         try:
             part = int(row.get("part", 0))
             scene = int(row.get("local_scene", row.get("scene", 0)))
             global_scene = int(row.get("global_scene", index))
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid scene mapping at row {index}"
-            ) from exc
+            raise RuntimeError(f"Invalid scene mapping: {index}") from exc
 
         if (part, scene, global_scene) != (
             expected_part, expected_scene, index
         ):
             raise RuntimeError(f"Scene order mismatch at row {index}")
-
         if row.get("status") != "completed":
-            raise RuntimeError(f"Scene {index} is incomplete")
+            raise RuntimeError(f"Scene {index} incomplete")
         if row.get("captions_burned") is not True:
-            raise RuntimeError(
-                f"Scene {index} captions are not confirmed"
-            )
+            raise RuntimeError(f"Scene {index} captions not confirmed")
 
         path = safe_output_file(row.get("video"), f"Scene {index}")
-        require_av(path, f"Scene {index}", mode)
+        require_av(path, f"Scene {index}")
         scene_files.append(path)
 
     part_rows = data.get("parts")
@@ -258,40 +230,28 @@ def validate_render(mode, parts, scenes):
         raise RuntimeError(f"Expected {parts} part videos")
 
     part_files = []
-
-    for index, value in enumerate(part_rows, start=1):
-        if isinstance(value, dict):
-            path_value = (
-                value.get("path")
-                or value.get("video")
-                or value.get("output")
-            )
+    for index, row in enumerate(part_rows, 1):
+        if isinstance(row, dict):
+            value = row.get("path") or row.get("video") or row.get("output")
         else:
-            path_value = value
-
-        path = safe_output_file(path_value, f"Part video {index}")
-        require_av(path, f"Part video {index}", mode)
+            value = row
+        path = safe_output_file(value, f"Part video {index}")
+        require_av(path, f"Part video {index}")
         part_files.append(path)
 
     final_video = safe_output_file(data.get("final_video"), "Final video")
     alias = safe_output_file(data.get("alias"), "Format-specific video")
-
-    final_info = require_av(final_video, "Final video", mode)
-    alias_info = require_av(alias, "Format-specific video", mode)
+    final_info = require_av(final_video, "Final video")
+    alias_info = require_av(alias, "Format-specific video")
 
     expected_alias = (
-        "katha_lok_ai_short.mp4"
-        if mode == "short"
+        "katha_lok_ai_short.mp4" if mode == "short"
         else "katha_lok_ai_full.mp4"
     )
-
     if alias.name != expected_alias:
-        raise RuntimeError(
-            f"Expected {expected_alias}, got {alias.name}"
-        )
-
+        raise RuntimeError(f"Expected {expected_alias}, got {alias.name}")
     if abs(final_info["duration"] - alias_info["duration"]) > 1.0:
-        raise RuntimeError("Final video and format alias durations differ")
+        raise RuntimeError("Final video and alias durations differ")
 
     return {
         "scene_files": scene_files,
@@ -302,56 +262,40 @@ def validate_render(mode, parts, scenes):
     }
 
 
-def validate_thumbnail(mode):
+def validate_thumbnail():
     path = require_file(
-        OUTPUT / "thumbnail.jpg",
-        "Thumbnail",
-        MIN_IMAGE_BYTES,
+        OUTPUT / "thumbnail.jpg", "Thumbnail", 1000
     )
-
     try:
         from PIL import Image
-
         with Image.open(path) as image:
             image.verify()
-
         with Image.open(path) as image:
-            actual = image.size
+            dimensions = image.size
             image_format = image.format
-
     except Exception as exc:
         raise RuntimeError(f"Thumbnail is invalid: {exc}") from exc
 
-    if actual != EXPECTED_THUMBNAIL_SIZE:
+    if dimensions != THUMBNAIL_SIZE:
         raise RuntimeError(
-            f"Thumbnail dimensions mismatch: expected "
-            f"{EXPECTED_THUMBNAIL_SIZE}, got {actual}"
+            f"Thumbnail must be {THUMBNAIL_SIZE}; got {dimensions}"
         )
-
     if image_format != "JPEG":
         raise RuntimeError(f"Expected JPEG thumbnail, got {image_format}")
-
     return path
 
 
 def validate_metadata():
     path = require_file(
-        OUTPUT / "youtube_metadata.txt",
-        "YouTube metadata",
-        MIN_TEXT_BYTES,
+        OUTPUT / "youtube_metadata.txt", "YouTube metadata", 10
     )
-
-    content = path.read_text(encoding="utf-8-sig").strip()
-    if len(content) < MIN_TEXT_BYTES:
+    if len(path.read_text(encoding="utf-8-sig").strip()) < 10:
         raise RuntimeError("YouTube metadata is empty")
-
     return path
 
 
 def validate_sound_design(parts, scenes):
-    sound = read_json(
-        OUTPUT / "sound_design" / "sound_design_manifest.json"
-    )
+    sound = read_json(OUTPUT / "sound_design" / "sound_design_manifest.json")
     cues = read_json(OUTPUT / "sound_design" / "sfx_cues.json")
     timing = read_json(
         OUTPUT / "sound_design" / "sfx_timing_validation.json"
@@ -370,79 +314,76 @@ def validate_sound_design(parts, scenes):
 
     sfx = timing.get("sfx")
     if not isinstance(sfx, dict) or sfx.get("status") != "valid":
-        raise RuntimeError("SFX timing report does not show valid status")
+        raise RuntimeError("SFX timing report is not valid")
 
-    expected_count = parts * scenes
-
-    if int(timing.get("expected_scenes", -1)) != expected_count:
+    expected = parts * scenes
+    if int(timing.get("expected_scenes", -1)) != expected:
         raise RuntimeError("SFX expected scene count mismatch")
-    if int(timing.get("narration_scenes_checked", -1)) != expected_count:
-        raise RuntimeError(
-            "SFX report did not check every narration scene"
-        )
+    if int(timing.get("narration_scenes_checked", -1)) != expected:
+        raise RuntimeError("SFX narration scene count mismatch")
 
     cue_rows = cues.get("cues", cues.get("items", []))
     if not isinstance(cue_rows, list):
         raise RuntimeError("SFX cue list is invalid")
 
-    for index, cue in enumerate(cue_rows, start=1):
+    enabled = sound.get("enabled", {})
+    tracks = sound.get("tracks", {})
+    if not isinstance(enabled, dict) or not isinstance(tracks, dict):
+        raise RuntimeError("Invalid sound-design track settings")
+
+    cue_enabled = strict_bool(
+        enabled.get("sfx"),
+        "sound_design.enabled.sfx",
+        default=bool(cue_rows),
+    )
+    if cue_enabled and not cue_rows:
+        raise RuntimeError("SFX enabled but no cues exist")
+    if not cue_enabled and cue_rows:
+        raise RuntimeError("SFX disabled but cues remain")
+
+    for index, cue in enumerate(cue_rows, 1):
         if not isinstance(cue, dict):
             raise RuntimeError(f"Invalid SFX cue {index}")
-
         path_value = (
-            cue.get("file")
-            or cue.get("path")
-            or cue.get("audio")
-            or cue.get("output")
+            cue.get("file") or cue.get("path") or cue.get("audio")
+            or cue.get("output") or cue.get("audio_path")
         )
-
-        path = safe_output_file(
-            path_value,
-            f"SFX cue {index}",
-            minimum_bytes=100,
-        )
-
-        info = media_info(path)
-        if not info["has_audio"]:
+        path = safe_output_file(path_value, f"SFX cue {index}", 100)
+        if not media_info(path)["has_audio"]:
             raise RuntimeError(f"SFX cue {index} has no audio stream")
 
-    tracks = sound.get("tracks", {})
-    enabled = sound.get("enabled", {})
-
-    if not isinstance(tracks, dict) or not isinstance(enabled, dict):
-        raise RuntimeError("Invalid sound-design tracks structure")
-
+    track_status = {}
     for name in ("music", "ambient", "sfx"):
         track = tracks.get(name)
-
-        if not bool(enabled.get(name, track is not None)):
-            continue
-
-        if not isinstance(track, dict) or track.get("status") != "completed":
-            raise RuntimeError(f"Enabled sound track is incomplete: {name}")
-
-        value = (
-            track.get("path")
-            or track.get("file")
-            or track.get("output")
+        is_enabled = strict_bool(
+            enabled.get(name),
+            f"sound_design.enabled.{name}",
+            default=(track is not None),
         )
+        if not is_enabled:
+            track_status[name] = "disabled"
+            continue
+        if not isinstance(track, dict) or track.get("status") != "completed":
+            raise RuntimeError(f"Enabled sound track incomplete: {name}")
 
+        value = track.get("path") or track.get("file") or track.get("output")
         path = safe_output_file(value, f"Sound track {name}", 100)
-        info = media_info(path)
-
-        if not info["has_audio"]:
-            raise RuntimeError(f"Sound track has no audio stream: {name}")
+        if not media_info(path)["has_audio"]:
+            raise RuntimeError(f"Sound track has no audio: {name}")
+        track_status[name] = "valid"
 
     return {
+        "status": "valid",
         "cue_count": len(cue_rows),
-        "timing_report": (
-            "output/sound_design/sfx_timing_validation.json"
-        ),
+        "tracks": track_status,
+        "sfx_enabled": cue_enabled,
+        "timing_report": "output/sound_design/sfx_timing_validation.json",
     }
 
 
 def archive_files():
     files = []
+    output_root = OUTPUT.resolve()
 
     for path in OUTPUT.rglob("*"):
         if not path.is_file():
@@ -455,17 +396,12 @@ def archive_files():
             continue
         if "__pycache__" in path.parts:
             continue
-
-        resolved = path.resolve()
-
-        if not resolved.is_relative_to(OUTPUT.resolve()):
+        if not path.resolve().is_relative_to(output_root):
             raise RuntimeError(f"Refusing path outside output/: {path}")
-
         files.append(path)
 
     return sorted(
-        files,
-        key=lambda path: path.relative_to(OUTPUT).as_posix(),
+        files, key=lambda item: item.relative_to(OUTPUT).as_posix()
     )
 
 
@@ -476,8 +412,7 @@ def build_archive(files):
 
     try:
         with zipfile.ZipFile(
-            temporary,
-            "w",
+            temporary, "w",
             compression=zipfile.ZIP_DEFLATED,
             compresslevel=6,
             allowZip64=True,
@@ -485,7 +420,6 @@ def build_archive(files):
             for path in files:
                 name = f"output/{path.relative_to(OUTPUT).as_posix()}"
                 archive.write(path, arcname=name)
-
                 entries.append({
                     "path": name,
                     "bytes": path.stat().st_size,
@@ -496,26 +430,20 @@ def build_archive(files):
             bad = archive.testzip()
             if bad:
                 raise RuntimeError(f"ZIP integrity check failed: {bad}")
-
             names = archive.namelist()
-
             if len(names) != len(set(names)):
                 raise RuntimeError("Duplicate ZIP entries detected")
+            if set(names) != {item["path"] for item in entries}:
+                raise RuntimeError("ZIP entries do not match manifest")
 
-            if set(names) != {row["path"] for row in entries}:
-                raise RuntimeError("ZIP contents do not match file manifest")
-
-            for row in entries:
-                content = archive.read(row["path"])
-
-                if len(content) != row["bytes"]:
-                    raise RuntimeError(f"ZIP size mismatch: {row['path']}")
-
-                if hashlib.sha256(content).hexdigest() != row["sha256"]:
-                    raise RuntimeError(f"ZIP hash mismatch: {row['path']}")
+            for item in entries:
+                payload = archive.read(item["path"])
+                if len(payload) != item["bytes"]:
+                    raise RuntimeError(f"ZIP size mismatch: {item['path']}")
+                if hashlib.sha256(payload).hexdigest() != item["sha256"]:
+                    raise RuntimeError(f"ZIP hash mismatch: {item['path']}")
 
         os.replace(temporary, ARCHIVE)
-
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -525,14 +453,12 @@ def build_archive(files):
 def atomic_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-
     try:
         temporary.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         os.replace(temporary, path)
-
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -553,50 +479,37 @@ def main():
     if not OUTPUT.is_dir():
         raise RuntimeError("output/ directory does not exist")
 
-    log("PACKAGING AUDIT:", VERSION)
-    log("FORMAT:", mode)
-    log("EXPECTED VIDEO SIZE:", "1280x720")
-    log("EXPECTED THUMBNAIL SIZE:", "1280x720")
+    log("PACKAGING:", VERSION)
+    log("FORMAT:", mode, "| EXPECTED SCENES:", parts * scenes)
 
-    # Fail closed: no package is produced from a missing or failed report.
     validation = require_validation(mode, parts, scenes)
-
     render = validate_render(mode, parts, scenes)
-    thumbnail = validate_thumbnail(mode)
+    thumbnail = validate_thumbnail()
     metadata = validate_metadata()
     sound = validate_sound_design(parts, scenes)
 
     captions = require_file(
         OUTPUT / "captions" / "final_captions.srt",
         "Final captions SRT",
-        MIN_TEXT_BYTES,
+        10,
     )
-
     if "-->" not in captions.read_text(encoding="utf-8-sig"):
         raise RuntimeError("Final SRT contains no timing cues")
 
     files = archive_files()
     if not files:
-        raise RuntimeError("No output files available to package")
+        raise RuntimeError("No output files to package")
 
     included = {path.resolve() for path in files}
-
     essential = [
-        render["final_video"],
-        render["alias"],
-        thumbnail,
-        metadata,
-        captions,
-        *render["part_files"],
-        *render["scene_files"],
+        render["final_video"], render["alias"], thumbnail,
+        metadata, captions, *render["part_files"], *render["scene_files"],
     ]
-
     for path in essential:
         if path.resolve() not in included:
             raise RuntimeError(f"Essential deliverable excluded: {path}")
 
     entries = build_archive(files)
-
     report = {
         "status": "completed",
         "version": VERSION,
@@ -604,8 +517,8 @@ def main():
         "parts": parts,
         "scenes_per_part": scenes,
         "scene_count": parts * scenes,
-        "video_dimensions": list(EXPECTED_VIDEO_SIZE),
-        "thumbnail_dimensions": list(EXPECTED_THUMBNAIL_SIZE),
+        "video_dimensions": list(VIDEO_SIZE),
+        "thumbnail_dimensions": list(THUMBNAIL_SIZE),
         "validation_report": {
             "path": "output/validation_report.json",
             "status": validation["status"],
@@ -618,29 +531,28 @@ def main():
         "files": entries,
         "deliverables": {
             "final_video": render["final_video"].relative_to(ROOT).as_posix(),
-            "format_alias": render["alias"].relative_to(ROOT).as_posix(),
+            "alias": render["alias"].relative_to(ROOT).as_posix(),
             "thumbnail": thumbnail.relative_to(ROOT).as_posix(),
             "metadata": metadata.relative_to(ROOT).as_posix(),
             "captions": captions.relative_to(ROOT).as_posix(),
+            "part_videos": [
+                path.relative_to(ROOT).as_posix()
+                for path in render["part_files"]
+            ],
+            "scene_videos": [
+                path.relative_to(ROOT).as_posix()
+                for path in render["scene_files"]
+            ],
         },
         "sound_design": sound,
-        "notes": [
-            "Packaging is blocked unless final validation has passed.",
-            "Short and Full outputs use 1280x720 video and thumbnail dimensions.",
-            "Final videos must contain both video and audio streams.",
-            "Every archived file has a verified size and SHA-256.",
-            "The package manifest stays outside the ZIP to avoid a circular hash.",
-        ],
+        "external_api_calls_during_packaging": 0,
     }
-
     atomic_json(REPORT, report)
 
-    log("PACKAGING COMPLETE")
-    log("SCENES:", parts * scenes)
+    log("PACKAGING: PASSED")
+    log("ARCHIVE:", ARCHIVE.name)
+    log("ARCHIVE BYTES:", ARCHIVE.stat().st_size)
     log("FILES:", len(entries))
-    log("ZIP:", ARCHIVE.name)
-    log("ZIP BYTES:", ARCHIVE.stat().st_size)
-    log("ZIP SHA256:", report["archive_sha256"])
     log("REPORT:", REPORT.relative_to(ROOT))
 
 
@@ -648,5 +560,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        log("PACKAGING FAILED:", str(exc))
+        log("PACKAGING: FAILED:", str(exc))
         sys.exit(1)
