@@ -1,11 +1,5 @@
-
 #!/usr/bin/env python3
-"""Create the deterministic scene plan required before story generation.
-
-This step is intentionally offline: it does not call Gemini or any other API.
-It creates output/story/story_plan.json from Input/topic.txt so that
-generate_story.py can safely run after this script.
-"""
+"""Deterministic offline story planning with validated checkpoint reuse."""
 
 from __future__ import annotations
 
@@ -29,49 +23,46 @@ from input_config import (
 
 ROOT = Path(__file__).resolve().parent.parent
 INPUT_FILE = ROOT / "Input" / "topic.txt"
-STORY_DIR = ROOT / "output" / "story"
-OUTPUT_FILE = STORY_DIR / "story_plan.json"
+OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
+VERSION = "offline-structural-story-plan-v2"
 
-SCRIPT_VERSION = "offline-structural-story-plan-v1"
-
-# Story beats are guidance for the story generator, not extra scenes.
 SHORT_BEATS = (
-    ("hook", "Open with an immediate question, danger, mystery, or surprise."),
-    ("setup", "Establish the character, place, goal, and immediate stakes."),
-    ("discovery", "Reveal a clue, unusual event, or important new information."),
-    ("escalation", "Increase the pressure and make the situation harder."),
-    ("obstacle", "Introduce a credible obstacle, conflict, or complication."),
-    ("reversal", "Change the audience's understanding with a meaningful turn."),
-    ("choice", "Force a character to make a consequential choice."),
-    ("confrontation", "Bring the main conflict into direct confrontation."),
-    ("reveal", "Reveal a significant truth while preserving continuity."),
-    ("climax", "Deliver the strongest action or emotional turning point."),
-    ("payoff", "Pay off an earlier clue or promise in the story."),
-    ("suspense", "End on a compelling unresolved question or consequence."),
+    ("hook", "Open with a compelling story-specific mystery or surprise."),
+    ("setup", "Establish character, place, goal and stakes."),
+    ("discovery", "Reveal a meaningful clue or new information."),
+    ("escalation", "Increase pressure and consequences."),
+    ("obstacle", "Introduce a credible obstacle."),
+    ("reversal", "Change the audience's understanding."),
+    ("choice", "Force a consequential decision."),
+    ("confrontation", "Bring the central conflict into focus."),
+    ("reveal", "Reveal a significant truth."),
+    ("climax", "Deliver the strongest turning point."),
+    ("payoff", "Pay off an earlier clue or promise."),
+    ("suspense", "Create a compelling continuation question."),
 )
 
 FULL_BEATS = (
-    ("hook", "Open with a strong cinematic hook and clear story tension."),
-    ("establishing", "Establish the world, characters, relationships, and stakes."),
-    ("inciting_event", "Introduce the event that disrupts ordinary life."),
-    ("goal", "Clarify the protagonist's goal and what is at risk."),
-    ("investigation", "Develop clues, motivations, and relevant story context."),
-    ("first_obstacle", "Introduce the first meaningful obstacle or opposition."),
-    ("complication", "Make the original goal harder and raise the stakes."),
-    ("relationship", "Develop character relationships through consequential action."),
-    ("discovery", "Reveal new information that changes the situation."),
-    ("midpoint", "Create a major reversal or shift in the conflict."),
-    ("pressure", "Increase urgency and the cost of failure."),
-    ("setback", "Deliver a believable setback with lasting consequences."),
-    ("reassessment", "Force the protagonist to reconsider their approach."),
-    ("preparation", "Prepare the characters for the decisive confrontation."),
-    ("approach", "Move the story toward its central confrontation."),
+    ("hook", "Open with strong cinematic tension."),
+    ("establishing", "Establish the world, characters and stakes."),
+    ("inciting_event", "Introduce the event disrupting ordinary life."),
+    ("goal", "Clarify the protagonist's goal."),
+    ("investigation", "Develop clues and motivations."),
+    ("first_obstacle", "Introduce meaningful opposition."),
+    ("complication", "Raise the stakes."),
+    ("relationship", "Develop relationships through consequential action."),
+    ("discovery", "Reveal information that changes the situation."),
+    ("midpoint", "Create a major reversal."),
+    ("pressure", "Increase urgency."),
+    ("setback", "Deliver a believable setback."),
+    ("reassessment", "Force a change of approach."),
+    ("preparation", "Prepare for the decisive confrontation."),
+    ("approach", "Move toward the central conflict."),
     ("confrontation", "Bring opposing goals into direct conflict."),
-    ("crisis", "Force a difficult choice with meaningful consequences."),
+    ("crisis", "Force a difficult choice."),
     ("climax", "Resolve the central struggle through decisive action."),
-    ("aftermath", "Show the immediate consequences of the climax."),
-    ("resolution", "Resolve the central story and provide emotional closure."),
-    ("final_suspense", "If the input calls for a continuation, end with a story-relevant question."),
+    ("aftermath", "Show the consequences."),
+    ("resolution", "Provide emotional closure."),
+    ("final_suspense", "Add continuation suspense only when appropriate."),
 )
 
 
@@ -79,42 +70,29 @@ def log(*values: Any) -> None:
     print(*values, flush=True)
 
 
-def read_json(path: Path) -> Any:
-    if not path.is_file():
-        return None
-
+def read_json(path: Path):
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def atomic_write(path: Path, content: str) -> None:
+def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-
+    temp = path.with_name(path.name + ".tmp")
     try:
-        with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(content)
+        with temp.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-
-        os.replace(temp_path, path)
+        os.replace(temp, path)
     finally:
-        try:
-            temp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        temp.unlink(missing_ok=True)
 
 
-def write_json(path: Path, data: dict) -> None:
-    atomic_write(
-        path,
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-    )
-
-
-def sha256_data(data: Any) -> str:
+def fingerprint(data: Any) -> str:
     raw = json.dumps(
         data,
         ensure_ascii=False,
@@ -125,19 +103,26 @@ def sha256_data(data: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def select_beat(format_type: str, scene_number: int, total_scenes: int):
-    """Spread story beats across any configured scene count."""
+def as_bool(config: dict, key: str, default: bool = True) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    value = str(value).strip().lower()
+    if value in {"true", "yes", "on", "1", "enabled"}:
+        return True
+    if value in {"false", "no", "off", "0", "disabled", ""}:
+        return False
+    return default
+
+
+def select_beat(format_type: str, index: int, total: int):
     beats = SHORT_BEATS if format_type == "short" else FULL_BEATS
-
-    if total_scenes <= 1:
+    if total <= 1:
         return beats[0]
-
-    # Evenly distribute the available beats over the requested scene count.
-    index = round(
-        (scene_number - 1) * (len(beats) - 1) / (total_scenes - 1)
-    )
-    index = max(0, min(index, len(beats) - 1))
-    return beats[index]
+    position = round(index * (len(beats) - 1) / (total - 1))
+    return beats[max(0, min(position, len(beats) - 1))]
 
 
 def build_plan(
@@ -148,106 +133,99 @@ def build_plan(
     parts_count: int,
     scenes_per_part: int,
 ) -> dict:
-    total_scenes = parts_count * scenes_per_part
+    total = parts_count * scenes_per_part
+    part_hook = as_bool(config, "PART_HOOK", True)
+    part_suspense = as_bool(config, "PART_SUSPENSE", True)
+    final_resolution = as_bool(config, "FINAL_RESOLUTION", True)
     parts = []
-    global_scene_number = 0
+    global_number = 0
 
     for part_number in range(1, parts_count + 1):
-        part_scenes = []
+        scenes = []
 
         for scene_number in range(1, scenes_per_part + 1):
-            global_scene_number += 1
-            beat_name, beat_description = select_beat(
-                format_type,
-                global_scene_number,
-                total_scenes,
+            global_number += 1
+            beat, description = select_beat(
+                format_type, global_number - 1, total
             )
+            is_first = scene_number == 1
+            is_last = scene_number == scenes_per_part
+            is_final_part = part_number == parts_count
+            is_final_scene = is_last and is_final_part
 
-            if scene_number == 1 and (
-                part_number == 1
-                or bool(config.get("PART_HOOK", True))
-            ):
-                role = "part_opening"
-                beat_name = "hook" if part_number == 1 else "part_hook"
-                beat_description = (
-                    "Start with an immediate, story-specific hook. "
-                    "For later parts, connect the hook to the previous part."
+            # Final resolution wins over generic part-ending suspense.
+            if is_final_scene and final_resolution:
+                role = "finale"
+                beat = "finale"
+                description = (
+                    "Resolve the central conflict, answer the main story "
+                    "question, and provide a satisfying, believable ending."
                 )
-            elif (
-                scene_number == scenes_per_part
-                and bool(config.get("PART_SUSPENSE", True))
-            ):
+            elif is_first and (part_number == 1 or part_hook):
+                role = "part_opening"
+                beat = "hook" if part_number == 1 else "part_hook"
+                description = (
+                    "Open with an immediate story-specific hook. Later parts "
+                    "must connect naturally to the previous part."
+                )
+            elif is_last and part_suspense:
                 role = "part_ending"
-                beat_name = "suspense"
-                beat_description = (
-                    "End with a meaningful story-specific suspense beat "
-                    "that encourages the viewer to continue."
+                beat = "suspense"
+                description = (
+                    "End on meaningful story-specific suspense that encourages "
+                    "continuation without inventing unsupported plot details."
                 )
             else:
                 role = "story_progression"
 
-            if (
-                part_number == parts_count
-                and scene_number == scenes_per_part
-                and bool(config.get("FINAL_RESOLUTION", True))
-            ):
-                role = "finale"
-                beat_name = "finale"
-                beat_description = (
-                    "Resolve the central conflict and provide a satisfying "
-                    "ending. Preserve any suspense only if it does not "
-                    "undermine the main resolution."
-                )
-
             scene_id = (
                 f"part_{part_number:02d}_scene_{scene_number:02d}"
             )
-
-            part_scenes.append({
+            scenes.append({
                 "scene": scene_number,
-                "global_scene_number": global_scene_number,
+                "global_scene_number": global_number,
                 "scene_id": scene_id,
                 "role": role,
-                "beat": beat_name,
-                "beat_description": beat_description,
-                "purpose": beat_description,
+                "beat": beat,
+                "beat_description": description,
+                "purpose": description,
             })
 
         parts.append({
             "part": part_number,
             "part_id": f"part_{part_number:02d}",
             "title": f"भाग {part_number}",
-            "scenes": part_scenes,
+            "scenes": scenes,
         })
 
     source = {
-        "script_version": SCRIPT_VERSION,
-        "input_file": str(INPUT_FILE.relative_to(ROOT)),
+        "script_version": VERSION,
+        "input_file": "Input/topic.txt",
         "format": format_type,
         "topic": topic,
         "story_text": story_text,
         "parts_count": parts_count,
         "scenes_per_part": scenes_per_part,
-        "total_scenes": total_scenes,
-        "part_hook": bool(config.get("PART_HOOK", True)),
-        "part_suspense": bool(config.get("PART_SUSPENSE", True)),
-        "final_resolution": bool(config.get("FINAL_RESOLUTION", True)),
+        "total_scenes": total,
+        "part_hook": part_hook,
+        "part_suspense": part_suspense,
+        "final_resolution": final_resolution,
         "parts": parts,
     }
 
     return {
         "status": "planned",
-        "script_version": SCRIPT_VERSION,
+        "script_version": VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "format": format_type,
         "topic": topic,
         "title": get_title_source(config),
         "parts_count": parts_count,
         "scenes_per_part": scenes_per_part,
-        "total_scenes": total_scenes,
+        "total_scenes": total,
         "scene_order": "part_then_scene",
-        "mapping_version": 3,
-        "source_fingerprint": sha256_data(source),
+        "mapping_version": 4,
+        "source_fingerprint": fingerprint(source),
         "source": {
             "input_file": "Input/topic.txt",
             "story_text_provided": bool(story_text),
@@ -265,33 +243,33 @@ def validate_plan(
     parts_count: int,
     scenes_per_part: int,
 ) -> None:
-    if plan.get("format") != format_type:
-        raise RuntimeError("Generated plan format mismatch.")
+    if not isinstance(plan, dict):
+        raise RuntimeError("Story plan must be a JSON object.")
 
-    if str(plan.get("topic", "")).strip() != topic:
-        raise RuntimeError("Generated plan topic mismatch.")
-
-    if int(plan.get("parts_count", -1)) != parts_count:
-        raise RuntimeError("Generated plan part count mismatch.")
-
-    if int(plan.get("scenes_per_part", -1)) != scenes_per_part:
-        raise RuntimeError("Generated plan scenes-per-part mismatch.")
-
-    if int(plan.get("total_scenes", -1)) != parts_count * scenes_per_part:
-        raise RuntimeError("Generated plan total scene count mismatch.")
+    expected_total = parts_count * scenes_per_part
+    expected_values = {
+        "format": format_type,
+        "topic": topic,
+        "parts_count": parts_count,
+        "scenes_per_part": scenes_per_part,
+        "total_scenes": expected_total,
+        "scene_order": "part_then_scene",
+    }
+    for key, expected in expected_values.items():
+        if plan.get(key) != expected:
+            raise RuntimeError(
+                f"Story plan mismatch for {key}: "
+                f"expected {expected!r}, got {plan.get(key)!r}."
+            )
 
     parts = plan.get("parts")
     if not isinstance(parts, list) or len(parts) != parts_count:
-        raise RuntimeError("Generated plan has an invalid parts list.")
+        raise RuntimeError("Story plan has an incorrect number of parts.")
 
-    expected_global = 0
-
+    global_number = 0
     for part_number, part in enumerate(parts, 1):
-        if not isinstance(part, dict):
-            raise RuntimeError(f"Invalid plan part {part_number}.")
-
-        if int(part.get("part", -1)) != part_number:
-            raise RuntimeError(f"Incorrect part number at part {part_number}.")
+        if not isinstance(part, dict) or part.get("part") != part_number:
+            raise RuntimeError(f"Invalid part numbering at part {part_number}.")
 
         scenes = part.get("scenes")
         if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
@@ -301,28 +279,20 @@ def validate_plan(
             )
 
         for scene_number, scene in enumerate(scenes, 1):
-            expected_global += 1
-
-            if not isinstance(scene, dict):
-                raise RuntimeError("Plan contains an invalid scene.")
-
+            global_number += 1
             expected_id = (
                 f"part_{part_number:02d}_scene_{scene_number:02d}"
             )
-
-            if int(scene.get("scene", -1)) != scene_number:
-                raise RuntimeError(f"Scene numbering mismatch: {expected_id}.")
-
-            if int(scene.get("global_scene_number", -1)) != expected_global:
-                raise RuntimeError(
-                    f"Global scene numbering mismatch: {expected_id}."
-                )
-
+            if not isinstance(scene, dict):
+                raise RuntimeError(f"Invalid scene: {expected_id}.")
+            if scene.get("scene") != scene_number:
+                raise RuntimeError(f"Incorrect local scene number: {expected_id}.")
+            if scene.get("global_scene_number") != global_number:
+                raise RuntimeError(f"Incorrect global scene number: {expected_id}.")
             if scene.get("scene_id") != expected_id:
-                raise RuntimeError(f"Scene ID mismatch: {expected_id}.")
-
+                raise RuntimeError(f"Incorrect scene ID: {expected_id}.")
             if not str(scene.get("purpose", "")).strip():
-                raise RuntimeError(f"Missing purpose for {expected_id}.")
+                raise RuntimeError(f"Missing scene purpose: {expected_id}.")
 
 
 def main() -> None:
@@ -340,45 +310,42 @@ def main() -> None:
         raise RuntimeError("TOPIC and STORY_TEXT are both empty.")
 
     plan = build_plan(
-        config=config,
-        format_type=format_type,
-        topic=topic,
-        story_text=story_text,
-        parts_count=parts_count,
-        scenes_per_part=scenes_per_part,
-    )
-
-    validate_plan(
-        plan,
+        config,
         format_type,
         topic,
+        story_text,
         parts_count,
         scenes_per_part,
+    )
+    validate_plan(
+        plan, format_type, topic, parts_count, scenes_per_part
     )
 
     old_plan = read_json(OUTPUT_FILE)
     if (
         isinstance(old_plan, dict)
         and old_plan.get("source_fingerprint") == plan["source_fingerprint"]
-        and old_plan.get("format") == format_type
-        and old_plan.get("topic", "") == topic
-        and old_plan.get("parts_count") == parts_count
-        and old_plan.get("scenes_per_part") == scenes_per_part
+        and old_plan.get("script_version") == VERSION
     ):
-        log("Matching story plan already exists; preserving its checkpoint.")
-        log("No API request was made.")
-        return
+        try:
+            validate_plan(
+                old_plan, format_type, topic, parts_count, scenes_per_part
+            )
+            log("Matching valid story-plan checkpoint preserved.")
+            log("External API calls: 0")
+            return
+        except (RuntimeError, TypeError, ValueError) as exc:
+            log("Existing plan is invalid; rebuilding:", exc)
 
     write_json(OUTPUT_FILE, plan)
-
     log("STORY PLAN: SUCCESS")
-    log(f"Format: {format_type}")
-    log(f"Topic: {topic or '(story text only)'}")
-    log(f"Parts: {parts_count}")
-    log(f"Scenes per part: {scenes_per_part}")
-    log(f"Total scenes: {parts_count * scenes_per_part}")
-    log(f"Saved: {OUTPUT_FILE}")
-    log("Planning mode: offline; API calls: 0")
+    log("Format:", format_type)
+    log("Topic:", topic or "(story text only)")
+    log("Parts:", parts_count)
+    log("Scenes per part:", scenes_per_part)
+    log("Total scenes:", parts_count * scenes_per_part)
+    log("Output:", OUTPUT_FILE)
+    log("External API calls: 0")
 
 
 if __name__ == "__main__":
@@ -388,5 +355,5 @@ if __name__ == "__main__":
         log("Cancelled.")
         sys.exit(130)
     except Exception as exc:
-        log(f"ERROR: {exc}")
+        log("ERROR:", exc, file=sys.stderr)
         sys.exit(1)
