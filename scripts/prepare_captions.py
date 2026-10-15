@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Prepare language-aware, validated and resumable scene captions."""
 
@@ -27,7 +26,7 @@ NARRATION_FILE = ROOT / "output" / "narration" / "narration.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v6-nested-language-text"
+VERSION = "prepare-captions-v7-consistent-auto-font-size"
 
 SUPPORTED_MODES = {"hindi", "english", "hinglish"}
 
@@ -100,11 +99,14 @@ def read_json(path, required=True):
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    try:
+        temporary.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def normalize_text(value):
@@ -124,10 +126,11 @@ def normalize_mode(config):
 
 
 def resolve_font_size(config, video_format):
+    """Keep auto font size consistent with burn_captions.py."""
     configured = get_caption_font_size(config)
 
     if str(configured).strip().lower() == "auto":
-        size = 46 if video_format == "short" else 32
+        size = 30
     else:
         try:
             size = int(configured)
@@ -165,7 +168,6 @@ def normalize_language(value):
 
 
 def language_keys(mode):
-    """Return supported dictionary keys for one requested language."""
     keys = {
         "hindi": ("hindi", "hi", "hin", "हिंदी"),
         "english": ("english", "en", "eng", "अंग्रेज़ी"),
@@ -175,7 +177,6 @@ def language_keys(mode):
 
 
 def text_from_nested_value(value, preferred_fields):
-    """Extract text from a string or a structured translation entry."""
     if isinstance(value, str):
         return normalize_text(value)
 
@@ -188,16 +189,7 @@ def text_from_nested_value(value, preferred_fields):
 
 
 def find_language_entry(container, mode, preferred_fields):
-    """
-    Read a language-specific value from a dictionary or a list.
-
-    Supported examples:
-      {"hindi": "हिंदी पाठ"}
-      {"hi": {"text": "हिंदी पाठ"}}
-      [{"language": "hindi", "text": "हिंदी पाठ"}]
-    """
     if isinstance(container, dict):
-        # Direct language-key lookup.
         for key in language_keys(mode):
             if key in container:
                 text = text_from_nested_value(
@@ -206,7 +198,6 @@ def find_language_entry(container, mode, preferred_fields):
                 if text:
                     return text, key
 
-        # Some manifests use {"language": "...", "text": "..."}.
         declared = normalize_language(
             container.get(
                 "language",
@@ -240,10 +231,6 @@ def find_language_entry(container, mode, preferred_fields):
 
 
 def nested_caption(row, mode):
-    """
-    Search nested caption/translation containers without using text
-    belonging to a different declared language.
-    """
     containers = (
         ("caption_texts", ("caption", "caption_text", "text", "value")),
         ("translations", ("caption", "caption_text", "text", "value")),
@@ -260,17 +247,15 @@ def nested_caption(row, mode):
 
 
 def choose_caption(row, mode):
-    """Choose existing text only; this script does not translate."""
+    """Select existing caption text; never silently claim translation."""
     translated, field = first_text(row, LANGUAGE_FIELDS[mode])
     if translated:
         return translated, field, "explicit_language_field"
 
-    # Support nested language dictionaries and structured translation lists.
     translated, field = nested_caption(row, mode)
     if translated:
         return translated, field, "nested_language_text"
 
-    # A generic caption is safe only when its language is declared.
     generic, generic_field = first_text(
         row, ("caption_text", "display_caption")
     )
@@ -280,8 +265,6 @@ def choose_caption(row, mode):
     if generic and declared_language == mode:
         return generic, generic_field, "declared_generic_caption"
 
-    # Hindi can use the source narration unless it is labelled as another
-    # language. English and Hinglish must have matching text already present.
     if mode == "hindi":
         source_language = normalize_language(
             row.get("language", row.get("narration_language", ""))
@@ -541,6 +524,7 @@ def main():
     log("Scenes:", expected_count)
     log("Font:", font)
     log("Font size:", font_size)
+    log("Auto font size is aligned with burn_captions.py: 30")
     log("Automatic translation: not performed")
     log("External API calls: 0")
     log("Output:", CAPTION_FILE.relative_to(ROOT))
