@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Resumable scene-wise TTS with strict billing safeguards."""
 
@@ -30,7 +29,7 @@ AUDIO_DIR = OUT / "audio"
 CHUNK_DIR = AUDIO_DIR / "_chunks"
 MANIFEST_FILE = OUT / "audio_jobs.json"
 
-VERSION = "generate-tts-v8-safe-resume"
+VERSION = "generate-tts-v9-directory-fix"
 CHUNK_LIMIT = 2400
 MIN_AUDIO_BYTES = 100
 
@@ -258,7 +257,9 @@ def edge_tts(text, path, config):
         voice = "hi-IN-SwaraNeural"
 
     rate = str(config.get("TTS_EDGE_RATE", config.get("SPEED", "+0%")))
-    temp = Path(path).with_suffix(".edge.tmp.mp3")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.stem + ".edge.tmp.mp3")
 
     try:
         run([
@@ -280,6 +281,8 @@ def piper(text, path, config):
     if not executable or not model or not Path(model).is_file():
         raise RuntimeError("Piper executable or model unavailable")
 
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     command = [
         executable, "--model", model,
         "--output_file", str(path),
@@ -317,7 +320,9 @@ def fish_audio(text, path, config):
             write_bytes(response.read(), path)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Fish Audio HTTP {exc.code}: {detail[:400]}") from exc
+        raise RuntimeError(
+            f"Fish Audio HTTP {exc.code}: {detail[:400]}"
+        ) from exc
 
 
 def gemini_tts(text, path, config):
@@ -362,7 +367,9 @@ def gemini_tts(text, path, config):
             and part.get("inlineData", {}).get("data")
         )
         raw = base64.b64decode(inline["data"], validate=True)
-        mime = str(inline.get("mimeType", "audio/L16;rate=24000")).lower()
+        mime = str(
+            inline.get("mimeType", "audio/L16;rate=24000")
+        ).lower()
     except (
         UnicodeDecodeError, json.JSONDecodeError, KeyError,
         IndexError, StopIteration, TypeError, ValueError,
@@ -406,7 +413,9 @@ def cartesia(text, path, config):
         "transcript": text,
         "voice": {"mode": "id", "id": voice},
         "output_format": {
-            "container": "mp3", "sample_rate": 24000, "encoding": "mp3"
+            "container": "mp3",
+            "sample_rate": 24000,
+            "encoding": "mp3",
         },
     }
     data = post_json(
@@ -456,11 +465,15 @@ def minimax(text, path, config):
         "voice_setting": {
             "voice_id": secret("MINIMAX_TTS_VOICE_ID")
             or "English_expressive_narrator",
-            "speed": 1, "vol": 1, "pitch": 0,
+            "speed": 1,
+            "vol": 1,
+            "pitch": 0,
         },
         "audio_setting": {
-            "sample_rate": 32000, "bitrate": 128000,
-            "format": "mp3", "channel": 1,
+            "sample_rate": 32000,
+            "bitrate": 128000,
+            "format": "mp3",
+            "channel": 1,
         },
         "output_format": "hex",
     }
@@ -475,7 +488,9 @@ def minimax(text, path, config):
         if status != 0:
             raise RuntimeError(f"MiniMax rejected request: {status}")
         decode_audio(data["data"]["audio"], path, "hex")
-    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (
+        UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError
+    ) as exc:
         raise RuntimeError("MiniMax returned invalid audio data") from exc
 
 
@@ -494,14 +509,21 @@ GENERATORS = {
 def normalize_provider(value):
     raw = str(value or "").strip().lower()
     aliases = {
-        "fish": "fish_audio", "fish audio": "fish_audio",
+        "fish": "fish_audio",
+        "fish audio": "fish_audio",
         "fish-audio": "fish_audio",
-        "gemini": "gemini_tts", "gemini tts": "gemini_tts",
-        "edge": "edge_tts", "edge tts": "edge_tts",
-        "piper tts": "piper", "eleven labs": "elevenlabs",
-        "mini max": "minimax", "fine voice": "finevoice",
+        "gemini": "gemini_tts",
+        "gemini tts": "gemini_tts",
+        "edge": "edge_tts",
+        "edge tts": "edge_tts",
+        "piper tts": "piper",
+        "eleven labs": "elevenlabs",
+        "mini max": "minimax",
+        "fine voice": "finevoice",
     }
-    return aliases.get(raw, aliases.get(raw.replace("-", "_"), raw.replace("-", "_")))
+    return aliases.get(
+        raw, aliases.get(raw.replace("-", "_"), raw.replace("-", "_"))
+    )
 
 
 def provider_groups(config):
@@ -511,12 +533,17 @@ def provider_groups(config):
         for i in (1, 2, 3)
     ]
     if len(set(primary)) != 3 or any(p not in PROVIDERS for p in primary):
-        raise RuntimeError("TTS_MAIN_1/2/3 must be different supported providers")
+        raise RuntimeError(
+            "TTS_MAIN_1/2/3 must be different supported providers"
+        )
 
     fallback = []
     if truthy(config.get("TTS_FALLBACK_ENABLED", True)):
         raw = config.get("TTS_FALLBACK_ORDER", ",".join(PROVIDERS))
-        values = raw if isinstance(raw, (list, tuple)) else str(raw).replace(";", ",").split(",")
+        values = (
+            raw if isinstance(raw, (list, tuple))
+            else str(raw).replace(";", ",").split(",")
+        )
         for item in values:
             provider = normalize_provider(item)
             if not provider:
@@ -525,7 +552,9 @@ def provider_groups(config):
                 raise RuntimeError(f"Unsupported fallback provider: {item}")
             if provider not in primary and provider not in fallback:
                 fallback.append(provider)
-        fallback.extend(p for p in PROVIDERS if p not in primary and p not in fallback)
+        fallback.extend(
+            p for p in PROVIDERS if p not in primary and p not in fallback
+        )
 
     return primary, fallback
 
@@ -542,7 +571,10 @@ def split_text(text, limit=CHUNK_LIMIT):
     text = " ".join(str(text).split())
     chunks = []
     while len(text) > limit:
-        positions = [text.rfind(mark, 0, limit) for mark in ("।", "!", "?", ".", " ")]
+        positions = [
+            text.rfind(mark, 0, limit)
+            for mark in ("।", "!", "?", ".", " ")
+        ]
         boundary = max(positions)
         if boundary < limit // 2:
             boundary = limit
@@ -575,7 +607,10 @@ def final_audio_path(part, scene):
 
 
 def chunk_audio_path(part, scene, index):
-    return CHUNK_DIR / f"part_{part:02d}" / f"scene_{scene:02d}" / f"chunk_{index:04d}.mp3"
+    return (
+        CHUNK_DIR / f"part_{part:02d}" / f"scene_{scene:02d}"
+        / f"chunk_{index:04d}.mp3"
+    )
 
 
 def load_checkpoint():
@@ -588,14 +623,22 @@ def load_checkpoint():
     return {"jobs": []}
 
 
-def generate_one_chunk(text, destination, config, primary, fallback, allow_paid):
+def generate_one_chunk(
+    text, destination, config, primary, fallback, allow_paid
+):
     errors = []
     raw = destination.with_suffix(".raw")
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
-    for group, providers in (("primary", primary), ("fallback", fallback)):
+    for group, providers in (
+        ("primary", primary),
+        ("fallback", fallback),
+    ):
         for provider in providers:
             if provider in BILLABLE and not allow_paid:
-                errors.append(f"{provider}: blocked by free-only billing guard")
+                errors.append(
+                    f"{provider}: blocked by free-only billing guard"
+                )
                 continue
 
             raw.unlink(missing_ok=True)
@@ -609,13 +652,17 @@ def generate_one_chunk(text, destination, config, primary, fallback, allow_paid)
             finally:
                 raw.unlink(missing_ok=True)
 
-    raise RuntimeError("No provider succeeded: " + " | ".join(errors[-8:]))
+    raise RuntimeError(
+        "No provider succeeded: " + " | ".join(errors[-8:])
+    )
 
 
 def main():
     config = load_and_validate()
     if not isinstance(config, dict):
-        raise RuntimeError("Input configuration did not return a dictionary")
+        raise RuntimeError(
+            "Input configuration did not return a dictionary"
+        )
 
     parts = int(get_parts(config))
     scenes_per_part = int(get_scenes(config))
@@ -623,7 +670,10 @@ def main():
         raise RuntimeError("PARTS and SCENES must be positive")
 
     narration = read_json(NARRATION_FILE)
-    if not isinstance(narration, dict) or not isinstance(narration.get("scenes"), list):
+    if (
+        not isinstance(narration, dict)
+        or not isinstance(narration.get("scenes"), list)
+    ):
         raise RuntimeError("narration.json must contain a scenes list")
 
     rows = {}
@@ -636,7 +686,9 @@ def main():
         text = str(row.get("narration", row.get("text", ""))).strip()
         if not text:
             raise RuntimeError(f"Narration text is empty for {key}")
-        if str(row.get("status", "completed")).lower() not in {"completed", "complete", "ready"}:
+        if str(row.get("status", "completed")).lower() not in {
+            "completed", "complete", "ready"
+        }:
             raise RuntimeError(f"Narration scene is not completed: {key}")
         rows[key] = {"text": text, "source": row}
 
@@ -678,12 +730,16 @@ def main():
 
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     CHUNK_DIR.mkdir(parents=True, exist_ok=True)
-    jobs = []
 
     for part, scene in sorted(expected):
         text = rows[(part, scene)]["text"]
         text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         destination = final_audio_path(part, scene)
+
+        # FIX: create the destination folder before creating temp/final files.
+        # This prevents scene_01.tmp.mp3 copy failures on fresh runs.
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
         chunks = split_text(text)
         signature = digest({
             "text_sha256": text_hash,
@@ -700,11 +756,11 @@ def main():
             try:
                 duration = audio_info(destination)
                 if previous.get("sha256") == file_digest(destination):
-                    jobs.append({
+                    old_jobs[(part, scene)] = {
                         **previous,
                         "duration": round(duration, 3),
                         "status": "completed",
-                    })
+                    }
                     print(f"RESUME scene {part}/{scene}: cached audio")
                     continue
             except Exception:
@@ -717,16 +773,20 @@ def main():
         for index, chunk in enumerate(chunks, start=1):
             chunk_path = chunk_audio_path(part, scene, index)
             chunk_path.parent.mkdir(parents=True, exist_ok=True)
-            chunk_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()
+            chunk_hash = hashlib.sha256(
+                chunk.encode("utf-8")
+            ).hexdigest()
             chunk_signature = digest({
                 "chunk_sha256": chunk_hash,
                 "settings_sha256": settings_hash,
                 "index": index,
             })
 
+            previous_chunks = previous.get("chunks", [])
             old_chunk = (
-                previous.get("chunks", [])[index - 1]
-                if len(previous.get("chunks", [])) >= index
+                previous_chunks[index - 1]
+                if isinstance(previous_chunks, list)
+                and len(previous_chunks) >= index
                 else {}
             )
 
@@ -744,7 +804,9 @@ def main():
                             "duration": round(duration, 3),
                         })
                         chunk_paths.append(chunk_path)
-                        provider_history.append(old_chunk.get("provider", "unknown"))
+                        provider_history.append(
+                            old_chunk.get("provider", "unknown")
+                        )
                         print(f"RESUME chunk {part}/{scene}/{index}")
                         continue
                 except Exception:
@@ -752,8 +814,10 @@ def main():
 
             temp_chunk = chunk_path.with_suffix(".generating.mp3")
             temp_chunk.unlink(missing_ok=True)
+
             provider, group = generate_one_chunk(
-                chunk, temp_chunk, config, primary, fallback, allow_paid
+                chunk, temp_chunk, config,
+                primary, fallback, allow_paid
             )
             duration = audio_info(temp_chunk)
             os.replace(temp_chunk, chunk_path)
@@ -772,7 +836,7 @@ def main():
             chunk_paths.append(chunk_path)
             provider_history.append(provider)
 
-            # Save the completed chunk immediately so a later failure can resume.
+            # Persist each successful chunk for recovery after later failures.
             partial = {
                 "part": part,
                 "scene": scene,
@@ -787,8 +851,11 @@ def main():
             }
             old_jobs[(part, scene)] = partial
             checkpoint["jobs"] = [
-                old_jobs.get(k, {"part": k[0], "scene": k[1], "status": "pending"})
-                for k in sorted(expected)
+                old_jobs.get(
+                    key,
+                    {"part": key[0], "scene": key[1], "status": "pending"},
+                )
+                for key in sorted(expected)
             ]
             checkpoint.update({
                 "version": VERSION,
@@ -798,21 +865,29 @@ def main():
             save_json(MANIFEST_FILE, checkpoint)
 
         if not chunk_paths:
-            raise RuntimeError(f"No audio chunks created for {part}/{scene}")
+            raise RuntimeError(
+                f"No audio chunks created for {part}/{scene}"
+            )
+
+        # Ensure the parent exists before either copy or ffmpeg concat.
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp_final = destination.with_suffix(".tmp.mp3")
 
         if len(chunk_paths) == 1:
-            temp_final = destination.with_suffix(".tmp.mp3")
-            shutil.copyfile(chunk_paths[0], temp_final)
-            audio_info(temp_final)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(temp_final, destination)
+            try:
+                shutil.copyfile(chunk_paths[0], temp_final)
+                audio_info(temp_final)
+                os.replace(temp_final, destination)
+            finally:
+                temp_final.unlink(missing_ok=True)
         else:
             concat_file = destination.with_suffix(".concat.txt")
-            temp_final = destination.with_suffix(".tmp.mp3")
             try:
                 concat_file.write_text(
                     "".join(
-                        "file '" + p.resolve().as_posix().replace("'", "'\\''") + "'\n"
+                        "file '" + p.resolve().as_posix().replace(
+                            "'", "'\\''"
+                        ) + "'\n"
                         for p in chunk_paths
                     ),
                     encoding="utf-8",
@@ -847,11 +922,13 @@ def main():
             "updated_at": now(),
         }
         old_jobs[(part, scene)] = job
-        jobs.append(job)
 
         checkpoint["jobs"] = [
-            old_jobs.get(k, {"part": k[0], "scene": k[1], "status": "pending"})
-            for k in sorted(expected)
+            old_jobs.get(
+                key,
+                {"part": key[0], "scene": key[1], "status": "pending"},
+            )
+            for key in sorted(expected)
         ]
         checkpoint.update({
             "version": VERSION,
@@ -881,7 +958,10 @@ def main():
 
     print("TTS COMPLETE")
     print("Scenes:", len(final_jobs))
-    print("Billing gate:", "OPEN BY EXPLICIT OPT-IN" if allow_paid else "FREE-ONLY")
+    print(
+        "Billing gate:",
+        "OPEN BY EXPLICIT OPT-IN" if allow_paid else "FREE-ONLY",
+    )
     print("Manifest:", MANIFEST_FILE.relative_to(ROOT))
 
 
