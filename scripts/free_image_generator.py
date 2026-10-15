@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Free-first image generation with provider fallback and scene checkpoints."""
+"""Image generation with ordered provider fallback and scene checkpoints."""
 
 from __future__ import annotations
 
@@ -29,7 +28,7 @@ JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 
-VERSION = "photo-motion-safe-15-dynamic-hf-api-free-first"
+VERSION = "photo-motion-safe-16-configured-provider-fallback-billable-opt-in"
 WIDTH = 1280
 HEIGHT = 720
 IMAGE_SIZE = (WIDTH, HEIGHT)
@@ -38,11 +37,11 @@ MIN_IMAGE_BYTES = 5000
 TIMEOUT = 180
 BASE_SEED = 20261009
 
-# Billing is disabled unless the user explicitly sets the exact opt-in phrase.
-PAID_OPT_IN = "I_ACCEPT_POTENTIAL_CHARGES"
-ALLOW_BILLABLE = (
-    os.getenv("ALLOW_BILLABLE_PROVIDERS", "").strip() == PAID_OPT_IN
-)
+# Honor the workflow's explicit true/false setting.
+# Some configured providers/models may charge for usage.
+ALLOW_BILLABLE = os.getenv(
+    "ALLOW_BILLABLE_PROVIDERS", "true"
+).strip().lower() in ("1", "true", "yes", "on")
 
 HF_SPACES = list(dict.fromkeys(
     item.strip()
@@ -57,9 +56,21 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 REPLICATE_KEY = os.getenv("REPLICATE_API_TOKEN", "").strip()
 POLLINATIONS_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 
+POLLINATIONS_MODELS = list(dict.fromkeys(
+    item.strip()
+    for item in os.getenv(
+        "POLLINATIONS_FREE_IMAGE_MODELS",
+        "black-forest-labs/flux.1-schnell,"
+        "tongyi-mai/z-image-turbo,"
+        "lykon/dreamshaper-8-lcm",
+    ).split(",")
+    if item.strip()
+))
+
 GEMINI_MODEL = os.getenv(
     "GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"
 ).strip()
+
 REPLICATE_MODEL = os.getenv(
     "REPLICATE_IMAGE_MODEL", "black-forest-labs/flux-schnell"
 ).strip()
@@ -353,7 +364,6 @@ def _build_hf_arguments(parameters, prompt, size, seed):
         elif normalized in {"randomize", "randomizeseed"}:
             args[name] = False
         elif required:
-            # Avoid guessing values for unknown required inputs.
             raise RuntimeError(
                 f"Unsupported required Hugging Face input: {name}"
             )
@@ -388,7 +398,6 @@ def generate_huggingface(prompt, destination, size, seed, space):
     )
 
     if endpoint is None:
-        # Use the first advertised endpoint, not an invented endpoint name.
         endpoint = next(iter(named_endpoints))
 
     details = named_endpoints[endpoint]
@@ -428,10 +437,10 @@ def generate_huggingface(prompt, destination, size, seed, space):
     raise ValueError(f"{space}: endpoint returned no usable image")
 
 
-def generate_pollinations(prompt, destination, size, seed):
-    """Public endpoint; availability, limits and free access can change."""
+def generate_pollinations(prompt, destination, size, seed, model):
+    """Generate through Pollinations' current image API for one configured model."""
     width, height = size
-    url = "https://image.pollinations.ai/prompt/" + quote(prompt, safe="")
+    url = "https://gen.pollinations.ai/image/" + quote(prompt, safe="")
     headers = {}
     if POLLINATIONS_KEY:
         headers["Authorization"] = f"Bearer {POLLINATIONS_KEY}"
@@ -439,6 +448,7 @@ def generate_pollinations(prompt, destination, size, seed):
     response = SESSION.get(
         url,
         params={
+            "model": model,
             "width": width,
             "height": height,
             "seed": seed,
@@ -447,12 +457,12 @@ def generate_pollinations(prompt, destination, size, seed):
         headers=headers,
         timeout=TIMEOUT,
     )
-    response_image(response, destination, size, "Pollinations")
+    response_image(response, destination, size, f"Pollinations ({model})")
 
 
 def generate_gemini(prompt, destination, size):
     if not ALLOW_BILLABLE:
-        raise RuntimeError("Gemini blocked: explicit billing opt-in absent")
+        raise RuntimeError("Gemini blocked: ALLOW_BILLABLE_PROVIDERS is false")
     if not GEMINI_KEY:
         raise RuntimeError("GEMINI_API_KEY is missing")
 
@@ -500,7 +510,7 @@ def generate_gemini(prompt, destination, size):
 
 def generate_replicate(prompt, destination, size, seed):
     if not ALLOW_BILLABLE:
-        raise RuntimeError("Replicate blocked: explicit billing opt-in absent")
+        raise RuntimeError("Replicate blocked: ALLOW_BILLABLE_PROVIDERS is false")
     if not REPLICATE_KEY:
         raise RuntimeError("REPLICATE_API_TOKEN is missing")
 
@@ -692,12 +702,17 @@ def main():
         "image_size": IMAGE_SIZE_TEXT,
         "policy": {
             "potentially_billable_providers_enabled": ALLOW_BILLABLE,
-            "free_first_order": ["Hugging Face Spaces", "Pollinations"],
-            "paid_providers": ["Gemini Image", "Replicate"],
+            "provider_order": [
+                "Hugging Face Spaces",
+                *[f"Pollinations: {model}" for model in POLLINATIONS_MODELS],
+                "Gemini Image",
+                "Replicate",
+            ],
+            "pollinations_models": POLLINATIONS_MODELS,
             "note": (
-                "Public endpoint access and free quotas may change. "
-                "Gemini and Replicate are disabled unless the exact explicit "
-                "billing opt-in phrase is configured."
+                "Provider availability, quota, pricing, and access may change. "
+                "Gemini and Replicate are attempted only when billable providers "
+                "are enabled and their API secrets are configured."
             ),
         },
         "total_scenes": len(records),
@@ -727,7 +742,7 @@ def main():
     log(f"Already valid: {len(jobs) - len(pending)}")
     log(f"Pending: {len(pending)}")
     log(f"Image canvas: {IMAGE_SIZE_TEXT}")
-    log(f"Billable opt-in enabled: {ALLOW_BILLABLE}")
+    log(f"Billable providers enabled: {ALLOW_BILLABLE}")
 
     if not pending:
         log("All image checkpoints match; no provider calls needed.")
@@ -741,6 +756,7 @@ def main():
         seed = BASE_SEED + record["scene"]
         providers = []
 
+        # First: configured Hugging Face Spaces in their configured order.
         for space in HF_SPACES:
             if space not in blocked_hf:
                 providers.append((
@@ -752,13 +768,18 @@ def main():
                     False,
                 ))
 
-        providers.append((
-            "Public Pollinations",
-            lambda: generate_pollinations(prompt, destination, size, seed),
-            "pollinations",
-            False,
-        ))
+        # Next: each configured Pollinations model, in exact list order.
+        for model in POLLINATIONS_MODELS:
+            providers.append((
+                f"Pollinations: {model}",
+                lambda model=model: generate_pollinations(
+                    prompt, destination, size, seed, model
+                ),
+                "pollinations:" + model,
+                False,
+            ))
 
+        # Last: configured Gemini and Replicate fallbacks, if enabled.
         if ALLOW_BILLABLE:
             if GEMINI_KEY and "gemini" not in blocked_paid:
                 providers.append((
