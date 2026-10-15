@@ -20,6 +20,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       TOKENIZERS_PARALLELISM: "false"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
@@ -55,155 +56,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Calculate input and code fingerprints
-        id: fingerprints
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s Input/topic.txt
-
-          INPUT_HASH="$(sha256sum Input/topic.txt | awk '{print $1}')"
-
-          {
-            sha256sum Input/topic.txt
-            find scripts -type f -name '*.py' -print0 \
-              | sort -z \
-              | xargs -0 -r sha256sum
-            sha256sum .github/workflows/generate-photo-motion-video.yml
-          } > /tmp/katha-code-files.sha256
-
-          CODE_HASH="$(sha256sum /tmp/katha-code-files.sha256 | awk '{print $1}')"
-
-          echo "input_hash=$INPUT_HASH" >> "$GITHUB_OUTPUT"
-          echo "code_hash=$CODE_HASH" >> "$GITHUB_OUTPUT"
-
-          echo "Input fingerprint: $INPUT_HASH"
-          echo "Code fingerprint: $CODE_HASH"
-
-      - name: Restore compatible checkpoint
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CURRENT_INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
-          CURRENT_CODE_HASH: ${{ steps.fingerprints.outputs.code_hash }}
-        run: |
-          set -euo pipefail
-          mkdir -p output
-          TEMP_DIR="$(mktemp -d)"
-          trap 'rm -rf "$TEMP_DIR"' EXIT
-
-          RUN_IDS="$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow generate-photo-motion-video.yml \
-            --limit 20 \
-            --json databaseId,status \
-            --jq '.[] | select(.status == "completed") | .databaseId' \
-            2>/dev/null || true)"
-
-          for RUN_ID in $RUN_IDS; do
-            DEST="$TEMP_DIR/$RUN_ID"
-            mkdir -p "$DEST"
-
-            if ! gh run download "$RUN_ID" \
-              --repo "$GITHUB_REPOSITORY" \
-              --name "katha-photo-motion-checkpoint-$RUN_ID" \
-              --dir "$DEST" 2>/dev/null; then
-              continue
-            fi
-
-            if [ ! -s "$DEST/checkpoint.zip" ]; then
-              continue
-            fi
-
-            mkdir -p "$DEST/extracted"
-            if ! unzip -q "$DEST/checkpoint.zip" -d "$DEST/extracted"; then
-              continue
-            fi
-
-            SAVED_OUTPUT="$DEST/extracted/output"
-            INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
-            CODE_FILE="$SAVED_OUTPUT/.resume-code.sha256"
-
-            if [ ! -s "$INPUT_FILE" ] || [ ! -s "$CODE_FILE" ]; then
-              echo "Skipping checkpoint without both fingerprints: $RUN_ID"
-              continue
-            fi
-
-            if [ "$(cat "$INPUT_FILE")" != "$CURRENT_INPUT_HASH" ]; then
-              continue
-            fi
-
-            if [ "$(cat "$CODE_FILE")" != "$CURRENT_CODE_HASH" ]; then
-              echo "Skipping checkpoint from another code version: $RUN_ID"
-              continue
-            fi
-
-            cp -a "$SAVED_OUTPUT/." output/
-            echo "Compatible checkpoint restored from run $RUN_ID."
-            exit 0
-          done
-
-          echo "No compatible checkpoint found."
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip downloads
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-photo-motion-py311-${{ hashFiles('.github/workflows/generate-photo-motion-video.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-photo-motion-py311-
-
-      - name: Install FFmpeg and font tools
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            ffmpeg zip unzip fontconfig \
-            fonts-noto-core fonts-noto-extra
-          fc-cache -f
-          ffmpeg -version
-          ffprobe -version
-          fc-match "Noto Sans Devanagari"
-
-      - name: Install Python dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install \
-            requests pillow edge-tts gradio_client \
-            huggingface_hub opencv-python-headless
-          python -m pip install torch \
-            --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install transformers
-
-      - name: Install free Hindi caption fonts
-        run: |
-          set -euo pipefail
-          test -s scripts/install_caption_fonts.py
-          python scripts/install_caption_fonts.py
-          fc-cache -f
-          fc-match "Noto Sans Devanagari"
-          fc-match "Mukta"
-          fc-match "Hind"
-          fc-match "Tiro Devanagari Hindi"
-
-      - name: Create Hindi font and size preview
-        run: |
-          set -euo pipefail
-          test -s scripts/preview_caption_fonts.py
-          python scripts/preview_caption_fonts.py
-          test -s output/captions/caption_font_preview.png
-          test -s output/captions/caption_font_preview.json
-
       - name: Check input and required scripts
+        shell: bash
         run: |
           set -euo pipefail
-          test -s Input/topic.txt
+
+          test -s Input/topic.txt || {
+            echo "::error::Input/topic.txt is missing or empty."
+            exit 1
+          }
 
           for file in \
             scripts/input_config.py \
@@ -231,10 +92,10 @@ jobs:
             scripts/validate_final_output.py \
             scripts/package_output.py
           do
-            test -s "$file" || {
-              echo "Missing required script: $file"
+            if [ ! -s "$file" ]; then
+              echo "::error::Required script is missing or empty: $file"
               exit 1
-            }
+            fi
           done
 
           python - <<'PY'
@@ -244,10 +105,175 @@ jobs:
           print_config_summary(config)
           PY
 
+      - name: Calculate input and code fingerprints
+        id: fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT_HASH="$(sha256sum Input/topic.txt | awk '{print $1}')"
+
+          {
+            sha256sum Input/topic.txt
+            find scripts -type f -name '*.py' -print0 \
+              | sort -z \
+              | xargs -0 -r sha256sum
+            sha256sum .github/workflows/generate-photo-motion-video.yml
+          } > /tmp/katha-code-files.sha256
+
+          CODE_HASH="$(sha256sum /tmp/katha-code-files.sha256 | awk '{print $1}')"
+
+          echo "input_hash=$INPUT_HASH" >> "$GITHUB_OUTPUT"
+          echo "code_hash=$CODE_HASH" >> "$GITHUB_OUTPUT"
+
+          echo "Input fingerprint: $INPUT_HASH"
+          echo "Code fingerprint: $CODE_HASH"
+
+      - name: Restore compatible checkpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
+          CURRENT_CODE_HASH: ${{ steps.fingerprints.outputs.code_hash }}
+        run: |
+          set -euo pipefail
+          mkdir -p output
+
+          TEMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          RUN_IDS="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow generate-photo-motion-video.yml \
+            --limit 20 \
+            --json databaseId,status \
+            --jq '.[] | select(.status == "completed") | .databaseId' \
+            2>/dev/null || true)"
+
+          for RUN_ID in $RUN_IDS; do
+            DEST="$TEMP_DIR/$RUN_ID"
+            mkdir -p "$DEST"
+
+            if ! gh run download "$RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "katha-photo-motion-checkpoint-$RUN_ID" \
+              --dir "$DEST" 2>/dev/null; then
+              continue
+            fi
+
+            CHECKPOINT="$DEST/checkpoint.zip"
+            if [ ! -s "$CHECKPOINT" ]; then
+              continue
+            fi
+
+            if ! unzip -tq "$CHECKPOINT" >/dev/null 2>&1; then
+              echo "Skipping corrupt checkpoint from run $RUN_ID."
+              continue
+            fi
+
+            if ! unzip -Z1 "$CHECKPOINT" > "$DEST/entries.txt"; then
+              continue
+            fi
+
+            if grep -Eq '(^/|(^|/)\.\.(/|$)|^[A-Za-z]:)' "$DEST/entries.txt"; then
+              echo "Skipping checkpoint with unsafe archive paths: $RUN_ID"
+              continue
+            fi
+
+            mkdir -p "$DEST/extracted"
+            if ! unzip -q "$CHECKPOINT" -d "$DEST/extracted"; then
+              continue
+            fi
+
+            SAVED_OUTPUT="$DEST/extracted/output"
+            INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
+            CODE_FILE="$SAVED_OUTPUT/.resume-code.sha256"
+
+            if [ ! -s "$INPUT_FILE" ] || [ ! -s "$CODE_FILE" ]; then
+              echo "Skipping checkpoint without fingerprints: $RUN_ID"
+              continue
+            fi
+
+            SAVED_INPUT_HASH="$(tr -d '\r\n' < "$INPUT_FILE")"
+            SAVED_CODE_HASH="$(tr -d '\r\n' < "$CODE_FILE")"
+
+            if [ "$SAVED_INPUT_HASH" != "$CURRENT_INPUT_HASH" ]; then
+              continue
+            fi
+
+            if [ "$SAVED_CODE_HASH" != "$CURRENT_CODE_HASH" ]; then
+              echo "Skipping checkpoint from a different code version: $RUN_ID"
+              continue
+            fi
+
+            cp -a "$SAVED_OUTPUT/." output/
+            echo "Compatible checkpoint restored from run $RUN_ID."
+            exit 0
+          done
+
+          echo "No compatible checkpoint found; starting without a restored checkpoint."
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-photo-motion-py311-${{ hashFiles('.github/workflows/generate-photo-motion-video.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-photo-motion-py311-
+
+      - name: Install FFmpeg and font tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg zip unzip fontconfig \
+            fonts-noto-core fonts-noto-extra
+          fc-cache -f
+          ffmpeg -version
+          ffprobe -version
+          fc-match "Noto Sans Devanagari"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install \
+            requests pillow edge-tts gradio_client \
+            huggingface_hub opencv-python-headless
+          python -m pip install torch \
+            --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install transformers
+
+      - name: Install free Hindi caption fonts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/install_caption_fonts.py
+          fc-cache -f
+          fc-match "Noto Sans Devanagari"
+          fc-match "Mukta"
+          fc-match "Hind"
+          fc-match "Tiro Devanagari Hindi"
+
+      - name: Create Hindi font and size preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/preview_caption_fonts.py
+          test -s output/captions/caption_font_preview.png
+          test -s output/captions/caption_font_preview.json
+
       - name: Select Gemini model
         run: python scripts/select_gemini_model.py
 
-      # Create the offline scene plan before generating the story.
       - name: Generate story plan
         run: python scripts/generate_story_plan.py
 
@@ -255,6 +281,7 @@ jobs:
         run: python scripts/generate_story.py
 
       - name: Verify completed story exists
+        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -277,6 +304,17 @@ jobs:
 
           if not isinstance(story.get("parts"), list) or not story["parts"]:
               raise SystemExit("Completed story has no parts.")
+
+          for index, part in enumerate(story["parts"], 1):
+              if not isinstance(part, dict):
+                  raise SystemExit(f"Story part {index} is not an object.")
+              if not any(
+                  isinstance(part.get(key), str) and part[key].strip()
+                  for key in ("text", "story", "content", "narration")
+              ):
+                  raise SystemExit(
+                      f"Story part {index} has no usable text field."
+                  )
 
           print("Completed story verified.")
           PY
@@ -411,6 +449,7 @@ jobs:
         run: python scripts/validate_final_output.py
 
       - name: Package and verify final output ZIP
+        shell: bash
         run: |
           set -euo pipefail
           python scripts/package_output.py
@@ -445,6 +484,7 @@ jobs:
           rm -f checkpoint.zip
           zip -qr checkpoint.zip output
           test -s checkpoint.zip
+          unzip -tq checkpoint.zip
 
       - name: Upload checkpoint
         if: always()
