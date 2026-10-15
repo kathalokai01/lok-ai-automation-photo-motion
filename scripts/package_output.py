@@ -19,7 +19,7 @@ ARCHIVE = ROOT / "katha-lok-ai-photo-motion-output.zip"
 REPORT = OUTPUT / "package_manifest.json"
 VALIDATION_REPORT = OUTPUT / "validation_report.json"
 
-VERSION = "output-packager-v5-validation-gate"
+VERSION = "output-packager-v6-youtube-16x9"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from input_config import load_and_validate, get_format, get_parts, get_scenes
@@ -27,6 +27,8 @@ from input_config import load_and_validate, get_format, get_parts, get_scenes
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 10
+EXPECTED_VIDEO_SIZE = (1280, 720)
+EXPECTED_THUMBNAIL_SIZE = (1280, 720)
 
 
 def log(*values):
@@ -87,10 +89,12 @@ def media_info(path):
 
     result = subprocess.run(
         [
-            ffprobe, "-v", "error",
+            ffprobe,
+            "-v", "error",
             "-show_entries",
             "format=duration:stream=codec_type,width,height",
-            "-of", "json", str(path),
+            "-of", "json",
+            str(path),
         ],
         capture_output=True,
         text=True,
@@ -114,10 +118,12 @@ def media_info(path):
 
     streams = data.get("streams", [])
     video = next(
-        (s for s in streams if s.get("codec_type") == "video"), None
+        (stream for stream in streams if stream.get("codec_type") == "video"),
+        None,
     )
     audio = next(
-        (s for s in streams if s.get("codec_type") == "audio"), None
+        (stream for stream in streams if stream.get("codec_type") == "audio"),
+        None,
     )
 
     return {
@@ -138,11 +144,11 @@ def require_av(path, label, mode=None):
         raise RuntimeError(f"{label}: audio stream missing")
 
     if mode:
-        expected = (720, 1280) if mode == "short" else (1280, 720)
         actual = (info["width"], info["height"])
-        if actual != expected:
+        if actual != EXPECTED_VIDEO_SIZE:
             raise RuntimeError(
-                f"{label}: expected {expected[0]}x{expected[1]}, "
+                f"{label}: expected "
+                f"{EXPECTED_VIDEO_SIZE[0]}x{EXPECTED_VIDEO_SIZE[1]}, "
                 f"got {actual[0]}x{actual[1]}"
             )
 
@@ -205,9 +211,9 @@ def validate_render(mode, parts, scenes):
     expected_count = parts * scenes
 
     if not isinstance(rows, list) or len(rows) != expected_count:
+        count = len(rows) if isinstance(rows, list) else 0
         raise RuntimeError(
-            f"Expected {expected_count} rendered scenes; "
-            f"found {len(rows) if isinstance(rows, list) else 0}"
+            f"Expected {expected_count} rendered scenes; found {count}"
         )
 
     if int(data.get("completed_count", -1)) != expected_count:
@@ -227,7 +233,9 @@ def validate_render(mode, parts, scenes):
             scene = int(row.get("local_scene", row.get("scene", 0)))
             global_scene = int(row.get("global_scene", index))
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid scene mapping at row {index}") from exc
+            raise RuntimeError(
+                f"Invalid scene mapping at row {index}"
+            ) from exc
 
         if (part, scene, global_scene) != (
             expected_part, expected_scene, index
@@ -237,7 +245,9 @@ def validate_render(mode, parts, scenes):
         if row.get("status") != "completed":
             raise RuntimeError(f"Scene {index} is incomplete")
         if row.get("captions_burned") is not True:
-            raise RuntimeError(f"Scene {index} captions are not confirmed")
+            raise RuntimeError(
+                f"Scene {index} captions are not confirmed"
+            )
 
         path = safe_output_file(row.get("video"), f"Scene {index}")
         require_av(path, f"Scene {index}", mode)
@@ -248,15 +258,24 @@ def validate_render(mode, parts, scenes):
         raise RuntimeError(f"Expected {parts} part videos")
 
     part_files = []
+
     for index, value in enumerate(part_rows, start=1):
-        path_value = value.get("path") or value.get("video") or value.get("output") \
-            if isinstance(value, dict) else value
+        if isinstance(value, dict):
+            path_value = (
+                value.get("path")
+                or value.get("video")
+                or value.get("output")
+            )
+        else:
+            path_value = value
+
         path = safe_output_file(path_value, f"Part video {index}")
         require_av(path, f"Part video {index}", mode)
         part_files.append(path)
 
     final_video = safe_output_file(data.get("final_video"), "Final video")
     alias = safe_output_file(data.get("alias"), "Format-specific video")
+
     final_info = require_av(final_video, "Final video", mode)
     alias_info = require_av(alias, "Format-specific video", mode)
 
@@ -285,7 +304,9 @@ def validate_render(mode, parts, scenes):
 
 def validate_thumbnail(mode):
     path = require_file(
-        OUTPUT / "thumbnail.jpg", "Thumbnail", MIN_IMAGE_BYTES
+        OUTPUT / "thumbnail.jpg",
+        "Thumbnail",
+        MIN_IMAGE_BYTES,
     )
 
     try:
@@ -293,17 +314,20 @@ def validate_thumbnail(mode):
 
         with Image.open(path) as image:
             image.verify()
+
         with Image.open(path) as image:
             actual = image.size
             image_format = image.format
+
     except Exception as exc:
         raise RuntimeError(f"Thumbnail is invalid: {exc}") from exc
 
-    expected = (1080, 1920) if mode == "short" else (1280, 720)
-    if actual != expected:
+    if actual != EXPECTED_THUMBNAIL_SIZE:
         raise RuntimeError(
-            f"Thumbnail dimensions mismatch: expected {expected}, got {actual}"
+            f"Thumbnail dimensions mismatch: expected "
+            f"{EXPECTED_THUMBNAIL_SIZE}, got {actual}"
         )
+
     if image_format != "JPEG":
         raise RuntimeError(f"Expected JPEG thumbnail, got {image_format}")
 
@@ -316,8 +340,8 @@ def validate_metadata():
         "YouTube metadata",
         MIN_TEXT_BYTES,
     )
-    content = path.read_text(encoding="utf-8-sig").strip()
 
+    content = path.read_text(encoding="utf-8-sig").strip()
     if len(content) < MIN_TEXT_BYTES:
         raise RuntimeError("YouTube metadata is empty")
 
@@ -349,10 +373,13 @@ def validate_sound_design(parts, scenes):
         raise RuntimeError("SFX timing report does not show valid status")
 
     expected_count = parts * scenes
+
     if int(timing.get("expected_scenes", -1)) != expected_count:
         raise RuntimeError("SFX expected scene count mismatch")
     if int(timing.get("narration_scenes_checked", -1)) != expected_count:
-        raise RuntimeError("SFX report did not check every narration scene")
+        raise RuntimeError(
+            "SFX report did not check every narration scene"
+        )
 
     cue_rows = cues.get("cues", cues.get("items", []))
     if not isinstance(cue_rows, list):
@@ -363,14 +390,20 @@ def validate_sound_design(parts, scenes):
             raise RuntimeError(f"Invalid SFX cue {index}")
 
         path_value = (
-            cue.get("file") or cue.get("path")
-            or cue.get("audio") or cue.get("output")
+            cue.get("file")
+            or cue.get("path")
+            or cue.get("audio")
+            or cue.get("output")
         )
+
         path = safe_output_file(
-            path_value, f"SFX cue {index}", minimum_bytes=100
+            path_value,
+            f"SFX cue {index}",
+            minimum_bytes=100,
         )
-        require_audio = media_info(path)
-        if not require_audio["has_audio"]:
+
+        info = media_info(path)
+        if not info["has_audio"]:
             raise RuntimeError(f"SFX cue {index} has no audio stream")
 
     tracks = sound.get("tracks", {})
@@ -381,21 +414,30 @@ def validate_sound_design(parts, scenes):
 
     for name in ("music", "ambient", "sfx"):
         track = tracks.get(name)
+
         if not bool(enabled.get(name, track is not None)):
             continue
 
         if not isinstance(track, dict) or track.get("status") != "completed":
             raise RuntimeError(f"Enabled sound track is incomplete: {name}")
 
-        value = track.get("path") or track.get("file") or track.get("output")
+        value = (
+            track.get("path")
+            or track.get("file")
+            or track.get("output")
+        )
+
         path = safe_output_file(value, f"Sound track {name}", 100)
         info = media_info(path)
+
         if not info["has_audio"]:
             raise RuntimeError(f"Sound track has no audio stream: {name}")
 
     return {
         "cue_count": len(cue_rows),
-        "timing_report": "output/sound_design/sfx_timing_validation.json",
+        "timing_report": (
+            "output/sound_design/sfx_timing_validation.json"
+        ),
     }
 
 
@@ -415,12 +457,16 @@ def archive_files():
             continue
 
         resolved = path.resolve()
+
         if not resolved.is_relative_to(OUTPUT.resolve()):
             raise RuntimeError(f"Refusing path outside output/: {path}")
 
         files.append(path)
 
-    return sorted(files, key=lambda p: p.relative_to(OUTPUT).as_posix())
+    return sorted(
+        files,
+        key=lambda path: path.relative_to(OUTPUT).as_posix(),
+    )
 
 
 def build_archive(files):
@@ -439,6 +485,7 @@ def build_archive(files):
             for path in files:
                 name = f"output/{path.relative_to(OUTPUT).as_posix()}"
                 archive.write(path, arcname=name)
+
                 entries.append({
                     "path": name,
                     "bytes": path.stat().st_size,
@@ -451,6 +498,7 @@ def build_archive(files):
                 raise RuntimeError(f"ZIP integrity check failed: {bad}")
 
             names = archive.namelist()
+
             if len(names) != len(set(names)):
                 raise RuntimeError("Duplicate ZIP entries detected")
 
@@ -459,12 +507,15 @@ def build_archive(files):
 
             for row in entries:
                 content = archive.read(row["path"])
+
                 if len(content) != row["bytes"]:
                     raise RuntimeError(f"ZIP size mismatch: {row['path']}")
+
                 if hashlib.sha256(content).hexdigest() != row["sha256"]:
                     raise RuntimeError(f"ZIP hash mismatch: {row['path']}")
 
         os.replace(temporary, ARCHIVE)
+
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -481,6 +532,7 @@ def atomic_json(path, data):
             encoding="utf-8",
         )
         os.replace(temporary, path)
+
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -502,8 +554,11 @@ def main():
         raise RuntimeError("output/ directory does not exist")
 
     log("PACKAGING AUDIT:", VERSION)
+    log("FORMAT:", mode)
+    log("EXPECTED VIDEO SIZE:", "1280x720")
+    log("EXPECTED THUMBNAIL SIZE:", "1280x720")
 
-    # Hard gate: a missing or stale failed validation report blocks packaging.
+    # Fail closed: no package is produced from a missing or failed report.
     validation = require_validation(mode, parts, scenes)
 
     render = validate_render(mode, parts, scenes)
@@ -516,6 +571,7 @@ def main():
         "Final captions SRT",
         MIN_TEXT_BYTES,
     )
+
     if "-->" not in captions.read_text(encoding="utf-8-sig"):
         raise RuntimeError("Final SRT contains no timing cues")
 
@@ -523,7 +579,8 @@ def main():
     if not files:
         raise RuntimeError("No output files available to package")
 
-    included = {p.resolve() for p in files}
+    included = {path.resolve() for path in files}
+
     essential = [
         render["final_video"],
         render["alias"],
@@ -547,6 +604,8 @@ def main():
         "parts": parts,
         "scenes_per_part": scenes,
         "scene_count": parts * scenes,
+        "video_dimensions": list(EXPECTED_VIDEO_SIZE),
+        "thumbnail_dimensions": list(EXPECTED_THUMBNAIL_SIZE),
         "validation_report": {
             "path": "output/validation_report.json",
             "status": validation["status"],
@@ -567,16 +626,16 @@ def main():
         "sound_design": sound,
         "notes": [
             "Packaging is blocked unless final validation has passed.",
-            "Thumbnail dimensions and final video audio/video streams are checked.",
+            "Short and Full outputs use 1280x720 video and thumbnail dimensions.",
+            "Final videos must contain both video and audio streams.",
             "Every archived file has a verified size and SHA-256.",
-            "The package manifest is kept outside the ZIP to avoid a circular hash.",
+            "The package manifest stays outside the ZIP to avoid a circular hash.",
         ],
     }
 
     atomic_json(REPORT, report)
 
     log("PACKAGING COMPLETE")
-    log("FORMAT:", mode)
     log("SCENES:", parts * scenes)
     log("FILES:", len(entries))
     log("ZIP:", ARCHIVE.name)
