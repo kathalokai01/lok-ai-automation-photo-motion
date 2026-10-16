@@ -1,5 +1,8 @@
+
 #!/usr/bin/env python3
-"""Offline story builder with topic fallback, validation and resumability."""
+"""Offline story builder with story-derived titles, natural scene splitting,
+continuity-safe hooks, suspense, validation, and resumable checkpoints.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ OUTPUT_FILE = STORY_DIR / "story.json"
 TITLE_FILE = STORY_DIR / "final_title.txt"
 FINGERPRINT_FILE = STORY_DIR / "story.fingerprint"
 
-VERSION = "offline-story-builder-v3"
+VERSION = "offline-story-builder-v4-story-aware"
 
 
 def log(*items):
@@ -34,7 +37,8 @@ def log(*items):
 
 def read_json(path):
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -72,14 +76,14 @@ def word_count(value):
 
 
 def clean_title(value):
-    value = clean(value).strip("'\"")
+    value = clean(value).strip("'\"“”‘’")
     value = re.sub(
         r"^(title|शीर्षक)\s*:\s*",
         "",
         value,
         flags=re.IGNORECASE,
     )
-    return clean(value)
+    return clean(value).strip(" .!?:;—-")
 
 
 def as_int(value, label):
@@ -93,12 +97,73 @@ def bool_value(config, key, default=True):
     value = config.get(key, default)
     if isinstance(value, bool):
         return value
-    value = str(value).strip().lower()
-    if value in {"true", "yes", "on", "1", "enabled"}:
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "yes", "on", "1", "enabled"}:
         return True
-    if value in {"false", "no", "off", "0", "disabled", ""}:
+    if normalized in {"false", "no", "off", "0", "disabled", ""}:
         return False
     return default
+
+
+def sentences(text):
+    text = re.sub(r"\r\n?", "\n", str(text or "")).strip()
+    result = []
+    for block in re.split(r"\n+", text):
+        for item in re.split(r"(?<=[।.!?])\s+", block.strip()):
+            item = clean(item)
+            if item:
+                result.append(item)
+    return result
+
+
+def derive_title(topic, story_text):
+    """Prefer explicit topic; otherwise derive a compact title from story."""
+    explicit = clean_title(topic)
+    if explicit:
+        return explicit[:100]
+
+    units = sentences(story_text)
+    if not units:
+        return ""
+
+    # Avoid using the first line blindly. Prefer a sentence that contains
+    # a distinctive plot clue, reversal, mystery, or decisive event.
+    markers = (
+        "रहस्य", "सच", "गायब", "लापता", "अचानक", "लेकिन", "मगर",
+        "खुलासा", "राज", "धोखा", "आखिरी", "आखिर", "क्यों",
+        "कैसे", "मौत", "चिट्ठी", "सबूत", "दरवाजा", "आवाज",
+        "secret", "mystery", "missing", "suddenly", "truth",
+        "betrayal", "letter", "disappeared", "revealed",
+    )
+
+    def score(sentence):
+        lowered = sentence.casefold()
+        marker_score = sum(2 for marker in markers if marker in lowered)
+        length_score = min(len(sentence), 150) / 50
+        return marker_score + length_score
+
+    candidates = sorted(
+        enumerate(units),
+        key=lambda pair: (score(pair[1]), -pair[0]),
+        reverse=True,
+    )
+    chosen = candidates[0][1]
+    chosen = re.sub(
+        r"^(और|लेकिन|मगर|फिर|तभी|क्योंकि|इसलिए)\s+",
+        "",
+        chosen,
+        flags=re.IGNORECASE,
+    )
+    chosen = clean_title(chosen)
+
+    # Titles should be compact, not a full plot summary.
+    words = chosen.split()
+    if len(words) > 9:
+        chosen = " ".join(words[:9]).rstrip(" ,;:-") + "…"
+    if len(chosen) > 90:
+        chosen = chosen[:87].rsplit(" ", 1)[0] + "…"
+
+    return chosen or "Katha Lok AI कहानी"
 
 
 def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
@@ -116,13 +181,13 @@ def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
         raise RuntimeError("Story plan topic differs from current input.")
 
     expected_total = parts_count * scenes_per_part
-    expected = (parts_count, scenes_per_part, expected_total)
-
     actual = (
         as_int(plan.get("parts_count"), "plan.parts_count"),
         as_int(plan.get("scenes_per_part"), "plan.scenes_per_part"),
         as_int(plan.get("total_scenes"), "plan.total_scenes"),
     )
+    expected = (parts_count, scenes_per_part, expected_total)
+
     if actual != expected:
         raise RuntimeError(
             f"Story plan counts {actual} do not match input {expected}. "
@@ -140,13 +205,16 @@ def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
         if as_int(part.get("part"), f"plan part {p}.part") != p:
             raise RuntimeError(f"Plan part numbering error at part {p}.")
 
-        scenes = part.get("scenes")
-        if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
+        scene_rows = part.get("scenes")
+        if (
+            not isinstance(scene_rows, list)
+            or len(scene_rows) != scenes_per_part
+        ):
             raise RuntimeError(
                 f"Plan part {p} must have {scenes_per_part} scenes."
             )
 
-        for s, scene in enumerate(scenes, 1):
+        for s, scene in enumerate(scene_rows, 1):
             global_number += 1
             if not isinstance(scene, dict):
                 raise RuntimeError(f"Invalid plan scene {p}:{s}.")
@@ -155,69 +223,91 @@ def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
             if clean(scene.get("scene_id")) != expected_id:
                 raise RuntimeError(f"Plan scene ID mismatch: {expected_id}.")
             if as_int(scene.get("scene"), expected_id + ".scene") != s:
-                raise RuntimeError(f"Plan scene number mismatch: {expected_id}.")
+                raise RuntimeError(
+                    f"Plan scene number mismatch: {expected_id}."
+                )
             if as_int(
                 scene.get("global_scene_number"),
                 expected_id + ".global_scene_number",
             ) != global_number:
-                raise RuntimeError(f"Plan global number mismatch: {expected_id}.")
+                raise RuntimeError(
+                    f"Plan global number mismatch: {expected_id}."
+                )
 
     return plan
 
 
-def make_hook(format_type):
-    if format_type == "short":
-        return "उस रात जो हुआ, उसकी किसी ने कल्पना तक नहीं की थी।"
-    return (
-        "उस रात सामने आने वाला रहस्य हर जिंदगी और हर रिश्ते को "
-        "हमेशा के लिए बदल देने वाला था।"
-    )
-
-
 def split_text(text, count):
-    """Distribute supplied text in order without external API calls."""
-    text = re.sub(r"\r\n?", "\n", str(text or "")).strip()
-    units = [
-        clean(x)
-        for x in re.split(r"(?<=[।.!?])\s+|\n+", text)
-        if clean(x)
-    ]
+    """Keep sentence boundaries where possible; never reorder the source."""
+    units = sentences(text)
     if not units:
-        return [""] * count
+        raise RuntimeError("STORY_TEXT contains no usable sentences.")
 
-    if len(units) >= count:
-        return [
-            " ".join(
-                units[
-                    round(i * len(units) / count):
-                    round((i + 1) * len(units) / count)
-                ]
-            ).strip()
-            for i in range(count)
-        ]
+    if len(units) < count:
+        total_words = word_count(" ".join(units))
+        if total_words < count:
+            raise RuntimeError(
+                f"STORY_TEXT has only {total_words} words for {count} scenes. "
+                "Provide more story text or reduce SCENES/PARTS."
+            )
 
-    words = re.findall(r"\S+", " ".join(units))
-    if len(words) >= count:
-        return [
-            " ".join(
-                words[
-                    round(i * len(words) / count):
-                    round((i + 1) * len(words) / count)
-                ]
-            ).strip()
-            for i in range(count)
-        ]
+        # If there are fewer sentences than scenes, split at word boundaries.
+        words = " ".join(units).split()
+        result = []
+        for index in range(count):
+            start = round(index * len(words) / count)
+            end = round((index + 1) * len(words) / count)
+            result.append(" ".join(words[start:end]).strip())
+        return result
 
-    # Do not silently invent plot details from insufficient supplied prose.
-    raise RuntimeError(
-        f"STORY_TEXT has only {len(words)} words for {count} scenes. "
-        "Provide more story text, or leave STORY_TEXT empty to use the "
-        "explicitly labelled offline topic-story template."
-    )
+    # Greedy contiguous sentence grouping, balanced by word count.
+    total_words = sum(word_count(item) for item in units)
+    result = []
+    cursor = 0
+
+    for group_index in range(count):
+        remaining_groups = count - group_index
+        remaining_units = len(units) - cursor
+
+        if remaining_groups == 1:
+            result.append(" ".join(units[cursor:]).strip())
+            break
+
+        target = sum(word_count(x) for x in units[cursor:]) / remaining_groups
+        group = []
+        group_words = 0
+        max_take = remaining_units - (remaining_groups - 1)
+
+        while cursor < len(units) and len(group) < max_take:
+            candidate = units[cursor]
+            candidate_words = word_count(candidate)
+
+            if group and abs(group_words - target) <= abs(
+                group_words + candidate_words - target
+            ):
+                break
+
+            group.append(candidate)
+            group_words += candidate_words
+            cursor += 1
+
+            if group_words >= target:
+                break
+
+        if not group and cursor < len(units):
+            group.append(units[cursor])
+            cursor += 1
+
+        result.append(" ".join(group).strip())
+
+    if len(result) != count or any(not item for item in result):
+        raise RuntimeError("Could not split story into the required scenes.")
+
+    return result
 
 
 def topic_story_beats(topic, count):
-    """Create a transparent generic story skeleton from a topic, offline."""
+    """Transparent offline outline; this is not falsely labelled AI-written."""
     subject = clean(topic)
     if not subject:
         raise RuntimeError("TOPIC is empty; cannot create a topic story.")
@@ -225,39 +315,106 @@ def topic_story_beats(topic, count):
     beats = [
         f"{subject} से जुड़ी एक असामान्य घटना ने सबका ध्यान खींचा।",
         f"शुरुआत में किसी को समझ नहीं आया कि {subject} के पीछे क्या कारण था।",
-        "मुख्य पात्र ने घटनाओं को ध्यान से देखना और सवाल पूछना शुरू किया।",
-        "पहला सुराग मिला, लेकिन उससे स्थिति और उलझ गई।",
-        "कुछ लोगों ने चेतावनी दी कि इस मामले में आगे बढ़ना ठीक नहीं होगा।",
-        "फिर एक ऐसी जानकारी सामने आई जिसने पुरानी धारणा बदल दी।",
-        "मुख्य पात्र ने जोखिम उठाकर सच्चाई तक पहुँचने का फैसला किया।",
-        "रास्ते में एक भरोसेमंद साथी की मदद मिली, पर भरोसे की परीक्षा भी हुई।",
+        "मुख्य पात्र ने घटनाओं को ध्यान से देखा और पहला सवाल पूछा।",
+        "पहला सुराग मिला, लेकिन उससे मामला और उलझ गया।",
+        "एक चेतावनी ने मुख्य पात्र को आगे बढ़ने से रोकने की कोशिश की।",
+        "नई जानकारी ने पहले से बनी धारणा को बदल दिया।",
+        "मुख्य पात्र ने जोखिम उठाकर सच्चाई खोजने का फैसला किया।",
+        "एक भरोसेमंद साथी की मदद मिली, पर भरोसे की परीक्षा भी हुई।",
         "दूसरा सुराग पहले सुराग से मेल नहीं खाता था।",
-        "जाँच के दौरान एक छिपा हुआ संबंध सामने आया।",
-        "अब समय कम था और गलत फैसला सब कुछ बिगाड़ सकता था।",
-        "मुख्य पात्र ने तथ्यों को जोड़कर एक नई संभावना पहचानी।",
+        "जाँच में एक छिपा हुआ संबंध सामने आया।",
+        "समय कम था और गलत फैसला सब कुछ बिगाड़ सकता था।",
+        "मुख्य पात्र ने संकेतों को जोड़कर नई संभावना पहचानी।",
         "सबसे अहम सबूत ठीक उसी समय गायब हो गया।",
         "एक अप्रत्याशित व्यक्ति ने घटना के बारे में नई बात बताई।",
-        "उस बयान की पुष्टि करने पर कहानी का रुख बदल गया।",
+        "उस बयान की जाँच से कहानी का रुख बदल गया।",
         "मुख्य पात्र को तय करना था कि किस पर भरोसा किया जाए।",
-        "एक अंतिम कोशिश ने छिपे हुए सच तक पहुँचने का रास्ता खोला।",
-        "सामना होने पर विरोधी पक्ष की बातों में बड़ा विरोधाभास मिला।",
-        "अब तक के संकेत एक ही निष्कर्ष की ओर इशारा कर रहे थे।",
+        "एक अंतिम कोशिश ने सच्चाई तक पहुँचने का रास्ता खोला।",
+        "सामने आने पर विरोधी पक्ष की बातों में विरोधाभास मिला।",
+        "सभी संकेत एक ही निष्कर्ष की ओर इशारा कर रहे थे।",
         "आखिरी खुलासे ने घटना का असली कारण स्पष्ट कर दिया।",
     ]
 
-    if count <= len(beats):
-        return beats[:count]
-
-    # Expand the outline transparently, not by repeating the same scene.
-    result = list(beats)
+    result = list(beats[:count])
     while len(result) < count:
-        n = len(result) + 1
+        number = len(result) + 1
         result.append(
             f"{subject} की जाँच में अगला चरण सामने आया। "
-            f"पात्र ने उपलब्ध संकेतों की दोबारा पड़ताल की और "
-            f"चरण {n} में अपनी योजना को नए सबूतों के अनुसार बदला।"
+            f"मुख्य पात्र ने उपलब्ध संकेतों की पड़ताल की और "
+            f"चरण {number} में अपनी योजना बदली।"
         )
     return result
+
+
+def story_hook(topic, story_text, first_chunk, format_type):
+    """Build an opening line using the supplied story/topic when available."""
+    source = clean(story_text)
+    units = sentences(source)
+
+    if source and units:
+        markers = (
+            "रहस्य", "गायब", "लापता", "अचानक", "लेकिन", "मगर",
+            "सच", "राज", "खुलासा", "क्यों", "कैसे", "सबूत",
+            "मौत", "आवाज", "चिट्ठी", "दरवाजा",
+        )
+        candidates = [
+            unit for unit in units
+            if any(marker in unit.casefold() for marker in markers)
+        ]
+        if candidates:
+            clue = candidates[0]
+            if word_count(clue) > 22:
+                clue = " ".join(clue.split()[:22]).rstrip(" ,;:-") + "…"
+            return f"इस कहानी का सबसे अहम सवाल यहीं से शुरू होता है: {clue}"
+
+        topic_text = clean(topic)
+        if topic_text:
+            return (
+                f"{topic_text} की कहानी में एक ऐसी बात सामने आती है "
+                "जिसका अर्थ अंत तक बदलता रहता है।"
+            )
+
+        clue = units[-1] if len(units) > 1 else units[0]
+        if word_count(clue) > 18:
+            clue = " ".join(clue.split()[:18]).rstrip(" ,;:-") + "…"
+        return f"इस कहानी का सुराग शुरुआत में ही छिपा है: {clue}"
+
+    subject = clean(topic) or clean(first_chunk)
+    if word_count(subject) > 14:
+        subject = " ".join(subject.split()[:14])
+    if format_type == "short":
+        return (
+            f"{subject} से जुड़ी एक बात सब कुछ बदल सकती थी—"
+            "लेकिन उसका असली मतलब अभी साफ नहीं था।"
+        )
+    return (
+        f"{subject} की शुरुआत में दिखाई देने वाली बात मामूली लगती थी, "
+        "लेकिन उसके पीछे छिपा सच हर फैसले को बदल सकता था।"
+    )
+
+
+def part_suspense(text, topic):
+    """Use an actual clue from the part instead of the same canned ending."""
+    units = sentences(text)
+    subject = clean(topic) or "इस कहानी"
+
+    if not units:
+        return (
+            f"{subject} का सबसे अहम सवाल अभी अनसुलझा है।"
+        )
+
+    ending = units[-1].strip()
+    if word_count(ending) > 24:
+        ending = " ".join(ending.split()[-18:])
+
+    lowered = ending.casefold()
+    question_words = ("क्यों", "कैसे", "कौन", "कहाँ", "क्या", "?")
+    if any(word in lowered for word in question_words):
+        return f"अब सवाल है: {ending}"
+
+    return (
+        f"{ending} — लेकिन इससे जुड़ा अगला सवाल अभी बाकी है।"
+    )
 
 
 def make_story(
@@ -265,6 +422,7 @@ def make_story(
     parts_count, scenes_per_part,
 ):
     total = parts_count * scenes_per_part
+
     if clean(story_text):
         chunks = split_text(story_text, total)
         story_type = "user_supplied_story_offline_mapping"
@@ -272,7 +430,7 @@ def make_story(
         chunks = topic_story_beats(topic or title, total)
         story_type = "offline_topic_template_not_ai_generated"
 
-    hook = make_hook(format_type)
+    hook = story_hook(topic or title, story_text, chunks[0], format_type)
     part_hook = bool_value(config, "PART_HOOK", True)
     part_suspense = bool_value(config, "PART_SUSPENSE", True)
     final_resolution = bool_value(config, "FINAL_RESOLUTION", True)
@@ -282,16 +440,26 @@ def make_story(
 
     for p, plan_part in enumerate(plan["parts"], 1):
         scenes = []
+        part_chunks = []
 
         for s, plan_scene in enumerate(plan_part["scenes"], 1):
             global_number += 1
-            scene_id = f"part_{p:02d}_scene_{s:02d}"
             narration = clean(chunks[global_number - 1])
+            part_chunks.append(narration)
 
             if p == 1 and s == 1:
                 narration = f"{hook} {narration}".strip()
             elif s == 1 and part_hook:
-                narration = f"एक नया मोड़ सामने आया। {narration}".strip()
+                prior_part_end = ""
+                if parts:
+                    prior_part_end = clean(
+                        parts[-1]["scenes"][-1].get("narration")
+                    )
+                if prior_part_end:
+                    narration = (
+                        f"पिछले भाग की घटना के बाद, "
+                        f"{narration}"
+                    ).strip()
 
             visual = clean(
                 plan_scene.get("visual")
@@ -302,29 +470,30 @@ def make_story(
                     "Photorealistic live-action cinematic scene showing: "
                     + narration[:450]
                     + ". Natural expressions, realistic lighting, "
-                    "consistent characters, no cartoon style."
+                    "consistent character appearance and clothing, "
+                    "no cartoon style, no exaggerated contrast."
                 )
 
-            purpose = clean(plan_scene.get("purpose"))
-            if not purpose:
-                purpose = "कहानी को आगे बढ़ाना"
-
+            purpose = clean(plan_scene.get("purpose")) or "कहानी को आगे बढ़ाना"
             suspense = ""
             is_ending = s == scenes_per_part
             is_final = p == parts_count
 
             if is_ending and is_final and final_resolution:
+                ending_source = clean(" ".join(part_chunks))
                 suspense = (
-                    "आखिरकार मुख्य संघर्ष का परिणाम सामने आया और "
-                    "कहानी के केंद्रीय प्रश्न का उत्तर मिल गया।"
+                    f"कहानी का केंद्रीय प्रश्न अब अपने परिणाम तक पहुँचता है: "
+                    f"{ending_source[-240:]}"
                 )
             elif is_ending and part_suspense:
-                suspense = "लेकिन सबसे बड़ा रहस्य अभी सामने आना बाकी था।"
+                suspense = part_suspense_text(
+                    " ".join(part_chunks), topic or title
+                )
 
             scenes.append({
                 "part": p,
                 "scene": s,
-                "scene_id": scene_id,
+                "scene_id": f"part_{p:02d}_scene_{s:02d}",
                 "global_scene_number": global_number,
                 "purpose": purpose,
                 "narration": narration,
@@ -344,7 +513,7 @@ def make_story(
         "status": "completed",
         "format": format_type,
         "title": title,
-        "topic": topic,
+        "topic": topic or title,
         "story_type": story_type,
         "hook": hook,
         "ending_type": "resolution" if final_resolution else "suspense",
@@ -371,7 +540,13 @@ def make_story(
     }
 
 
-def validate_story(data, format_type, title, topic, parts_count, scenes_per_part):
+def part_suspense_text(text, topic):
+    return part_suspense(text, topic)
+
+
+def validate_story(
+    data, format_type, title, topic, parts_count, scenes_per_part
+):
     if not isinstance(data, dict):
         raise RuntimeError("Story root must be a JSON object.")
     if data.get("status") != "completed":
@@ -384,8 +559,8 @@ def validate_story(data, format_type, title, topic, parts_count, scenes_per_part
         raise RuntimeError(f"Expected exactly {parts_count} parts.")
 
     hook = clean(data.get("hook"))
-    if word_count(hook) < (7 if format_type == "short" else 14):
-        raise RuntimeError("Opening hook is shorter than the configured minimum.")
+    if word_count(hook) < 7:
+        raise RuntimeError("Opening hook is shorter than the minimum.")
 
     seen = set()
     global_number = 0
@@ -397,8 +572,11 @@ def validate_story(data, format_type, title, topic, parts_count, scenes_per_part
         if as_int(part.get("part"), f"part {p}") != p:
             raise RuntimeError(f"Incorrect part numbering at {p}.")
 
-        scenes = part.get("scenes")
-        if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
+        scene_rows = part.get("scenes")
+        if (
+            not isinstance(scene_rows, list)
+            or len(scene_rows) != scenes_per_part
+        ):
             raise RuntimeError(
                 f"Part {p} must contain exactly {scenes_per_part} scenes."
             )
@@ -406,11 +584,10 @@ def validate_story(data, format_type, title, topic, parts_count, scenes_per_part
         part["part_id"] = f"part_{p:02d}"
         part["title"] = clean(part.get("title")) or f"भाग {p}"
 
-        for s, scene in enumerate(scenes, 1):
+        for s, scene in enumerate(scene_rows, 1):
             global_number += 1
             if not isinstance(scene, dict):
                 raise RuntimeError(f"Invalid scene {p}:{s}.")
-
             if as_int(scene.get("scene"), f"scene {p}:{s}") != s:
                 raise RuntimeError(f"Scene numbering error at {p}:{s}.")
 
@@ -419,7 +596,9 @@ def validate_story(data, format_type, title, topic, parts_count, scenes_per_part
             scene["scene_id"] = scene_id
             scene["global_scene_number"] = global_number
 
-            for field in ("purpose", "narration", "visual", "dialogue", "suspense"):
+            for field in (
+                "purpose", "narration", "visual", "dialogue", "suspense"
+            ):
                 value = scene.get(field, "")
                 if not isinstance(value, str):
                     raise RuntimeError(f"{scene_id}: {field} must be text.")
@@ -438,23 +617,22 @@ def validate_story(data, format_type, title, topic, parts_count, scenes_per_part
 
     if len(seen) != parts_count * scenes_per_part:
         raise RuntimeError("Total scene mapping validation failed.")
-
     if not first_narration.startswith(hook):
         raise RuntimeError("Scene 1 narration must start with the opening hook.")
 
     data["title"] = title
-    data["topic"] = topic
+    data["topic"] = topic or title
     data["status"] = "completed"
     return data
 
 
 def main():
     log("=" * 60)
-    log("KATHA LOK AI — OFFLINE STORY BUILDER")
+    log("KATHA LOK AI — STORY BUILDER")
     log("External API calls: 0")
     log("=" * 60)
 
-    config = load_and_validate()
+    config = load_and_validate(ROOT / "Input" / "topic.txt")
     format_type = clean(get_format(config)).lower()
     topic = clean(get_topic(config))
     story_text = clean(get_story_text(config))
@@ -468,9 +646,9 @@ def main():
     if not topic and not story_text:
         raise RuntimeError("Provide TOPIC or STORY_TEXT in Input/topic.txt.")
 
-    title = clean_title(topic or story_text.splitlines()[0][:100])
+    title = derive_title(topic, story_text)
     if not title:
-        raise RuntimeError("Could not determine a title.")
+        raise RuntimeError("Could not determine a story title.")
 
     plan = validate_plan(
         read_json(PLAN_FILE),
@@ -492,6 +670,7 @@ def main():
         "format": format_type,
         "topic": topic,
         "story_text": story_text,
+        "title": title,
         "parts": parts_count,
         "scenes_per_part": scenes_per_part,
         "plan": plan,
@@ -521,7 +700,6 @@ def main():
                     parts_count, scenes_per_part,
                 )
                 log("RESUME: matching validated story reused.")
-                log("API calls: 0")
                 return
             except (RuntimeError, TypeError, ValueError) as exc:
                 log("Saved checkpoint invalid; rebuilding:", exc)
@@ -542,11 +720,10 @@ def main():
     log("STORY BUILD: SUCCESS")
     log("Output:", OUTPUT_FILE.relative_to(ROOT))
     log("Story type:", data["story_type"])
-    log("API calls: 0")
     if not story_text:
         log(
-            "WARNING: topic-only mode creates a generic offline story "
-            "outline, not a fully AI-written, topic-specific narrative."
+            "WARNING: topic-only mode uses a generic offline story outline; "
+            "it is not a fully AI-written, story-specific narrative."
         )
 
 
