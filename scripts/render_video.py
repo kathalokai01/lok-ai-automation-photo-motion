@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Resume-safe 16:9 renderer with narration and sound mixing."""
+"""Resume-safe video renderer with improved narration-first audio mixing."""
 
 from __future__ import annotations
 
@@ -38,15 +37,15 @@ SOUND_MANIFEST = SOUND_DIR / "sound_design_manifest.json"
 SFX_MANIFEST = SOUND_DIR / "sfx_cues.json"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 
-VERSION = "render-video-v19-ffprobe-metadata-fix"
+# Bump this whenever the render or audio-mix behaviour changes.
+VERSION = "render-video-v20-narration-first-balanced-mix"
+
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.0
 OUTPUT_RESOLUTION = (1280, 720)
 
-SFX_TIME_KEYS = (
-    "time", "time_seconds", "timestamp", "start_seconds", "start"
-)
+SFX_TIME_KEYS = ("time", "time_seconds", "timestamp", "start_seconds", "start")
 AUDIO_PATH_KEYS = ("output", "audio_path", "path", "file", "audio")
 
 
@@ -92,19 +91,16 @@ def relative(path):
 def safe_path(value, label, minimum_bytes=1):
     if not isinstance(value, str) or not value.strip():
         raise RuntimeError(f"{label}: missing file path")
-
     path = Path(value.strip())
     if not path.is_absolute():
         path = ROOT / path
     path = path.resolve()
-
     if not path.is_relative_to(ROOT.resolve()):
         raise RuntimeError(f"{label}: path is outside the repository")
     if not path.is_file():
         raise RuntimeError(f"{label}: file not found: {path}")
     if path.stat().st_size < minimum_bytes:
         raise RuntimeError(f"{label}: file is empty or too small: {path}")
-
     return path
 
 
@@ -123,94 +119,59 @@ def rows_from(data, *keys):
         return data
     if isinstance(data, dict):
         for key in keys:
-            value = data.get(key)
-            if isinstance(value, list):
-                return value
+            if isinstance(data.get(key), list):
+                return data[key]
     return []
 
 
 def probe(path, audio_only=False):
-    """Read duration and stream dimensions using valid ffprobe syntax."""
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         raise RuntimeError("ffprobe is not installed")
 
-    # Correct syntax: format and stream entries are separate sections.
     entries = (
         "format=duration:stream=codec_type"
         if audio_only
         else "format=duration:stream=codec_type,width,height"
     )
-
     result = subprocess.run(
-        [
-            ffprobe, "-v", "error",
-            "-show_entries", entries,
-            "-of", "json", str(path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=90,
-        check=False,
+        [ffprobe, "-v", "error", "-show_entries", entries,
+         "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=90, check=False,
     )
-
     if result.returncode:
         raise RuntimeError(
-            f"ffprobe failed for {Path(path).name}: "
-            f"{result.stderr[-1000:]}"
+            f"ffprobe failed for {Path(path).name}: {result.stderr[-1000:]}"
         )
-
     try:
         data = json.loads(result.stdout)
         duration = float(data["format"]["duration"])
     except (ValueError, TypeError, KeyError) as exc:
-        raise RuntimeError(
-            f"Invalid media metadata for {Path(path).name}: "
-            f"{result.stdout[-500:]}"
-        ) from exc
+        raise RuntimeError(f"Invalid media metadata: {path}") from exc
 
     if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError(f"Invalid media duration: {path}")
 
     streams = data.get("streams", [])
     has_audio = any(
-        stream.get("codec_type") == "audio"
-        for stream in streams
-        if isinstance(stream, dict)
+        isinstance(s, dict) and s.get("codec_type") == "audio"
+        for s in streams
     )
-
     if audio_only:
         if not has_audio:
             raise RuntimeError(f"No audio stream in {path}")
         return {"duration": duration}
 
     video = next(
-        (
-            stream for stream in streams
-            if isinstance(stream, dict)
-            and stream.get("codec_type") == "video"
-        ),
+        (s for s in streams
+         if isinstance(s, dict) and s.get("codec_type") == "video"),
         None,
     )
     if video is None:
         raise RuntimeError(f"No video stream in {path}")
-
-    try:
-        width = int(video.get("width") or 0)
-        height = int(video.get("height") or 0)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"Invalid video dimensions in {Path(path).name}: "
-            f"{video!r}"
-        ) from exc
-
+    width, height = int(video.get("width") or 0), int(video.get("height") or 0)
     if width <= 0 or height <= 0:
-        raise RuntimeError(
-            f"Invalid video dimensions in {Path(path).name}: "
-            f"ffprobe returned width={width}, height={height}. "
-            "The file may be corrupt or may not contain a decodable video stream."
-        )
-
+        raise RuntimeError(f"Invalid video dimensions: {path}")
     return {
         "duration": duration,
         "width": width,
@@ -226,10 +187,7 @@ def enabled(config, key, default=True):
             "AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND",
             "ENVIRONMENT_SOUND", "AMBIENCE_ENABLED",
         ),
-        "sfx": (
-            "SFX_ENABLED", "SFX", "SOUND_EFFECTS",
-            "SOUND_EFFECTS_ENABLED",
-        ),
+        "sfx": ("SFX_ENABLED", "SFX", "SOUND_EFFECTS", "SOUND_EFFECTS_ENABLED"),
     }
     for name in aliases[key]:
         if name not in config:
@@ -254,17 +212,15 @@ def scene_number(row, primary, fallback=None):
 
 def expected_keys(parts, scenes_per_part):
     return {
-        (part, scene)
-        for part in range(1, parts + 1)
-        for scene in range(1, scenes_per_part + 1)
+        (p, s)
+        for p in range(1, parts + 1)
+        for s in range(1, scenes_per_part + 1)
     }
 
 
 def validate_photo_scenes(data, parts, scenes_per_part):
     expected = expected_keys(parts, scenes_per_part)
-    rows = rows_from(
-        data, "scenes", "videos", "completed_scenes", "items"
-    )
+    rows = rows_from(data, "scenes", "videos", "completed_scenes", "items")
     if len(rows) != len(expected):
         raise RuntimeError(
             f"Expected {len(expected)} photo-motion scenes; found {len(rows)}"
@@ -274,70 +230,44 @@ def validate_photo_scenes(data, parts, scenes_per_part):
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             raise RuntimeError(f"Invalid photo-motion row {index}")
-
         try:
             part = scene_number(row, "part")
             scene = scene_number(row, "local_scene", "scene")
-            global_scene = (
-                int(row["global_scene"])
-                if row.get("global_scene") is not None
-                else index
-            )
+            global_scene = int(row.get("global_scene", index))
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid photo-motion mapping at row {index}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Invalid photo-motion mapping row {index}: {exc}") from exc
 
         expected_part = (index - 1) // scenes_per_part + 1
         expected_scene = (index - 1) % scenes_per_part + 1
-        if (part, scene, global_scene) != (
-            expected_part, expected_scene, index
-        ):
+        if (part, scene, global_scene) != (expected_part, expected_scene, index):
             raise RuntimeError(
-                f"Incorrect photo-motion order at row {index}: "
-                f"got {(part, scene, global_scene)}, "
-                f"expected {(expected_part, expected_scene, index)}"
+                f"Wrong photo-motion order at row {index}: "
+                f"{(part, scene, global_scene)}"
             )
 
         key = (part, scene)
         if key in mapping:
             raise RuntimeError(f"Duplicate photo-motion scene: {key}")
 
-        source_value = first_path(
-            row,
-            (
-                "source_video", "video", "output",
-                "rendered_video", "path", "file",
-            ),
-        )
         source = safe_path(
-            source_value, f"Photo-motion scene {key}", MIN_VIDEO_BYTES
+            first_path(row, (
+                "source_video", "video", "output", "rendered_video", "path", "file"
+            )),
+            f"Photo-motion scene {key}",
+            MIN_VIDEO_BYTES,
         )
-
-        try:
-            info = probe(source)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Cannot validate photo-motion scene {key} "
-                f"({source.name}): {exc}"
-            ) from exc
-
+        info = probe(source)
         mapping[key] = {
-            "part": part,
-            "scene": scene,
-            "global_scene": global_scene,
-            "path": source,
-            "duration": info["duration"],
+            "part": part, "scene": scene, "global_scene": global_scene,
+            "path": source, "duration": info["duration"],
             "sha256": sha256_file(source),
-            "width": info["width"],
-            "height": info["height"],
+            "width": info["width"], "height": info["height"],
         }
 
     if set(mapping) != expected:
         raise RuntimeError(
-            "Photo-motion scene mapping mismatch: "
-            f"missing={sorted(expected - set(mapping))}; "
-            f"extra={sorted(set(mapping) - expected)}"
+            f"Photo-motion mapping mismatch: missing={sorted(expected-set(mapping))}; "
+            f"extra={sorted(set(mapping)-expected)}"
         )
     return mapping
 
@@ -345,7 +275,6 @@ def validate_photo_scenes(data, parts, scenes_per_part):
 def load_audio_map(parts, scenes_per_part):
     if not AUDIO_MANIFEST.is_file():
         raise RuntimeError(f"Narration manifest missing: {AUDIO_MANIFEST}")
-
     data = read_json(AUDIO_MANIFEST)
     jobs = rows_from(data, "jobs", "audio_jobs", "scenes")
     if not jobs:
@@ -358,10 +287,7 @@ def load_audio_map(parts, scenes_per_part):
         try:
             part, scene = int(row["part"]), int(row["scene"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid narration part/scene at row {index}"
-            ) from exc
-
+            raise RuntimeError(f"Invalid narration mapping row {index}") from exc
         key = (part, scene)
         if key in mapping:
             raise RuntimeError(f"Duplicate narration mapping: {key}")
@@ -369,31 +295,26 @@ def load_audio_map(parts, scenes_per_part):
             raise RuntimeError(f"Narration is not completed for {key}")
 
         audio = safe_path(
-            first_path(row, AUDIO_PATH_KEYS),
-            f"Narration {key}",
-            MIN_AUDIO_BYTES,
+            first_path(row, AUDIO_PATH_KEYS), f"Narration {key}", MIN_AUDIO_BYTES
         )
         info = probe(audio, audio_only=True)
         mapping[key] = {
-            "part": part,
-            "scene": scene,
-            "path": audio,
-            "duration": info["duration"],
-            "sha256": sha256_file(audio),
+            "part": part, "scene": scene, "path": audio,
+            "duration": info["duration"], "sha256": sha256_file(audio),
         }
 
     expected = expected_keys(parts, scenes_per_part)
     if set(mapping) != expected:
         raise RuntimeError(
-            "Narration scene mapping mismatch: "
-            f"missing={sorted(expected - set(mapping))}; "
-            f"extra={sorted(set(mapping) - expected)}"
+            f"Narration mapping mismatch: missing={sorted(expected-set(mapping))}; "
+            f"extra={sorted(set(mapping)-expected)}"
         )
     return mapping
 
 
 def background_gain(category):
-    return {"music": 0.12, "ambient": 0.045}[category]
+    # Linear gains: narration stays dominant; background remains audible.
+    return {"music": 0.20, "ambient": 0.075}[category]
 
 
 def load_backgrounds(config):
@@ -409,13 +330,11 @@ def load_backgrounds(config):
     for category in ("music", "ambient"):
         if not enabled(config, category):
             continue
-
         record = manifest_tracks.get(category)
         if isinstance(record, dict) and record.get("status") == "completed":
             track = safe_path(
                 record.get("path") or record.get("file") or record.get("output"),
-                f"{category} sound-design track",
-                MIN_AUDIO_BYTES,
+                f"{category} sound-design track", MIN_AUDIO_BYTES,
             )
             probe(track, audio_only=True)
             selected[category] = track
@@ -427,9 +346,7 @@ def load_backgrounds(config):
             else ("music", "bgm", "background")
         )
         found = None
-        for directory in (
-            OUTPUT / "audio", OUTPUT / "sound", OUTPUT / "music"
-        ):
+        for directory in (OUTPUT / "audio", OUTPUT / "sound", OUTPUT / "music"):
             if not directory.exists():
                 continue
             for candidate in sorted(directory.rglob("*")):
@@ -444,46 +361,35 @@ def load_backgrounds(config):
                     break
             if found:
                 break
-
         if found:
-            found = safe_path(
-                str(found), f"Discovered {category} track", MIN_AUDIO_BYTES
-            )
+            found = safe_path(str(found), f"Discovered {category} track", MIN_AUDIO_BYTES)
             probe(found, audio_only=True)
             selected[category] = found
     return selected
 
 
 def cue_number(row, keys, default=None, label="SFX cue"):
-    value, chosen = None, None
+    value = None
     for key in keys:
-        if key not in row or row[key] is None:
-            continue
-        if isinstance(row[key], str) and not row[key].strip():
-            continue
-        value, chosen = row[key], key
-        break
-
+        if key in row and row[key] is not None and str(row[key]).strip():
+            value = row[key]
+            break
     if value is None:
         if default is not None:
-            return float(default), None
+            return float(default)
         raise RuntimeError(f"{label}: missing numeric value")
-
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"{label}: invalid numeric field {chosen}: {value!r}"
-        ) from exc
+        raise RuntimeError(f"{label}: invalid numeric value {value!r}") from exc
     if not math.isfinite(number):
-        raise RuntimeError(f"{label}: non-finite numeric value in {chosen}")
-    return number, chosen
+        raise RuntimeError(f"{label}: non-finite numeric value")
+    return number
 
 
 def load_sfx(part, scene, duration, config):
     if not enabled(config, "sfx") or not SFX_MANIFEST.is_file():
         return []
-
     data = read_json(SFX_MANIFEST)
     if not isinstance(data, dict):
         raise RuntimeError("SFX cue manifest must be a JSON object")
@@ -497,46 +403,38 @@ def load_sfx(part, scene, duration, config):
         try:
             cue_part, cue_scene = int(row["part"]), int(row["scene"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid SFX part/scene mapping at row {index}"
-            ) from exc
-
+            raise RuntimeError(f"Invalid SFX mapping row {index}") from exc
         if cue_part < 1 or cue_scene < 1:
-            raise RuntimeError(f"Invalid SFX scene mapping at row {index}")
+            raise RuntimeError(f"Invalid SFX scene mapping row {index}")
         if (cue_part, cue_scene) != (part, scene):
             continue
 
-        cue_time, time_field = cue_number(
-            row, SFX_TIME_KEYS, label=f"SFX cue {index}"
-        )
-        gain, _ = cue_number(
-            row, ("gain", "volume", "volume_gain"),
-            default=0.075, label=f"SFX gain {index}",
+        cue_time = cue_number(row, SFX_TIME_KEYS, label=f"SFX cue {index}")
+        gain = cue_number(
+            row, ("gain", "volume", "volume_gain"), default=0.12,
+            label=f"SFX gain {index}",
         )
         if cue_time < 0 or cue_time >= duration:
             raise RuntimeError(
                 f"SFX cue {index} is outside narration duration: "
-                f"time={cue_time:.3f}s, duration={duration:.3f}s"
+                f"{cue_time:.3f}s / {duration:.3f}s"
             )
         if not 0 <= gain <= 1:
             raise RuntimeError(f"SFX gain out of range at cue {index}")
 
         path = safe_path(
             first_path(row, ("file", "path", "audio", "output")),
-            f"SFX cue {index}",
-            MIN_AUDIO_BYTES,
+            f"SFX cue {index}", MIN_AUDIO_BYTES,
         )
         info = probe(path, audio_only=True)
         selected.append({
-            "path": path,
-            "time": cue_time,
-            "time_field": time_field,
-            "gain": gain,
+            "path": path, "time": cue_time,
+            "gain": min(gain * 1.5, 0.35),
+            "original_gain": gain,
             "sha256": sha256_file(path),
             "duration": info["duration"],
             "kind": str(row.get("kind", row.get("type", "unspecified"))),
         })
-
     selected.sort(key=lambda item: (item["time"], item["kind"]))
     return selected
 
@@ -548,25 +446,19 @@ def signature_for(source, narration, backgrounds, cues, fps, resolution, duratio
         "narration_sha256": narration["sha256"],
         "backgrounds": [
             {
-                "path": relative(path),
-                "sha256": sha256_file(path),
-                "category": category,
-                "gain": background_gain(category),
+                "path": relative(path), "sha256": sha256_file(path),
+                "category": category, "gain": background_gain(category),
             }
             for category, path in sorted(backgrounds.items())
         ],
         "sfx": [
             {
-                "path": relative(cue["path"]),
-                "sha256": cue["sha256"],
-                "time": cue["time"],
-                "gain": cue["gain"],
-                "kind": cue["kind"],
+                "path": relative(cue["path"]), "sha256": cue["sha256"],
+                "time": cue["time"], "gain": cue["gain"], "kind": cue["kind"],
             }
             for cue in cues
         ],
-        "fps": fps,
-        "resolution": list(resolution),
+        "fps": fps, "resolution": list(resolution),
         "duration": round(duration, 3),
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -614,7 +506,6 @@ def render_scene(
     temporary = destination.with_name(destination.stem + ".tmp.mp4")
     inputs = ["-i", str(source["path"]), "-i", str(narration["path"])]
     background_order = sorted(backgrounds.items())
-
     for _, path in background_order:
         inputs.extend(["-stream_loop", "-1", "-i", str(path)])
     for cue in cues:
@@ -628,12 +519,11 @@ def render_scene(
         f"trim=duration={duration:.3f},setpts=PTS-STARTPTS[v]",
         "[1:a]aresample=44100,"
         f"apad,atrim=duration={duration:.3f},"
-        "asetpts=PTS-STARTPTS[narr]",
+        "asetpts=PTS-STARTPTS,volume=1.0[narr]",
     ]
 
-    audio_labels = ["[narr]"]
+    background_labels = []
     next_input = 2
-
     for category, _ in background_order:
         label = f"bg{next_input}"
         filters.append(
@@ -642,8 +532,26 @@ def render_scene(
             f"apad,atrim=duration={duration:.3f},"
             f"asetpts=PTS-STARTPTS[{label}]"
         )
-        audio_labels.append(f"[{label}]")
+        background_labels.append(f"[{label}]")
         next_input += 1
+
+    # Mix background tracks separately, then duck them whenever narration
+    # is present. This protects speech intelligibility without muting music.
+    if background_labels:
+        filters.append(
+            "".join(background_labels)
+            + f"amix=inputs={len(background_labels)}:duration=longest:"
+            "dropout_transition=1:normalize=0,"
+            "volume=0.85[bgmix]"
+        )
+        filters.append(
+            "[bgmix][narr]sidechaincompress="
+            "threshold=0.025:ratio=8:attack=15:release=350:"
+            "makeup=1[duckedbg]"
+        )
+        mix_labels = ["[narr]", "[duckedbg]"]
+    else:
+        mix_labels = ["[narr]"]
 
     cue_details = []
     for cue in cues:
@@ -656,12 +564,12 @@ def render_scene(
             f"atrim=duration={duration:.3f},"
             f"asetpts=PTS-STARTPTS[{label}]"
         )
-        audio_labels.append(f"[{label}]")
+        mix_labels.append(f"[{label}]")
         cue_details.append({
             "path": relative(cue["path"]),
             "time": cue["time"],
-            "time_field": cue["time_field"],
             "gain": cue["gain"],
+            "original_gain": cue["original_gain"],
             "kind": cue["kind"],
             "duration_seconds": cue["duration"],
             "sha256": cue["sha256"],
@@ -669,9 +577,9 @@ def render_scene(
         next_input += 1
 
     filters.append(
-        "".join(audio_labels)
-        + f"amix=inputs={len(audio_labels)}:duration=longest:"
-        "dropout_transition=2:normalize=0,"
+        "".join(mix_labels)
+        + f"amix=inputs={len(mix_labels)}:duration=longest:"
+        "dropout_transition=1:normalize=0,"
         "alimiter=limit=0.90:level=false,"
         f"atrim=duration={duration:.3f},"
         "asetpts=PTS-STARTPTS[a]"
@@ -679,29 +587,23 @@ def render_scene(
 
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-        *inputs,
-        "-filter_complex", ";".join(filters),
+        *inputs, "-filter_complex", ";".join(filters),
         "-map", "[v]", "-map", "[a]",
         "-t", f"{duration:.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
         "-pix_fmt", "yuv420p", "-r", str(fps),
         "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
-        str(temporary),
+        "-movflags", "+faststart", str(temporary),
     ]
 
     try:
         result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=1200,
-            check=False,
+            command, capture_output=True, text=True,
+            timeout=1200, check=False,
         )
         if result.returncode:
             raise RuntimeError(
-                f"Render failed for {destination.name}: "
-                f"{result.stderr[-1800:]}"
+                f"Render failed for {destination.name}: {result.stderr[-1800:]}"
             )
         if not temporary.is_file() or temporary.stat().st_size < MIN_VIDEO_BYTES:
             raise RuntimeError(f"Rendered output is empty: {destination.name}")
@@ -715,8 +617,7 @@ def render_scene(
             "narration": relative(narration["path"]),
             "background_tracks": [
                 {
-                    "path": relative(path),
-                    "category": category,
+                    "path": relative(path), "category": category,
                     "gain": background_gain(category),
                 }
                 for category, path in background_order
@@ -737,7 +638,6 @@ def render_scene(
 def concat_videos(videos, destination):
     if not videos:
         raise RuntimeError(f"No scenes available for {destination.name}")
-
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg is not installed")
@@ -746,46 +646,35 @@ def concat_videos(videos, destination):
     concat_file = destination.with_suffix(".concat.txt")
     temporary = destination.with_name(destination.stem + ".tmp.mp4")
     lines = []
-
     for video in videos:
         resolved = str(video.resolve())
         if "\n" in resolved or "\r" in resolved:
             raise RuntimeError("Unexpected newline in a video path")
-        escaped = resolved.replace("'", "'\\''")
-        lines.append(f"file '{escaped}'")
-
+        lines.append("file '" + resolved.replace("'", "'\\''") + "'")
     concat_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     try:
         result = subprocess.run(
             [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "concat", "-safe", "0", "-i", str(concat_file),
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                "-movflags", "+faststart",
-                str(temporary),
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart", str(temporary),
             ],
-            capture_output=True,
-            text=True,
-            timeout=2400,
-            check=False,
+            capture_output=True, text=True, timeout=2400, check=False,
         )
         if result.returncode:
             raise RuntimeError(
-                f"Merge failed for {destination.name}: "
-                f"{result.stderr[-1800:]}"
+                f"Merge failed for {destination.name}: {result.stderr[-1800:]}"
             )
         if not temporary.is_file() or temporary.stat().st_size < MIN_VIDEO_BYTES:
             raise RuntimeError(f"Merged output is empty: {destination.name}")
-
         info = probe(temporary)
         if not info["has_audio"]:
             raise RuntimeError(f"Merged output has no audio: {destination.name}")
         if (info["width"], info["height"]) != OUTPUT_RESOLUTION:
-            raise RuntimeError(
-                f"Merged output is not 1280x720: {destination.name}"
-            )
+            raise RuntimeError(f"Merged output is not 1280x720: {destination.name}")
         os.replace(temporary, destination)
         return probe(destination)
     finally:
@@ -819,6 +708,7 @@ def save_manifest(
             "music": None,
             "ambient": None,
             "sfx_enabled": None,
+            "mix_profile": "narration-first-ducked-background",
             "external_api_calls": 0,
             "paid_services_used": False,
         },
@@ -843,7 +733,6 @@ def main():
 
     expected_count = parts * scenes_per_part
     resolution = OUTPUT_RESOLUTION
-
     if not PHOTO_MANIFEST.is_file():
         raise RuntimeError(f"Photo-motion manifest missing: {PHOTO_MANIFEST}")
 
@@ -862,7 +751,6 @@ def main():
     VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
     completed_scenes, part_records, errors = [], [], []
-
     for global_scene in range(1, expected_count + 1):
         part = (global_scene - 1) // scenes_per_part + 1
         scene = (global_scene - 1) % scenes_per_part + 1
@@ -879,10 +767,8 @@ def main():
             )
         except Exception as exc:
             errors.append({
-                "part": part,
-                "scene": scene,
-                "global_scene": global_scene,
-                "error": str(exc),
+                "part": part, "scene": scene,
+                "global_scene": global_scene, "error": str(exc),
             })
             save_manifest(
                 "failed", mode, fps, resolution, parts, scenes_per_part,
@@ -933,10 +819,8 @@ def main():
         part_info = concat_videos(scene_files, part_path)
         part_videos.append(part_path)
         part_records.append({
-            "part": part,
-            "status": "completed",
-            "path": relative(part_path),
-            "duration": part_info["duration"],
+            "part": part, "status": "completed",
+            "path": relative(part_path), "duration": part_info["duration"],
             "scenes": scenes_per_part,
         })
         save_manifest(
@@ -974,6 +858,11 @@ def main():
         "music": "music" in backgrounds,
         "ambient": "ambient" in backgrounds,
         "sfx_enabled": enabled(config, "sfx"),
+        "mix_profile": "narration-first-ducked-background",
+        "background_gains": {
+            category: background_gain(category)
+            for category in backgrounds
+        },
         "external_api_calls": 0,
         "paid_services_used": False,
     }
