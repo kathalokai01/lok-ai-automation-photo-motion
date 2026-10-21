@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Prepare validated, resumable 16:9 photo-motion image jobs."""
+"""Prepare validated, resumable photo-motion image jobs with character continuity."""
 
 from __future__ import annotations
 
@@ -14,12 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import (
-    load_and_validate,
-    get_format,
-    get_parts,
-    get_scenes,
-)
+from input_config import load_and_validate, get_format, get_parts, get_scenes
 
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 SCENES_FILE = ROOT / "output" / "scenes" / "scenes.json"
@@ -29,7 +23,7 @@ VISUAL_DIR = ROOT / "output" / "visuals"
 JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUAL_DIR / "image_manifest.json"
 
-VERSION = "photo-motion-12-landscape-strict-mapping-checksum"
+VERSION = "photo-motion-13-character-gender-natural-contrast"
 IMAGE_WIDTH = 1280
 IMAGE_HEIGHT = 720
 IMAGE_DIMENSIONS = (IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -40,60 +34,90 @@ QUALITY = (
     "Photorealistic live-action cinematic photography. Realistic Indian "
     "people, locations, clothing and architecture. Natural skin texture, "
     "believable anatomy, realistic eyes, natural lighting and shadows. "
-    "Maintain recurring character identity, age, hairstyle and clothing. "
-    "No cartoon, anime, illustration, CGI, text, logo or watermark."
+    "Maintain recurring character identity, age, facial features, hairstyle, "
+    "body proportions and clothing continuity. Balanced exposure, natural "
+    "skin tones, controlled highlights, visible shadow detail, moderate "
+    "contrast, realistic cinematic color grading. No cartoon, anime, "
+    "illustration, CGI, text, logo or watermark."
 )
 
 NEGATIVE_PROMPT = (
     "cartoon, anime, illustration, painting, CGI, plastic skin, wax figure, "
-    "distorted face, bad anatomy, extra limbs, duplicated people, blurry "
-    "face, unrealistic eyes, text, subtitles, watermark, logo, collage, "
-    "split screen, poster lettering, floating objects, inconsistent "
-    "character identity, unrelated characters, wrong era, unrealistic "
-    "clothing, oversaturated skin, impossible perspective"
+    "distorted face, bad anatomy, extra limbs, duplicated people, blurry face, "
+    "unrealistic eyes, text, subtitles, watermark, logo, collage, split screen, "
+    "poster lettering, floating objects, inconsistent character identity, "
+    "unrelated characters, wrong era, unrealistic clothing, oversaturated "
+    "skin, extreme contrast, crushed blacks, blown highlights, harsh HDR, "
+    "unnatural skin color, excessive sharpening, impossible perspective, "
+    "gender-inconsistent appearance, random costume changes"
 )
 
 DESCRIPTION_KEYS = (
-    "visual_prompt", "image_prompt", "visual_description",
-    "scene_description", "description", "prompt", "action", "text",
+    "visual_prompt",
+    "image_prompt",
+    "visual_description",
+    "scene_description",
+    "description",
+    "prompt",
+    "action",
+    "text",
 )
+
 DURATION_KEYS = ("duration", "scene_duration", "duration_seconds", "seconds")
 
 CATEGORY_KEYWORDS = {
     "horror": (
-        "भूत", "प्रेत", "डरावनी", "खौफ", "चुड़ैल", "आत्मा",
-        "हवेली", "शैतान", "horror", "ghost", "haunted", "witch",
-        "demon", "scary", "supernatural",
+        "भूत", "प्रेत", "डरावनी", "खौफ", "चुड़ैल", "आत्मा", "हवेली",
+        "शैतान", "horror", "ghost", "haunted", "witch", "demon", "scary",
+        "supernatural",
     ),
     "mystery": (
-        "रहस्य", "गुमशुदा", "गायब", "पहेली", "अनजान", "अज्ञात",
-        "खोज", "mystery", "secret", "unknown", "disappearance",
-        "investigation",
+        "रहस्य", "गुमशुदा", "गायब", "पहेली", "अनजान", "अज्ञात", "खोज",
+        "mystery", "secret", "unknown", "disappearance", "investigation",
     ),
     "devotional": (
-        "भक्ति", "भगवान", "देवी", "देवता", "मंदिर", "पूजा",
-        "कृष्ण", "राम", "शिव", "विष्णु", "हनुमान", "दुर्गा",
-        "गणेश", "पुराण", "अवतार", "divine", "devotional",
-        "temple", "krishna", "rama", "shiva", "goddess", "mythology",
+        "भक्ति", "भगवान", "देवी", "देवता", "मंदिर", "पूजा", "कृष्ण", "राम",
+        "शिव", "विष्णु", "हनुमान", "दुर्गा", "गणेश", "पुराण", "अवतार",
+        "divine", "devotional", "temple", "krishna", "rama", "shiva",
+        "goddess", "mythology",
     ),
     "historical": (
-        "राजा", "रानी", "सम्राट", "महाराज", "युद्ध", "किला",
-        "इतिहास", "योद्धा", "साम्राज्य", "historical", "king",
-        "queen", "emperor", "warrior", "battle", "kingdom",
+        "राजा", "रानी", "सम्राट", "महाराज", "युद्ध", "किला", "इतिहास",
+        "योद्धा", "साम्राज्य", "historical", "king", "queen", "emperor",
+        "warrior", "battle", "kingdom",
     ),
     "emotional": (
-        "माँ", "मां", "पिता", "परिवार", "बेटा", "बेटी", "प्यार",
-        "प्रेम", "बलिदान", "दर्द", "emotional", "family",
-        "mother", "father", "love", "sacrifice", "ईमान", "गरीबी",
-        "honesty", "poverty",
+        "माँ", "मां", "पिता", "परिवार", "बेटा", "बेटी", "प्यार", "प्रेम",
+        "बलिदान", "दर्द", "emotional", "family", "mother", "father", "love",
+        "sacrifice", "ईमान", "गरीबी", "honesty", "poverty",
     ),
     "nature": (
-        "जंगल", "वन", "पहाड़", "नदी", "प्रकृति", "गाँव", "गांव",
-        "किसान", "forest", "nature", "mountain", "river",
-        "village", "farmer", "wildlife",
+        "जंगल", "वन", "पहाड़", "नदी", "प्रकृति", "गाँव", "गांव", "किसान",
+        "forest", "nature", "mountain", "river", "village", "farmer",
+        "wildlife",
     ),
 }
 
+MALE_WORDS = (
+    "male", "man", "boy", "father", "son", "brother", "husband",
+    "grandfather", "पुरुष", "आदमी", "लड़का", "लड़के", "पिता", "बेटा",
+    "भाई", "पति", "दादा", "नाना", "बूढ़ा", "युवक", "राजा", "किसान",
+)
+
+FEMALE_WORDS = (
+    "female", "woman", "girl", "mother", "daughter", "sister", "wife",
+    "grandmother", "महिला", "औरत", "लड़की", "लड़कियां", "माँ", "मां",
+    "बेटी", "बहन", "पत्नी", "दादी", "नानी", "बूढ़ी", "युवती", "रानी",
+)
+
+MALE_ONLY_CLOTHING = (
+    "saree", "sari", "साड़ी", "सिंदूर", "mangalsutra", "मंगलसूत्र",
+    "women's blouse", "महिला ब्लाउज",
+)
+
+FEMALE_ONLY_FEATURES = (
+    "beard", "moustache", "mustache", "दाढ़ी", "मूँछ", "मूंछ",
+)
 
 def log(*values):
     print(*values, flush=True)
@@ -130,6 +154,7 @@ def sha256_file(path):
 
 def read_json(path, required=True):
     path = Path(path)
+
     if not path.is_file():
         if required:
             raise RuntimeError(f"Required file missing: {path}")
@@ -190,11 +215,7 @@ def resolve_topic(config):
 
     story_text = str(config.get("STORY_TEXT", "")).strip()
     if story_text:
-        return (
-            first_story_line(story_text)
-            or saved_title()
-            or "Indian story"
-        )
+        return saved_title() or first_story_line(story_text) or "Indian story"
 
     return saved_title() or "Indian cinematic story"
 
@@ -203,10 +224,6 @@ def resolve_title(topic, config):
     explicit = clean(config.get("TOPIC", ""), 250)
     if explicit:
         return explicit
-
-    story_text = str(config.get("STORY_TEXT", "")).strip()
-    if story_text:
-        return first_story_line(story_text) or topic
 
     return saved_title() or topic
 
@@ -224,12 +241,12 @@ def detect_category(text):
 def category_direction(category):
     directions = {
         "horror": (
-            "Use believable low light, restrained shadows and suspenseful "
-            "framing. Do not invent monsters or events."
+            "Use believable low light and restrained shadows. Preserve details "
+            "in dark areas. Do not invent monsters or events."
         ),
         "mystery": (
-            "Use grounded visual clues and suspense. Do not reveal or invent "
-            "plot events absent from the scene."
+            "Use grounded visual clues and suspense. Do not invent plot events "
+            "absent from the scene."
         ),
         "devotional": (
             "Use respectful devotional imagery only when called for. Do not "
@@ -240,10 +257,10 @@ def category_direction(category):
             "Avoid anachronistic objects."
         ),
         "emotional": (
-            "Emphasize believable expressions and natural body language."
+            "Emphasize believable expressions, natural skin tones and body language."
         ),
         "nature": (
-            "Use realistic landscapes, vegetation, weather and materials."
+            "Use realistic landscapes, vegetation, weather and natural colors."
         ),
         "general": (
             "Match lighting, color, composition and setting to the actual scene."
@@ -293,7 +310,6 @@ def positive_number(value):
             return number
     except (TypeError, ValueError):
         pass
-
     return None
 
 
@@ -381,22 +397,128 @@ def validate_expected_mapping(mappings, parts, scenes_per_part):
         )
 
 
-def collect_scene_context(scene, bible):
-    """Select only continuity details relevant to this scene."""
-    scene_text = " ".join(
-        clean(scene.get(key), 1200)
-        for key in (
-            "title", "narration", "dialogue", "visual_prompt",
-            "image_prompt", "visual", "description", "action",
-            "character_name", "location", "setting",
-        )
+def values_as_strings(value):
+    """Normalize a scene character field that may be a string or list."""
+    if isinstance(value, str):
+        return [clean(value, 120)] if clean(value) else []
+
+    if isinstance(value, list):
+        return [
+            clean(item, 120)
+            for item in value
+            if isinstance(item, str) and clean(item)
+        ]
+
+    if isinstance(value, dict):
+        name = clean(value.get("name") or value.get("character_name"), 120)
+        return [name] if name else []
+
+    return []
+
+
+def scene_explicit_names(scene):
+    names = set()
+
+    for key in ("character_name", "character", "characters", "cast"):
+        for name in values_as_strings(scene.get(key)):
+            names.add(name.casefold())
+
+    return names
+
+
+def scene_text_for_matching(scene):
+    parts = []
+
+    for key in (
+        "title", "narration", "dialogue", "visual_prompt", "image_prompt",
+        "visual", "description", "action", "character_name", "location",
+        "setting",
+    ):
+        value = scene.get(key)
+
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+
+        elif isinstance(value, list):
+            parts.extend(
+                item.strip() for item in value
+                if isinstance(item, str) and item.strip()
+            )
+
+    return " ".join(parts).casefold()
+
+
+def character_matches_scene(character, scene_text, explicit_names):
+    name = clean(character.get("name"), 120)
+
+    if not name:
+        return False
+
+    normalized_name = name.casefold()
+
+    if normalized_name in explicit_names:
+        return True
+
+    # Use a word boundary for Latin names to avoid accidental substring matches.
+    if re.fullmatch(r"[a-zA-Z][a-zA-Z .'-]*", name):
+        return bool(re.search(
+            r"(?<!\w)" + re.escape(normalized_name) + r"(?!\w)",
+            scene_text,
+        ))
+
+    # For non-Latin names, require the exact normalized name to appear.
+    return normalized_name in scene_text
+
+
+def normalize_gender(character):
+    """Return only explicitly supported male/female labels; otherwise unknown."""
+    raw = clean(
+        character.get("gender")
+        or character.get("sex")
+        or character.get("gender_identity"),
+        80,
     ).casefold()
 
-    explicit_names = {
-        clean(scene.get(key), 120).casefold()
-        for key in ("character_name", "character", "characters")
-        if isinstance(scene.get(key), str) and clean(scene.get(key))
-    }
+    if raw in {"male", "man", "boy", "पुरुष", "आदमी", "लड़का"}:
+        return "male"
+
+    if raw in {"female", "woman", "girl", "महिला", "औरत", "लड़की"}:
+        return "female"
+
+    return "unknown"
+
+
+def gender_prompt_rules(gender):
+    if gender == "male":
+        return (
+            "GENDER CONTINUITY: Depict this named character as male, matching "
+            "the established age and face. Do not add feminine-coded clothing "
+            "or adornments such as a sari, sindoor, mangalsutra or women's blouse "
+            "unless the scene explicitly requires that disguise, costume or event. "
+            "Do not assume every man must have a beard or moustache; follow the "
+            "character's established facial hair."
+        )
+
+    if gender == "female":
+        return (
+            "GENDER CONTINUITY: Depict this named character as female, matching "
+            "the established age and face. Do not add a beard or moustache unless "
+            "the scene explicitly describes a disguise or such an appearance. "
+            "Do not force a sari, sindoor or jewelry if the scene specifies other "
+            "clothing; preserve the established character design."
+        )
+
+    return (
+        "GENDER CONTINUITY: Gender is not established clearly for this character. "
+        "Do not infer gender from an ambiguous pronoun or name alone. Follow "
+        "explicit scene descriptions and established visual references only."
+    )
+
+
+def collect_scene_context(scene, bible):
+    """Select scene-relevant characters and retain their supported traits."""
+    scene_text = scene_text_for_matching(scene)
+    explicit_names = scene_explicit_names(scene)
 
     characters = bible.get("characters", [])
     selected = []
@@ -406,45 +528,52 @@ def collect_scene_context(scene, bible):
             if not isinstance(character, dict):
                 continue
 
-            name = clean(character.get("name"), 120)
-            if not name:
+            if not character_matches_scene(character, scene_text, explicit_names):
                 continue
 
-            normalized_name = name.casefold()
-            if (
-                normalized_name in explicit_names
-                or normalized_name in scene_text
+            name = clean(character.get("name"), 120)
+            gender = normalize_gender(character)
+            details = []
+
+            for key in (
+                "role", "age", "gender", "appearance", "face_features",
+                "skin_tone", "hair", "eyes", "body_features", "clothing",
+                "distinctive_features", "visual_identity", "continuity_notes",
             ):
-                details = []
+                value = clean(character.get(key), 240)
 
-                for key in (
-                    "role", "age", "gender", "appearance", "face_features",
-                    "skin_tone", "hair", "eyes", "body_features", "clothing",
-                    "distinctive_features", "visual_identity", "continuity_notes",
-                ):
-                    value = clean(character.get(key), 240)
-                    if value and not value.casefold().startswith(
-                        ("not specified", "not inferred", "do not invent")
-                    ):
-                        details.append(f"{key.replace('_', ' ')}: {value}")
+                if not value:
+                    continue
 
-                source_details = character.get("source_details", [])
-                if isinstance(source_details, list):
-                    for detail in source_details[:4]:
-                        detail = clean(detail, 240)
-                        if detail and detail not in details:
-                            details.append(detail)
+                if value.casefold().startswith((
+                    "not specified", "not inferred", "do not invent",
+                    "unknown", "not established",
+                )):
+                    continue
 
-                selected.append({
-                    "name": name,
-                    "details": details[:8],
-                })
+                details.append(f"{key.replace('_', ' ')}: {value}")
 
+            source_details = character.get("source_details", [])
+            if isinstance(source_details, list):
+                for detail in source_details[:4]:
+                    detail = clean(detail, 240)
+                    if detail and detail not in details:
+                        details.append(detail)
+
+            selected.append({
+                "name": name,
+                "gender": gender,
+                "details": details[:10],
+                "gender_rule": gender_prompt_rules(gender),
+            })
+
+    # Preserve explicitly described scene details.
     scene_details = []
 
     for key, label in (
         ("character_name", "character"),
         ("age", "age"),
+        ("gender", "gender"),
         ("appearance", "appearance"),
         ("clothing", "clothing"),
         ("location", "location"),
@@ -453,9 +582,19 @@ def collect_scene_context(scene, bible):
         ("weather", "weather"),
         ("time_of_day", "time of day"),
     ):
-        value = clean(scene.get(key), 300)
-        if value:
-            scene_details.append(f"{label}: {value}")
+        value = scene.get(key)
+
+        if isinstance(value, str) and value.strip():
+            scene_details.append(f"{label}: {clean(value, 300)}")
+
+    # Include list-form character names without pretending they define appearance.
+    for key in ("characters", "cast"):
+        for name in values_as_strings(scene.get(key)):
+            if name.casefold() not in explicit_names:
+                continue
+            marker = f"named character: {name}"
+            if marker not in scene_details:
+                scene_details.append(marker)
 
     world = bible.get("world", {})
     world_details = []
@@ -464,64 +603,75 @@ def collect_scene_context(scene, bible):
         for key in ("setting", "time_period", "geography"):
             value = clean(world.get(key), 350)
             if value and not value.casefold().startswith(
-                "not explicitly specified"
+                ("not explicitly specified", "unknown", "not specified")
             ):
                 world_details.append(f"{key.replace('_', ' ')}: {value}")
 
-    return selected[:8], scene_details[:8], world_details[:3]
+    return selected[:8], scene_details[:10], world_details[:3]
 
 
 def build_prompt(
-    mode, dimensions, topic, title, category, part, local_scene,
-    description, scene, bible,
+    mode,
+    dimensions,
+    topic,
+    title,
+    category,
+    part,
+    local_scene,
+    description,
+    scene,
+    bible,
 ):
-    # Both short and full are intentionally landscape 16:9.
     framing = (
-        "Horizontal 16:9 cinematic composition. Compose for a 1280x720 "
-        "frame with balanced foreground, middle-ground and background. "
-        "Keep important faces and actions away from the extreme edges. "
-        "Do not create vertical-video framing, split screens or lettered posters."
+        "Horizontal 16:9 cinematic composition, 1280x720. Use a clear visual "
+        "subject, natural foreground and background depth, believable camera "
+        "perspective, and realistic proportions. Keep faces and important action "
+        "away from extreme edges. No vertical framing, collage or split screen."
     )
 
-    characters, scene_details, world_details = collect_scene_context(
-        scene, bible
-    )
-    context = []
+    characters, scene_details, world_details = collect_scene_context(scene, bible)
+    continuity = []
 
     for character in characters:
         detail_text = "; ".join(character["details"])
         line = f"- {character['name']}"
+
         if detail_text:
             line += f": {detail_text}"
-        context.append(line)
 
-    continuity = ""
+        line += f"\n  {character['gender_rule']}"
+        continuity.append(line)
 
-    if context:
-        continuity += (
-            "\nRELEVANT CHARACTER CONTINUITY "
-            "(only these scene-relevant entries):\n"
-            + "\n".join(context)
+    sections = []
+
+    if continuity:
+        sections.append(
+            "RELEVANT CHARACTER CONTINUITY — keep each named character's identity "
+            "consistent across scenes:\n" + "\n".join(continuity)
         )
 
     if scene_details:
-        continuity += (
-            "\nEXPLICIT SCENE DETAILS:\n- "
-            + "\n- ".join(scene_details)
+        sections.append(
+            "EXPLICIT SCENE DETAILS:\n- " + "\n- ".join(scene_details)
         )
 
     if world_details:
-        continuity += (
-            "\nWORLD CONTINUITY:\n- "
-            + "\n- ".join(world_details)
+        sections.append(
+            "WORLD CONTINUITY:\n- " + "\n- ".join(world_details)
         )
 
-    if continuity:
-        continuity += (
-            "\nUse these details only when consistent with the scene description. "
-            "Explicit scene details override general bible notes. Unspecified "
-            "physical traits must not be fabricated."
+    if sections:
+        sections.append(
+            "Apply only details supported by the story. Explicit scene details "
+            "override general character-bible notes when the scene clearly "
+            "describes a deliberate change. Do not invent unsupported gender, "
+            "age, facial hair, jewelry, clothing, physical traits or plot events. "
+            "For a returning character, preserve face shape, skin tone, age, "
+            "hairstyle, body proportions and established clothing unless the "
+            "story describes a change."
         )
+
+    continuity_text = "\n\n".join(sections)
 
     return (
         "Create one original photorealistic live-action cinematic photograph "
@@ -532,18 +682,29 @@ def build_prompt(
         f"GENRE DIRECTION: {category_direction(category)}\n"
         f"FORMAT: {mode}; target dimensions: {dimensions}.\n"
         f"PART: {part}; LOCAL SCENE: {local_scene}.\n"
-        f"SCENE TO DEPICT: {description}\n"
-        "Depict the actual characters, action, location, time, weather and "
-        "emotion. Use believable expressions, realistic lighting and culturally "
-        "appropriate Indian details when relevant. Create one coherent photograph, "
-        "not a collage, split screen, poster or slideshow. Do not invent unrelated "
-        "people, objects, costumes, locations or plot events. No lettering, "
-        f"captions, logos or watermarks. {framing}{continuity}"
+        f"SCENE TO DEPICT: {description}\n\n"
+        "VISUAL QUALITY AND EXPOSURE RULES:\n"
+        "- Natural, believable Indian skin tones; preserve realistic skin texture.\n"
+        "- Balanced exposure and moderate cinematic contrast.\n"
+        "- Keep useful detail in shadows; avoid crushed blacks and blown highlights.\n"
+        "- Use soft, motivated lighting and realistic shadow transitions.\n"
+        "- Avoid excessive saturation, neon color casts, artificial HDR and harsh "
+        "edge sharpening.\n"
+        "- Dark or suspenseful scenes may be dim, but faces and important objects "
+        "must remain naturally visible when the scene lighting allows.\n"
+        "- Bright scenes must retain detail in faces, clothing and the sky.\n\n"
+        "Depict the actual characters, action, location, time, weather and emotion. "
+        "Use believable expressions, realistic anatomy, natural lighting and "
+        "culturally appropriate Indian details when relevant. Create one coherent "
+        "photograph, not a collage, split screen, poster or slideshow. Do not add "
+        "unrelated people, objects, costumes, locations or plot events. No "
+        "lettering, captions, logos or watermarks.\n"
+        f"{framing}\n\n{continuity_text}"
     )
 
 
 def image_prompt_hash(prompt, negative_prompt):
-    # Must match free_image_generator.py make_prompt() exactly.
+    # Keep compatibility with free_image_generator.py make_prompt().
     combined = (
         f"{prompt}\n\nQuality: {QUALITY}\n\nAvoid: {negative_prompt}"
     )
@@ -576,6 +737,7 @@ def valid_existing_image(path, dimensions):
         from PIL import Image
 
         path = Path(path)
+
         if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
             return False
 
@@ -587,6 +749,7 @@ def valid_existing_image(path, dimensions):
                 image.size == dimensions
                 and image.format in ("PNG", "JPEG", "WEBP")
             )
+
     except Exception:
         return False
 
@@ -609,7 +772,6 @@ def main():
     if parts < 1 or scenes_per_part < 1:
         raise RuntimeError("PARTS and SCENES must both be positive.")
 
-    # This project requires the same landscape canvas in both modes.
     dimensions = IMAGE_SIZE
     width, height = IMAGE_DIMENSIONS
 
@@ -697,20 +859,19 @@ def main():
         prior_hash = str(old.get("image_sha256", "")).strip()
         checksum_matches = (
             not prior_hash
-            or (
-                image_ok
-                and sha256_file(destination) == prior_hash
-            )
+            or (image_ok and sha256_file(destination) == prior_hash)
         )
 
         old_status = str(old.get("status", ""))
 
         if matching_prompt and image_ok and checksum_matches:
             status = old_status
+
             if status not in {
                 "generated", "existing", "reused", "completed"
             }:
                 status = "existing"
+
             provider = old.get("provider") or "previous run"
             image_hash = sha256_file(destination)
         else:
