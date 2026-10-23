@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Local, resumable story-aware sound design with manifest-compatible outputs."""
 
