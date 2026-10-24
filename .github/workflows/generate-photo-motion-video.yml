@@ -1,3 +1,4 @@
+
 name: Generate Katha Lok AI Photo Motion Video
 
 on:
@@ -49,11 +50,7 @@ jobs:
       POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
       REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
 
-      # Try the configured image providers in fallback order.
       POLLINATIONS_FREE_IMAGE_MODELS: "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"
-
-      # Explicitly allow configured Gemini and Replicate fallbacks.
-      # These providers and some image models may incur charges.
       ALLOW_BILLABLE_PROVIDERS: "true"
 
     steps:
@@ -94,6 +91,7 @@ jobs:
             scripts/preview_caption_fonts.py \
             scripts/burn_captions.py \
             scripts/generate_thumbnail.py \
+            scripts/generate_youtube_metadata.py \
             scripts/validate_final_output.py \
             scripts/package_output.py
           do
@@ -332,86 +330,14 @@ jobs:
       - name: Generate requested-format thumbnail
         run: python scripts/generate_thumbnail.py
 
-      - name: Generate topic-based metadata
+      - name: Generate story-specific YouTube metadata
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import re
-          from pathlib import Path
-
-          output = Path("output")
-          values = {}
-
-          for line in Path("Input/topic.txt").read_text(
-              encoding="utf-8-sig"
-          ).splitlines():
-              line = line.strip()
-              if not line or line.startswith("#") or "=" not in line:
-                  continue
-
-              key, value = line.split("=", 1)
-              values[key.strip().upper()] = (
-                  value.split("#", 1)[0].strip().strip("'\"")
-              )
-
-          def clean(value):
-              return re.sub(r"\s+", " ", str(value or "")).strip()
-
-          topic = clean(values.get("TOPIC", ""))
-          title_file = output / "story" / "final_title.txt"
-          title = ""
-
-          if title_file.is_file():
-              lines = title_file.read_text(
-                  encoding="utf-8-sig"
-              ).splitlines()
-              if lines:
-                  title = clean(lines[0])
-
-          title = (title or topic or "Katha Lok AI Story")[:100]
-
-          description = (
-              f"{title}\n\n"
-              f"Watch this Katha Lok AI story about {topic or title}. "
-              "Enjoy the cinematic storytelling, narration and "
-              "scene-by-scene visuals.\n\n"
-              "#KathaLokAI #HindiKahani"
-          )
-
-          tokens = re.findall(
-              r"[A-Za-z0-9]+|[\u0900-\u097F]+",
-              f"{title} {topic}",
-          )
-
-          tags = []
-          seen = set()
-
-          for tag in tokens + [
-              "Katha Lok AI",
-              "Hindi story",
-              "Hindi kahani",
-              "Hindi storytelling",
-          ]:
-              key = tag.casefold()
-              if len(tag) >= 3 and key not in seen:
-                  seen.add(key)
-                  tags.append(tag)
-              if len(tags) >= 20:
-                  break
-
-          metadata = (
-              f"Title:\n{title}\n\n"
-              f"Description:\n\n{description}\n\n"
-              f"Tags:\n{', '.join(tags)}\n"
-          )
-
-          output.mkdir(parents=True, exist_ok=True)
-          (output / "youtube_metadata.txt").write_text(
-              metadata, encoding="utf-8"
-          )
-          print("Topic-based metadata generated.")
-          PY
+          python scripts/generate_youtube_metadata.py
+          test -s output/youtube_metadata.txt
+          test -s output/publish/youtube_metadata.json
+          echo "Story-specific YouTube metadata generated."
 
       - name: Validate final deliverables
         run: python scripts/validate_final_output.py
