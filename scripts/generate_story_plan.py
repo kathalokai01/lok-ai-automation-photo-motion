@@ -1,11 +1,13 @@
+
 #!/usr/bin/env python3
-"""Deterministic offline story planning with validated checkpoint reuse."""
+"""Offline story planner with story-grounded hooks, suspense and safe checkpoints."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,45 +26,46 @@ from input_config import (
 ROOT = Path(__file__).resolve().parent.parent
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
-VERSION = "offline-structural-story-plan-v2"
+
+VERSION = "offline-structural-story-plan-v3-story-grounded-hooks"
 
 SHORT_BEATS = (
-    ("hook", "Open with a compelling story-specific mystery or surprise."),
-    ("setup", "Establish character, place, goal and stakes."),
-    ("discovery", "Reveal a meaningful clue or new information."),
-    ("escalation", "Increase pressure and consequences."),
-    ("obstacle", "Introduce a credible obstacle."),
-    ("reversal", "Change the audience's understanding."),
-    ("choice", "Force a consequential decision."),
-    ("confrontation", "Bring the central conflict into focus."),
-    ("reveal", "Reveal a significant truth."),
-    ("climax", "Deliver the strongest turning point."),
-    ("payoff", "Pay off an earlier clue or promise."),
-    ("suspense", "Create a compelling continuation question."),
+    ("hook", "Open with an immediate mystery, danger, surprising choice or unanswered question grounded in the story."),
+    ("setup", "Establish the relevant character, location, goal and stakes."),
+    ("discovery", "Introduce a clue or meaningful new information from the story."),
+    ("escalation", "Increase pressure through a consequence supported by the story."),
+    ("obstacle", "Present a credible obstacle to the character's goal."),
+    ("reversal", "Change the audience's understanding using an established detail."),
+    ("choice", "Show a consequential character decision."),
+    ("confrontation", "Bring the central conflict into direct focus."),
+    ("reveal", "Reveal or clarify a meaningful story fact when supported."),
+    ("climax", "Deliver a decisive turning point."),
+    ("payoff", "Pay off an earlier clue, promise or character choice."),
+    ("suspense", "End on a specific unresolved consequence, discovery or decision supported by the story."),
 )
 
 FULL_BEATS = (
-    ("hook", "Open with strong cinematic tension."),
-    ("establishing", "Establish the world, characters and stakes."),
-    ("inciting_event", "Introduce the event disrupting ordinary life."),
-    ("goal", "Clarify the protagonist's goal."),
-    ("investigation", "Develop clues and motivations."),
-    ("first_obstacle", "Introduce meaningful opposition."),
-    ("complication", "Raise the stakes."),
+    ("hook", "Open with strong story-specific tension, a striking event or an unanswered question."),
+    ("establishing", "Establish the setting, characters, relationships and stakes."),
+    ("inciting_event", "Show the event that disrupts ordinary life."),
+    ("goal", "Clarify the protagonist's goal and motivation."),
+    ("investigation", "Develop clues, motivations and meaningful actions."),
+    ("first_obstacle", "Introduce credible opposition."),
+    ("complication", "Raise the stakes through consequences."),
     ("relationship", "Develop relationships through consequential action."),
     ("discovery", "Reveal information that changes the situation."),
-    ("midpoint", "Create a major reversal."),
-    ("pressure", "Increase urgency."),
+    ("midpoint", "Create a meaningful reversal supported by established events."),
+    ("pressure", "Increase urgency and narrow the available choices."),
     ("setback", "Deliver a believable setback."),
     ("reassessment", "Force a change of approach."),
     ("preparation", "Prepare for the decisive confrontation."),
-    ("approach", "Move toward the central conflict."),
+    ("approach", "Move the characters toward the central conflict."),
     ("confrontation", "Bring opposing goals into direct conflict."),
-    ("crisis", "Force a difficult choice."),
+    ("crisis", "Force a difficult, consequential choice."),
     ("climax", "Resolve the central struggle through decisive action."),
-    ("aftermath", "Show the consequences."),
-    ("resolution", "Provide emotional closure."),
-    ("final_suspense", "Add continuation suspense only when appropriate."),
+    ("aftermath", "Show the immediate consequences of the climax."),
+    ("resolution", "Provide believable emotional and narrative closure."),
+    ("final_suspense", "Use a final unanswered question only when the story genuinely supports one."),
 )
 
 
@@ -109,6 +112,7 @@ def as_bool(config: dict, key: str, default: bool = True) -> bool:
         return value
     if isinstance(value, int) and value in (0, 1):
         return bool(value)
+
     value = str(value).strip().lower()
     if value in {"true", "yes", "on", "1", "enabled"}:
         return True
@@ -117,12 +121,95 @@ def as_bool(config: dict, key: str, default: bool = True) -> bool:
     return default
 
 
+def clean_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split on sentence boundaries while retaining Hindi and English text."""
+    text = clean_text(text)
+    if not text:
+        return []
+
+    pieces = re.split(r"(?<=[।!?！？.!])\s+", text)
+    return [piece.strip() for piece in pieces if piece.strip()]
+
+
+def story_anchors(story_text: str, topic: str, total_scenes: int) -> list[str]:
+    """
+    Select source-story excerpts as planning anchors.
+    This does not invent events or call an external model.
+    """
+    sentences = split_sentences(story_text)
+    if not sentences:
+        return [clean_text(topic)] if clean_text(topic) else []
+
+    if len(sentences) <= total_scenes:
+        return sentences
+
+    selected = []
+    for index in range(total_scenes):
+        position = round(index * (len(sentences) - 1) / max(1, total_scenes - 1))
+        selected.append(sentences[position])
+
+    return selected
+
+
 def select_beat(format_type: str, index: int, total: int):
     beats = SHORT_BEATS if format_type == "short" else FULL_BEATS
     if total <= 1:
         return beats[0]
     position = round(index * (len(beats) - 1) / (total - 1))
     return beats[max(0, min(position, len(beats) - 1))]
+
+
+def make_scene_purpose(
+    role: str,
+    beat: str,
+    description: str,
+    anchor: str,
+    topic: str,
+) -> str:
+    subject = anchor or topic
+
+    if role == "part_opening":
+        if subject:
+            return (
+                f"{description} Use this story-grounded starting point when "
+                f"relevant: {subject}. Do not invent a new event, character "
+                "or fact just to make the opening dramatic."
+            )
+        return description
+
+    if role == "part_ending":
+        if subject:
+            return (
+                f"{description} Build suspense from this established story "
+                f"detail when appropriate: {subject}. Leave a meaningful "
+                "consequence, decision or question unresolved without "
+                "fabricating a plot twist."
+            )
+        return description
+
+    if role == "finale":
+        if subject:
+            return (
+                f"{description} Connect the ending to established story "
+                f"events, including this relevant detail when appropriate: "
+                f"{subject}. Do not introduce an unsupported solution."
+            )
+        return description
+
+    if anchor:
+        return (
+            f"{description} Relevant source-story anchor: {anchor}. "
+            "Use it only if it fits this scene's chronological position; "
+            "preserve established character identities and causal continuity."
+        )
+
+    return description
 
 
 def build_plan(
@@ -137,6 +224,8 @@ def build_plan(
     part_hook = as_bool(config, "PART_HOOK", True)
     part_suspense = as_bool(config, "PART_SUSPENSE", True)
     final_resolution = as_bool(config, "FINAL_RESOLUTION", True)
+
+    anchors = story_anchors(story_text, topic, total)
     parts = []
     global_number = 0
 
@@ -144,52 +233,69 @@ def build_plan(
         scenes = []
 
         for scene_number in range(1, scenes_per_part + 1):
-            global_number += 1
+            anchor = anchors[global_number] if global_number < len(anchors) else ""
             beat, description = select_beat(
-                format_type, global_number - 1, total
+                format_type, global_number, total
             )
+
             is_first = scene_number == 1
             is_last = scene_number == scenes_per_part
             is_final_part = part_number == parts_count
             is_final_scene = is_last and is_final_part
 
-            # Final resolution wins over generic part-ending suspense.
             if is_final_scene and final_resolution:
                 role = "finale"
                 beat = "finale"
                 description = (
-                    "Resolve the central conflict, answer the main story "
-                    "question, and provide a satisfying, believable ending."
+                    "Resolve the central conflict and answer the main story "
+                    "question with a believable consequence. If the source "
+                    "does not provide enough information, do not fabricate "
+                    "a definitive fact."
                 )
             elif is_first and (part_number == 1 or part_hook):
                 role = "part_opening"
                 beat = "hook" if part_number == 1 else "part_hook"
                 description = (
-                    "Open with an immediate story-specific hook. Later parts "
-                    "must connect naturally to the previous part."
+                    "Open with immediate story-specific tension using an "
+                    "established mystery, danger, unusual detail or choice. "
+                    "For later parts, connect naturally to the prior part."
                 )
             elif is_last and part_suspense:
                 role = "part_ending"
                 beat = "suspense"
                 description = (
-                    "End on meaningful story-specific suspense that encourages "
-                    "continuation without inventing unsupported plot details."
+                    "End on a meaningful unresolved consequence, discovery "
+                    "or decision grounded in established story events. Avoid "
+                    "generic cliffhangers and unsupported plot twists."
                 )
             else:
                 role = "story_progression"
 
-            scene_id = (
-                f"part_{part_number:02d}_scene_{scene_number:02d}"
+            purpose = make_scene_purpose(
+                role, beat, description, anchor, topic
             )
+
+            scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
             scenes.append({
                 "scene": scene_number,
-                "global_scene_number": global_number,
+                "global_scene_number": global_number + 1,
                 "scene_id": scene_id,
                 "role": role,
                 "beat": beat,
                 "beat_description": description,
-                "purpose": description,
+                "purpose": purpose,
+                "story_anchor": anchor,
+                "continuity_rule": (
+                    "Keep character identity, gender presentation, clothing, "
+                    "location, objects and causal details consistent with "
+                    "the source story and prior scenes."
+                ),
+                "invention_policy": (
+                    "Do not treat planning hints as facts. Do not add "
+                    "unsupported characters, relationships, motives or twists."
+                ),
             })
+            global_number += 1
 
         parts.append({
             "part": part_number,
@@ -210,6 +316,7 @@ def build_plan(
         "part_hook": part_hook,
         "part_suspense": part_suspense,
         "final_resolution": final_resolution,
+        "anchors": anchors,
         "parts": parts,
     }
 
@@ -229,7 +336,7 @@ def build_plan(
         "source": {
             "input_file": "Input/topic.txt",
             "story_text_provided": bool(story_text),
-            "planning_mode": "offline_structural",
+            "planning_mode": "offline_story_grounded",
             "api_calls": 0,
         },
         "parts": parts,
@@ -254,7 +361,9 @@ def validate_plan(
         "scenes_per_part": scenes_per_part,
         "total_scenes": expected_total,
         "scene_order": "part_then_scene",
+        "mapping_version": 4,
     }
+
     for key, expected in expected_values.items():
         if plan.get(key) != expected:
             raise RuntimeError(
@@ -280,9 +389,8 @@ def validate_plan(
 
         for scene_number, scene in enumerate(scenes, 1):
             global_number += 1
-            expected_id = (
-                f"part_{part_number:02d}_scene_{scene_number:02d}"
-            )
+            expected_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
+
             if not isinstance(scene, dict):
                 raise RuntimeError(f"Invalid scene: {expected_id}.")
             if scene.get("scene") != scene_number:
@@ -293,6 +401,8 @@ def validate_plan(
                 raise RuntimeError(f"Incorrect scene ID: {expected_id}.")
             if not str(scene.get("purpose", "")).strip():
                 raise RuntimeError(f"Missing scene purpose: {expected_id}.")
+            if not isinstance(scene.get("story_anchor", ""), str):
+                raise RuntimeError(f"Invalid story anchor: {expected_id}.")
 
 
 def main() -> None:
@@ -300,12 +410,16 @@ def main() -> None:
         raise RuntimeError(f"Input file is missing: {INPUT_FILE}")
 
     config = load_and_validate(str(INPUT_FILE))
-    format_type = get_format(config)
-    topic = get_topic(config)
-    story_text = get_story_text(config)
-    parts_count = get_parts(config)
-    scenes_per_part = get_scenes(config)
+    format_type = str(get_format(config)).strip().lower()
+    topic = clean_text(get_topic(config))
+    story_text = clean_text(get_story_text(config))
+    parts_count = int(get_parts(config))
+    scenes_per_part = int(get_scenes(config))
 
+    if format_type not in {"short", "full"}:
+        raise RuntimeError(f"Unsupported FORMAT: {format_type}")
+    if parts_count < 1 or scenes_per_part < 1:
+        raise RuntimeError("PARTS and SCENES must be positive integers.")
     if not topic and not story_text:
         raise RuntimeError("TOPIC and STORY_TEXT are both empty.")
 
@@ -339,11 +453,17 @@ def main() -> None:
 
     write_json(OUTPUT_FILE, plan)
     log("STORY PLAN: SUCCESS")
+    log("Version:", VERSION)
     log("Format:", format_type)
     log("Topic:", topic or "(story text only)")
     log("Parts:", parts_count)
     log("Scenes per part:", scenes_per_part)
     log("Total scenes:", parts_count * scenes_per_part)
+    log("Story-grounded anchors:", sum(
+        bool(scene.get("story_anchor"))
+        for part in plan["parts"]
+        for scene in part["scenes"]
+    ))
     log("Output:", OUTPUT_FILE)
     log("External API calls: 0")
 
