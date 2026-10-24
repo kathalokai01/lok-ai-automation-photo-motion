@@ -1,4 +1,3 @@
-
 name: Generate Katha Lok AI Photo Motion Video
 
 on:
@@ -348,8 +347,21 @@ jobs:
           set -euo pipefail
           python scripts/package_output.py
           test -s katha-lok-ai-photo-motion-output.zip
+          test -s output/package_manifest.json
           unzip -t katha-lok-ai-photo-motion-output.zip
           ls -lh katha-lok-ai-photo-motion-output.zip
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/package_manifest.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          assert data.get("status") == "completed", "Package manifest status failed"
+          assert data.get("format") in {"short", "full"}, "Package format is invalid"
+          assert data.get("file_count", 0) > 0, "Package contains no files"
+          assert data.get("zip_integrity") == "valid", "ZIP integrity not confirmed"
+          print("Package manifest verified.")
+          PY
 
       - name: Upload final output artifact
         if: success()
@@ -357,8 +369,8 @@ jobs:
         with:
           name: katha-lok-ai-photo-motion-output
           path: |
-            output/**
             katha-lok-ai-photo-motion-output.zip
+            output/package_manifest.json
           if-no-files-found: error
           retention-days: 7
 
