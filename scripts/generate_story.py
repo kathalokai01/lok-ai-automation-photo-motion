@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Story builder with format-safe parts, word-count checks, title, hooks and suspense."""
+"""Schema-compatible, offline story builder for Katha Lok AI."""
 
 from __future__ import annotations
 
@@ -25,7 +26,10 @@ OUTPUT_FILE = STORY_DIR / "story.json"
 TITLE_FILE = STORY_DIR / "final_title.txt"
 FINGERPRINT_FILE = STORY_DIR / "story.fingerprint"
 
-VERSION = "story-builder-v5-short-parts-word-target"
+VERSION = "story-builder-v6-short-word-aware-schema-compatible"
+MIN_WORDS_PER_SHORT_PART = 120
+MAX_WORDS_PER_SHORT_PART = 150
+TARGET_WORDS_PER_SHORT_PART = 135
 
 
 def log(*items):
@@ -73,6 +77,7 @@ def read_json(path):
 
 
 def sentences(text):
+    """Split on sentence boundaries while preserving the source order."""
     text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     result = []
     for block in re.split(r"\n+", text):
@@ -95,9 +100,8 @@ def clean_title(value):
 
 
 def derive_title(topic, story_text):
-    explicit = clean_title(topic)
-    if explicit:
-        return explicit[:100]
+    if clean_title(topic):
+        return clean_title(topic)[:100]
 
     units = sentences(story_text)
     if not units:
@@ -111,26 +115,28 @@ def derive_title(topic, story_text):
         "letter", "disappeared", "revealed",
     )
 
-    def score(sentence):
-        lower = sentence.casefold()
+    def score(item):
+        lower = item.casefold()
         return (
             sum(3 for marker in markers if marker in lower)
-            + min(len(sentence), 150) / 50
+            + min(len(item), 150) / 50
         )
 
-    chosen = max(enumerate(units), key=lambda item: (score(item[1]), -item[0]))[1]
+    chosen = max(
+        enumerate(units),
+        key=lambda item: (score(item[1]), -item[0]),
+    )[1]
+
     chosen = re.sub(
         r"^(और|लेकिन|मगर|फिर|तभी|क्योंकि|इसलिए)\s+",
         "",
         chosen,
         flags=re.IGNORECASE,
     )
-    words = clean_title(chosen).split()
+    words = chosen.split()
     if len(words) > 9:
         chosen = " ".join(words[:9]).rstrip(" ,;:-") + "…"
-    else:
-        chosen = " ".join(words)
-    return chosen[:90].rstrip() or "Katha Lok AI कहानी"
+    return clean_title(chosen)[:90] or "Katha Lok AI कहानी"
 
 
 def as_int(value, label):
@@ -153,11 +159,10 @@ def bool_value(config, key, default=True):
 
 
 def split_balanced(text, count):
-    """Split text in source order, preserving sentence boundaries where possible."""
+    """Split into exactly count non-empty chunks, keeping source order."""
     units = sentences(text)
     if not units:
         raise RuntimeError("Story text has no usable sentences.")
-
     if count < 1:
         raise RuntimeError("Split count must be positive.")
 
@@ -168,25 +173,27 @@ def split_balanced(text, count):
                 f"Only {len(words)} words are available for {count} scenes. "
                 "Add story text or reduce PARTS/SCENES."
             )
-        result = []
+        chunks = []
         for i in range(count):
             start = round(i * len(words) / count)
             end = round((i + 1) * len(words) / count)
-            result.append(" ".join(words[start:end]).strip())
-        return result
+            chunks.append(" ".join(words[start:end]).strip())
+        return chunks
 
-    result = []
+    chunks = []
     cursor = 0
-
     for group_index in range(count):
         groups_left = count - group_index
         units_left = len(units) - cursor
 
         if groups_left == 1:
-            result.append(" ".join(units[cursor:]).strip())
+            chunks.append(" ".join(units[cursor:]).strip())
             break
 
-        target = sum(word_count(x) for x in units[cursor:]) / groups_left
+        target = (
+            sum(word_count(item) for item in units[cursor:])
+            / groups_left
+        )
         group = []
         current_words = 0
         max_take = units_left - (groups_left - 1)
@@ -211,12 +218,73 @@ def split_balanced(text, count):
             group.append(units[cursor])
             cursor += 1
 
-        result.append(" ".join(group).strip())
+        chunks.append(" ".join(group).strip())
 
-    if len(result) != count or any(not x for x in result):
-        raise RuntimeError("Could not split story into the requested number of sections.")
+    if len(chunks) != count or any(not item for item in chunks):
+        raise RuntimeError("Could not split story into requested sections.")
+    return chunks
 
-    return result
+
+def split_short_parts(text, parts_count):
+    """
+    Split at sentence boundaries, aiming for 135 words per part.
+    Preserve all supplied story text; never invent missing words.
+    """
+    units = sentences(text)
+    if not units:
+        raise RuntimeError("Short story contains no usable sentences.")
+
+    if len(units) < parts_count:
+        return split_balanced(text, parts_count)
+
+    chunks = []
+    cursor = 0
+
+    for index in range(parts_count):
+        parts_left = parts_count - index
+        units_left = len(units) - cursor
+
+        if parts_left == 1:
+            chunks.append(" ".join(units[cursor:]).strip())
+            break
+
+        # Keep at least one sentence for every remaining part.
+        max_take = units_left - (parts_left - 1)
+        group = []
+        current_words = 0
+
+        while cursor < len(units) and len(group) < max_take:
+            candidate = units[cursor]
+            candidate_words = word_count(candidate)
+
+            if group:
+                current_distance = abs(
+                    current_words - TARGET_WORDS_PER_SHORT_PART
+                )
+                next_distance = abs(
+                    current_words + candidate_words
+                    - TARGET_WORDS_PER_SHORT_PART
+                )
+                # Once near the target, stop before crossing it too far.
+                if current_distance <= next_distance:
+                    break
+
+            group.append(candidate)
+            current_words += candidate_words
+            cursor += 1
+
+            if current_words >= TARGET_WORDS_PER_SHORT_PART:
+                break
+
+        if not group and cursor < len(units):
+            group.append(units[cursor])
+            cursor += 1
+
+        chunks.append(" ".join(group).strip())
+
+    if len(chunks) != parts_count or any(not item for item in chunks):
+        raise RuntimeError("Could not create the requested short parts.")
+    return chunks
 
 
 def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
@@ -224,7 +292,6 @@ def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
         raise RuntimeError(
             "Story plan missing/invalid. Run generate_story_plan.py first."
         )
-
     if clean(plan.get("format")).lower() != format_type:
         raise RuntimeError("Story plan format differs from Input/topic.txt.")
 
@@ -233,12 +300,12 @@ def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
         raise RuntimeError("Story plan topic differs from current input.")
 
     expected_total = parts_count * scenes_per_part
-    expected = (parts_count, scenes_per_part, expected_total)
     actual = (
         as_int(plan.get("parts_count"), "plan.parts_count"),
         as_int(plan.get("scenes_per_part"), "plan.scenes_per_part"),
         as_int(plan.get("total_scenes"), "plan.total_scenes"),
     )
+    expected = (parts_count, scenes_per_part, expected_total)
     if actual != expected:
         raise RuntimeError(
             f"Story plan counts {actual} do not match input {expected}. "
@@ -276,8 +343,8 @@ def validate_plan(plan, format_type, topic, parts_count, scenes_per_part):
 
 
 def topic_story_beats(topic, count):
-    """Offline fallback outline; explicitly not represented as AI-written."""
-    subject = clean(topic)
+    """Offline outline fallback; explicitly not represented as AI-written."""
+    subject = clean(topic) or "इस कहानी"
     beats = [
         f"{subject} से जुड़ी एक असामान्य घटना ने सबका ध्यान खींचा।",
         f"शुरुआत में किसी को समझ नहीं आया कि {subject} के पीछे क्या कारण था।",
@@ -302,98 +369,102 @@ def topic_story_beats(topic, count):
     ]
     result = list(beats[:count])
     while len(result) < count:
-        n = len(result) + 1
+        number = len(result) + 1
         result.append(
             f"{subject} की जाँच में अगला चरण सामने आया। "
             f"मुख्य पात्र ने उपलब्ध संकेतों की पड़ताल की और "
-            f"चरण {n} में अपनी योजना बदली।"
+            f"चरण {number} में अपनी योजना बदली।"
         )
     return result
 
 
-def story_hook(topic, story_text, first_chunk, format_type):
+def story_hook(topic, title, story_text, first_chunk, format_type):
+    """Prefer real story wording over a repeated generic hook."""
     units = sentences(story_text)
-    markers = (
-        "रहस्य", "गायब", "लापता", "अचानक", "खुलासा", "सच",
-        "राज", "क्यों", "कैसे", "सबूत", "मौत", "आवाज", "चिट्ठी",
-    )
-
-    for unit in units:
-        if any(marker in unit.casefold() for marker in markers):
-            clue = unit
-            if word_count(clue) > 22:
-                clue = " ".join(clue.split()[:22]).rstrip(" ,;:-") + "…"
-            return f"इस कहानी का सबसे अहम सवाल यहीं से शुरू होता है: {clue}"
-
-    subject = clean(topic) or clean(first_chunk)
-    if word_count(subject) > 14:
-        subject = " ".join(subject.split()[:14])
-
     if units:
-        clue = units[-1] if len(units) > 1 else units[0]
-        if word_count(clue) > 18:
-            clue = " ".join(clue.split()[:18]).rstrip(" ,;:-") + "…"
-        return f"इस कहानी का सुराग शुरुआत में ही छिपा है: {clue}"
+        first = units[0]
+        if word_count(first) >= 7:
+            return first
+        if len(units) > 1 and word_count(units[1]) >= 7:
+            return units[1]
 
+        combined = " ".join(units[:2]).strip()
+        if word_count(combined) >= 7:
+            return combined
+
+    subject = clean(topic) or clean(title) or clean(first_chunk)
+    subject = subject.rstrip("।.!? ")
     if format_type == "short":
         return (
-            f"{subject} से जुड़ी एक बात सब कुछ बदल सकती थी—"
-            "लेकिन उसका असली मतलब अभी साफ नहीं था।"
+            f"{subject} से जुड़ी इस घटना में एक ऐसा सवाल छिपा है "
+            "जिसका जवाब आगे की कहानी में मिलेगा।"
         )
     return (
-        f"{subject} की शुरुआत मामूली लगती थी, "
-        "लेकिन उसके पीछे छिपा सच हर फैसले को बदल सकता था।"
+        f"{subject} की असली वजह समझने के लिए घटनाओं के "
+        "हर संकेत को ध्यान से देखना होगा।"
     )
 
 
 def suspense_ending(text, topic):
     units = sentences(text)
-    subject = clean(topic) or "इस कहानी"
-
     if not units:
-        return f"{subject} का सबसे अहम सवाल अभी अनसुलझा है।"
+        return ""
 
     ending = units[-1]
     if word_count(ending) > 24:
         ending = " ".join(ending.split()[-18:])
 
-    if any(token in ending.casefold() for token in ("क्यों", "कैसे", "कौन", "कहाँ", "क्या", "?")):
-        return f"अब सवाल है: {ending}"
+    if any(
+        token in ending.casefold()
+        for token in ("क्यों", "कैसे", "कौन", "कहाँ", "क्या", "?")
+    ):
+        return ending
 
-    return f"{ending} — लेकिन इससे जुड़ा अगला सवाल अभी बाकी है।"
+    # The supplied ending remains the suspense anchor; no new plot fact is added.
+    subject = clean(topic)
+    if subject:
+        return f"{ending} अब {subject} से जुड़ा अगला सवाल बाकी है।"
+    return f"{ending} अब इससे जुड़ा अगला सवाल बाकी है।"
 
 
-def make_story(config, plan, format_type, title, topic, story_text,
-               parts_count, scenes_per_part):
+def make_story(
+    config, plan, format_type, title, topic, story_text,
+    parts_count, scenes_per_part,
+):
     part_hook = bool_value(config, "PART_HOOK", True)
     part_suspense = bool_value(config, "PART_SUSPENSE", True)
     final_resolution = bool_value(config, "FINAL_RESOLUTION", True)
 
     if clean(story_text):
         if format_type == "short":
-            # Short mode splits by part first, then by scene.
-            part_texts = split_balanced(story_text, parts_count)
+            part_texts = split_short_parts(story_text, parts_count)
             chunks_by_part = [
                 split_balanced(part_text, scenes_per_part)
                 for part_text in part_texts
             ]
             story_type = "user_supplied_story_short_part_mapping"
         else:
-            all_chunks = split_balanced(story_text, parts_count * scenes_per_part)
+            all_chunks = split_balanced(
+                story_text, parts_count * scenes_per_part
+            )
             chunks_by_part = [
                 all_chunks[i * scenes_per_part:(i + 1) * scenes_per_part]
                 for i in range(parts_count)
             ]
             story_type = "user_supplied_story_offline_mapping"
     else:
-        all_chunks = topic_story_beats(topic or title, parts_count * scenes_per_part)
+        all_chunks = topic_story_beats(
+            topic or title, parts_count * scenes_per_part
+        )
         chunks_by_part = [
             all_chunks[i * scenes_per_part:(i + 1) * scenes_per_part]
             for i in range(parts_count)
         ]
         story_type = "offline_topic_template_not_ai_generated"
 
-    hook = story_hook(topic or title, story_text, chunks_by_part[0][0], format_type)
+    hook = story_hook(
+        topic, title, story_text, chunks_by_part[0][0], format_type
+    )
     parts = []
     global_number = 0
     part_word_counts = []
@@ -401,14 +472,17 @@ def make_story(config, plan, format_type, title, topic, story_text,
     for p, plan_part in enumerate(plan["parts"], 1):
         scenes = []
         raw_chunks = chunks_by_part[p - 1]
-        part_word_counts.append(sum(word_count(x) for x in raw_chunks))
+        part_text = " ".join(raw_chunks).strip()
+        part_word_counts.append(word_count(part_text))
 
         for s, plan_scene in enumerate(plan_part["scenes"], 1):
             global_number += 1
             narration = clean(raw_chunks[s - 1])
 
             if p == 1 and s == 1:
-                narration = f"{hook} {narration}".strip()
+                # Avoid repeating the hook when it is already the opening text.
+                if not narration.startswith(hook):
+                    narration = f"{hook} {narration}".strip()
             elif s == 1 and part_hook and p > 1:
                 narration = f"पिछले भाग की घटना के बाद, {narration}".strip()
 
@@ -427,14 +501,13 @@ def make_story(config, plan, format_type, title, topic, story_text,
             suspense = ""
             if s == scenes_per_part:
                 if p == parts_count and final_resolution:
+                    # Do not falsely claim that an unresolved story was resolved.
                     suspense = (
-                        "कहानी का केंद्रीय प्रश्न अपने परिणाम तक पहुँचता है: "
-                        + clean(" ".join(raw_chunks))[-240:]
+                        "अंतिम भाग: उपलब्ध कहानी के निष्कर्ष को स्पष्ट करें; "
+                        "किसी असमर्थित घटना या खुलासे को न जोड़ें।"
                     )
                 elif part_suspense:
-                    suspense = suspense_ending(
-                        " ".join(raw_chunks), topic or title
-                    )
+                    suspense = suspense_ending(part_text, topic or title)
 
             scenes.append({
                 "part": p,
@@ -465,8 +538,10 @@ def make_story(config, plan, format_type, title, topic, story_text,
         "ending_type": "resolution" if final_resolution else "suspense",
         "parts": parts,
         "part_word_counts": part_word_counts,
-        "short_word_target": {"minimum": 120, "maximum": 150}
-            if format_type == "short" else None,
+        "short_word_target": {
+            "minimum": MIN_WORDS_PER_SHORT_PART,
+            "maximum": MAX_WORDS_PER_SHORT_PART,
+        } if format_type == "short" else None,
         "source_text_sha256": hashlib.sha256(
             clean(story_text).encode("utf-8")
         ).hexdigest(),
@@ -489,7 +564,9 @@ def make_story(config, plan, format_type, title, topic, story_text,
     }
 
 
-def validate_story(data, format_type, title, topic, parts_count, scenes_per_part):
+def validate_story(
+    data, format_type, title, topic, parts_count, scenes_per_part
+):
     if not isinstance(data, dict) or data.get("status") != "completed":
         raise RuntimeError("Story root/status is invalid.")
     if clean(data.get("format")).lower() != format_type:
@@ -508,12 +585,16 @@ def validate_story(data, format_type, title, topic, parts_count, scenes_per_part
     first_narration = ""
 
     for p, part in enumerate(parts, 1):
-        if not isinstance(part, dict) or as_int(part.get("part"), f"part {p}") != p:
+        if not isinstance(part, dict) or as_int(
+            part.get("part"), f"part {p}"
+        ) != p:
             raise RuntimeError(f"Invalid part numbering at {p}.")
 
         rows = part.get("scenes")
         if not isinstance(rows, list) or len(rows) != scenes_per_part:
-            raise RuntimeError(f"Part {p} must contain {scenes_per_part} scenes.")
+            raise RuntimeError(
+                f"Part {p} must have exactly {scenes_per_part} scenes."
+            )
 
         part["part_id"] = f"part_{p:02d}"
         part["title"] = clean(part.get("title")) or f"भाग {p}"
@@ -529,14 +610,18 @@ def validate_story(data, format_type, title, topic, parts_count, scenes_per_part
             scene["scene_id"] = scene_id
             scene["global_scene_number"] = global_number
 
-            for field in ("purpose", "narration", "visual", "dialogue", "suspense"):
+            for field in (
+                "purpose", "narration", "visual", "dialogue", "suspense"
+            ):
                 value = scene.get(field, "")
                 if not isinstance(value, str):
                     raise RuntimeError(f"{scene_id}: {field} must be text.")
                 scene[field] = value.strip()
 
             if not scene["narration"] or not scene["visual"]:
-                raise RuntimeError(f"{scene_id}: narration or visual is empty.")
+                raise RuntimeError(
+                    f"{scene_id}: narration or visual is empty."
+                )
             if scene_id in seen:
                 raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
             seen.add(scene_id)
@@ -580,24 +665,28 @@ def main():
         raise RuntimeError("Could not determine story title.")
 
     plan = validate_plan(
-        read_json(PLAN_FILE), format_type, topic, parts_count, scenes_per_part
+        read_json(PLAN_FILE),
+        format_type,
+        topic,
+        parts_count,
+        scenes_per_part,
     )
 
     if format_type == "short" and story_text:
         total_words = word_count(story_text)
-        low = parts_count * 120
-        high = parts_count * 150
-        log("SHORT STORY WORD COUNT:", total_words)
+        low = parts_count * MIN_WORDS_PER_SHORT_PART
+        high = parts_count * MAX_WORDS_PER_SHORT_PART
+        log("SHORT STORY SOURCE WORD COUNT:", total_words)
         log("TARGET WORD COUNT:", f"{low}-{high} across {parts_count} part(s)")
         if total_words < low:
             log(
-                "WARNING: story text is below the 120-word-per-part target. "
-                "The script will not fabricate extra story text."
+                "WARNING: source is shorter than the requested target. "
+                "No invented padding or unsupported plot will be added."
             )
         elif total_words > high:
             log(
-                "INFO: supplied story is longer than the target range; "
-                "it will be split across the configured parts."
+                "INFO: source is longer than the target. All source text "
+                "will be preserved and distributed in order."
             )
 
     settings = {
@@ -626,7 +715,9 @@ def main():
     log("Total scenes:", parts_count * scenes_per_part)
 
     try:
-        saved_fingerprint = FINGERPRINT_FILE.read_text(encoding="utf-8").strip()
+        saved_fingerprint = FINGERPRINT_FILE.read_text(
+            encoding="utf-8"
+        ).strip()
     except OSError:
         saved_fingerprint = ""
 
@@ -635,7 +726,8 @@ def main():
         if isinstance(saved, dict):
             try:
                 validate_story(
-                    saved, format_type, title, topic, parts_count, scenes_per_part
+                    saved, format_type, title, topic,
+                    parts_count, scenes_per_part,
                 )
                 log("RESUME: matching validated story reused.")
                 return
@@ -647,7 +739,8 @@ def main():
         parts_count, scenes_per_part,
     )
     data = validate_story(
-        data, format_type, title, topic, parts_count, scenes_per_part
+        data, format_type, title, topic,
+        parts_count, scenes_per_part,
     )
 
     write_json(OUTPUT_FILE, data)
@@ -658,6 +751,15 @@ def main():
     log("Output:", OUTPUT_FILE.relative_to(ROOT))
     log("Story type:", data["story_type"])
     log("Words per part:", data["part_word_counts"])
+
+    if format_type == "short":
+        for number, count in enumerate(data["part_word_counts"], 1):
+            status = (
+                "IN RANGE"
+                if MIN_WORDS_PER_SHORT_PART <= count <= MAX_WORDS_PER_SHORT_PART
+                else "OUTSIDE TARGET"
+            )
+            log(f"Part {number}: {count} words — {status}")
 
     if not story_text:
         log(
