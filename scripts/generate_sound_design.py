@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Local, resumable story-aware sound design with manifest-compatible outputs."""
+"""Local, resumable story-aware sound design with improved source audibility."""
 
 from __future__ import annotations
 
@@ -27,19 +27,19 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SCENES_PATH = OUTPUT / "scenes" / "scenes.json"
 AUDIO_MANIFEST = OUTPUT / "narration" / "audio_jobs.json"
 
-VERSION = "free-sound-design-v13-story-aware-resumable"
+VERSION = "free-sound-design-v14-audibility-resume-safe"
 RATE = 22050
 SFX_SECONDS = 1.8
 SFX_TYPES = ("whoosh", "impact", "mystery", "heartbeat", "chime")
 PATH_KEYS = ("output", "audio_path", "path", "file", "audio")
 
-# These are cue gains; render_video.py applies its own final mix gain.
+# Cue gains are applied by render_video.py. The final limiter remains enabled.
 SFX_GAINS = {
-    "whoosh": 0.19,
-    "impact": 0.24,
-    "mystery": 0.17,
-    "heartbeat": 0.19,
-    "chime": 0.19,
+    "whoosh": 0.30,
+    "impact": 0.38,
+    "mystery": 0.28,
+    "heartbeat": 0.30,
+    "chime": 0.30,
 }
 SFX_TIME_FRACTIONS = {
     "whoosh": 0.30,
@@ -190,16 +190,16 @@ def envelope(t, duration, fade_in=1.5, fade_out=2.0):
 
 
 def music_samples(duration):
-    # A restrained, slow instrumental-style synthesized bed, not a real song.
+    # Local synthesized instrumental-style bed; no external service.
     roots = (110.0, 130.81, 98.0, 146.83, 123.47, 92.5)
     for index in range(int(round(RATE * duration))):
         t = index / RATE
         root = roots[int(t // 8) % len(roots)]
         slow = 0.8 + 0.2 * math.sin(2 * math.pi * t / 17)
         tone = (
-            0.30 * math.sin(2 * math.pi * root * t)
-            + 0.19 * math.sin(2 * math.pi * root * 1.5 * t)
-            + 0.12 * math.sin(2 * math.pi * root * 2 * t)
+            0.36 * math.sin(2 * math.pi * root * t)
+            + 0.23 * math.sin(2 * math.pi * root * 1.5 * t)
+            + 0.15 * math.sin(2 * math.pi * root * 2 * t)
         )
         yield tone * slow * envelope(t, duration, 2.0, 3.0)
 
@@ -211,10 +211,10 @@ def ambient_samples(duration):
         t = index / RATE
         filtered = filtered * 0.985 + rng.uniform(-1, 1) * 0.015
         low = (
-            0.12 * math.sin(2 * math.pi * 47 * t)
-            + 0.08 * math.sin(2 * math.pi * 69.3 * t)
+            0.15 * math.sin(2 * math.pi * 47 * t)
+            + 0.10 * math.sin(2 * math.pi * 69.3 * t)
         )
-        yield (low + filtered * 0.14) * envelope(t, duration, 1.5, 2.0)
+        yield (low + filtered * 0.18) * envelope(t, duration, 1.5, 2.0)
 
 
 def sfx_samples(kind):
@@ -230,30 +230,30 @@ def sfx_samples(kind):
 
         if kind == "whoosh":
             value = (
-                0.42 * filtered
-                + 0.28 * math.sin(2 * math.pi * (140 + 600 * progress) * t)
+                0.48 * filtered
+                + 0.30 * math.sin(2 * math.pi * (140 + 600 * progress) * t)
             )
         elif kind == "impact":
             decay = math.exp(-7.0 * t)
             value = decay * (
-                0.75 * math.sin(2 * math.pi * 65 * t)
-                + 0.25 * filtered
+                0.78 * math.sin(2 * math.pi * 65 * t)
+                + 0.28 * filtered
             )
         elif kind == "mystery":
             wobble = 2.0 * math.sin(2 * math.pi * 0.7 * t)
             value = (
-                0.32 * math.sin(2 * math.pi * (196 + wobble) * t)
-                + 0.20 * math.sin(2 * math.pi * 246.94 * t)
-                + 0.12 * filtered
+                0.36 * math.sin(2 * math.pi * (196 + wobble) * t)
+                + 0.22 * math.sin(2 * math.pi * 246.94 * t)
+                + 0.14 * filtered
             )
         elif kind == "heartbeat":
             beat = max(0.0, math.sin(2 * math.pi * 1.5 * t)) ** 10
-            value = beat * math.sin(2 * math.pi * 58 * t) + 0.05 * filtered
+            value = beat * math.sin(2 * math.pi * 58 * t) + 0.06 * filtered
         else:
             value = (
-                0.45 * math.sin(2 * math.pi * 880 * t)
-                + 0.24 * math.sin(2 * math.pi * 1320 * t)
-                + 0.12 * math.sin(2 * math.pi * 1760 * t)
+                0.48 * math.sin(2 * math.pi * 880 * t)
+                + 0.26 * math.sin(2 * math.pi * 1320 * t)
+                + 0.14 * math.sin(2 * math.pi * 1760 * t)
             ) * math.exp(-2.2 * t)
 
         yield value * fade
@@ -274,7 +274,10 @@ def make_track(path, category, factory, duration, old_tracks):
         try:
             actual_duration = validate_wav(path, duration)
             checksum = sha256_file(path)
-            if previous.get("signature") == sig and previous.get("sha256") == checksum:
+            if (
+                previous.get("signature") == sig
+                and previous.get("sha256") == checksum
+            ):
                 log("RESUME:", path.relative_to(ROOT))
                 return {
                     "status": "completed",
@@ -332,8 +335,10 @@ def narration_durations():
             continue
 
         value = next(
-            (row.get(key) for key in PATH_KEYS
-             if isinstance(row.get(key), str) and row[key].strip()),
+            (
+                row.get(key) for key in PATH_KEYS
+                if isinstance(row.get(key), str) and row[key].strip()
+            ),
             None,
         )
         if not value:
@@ -345,7 +350,9 @@ def narration_durations():
         path = path.resolve()
 
         if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
-            raise RuntimeError(f"Narration file missing or unsafe: {part}/{scene}")
+            raise RuntimeError(
+                f"Narration file missing or unsafe: {part}/{scene}"
+            )
 
         process = subprocess.run(
             [
@@ -453,7 +460,10 @@ def choose_sfx(scene):
         if any(word in text for word in keywords):
             return kind
 
-    if any(word in text for word in ("transition", "दौड़ा", "भागा", "भाग रही")):
+    if any(
+        word in text
+        for word in ("transition", "दौड़ा", "भागा", "भाग रही")
+    ):
         return "whoosh"
     return "mystery" if scene.get("suspense_required") else "whoosh"
 
@@ -470,8 +480,10 @@ def main():
         ),
         "ambient": enabled(
             config,
-            ("AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND",
-             "ENVIRONMENT_SOUND", "AMBIENCE_ENABLED"),
+            (
+                "AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND",
+                "ENVIRONMENT_SOUND", "AMBIENCE_ENABLED",
+            ),
         ),
         "sfx": enabled(
             config,
@@ -620,8 +632,9 @@ def main():
         "sfx_cue_manifest": CUES_PATH.relative_to(ROOT).as_posix(),
         "sfx_cue_count": len(cues),
         "mixing_note": (
-            "This script generates source tracks and cue metadata. "
-            "Final audible gains are applied by render_video.py."
+            "Source track and cue levels were raised modestly. Final audible "
+            "balance and narration protection remain controlled by "
+            "render_video.py; this script makes no external API calls."
         ),
     })
 
