@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Story-specific YouTube metadata with cache and one-request API policy."""
+"""Story-grounded YouTube metadata with cache, validation and local fallback."""
 
 from __future__ import annotations
 
@@ -14,8 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_FILE = ROOT / "Input" / "topic.txt"
-STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
-SOURCE_STORY_FILE = ROOT / "output" / "story" / "story.json"
+AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
+STORY_FILE = ROOT / "output" / "story" / "story.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
@@ -28,7 +29,7 @@ OUTPUT_TAGS = PUBLISH / "youtube_tags.txt"
 CHECKPOINT = PUBLISH / "metadata_checkpoint.json"
 PACKAGE_METADATA = OUT / "youtube_metadata.txt"
 
-VERSION = "metadata-v7-story-specific-single-request"
+VERSION = "metadata-v8-story-grounded-validated"
 MAX_TITLE = 100
 MAX_DESCRIPTION = 1000
 MAX_TAGS = 20
@@ -43,7 +44,9 @@ def clean(value, limit=None):
     if not isinstance(value, str):
         return ""
     value = re.sub(r"\s+", " ", value).strip()
-    return value[:limit].rstrip() if limit else value
+    if limit is not None:
+        value = value[:limit].rstrip()
+    return value
 
 
 def read_json(path):
@@ -56,7 +59,7 @@ def read_json(path):
 
 def write_text(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
+    temp = path.with_name(path.name + ".tmp")
     try:
         temp.write_text(content, encoding="utf-8")
         os.replace(temp, path)
@@ -66,7 +69,7 @@ def write_text(path, content):
 
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
+    temp = path.with_name(path.name + ".tmp")
     try:
         temp.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -81,131 +84,120 @@ def read_input():
     if not INPUT_FILE.is_file():
         raise RuntimeError("Input/topic.txt is missing.")
 
-    result = {}
+    values = {}
     for raw in INPUT_FILE.read_text(encoding="utf-8-sig").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        result[key.strip().upper()] = value.strip().strip("\"'")
-    return result
+        values[key.strip().upper()] = value.strip().strip("\"'")
+    return values
 
 
-def story_strings(value, depth=0):
-    """Read story content only; ignore technical prompts and image instructions."""
-    if depth > 10:
+def collect_story_text(value, depth=0):
+    """Collect narrative fields while excluding visual and technical prompts."""
+    if depth > 12:
         return []
 
     if isinstance(value, str):
         text = clean(value)
-        return [text] if len(text) >= 20 else []
+        return [text] if len(text) >= 15 else []
 
     if isinstance(value, list):
         result = []
-        for item in value[:400]:
-            result.extend(story_strings(item, depth + 1))
+        for item in value[:500]:
+            result.extend(collect_story_text(item, depth + 1))
         return result
 
     if not isinstance(value, dict):
         return []
 
     result = []
-    narrative_fields = (
-        "summary", "logline", "synopsis", "story_text", "full_story",
-        "story", "narration", "text", "content",
-    )
-    container_fields = (
-        "parts", "scenes", "story_parts", "chapters",
-        "plot", "ending", "story_metadata", "metadata",
-    )
 
-    for key in narrative_fields:
+    for key in (
+        "title", "summary", "logline", "synopsis",
+        "story_text", "full_story", "story", "narration",
+        "dialogue", "ending",
+    ):
         item = value.get(key)
         if isinstance(item, str):
             text = clean(item)
-            if len(text) >= 20:
+            if len(text) >= 15:
                 result.append(text)
 
-    for key in container_fields:
+    for key in ("parts", "scenes", "chapters", "story_parts"):
         item = value.get(key)
         if isinstance(item, (dict, list)):
-            result.extend(story_strings(item, depth + 1))
+            result.extend(collect_story_text(item, depth + 1))
 
     return result
 
 
 def story_context(story):
-    values = story_strings(story)
+    candidates = collect_story_text(story)
     result = []
     seen = set()
 
-    for value in values:
+    for value in candidates:
         key = value.casefold()
         if key in seen:
             continue
         seen.add(key)
         result.append(value)
 
-    # Keep source order so the opening, plot and ending remain in order.
     return clean(" ".join(result), MAX_CONTEXT)
 
 
 def read_title_file():
-    if not TITLE_FILE.is_file():
-        return ""
-    for line in TITLE_FILE.read_text(encoding="utf-8-sig").splitlines():
-        value = clean(line, MAX_TITLE)
-        if value and not value.startswith(("#", "[")):
-            return value
+    try:
+        for line in TITLE_FILE.read_text(encoding="utf-8-sig").splitlines():
+            title = clean(line, MAX_TITLE)
+            if title and not title.startswith(("#", "[")):
+                return title
+    except OSError:
+        pass
     return ""
 
 
-def title_from_story(story, topic, context):
-    # An explicitly supplied topic/title takes priority.
-    if topic:
-        return clean(topic, MAX_TITLE)
+def derive_title(story, explicit_title, context):
+    if explicit_title:
+        return clean(explicit_title, MAX_TITLE)
 
-    # The story-generation stage may already have created a title.
     saved = read_title_file()
     if saved:
         return saved
 
     if isinstance(story, dict):
-        containers = [
-            story,
-            story.get("metadata", {}),
-            story.get("story_metadata", {}),
-        ]
-        for container in containers:
-            if not isinstance(container, dict):
-                continue
-            for key in ("title", "story_title", "generated_title"):
-                value = clean(container.get(key), MAX_TITLE)
-                if value:
-                    return value
+        for key in ("title", "story_title", "generated_title"):
+            title = clean(story.get(key), MAX_TITLE)
+            if title:
+                return title
 
-    # Last-resort title derived from story keywords, not its first sentence.
+    # Avoid using an entire narration sentence as the video title.
     ignored = {
-        "एक", "और", "था", "थी", "थे", "उस", "उसके", "उसकी",
-        "लेकिन", "फिर", "तभी", "कहानी", "उसने", "वह", "यह",
+        "एक", "और", "था", "थी", "थे", "उस", "उसने", "उसकी",
+        "उसके", "लेकिन", "फिर", "तभी", "कहानी", "वह", "यह",
         "जो", "की", "के", "का", "में", "से", "पर", "को", "है",
         "the", "and", "was", "were", "then", "when", "with",
         "from", "story", "that", "this", "have", "they",
     }
-    words = re.findall(r"[\w\u0900-\u097F]+", context)
-    chosen, seen = [], set()
 
-    for word in words:
-        key = word.casefold()
-        if len(word) < 3 or key in ignored or key in seen:
+    tokens = re.findall(r"[\w\u0900-\u097F]+", context)
+    selected = []
+    seen = set()
+
+    for token in tokens:
+        key = token.casefold()
+        if len(token) < 3 or key in ignored or key in seen:
             continue
-        chosen.append(word)
+        selected.append(token)
         seen.add(key)
-        if len(chosen) == 5:
+        if len(selected) >= 5:
             break
 
-    if chosen:
-        return clean(" ".join(chosen) + " | हिंदी कहानी", MAX_TITLE)
+    if selected:
+        return clean(" ".join(selected) + " | हिंदी कहानी", MAX_TITLE)
+
     return "हिंदी कहानी"
 
 
@@ -214,27 +206,47 @@ def infer_tags(title, context, mode):
     tags = [title, "Hindi story", "Hindi kahani", "हिंदी कहानी"]
 
     categories = [
-        (("भूत", "प्रेत", "हवेली", "डरावनी", "horror", "ghost", "haunted"),
-         ["horror story", "डरावनी कहानी"]),
-        (("रहस्य", "गायब", "गुमशुदा", "पहेली", "mystery", "secret"),
-         ["mystery story", "रहस्य कहानी"]),
-        (("सस्पेंस", "रोमांच", "thriller", "suspense"),
-         ["suspense story", "thriller story"]),
-        (("प्रेम", "प्यार", "रोमांस", "love", "romance"),
-         ["love story", "प्रेम कहानी"]),
-        (("अपराध", "पुलिस", "चोर", "जुर्म", "crime", "criminal"),
-         ["crime story", "अपराध कहानी"]),
-        (("माँ", "मां", "पिता", "परिवार", "बेटा", "बेटी",
-          "mother", "father", "family"),
-         ["family story", "परिवार की कहानी"]),
-        (("किसान", "गाँव", "गांव", "जंगल", "नदी", "farmer", "village"),
-         ["village story", "ग्रामीण कहानी"]),
-        (("भगवान", "भक्ति", "मंदिर", "कृष्ण", "राम", "शिव", "devotional"),
-         ["devotional story", "भक्ति कहानी"]),
-        (("राजा", "रानी", "सम्राट", "किला", "युद्ध", "king", "queen"),
-         ["historical story", "ऐतिहासिक कहानी"]),
-        (("प्रेरणा", "प्रेरणादायक", "motivational", "inspiration"),
-         ["motivational story", "प्रेरणादायक कहानी"]),
+        (
+            ("भूत", "प्रेत", "हवेली", "डरावनी", "horror", "ghost", "haunted"),
+            ["horror story", "डरावनी कहानी"],
+        ),
+        (
+            ("रहस्य", "गायब", "गुमशुदा", "पहेली", "mystery", "secret"),
+            ["mystery story", "रहस्य कहानी"],
+        ),
+        (
+            ("सस्पेंस", "रोमांच", "thriller", "suspense"),
+            ["suspense story", "thriller story"],
+        ),
+        (
+            ("प्रेम", "प्यार", "रोमांस", "love", "romance"),
+            ["love story", "प्रेम कहानी"],
+        ),
+        (
+            ("अपराध", "पुलिस", "चोर", "जुर्म", "crime", "criminal"),
+            ["crime story", "अपराध कहानी"],
+        ),
+        (
+            ("माँ", "मां", "पिता", "परिवार", "बेटा", "बेटी",
+             "mother", "father", "family"),
+            ["family story", "परिवार की कहानी"],
+        ),
+        (
+            ("किसान", "गाँव", "गांव", "जंगल", "नदी", "farmer", "village"),
+            ["village story", "ग्रामीण कहानी"],
+        ),
+        (
+            ("भगवान", "भक्ति", "मंदिर", "कृष्ण", "राम", "शिव", "devotional"),
+            ["devotional story", "भक्ति कहानी"],
+        ),
+        (
+            ("राजा", "रानी", "सम्राट", "किला", "युद्ध", "king", "queen"),
+            ["historical story", "ऐतिहासिक कहानी"],
+        ),
+        (
+            ("प्रेरणा", "प्रेरणादायक", "motivational", "inspiration"),
+            ["motivational story", "प्रेरणादायक कहानी"],
+        ),
     ]
 
     for keywords, additions in categories:
@@ -242,55 +254,67 @@ def infer_tags(title, context, mode):
             tags.extend(additions)
 
     if mode == "short":
-        tags.extend(["Hindi shorts", "story shorts"])
+        tags.extend(["Hindi Shorts", "Hindi story shorts"])
 
-    unique, seen = [], set()
+    result = []
+    seen = set()
+
     for item in tags:
-        item = clean(item, 100).strip(" ,#")
-        key = item.casefold()
-        if item and key not in seen:
-            unique.append(item)
+        tag = clean(item, 100).strip(" ,#")
+        key = tag.casefold()
+        if tag and key not in seen:
+            result.append(tag)
             seen.add(key)
-        if len(unique) >= MAX_TAGS:
+        if len(result) >= MAX_TAGS:
             break
-    return unique
+
+    return result
 
 
 def make_local_metadata(title, context, language, mode):
-    sentences = [
-        clean(s) for s in re.split(r"(?<=[.!?।])\s+", context)
-        if clean(s)
+    pieces = [
+        clean(part)
+        for part in re.split(r"(?<=[.!?।])\s+", context)
+        if clean(part)
     ]
 
-    excerpt_parts, total = [], 0
-    for sentence in sentences:
+    excerpts = []
+    total_chars = 0
+
+    for sentence in pieces:
         if sentence.casefold() == title.casefold():
             continue
-        if len(sentence) > 400:
-            sentence = sentence[:400].rsplit(" ", 1)[0]
-        if total + len(sentence) > 600:
-            remaining = 600 - total
+
+        sentence = clean(sentence, 300)
+        if total_chars + len(sentence) > 550:
+            remaining = 550 - total_chars
             if remaining >= 60:
-                excerpt_parts.append(sentence[:remaining].rsplit(" ", 1)[0])
-            break
-        excerpt_parts.append(sentence)
-        total += len(sentence) + 1
-        if len(excerpt_parts) >= 3:
+                excerpts.append(sentence[:remaining].rsplit(" ", 1)[0])
             break
 
-    excerpt = clean(" ".join(excerpt_parts), 600)
+        excerpts.append(sentence)
+        total_chars += len(sentence) + 1
+
+        if len(excerpts) >= 3:
+            break
+
+    excerpt = clean(" ".join(excerpts), 550)
+
     if excerpt:
         description = f"{title}\n\n{excerpt}"
-        description += (
-            "\n\nकहानी के अगले मोड़ जानने के लिए वीडियो अंत तक देखें।"
-        )
     else:
         description = f"{title}\n\nयह हिंदी कहानी प्रस्तुत है।"
 
     if mode == "short":
-        description += "\n\n#HindiShorts #HindiKahani"
+        description += (
+            "\n\nकहानी का अगला मोड़ जानने के लिए वीडियो देखें।"
+            "\n\n#HindiShorts #HindiKahani"
+        )
     else:
-        description += "\n\n#HindiKahani #HindiStory"
+        description += (
+            "\n\nकहानी पूरी देखने के लिए वीडियो अंत तक देखें।"
+            "\n\n#HindiKahani #HindiStory"
+        )
 
     return {
         "title": clean(title, MAX_TITLE),
@@ -305,8 +329,6 @@ def selected_model():
     if not isinstance(data, dict):
         return ""
 
-    # Accept common field names; do not reject a valid model just because
-    # another script uses a different status label.
     for key in ("model", "selected_model", "model_name", "name"):
         value = clean(data.get(key), 150)
         if value:
@@ -316,7 +338,7 @@ def selected_model():
 
 def normalize_metadata(data, fallback, context, language, mode):
     if not isinstance(data, dict):
-        raise ValueError("Metadata response was not a JSON object.")
+        raise ValueError("Metadata response must be a JSON object.")
 
     title = clean(data.get("title"), MAX_TITLE) or fallback
     local = make_local_metadata(title, context, language, mode)
@@ -326,10 +348,14 @@ def normalize_metadata(data, fallback, context, language, mode):
         description = local["description"]
 
     raw_tags = data.get("tags", [])
+    if isinstance(raw_tags, str):
+        raw_tags = re.split(r"[,;\n]", raw_tags)
     if not isinstance(raw_tags, list):
         raw_tags = []
 
-    tags, seen = [], set()
+    tags = []
+    seen = set()
+
     for value in raw_tags:
         tag = clean(value, 100).strip(" ,#")
         if tag and tag.casefold() not in seen:
@@ -338,12 +364,12 @@ def normalize_metadata(data, fallback, context, language, mode):
         if len(tags) >= MAX_TAGS:
             break
 
-    # Prevent empty or generic API tags from replacing useful story tags.
+    # Preserve useful locally inferred tags when the model returns weak tags.
     if len(tags) < 4:
         tags = local["tags"]
 
     return {
-        "title": title,
+        "title": clean(title, MAX_TITLE),
         "description": clean(description, MAX_DESCRIPTION),
         "tags": tags[:MAX_TAGS],
         "language": clean(data.get("language") or language, 40) or "Hindi",
@@ -351,28 +377,33 @@ def normalize_metadata(data, fallback, context, language, mode):
 
 
 def request_gemini(api_key, model, title, context, language, mode):
-    model = urllib.parse.quote(model, safe="-_.")
+    encoded_model = urllib.parse.quote(model, safe="-_.")
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        + model + ":generateContent"
+        + encoded_model
+        + ":generateContent"
     )
 
     prompt = f"""
-Create accurate YouTube metadata for the supplied story.
+Create YouTube metadata for this exact story.
 
-Current title/topic: {title}
-Story: {context[:MAX_CONTEXT]}
+Current topic/title: {title}
+Story text: {context[:MAX_CONTEXT]}
 Language: {language}
-Format: {mode}
+Video format: {mode}
+
+Return JSON only with these keys:
+title, description, tags, language.
 
 Rules:
-- Return JSON with title, description, tags and language.
-- Keep title under 100 characters and make it specific to this story.
-- Do not use the first narration sentence as the title.
-- Do not invent characters, events, locations or story outcomes.
-- The description should tease the plot without revealing the ending.
-- Use 8-15 relevant Hindi/English tags; no unrelated keyword stuffing.
-- For short format, make metadata appropriate for a short video.
+- Title must be under 100 characters and specific to this story.
+- Do not simply copy the opening narration sentence as the title.
+- Do not invent characters, locations, events or outcomes.
+- Description should describe the premise and build curiosity without
+  falsely claiming events or spoiling the ending.
+- Return 8 to 15 relevant Hindi/English tags.
+- Do not add unrelated trending tags or repeat the same tag.
+- Short format metadata must suit a short video.
 """
 
     payload = {
@@ -393,39 +424,47 @@ Rules:
         method="POST",
     )
 
-    # One request only: avoid duplicate paid/API attempts in the same run.
+    # Exactly one request: do not repeat a possibly billable failed request.
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:300]
-        raise RuntimeError(f"Gemini metadata HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(
+            f"Gemini metadata HTTP {exc.code}: {detail}"
+        ) from exc
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise RuntimeError(f"Gemini metadata request failed: {exc}") from exc
 
     candidates = result.get("candidates", [])
-    parts = (
+    content_parts = (
         candidates[0].get("content", {}).get("parts", [])
         if candidates else []
     )
+
     response_text = next(
-        (p.get("text", "") for p in parts
-         if isinstance(p, dict) and p.get("text")),
+        (
+            part.get("text", "")
+            for part in content_parts
+            if isinstance(part, dict) and part.get("text")
+        ),
         "",
     )
+
     if not response_text:
         raise RuntimeError("Gemini returned empty metadata.")
 
     try:
-        data = json.loads(response_text)
+        parsed = json.loads(response_text)
     except ValueError as exc:
-        raise RuntimeError("Gemini metadata was not valid JSON.") from exc
+        raise RuntimeError("Gemini metadata response was not valid JSON.") from exc
 
-    return normalize_metadata(data, title, context, language, mode)
+    return normalize_metadata(parsed, title, context, language, mode)
 
 
 def save_outputs(metadata, fingerprint, source):
     PUBLISH.mkdir(parents=True, exist_ok=True)
+
     result = {
         "status": "completed",
         "version": VERSION,
@@ -439,14 +478,19 @@ def save_outputs(metadata, fingerprint, source):
     write_text(OUTPUT_DESCRIPTION, metadata["description"] + "\n")
     write_text(OUTPUT_TAGS, ", ".join(metadata["tags"]) + "\n")
 
-    # Keep headings expected by the current validation/package pipeline.
     package_text = (
-        "TITLE\n" + metadata["title"] + "\n\n"
-        "DESCRIPTION\n" + metadata["description"] + "\n\n"
-        "TAGS\n" + ", ".join(metadata["tags"]) + "\n\n"
-        "LANGUAGE\n" + metadata["language"] + "\n"
+        "TITLE\n"
+        + metadata["title"]
+        + "\n\nDESCRIPTION\n"
+        + metadata["description"]
+        + "\n\nTAGS\n"
+        + ", ".join(metadata["tags"])
+        + "\n\nLANGUAGE\n"
+        + metadata["language"]
+        + "\n"
     )
     write_text(PACKAGE_METADATA, package_text)
+
     write_json(CHECKPOINT, {
         "status": "completed",
         "version": VERSION,
@@ -457,26 +501,39 @@ def save_outputs(metadata, fingerprint, source):
 
 def main():
     values = read_input()
-    ai_story = read_json(STORY_FILE)
-    source_story = read_json(SOURCE_STORY_FILE)
+    ai_story = read_json(AI_STORY_FILE)
+    source_story = read_json(STORY_FILE)
 
-    # Prefer AI story when available, then source story, then supplied text.
+    # Use AI story when complete; otherwise use the source story.
     context = story_context(ai_story)
     story_for_title = ai_story if context else source_story
+
     if not context:
         context = story_context(source_story)
+
     if not context:
-        context = clean(values.get("STORY_TEXT") or values.get("STORY") or "")
+        context = clean(
+            values.get("STORY_TEXT") or values.get("STORY") or "",
+            MAX_CONTEXT,
+        )
 
-    topic = clean(values.get("TOPIC") or values.get("TITLE"))
-    title = title_from_story(story_for_title, topic, context)
-    language = clean(values.get("LANGUAGE") or values.get("CAPTIONS") or "Hindi", 40)
+    explicit_title = clean(values.get("TITLE") or values.get("TOPIC"))
+    title = derive_title(story_for_title, explicit_title, context)
 
-    mode_value = clean(values.get("FORMAT") or "full").lower()
-    mode = "short" if mode_value in {"short", "shorts", "vertical", "reels"} else "full"
+    language = clean(
+        values.get("LANGUAGE") or values.get("CAPTIONS") or "Hindi",
+        40,
+    )
+
+    raw_mode = clean(values.get("FORMAT") or "full").lower()
+    mode = (
+        "short"
+        if raw_mode in {"short", "shorts", "vertical", "reels"}
+        else "full"
+    )
 
     model = selected_model()
-    fingerprint_payload = {
+    fingerprint_data = {
         "version": VERSION,
         "input": values,
         "context": context,
@@ -486,7 +543,7 @@ def main():
     }
     fingerprint = hashlib.sha256(
         json.dumps(
-            fingerprint_payload,
+            fingerprint_data,
             ensure_ascii=False,
             sort_keys=True,
             default=str,
@@ -494,13 +551,17 @@ def main():
     ).hexdigest()
 
     cached = read_json(OUTPUT_JSON)
+
     if (
         isinstance(cached, dict)
         and cached.get("status") == "completed"
         and cached.get("version") == VERSION
         and cached.get("input_fingerprint") == fingerprint
+        and clean(cached.get("title"))
+        and clean(cached.get("description"))
+        and isinstance(cached.get("tags"), list)
     ):
-        log("Matching metadata cache found; no API request.")
+        log("Matching validated metadata cache found; no API request.")
         save_outputs(cached, fingerprint, "cache")
         return
 
@@ -515,7 +576,7 @@ def main():
             source = "gemini"
         except RuntimeError as exc:
             log("WARNING:", exc)
-            log("Using local story-specific metadata; no retry.")
+            log("Using local story-specific fallback; no retry.")
             metadata = local
             source = "local_fallback"
     else:
@@ -524,11 +585,12 @@ def main():
         source = "local_fallback"
 
     save_outputs(metadata, fingerprint, source)
+
     log("METADATA GENERATION: SUCCESS")
     log("Source:", source)
     log("Format:", mode)
     log("Title:", metadata["title"])
-    log("Tags:", len(metadata["tags"]))
+    log("Tag count:", len(metadata["tags"]))
     log("Output:", PACKAGE_METADATA.relative_to(ROOT))
 
 
