@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Schema-compatible story mapper with continuity and checkpoint validation."""
+"""Katha Lok AI story-to-scene mapper with strict schema validation."""
 
 from __future__ import annotations
 
@@ -25,10 +25,13 @@ from input_config import (
 
 STORY_DIR = ROOT / "output" / "story"
 SOURCE_FILE = STORY_DIR / "story.json"
+PLAN_FILE = STORY_DIR / "story_plan.json"
 OUTPUT_FILE = STORY_DIR / "ai_story.json"
 
-VERSION = "offline-ai-story-mapper-v3-story-schema-compatible"
-MAPPING_VERSION = 4
+VERSION = "offline-ai-story-mapper-v4-short-validation"
+MAPPING_VERSION = 5
+SHORT_MIN_WORDS = 120
+SHORT_MAX_WORDS = 150
 
 SCENE_FIELDS = (
     "narration",
@@ -53,13 +56,14 @@ def clean(value):
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def word_count(value):
+    return len(re.findall(r"\S+", clean(value)))
+
+
 def fingerprint(data):
     raw = json.dumps(
-        data,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
+        data, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), default=str
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -72,31 +76,31 @@ def read_json(path, required=False):
         return None
 
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         if required:
             raise RuntimeError(f"Cannot read {path}: {exc}") from exc
         return None
 
-    if not isinstance(data, dict):
+    if not isinstance(value, dict):
         if required:
-            raise RuntimeError(f"Expected a JSON object in {path}.")
+            raise RuntimeError(f"Expected a JSON object in {path}")
         return None
-    return data
+    return value
 
 
 def save_json(data):
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp = OUTPUT_FILE.with_suffix(".json.tmp")
+    temporary = OUTPUT_FILE.with_suffix(".json.tmp")
     try:
-        with temp.open("w", encoding="utf-8", newline="\n") as handle:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, OUTPUT_FILE)
+        os.replace(temporary, OUTPUT_FILE)
     finally:
-        temp.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 def bool_value(config, key, default=True):
@@ -121,91 +125,135 @@ def text_value(item, *keys, default=""):
     return default
 
 
+def source_visual(scene):
+    return text_value(
+        scene, "visual", "visual_prompt", "image_prompt",
+        "scene_prompt", "visual_description", "description"
+    )
+
+
+def validate_plan(plan, mode, parts_expected, scenes_expected):
+    if not isinstance(plan, dict):
+        raise RuntimeError("story_plan.json missing or invalid")
+
+    if clean(plan.get("status")).lower() != "planned":
+        raise RuntimeError("story_plan.json status must be planned")
+
+    if clean(plan.get("format")).lower() != mode:
+        raise RuntimeError("Story plan FORMAT does not match input")
+
+    if int(plan.get("parts_count", -1)) != parts_expected:
+        raise RuntimeError("Story plan PARTS mismatch")
+
+    if int(plan.get("scenes_per_part", -1)) != scenes_expected:
+        raise RuntimeError("Story plan SCENES mismatch")
+
+    expected_total = parts_expected * scenes_expected
+    if int(plan.get("total_scenes", -1)) != expected_total:
+        raise RuntimeError("Story plan total_scenes mismatch")
+
+    parts = plan.get("parts")
+    if not isinstance(parts, list) or len(parts) != parts_expected:
+        raise RuntimeError("Story plan parts list mismatch")
+
+    global_number = 0
+    for p, part in enumerate(parts, 1):
+        if not isinstance(part, dict) or int(part.get("part", -1)) != p:
+            raise RuntimeError(f"Story plan part numbering mismatch: {p}")
+
+        scenes = part.get("scenes")
+        if not isinstance(scenes, list) or len(scenes) != scenes_expected:
+            raise RuntimeError(f"Story plan part {p} scene count mismatch")
+
+        for s, scene in enumerate(scenes, 1):
+            global_number += 1
+            if not isinstance(scene, dict):
+                raise RuntimeError(f"Invalid planned scene {p}:{s}")
+
+            expected_id = f"part_{p:02d}_scene_{s:02d}"
+            if clean(scene.get("scene_id")) != expected_id:
+                raise RuntimeError(f"Planned scene ID mismatch: {expected_id}")
+
+            if int(scene.get("scene", -1)) != s:
+                raise RuntimeError(f"Planned scene number mismatch: {expected_id}")
+
+            if int(scene.get("global_scene_number", -1)) != global_number:
+                raise RuntimeError(f"Planned global scene number mismatch: {expected_id}")
+
+    return plan
+
+
 def validate_source(story, mode, parts_expected, scenes_expected):
     if story.get("status") != "completed":
-        raise RuntimeError("story.json is not marked completed.")
+        raise RuntimeError("story.json is not marked completed")
 
     if clean(story.get("format")).lower() != mode:
-        raise RuntimeError(
-            "story.json FORMAT does not match Input/topic.txt. "
-            "Regenerate the story first."
-        )
+        raise RuntimeError("story.json FORMAT mismatch; regenerate the story first")
 
     parts = story.get("parts")
     if not isinstance(parts, list) or len(parts) != parts_expected:
         actual = len(parts) if isinstance(parts, list) else "invalid"
-        raise RuntimeError(
-            f"story.json has {actual} parts; expected {parts_expected}."
-        )
+        raise RuntimeError(f"story.json has {actual} parts; expected {parts_expected}")
 
-    total = parts_expected * scenes_expected
+    total_scenes = parts_expected * scenes_expected
     global_number = 0
+    part_counts = []
 
     for p, part in enumerate(parts, 1):
-        if not isinstance(part, dict):
-            raise RuntimeError(f"Invalid story part {p}.")
-        try:
-            declared_part = int(part.get("part", -1))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid part number at {p}.") from exc
+        if not isinstance(part, dict) or int(part.get("part", -1)) != p:
+            raise RuntimeError(f"Source part numbering mismatch: {p}")
 
-        if declared_part != p:
-            raise RuntimeError(f"Part order mismatch at part {p}.")
-
-        source_scenes = part.get("scenes")
-        if (
-            not isinstance(source_scenes, list)
-            or len(source_scenes) != scenes_expected
-        ):
-            actual = len(source_scenes) if isinstance(source_scenes, list) else 0
+        scenes = part.get("scenes")
+        if not isinstance(scenes, list) or len(scenes) != scenes_expected:
+            actual = len(scenes) if isinstance(scenes, list) else 0
             raise RuntimeError(
-                f"Part {p} has {actual} scenes; expected {scenes_expected}."
+                f"Part {p} has {actual} scenes; expected {scenes_expected}"
             )
 
-        for s, scene in enumerate(source_scenes, 1):
+        count = 0
+        for s, scene in enumerate(scenes, 1):
             global_number += 1
             if not isinstance(scene, dict):
-                raise RuntimeError(f"Invalid source scene {p}:{s}.")
-
-            try:
-                declared_scene = int(scene.get("scene", -1))
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(f"Invalid scene number at {p}:{s}.") from exc
+                raise RuntimeError(f"Invalid source scene {p}:{s}")
 
             expected_id = f"part_{p:02d}_scene_{s:02d}"
-            if declared_scene != s:
-                raise RuntimeError(f"Scene number mismatch at {expected_id}.")
+            if int(scene.get("scene", -1)) != s:
+                raise RuntimeError(f"Source scene number mismatch: {expected_id}")
 
             source_id = clean(scene.get("scene_id"))
             if source_id and source_id != expected_id:
-                raise RuntimeError(
-                    f"Scene ID mismatch at {expected_id}: {source_id}."
-                )
+                raise RuntimeError(f"Source scene ID mismatch: {expected_id}")
 
             narration = text_value(scene, "narration", "text", "dialogue")
-            visual = text_value(
-                scene, "visual", "visual_prompt", "image_prompt",
-                "scene_prompt", "visual_description", "description",
-            )
-
+            visual = source_visual(scene)
             if not narration:
-                raise RuntimeError(f"Empty narration at {expected_id}.")
+                raise RuntimeError(f"Empty narration: {expected_id}")
             if not visual:
-                raise RuntimeError(f"Empty visual description at {expected_id}.")
+                raise RuntimeError(f"Empty visual description: {expected_id}")
 
-    if global_number != total:
-        raise RuntimeError(
-            f"Source scene count mismatch: {global_number}/{total}."
-        )
+            count += word_count(narration)
+
+        part_counts.append(count)
+
+    if global_number != total_scenes:
+        raise RuntimeError("Source total scene count mismatch")
 
     if not clean(story.get("hook")):
-        raise RuntimeError("story.json has no opening hook.")
+        raise RuntimeError("story.json has no opening hook")
 
-    return total
+    if mode == "short":
+        for p, amount in enumerate(part_counts, 1):
+            if not SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS:
+                raise RuntimeError(
+                    f"SHORT WORD COUNT ERROR: part {p} has {amount} words; "
+                    f"required {SHORT_MIN_WORDS}-{SHORT_MAX_WORDS}. "
+                    "Fix story.json before continuing."
+                )
+
+    return total_scenes, part_counts
 
 
 def identity_details(scene):
-    """Use only explicit source details; do not infer gender or identity."""
     labels = (
         ("character name", ("character_name", "person_name")),
         ("gender", ("gender",)),
@@ -215,7 +263,6 @@ def identity_details(scene):
         ("hair", ("hair",)),
         ("distinctive features", ("distinctive_features",)),
     )
-
     details = []
     for label, keys in labels:
         value = text_value(scene, *keys)
@@ -224,7 +271,7 @@ def identity_details(scene):
 
     characters = scene.get("characters")
     if isinstance(characters, list):
-        names = [clean(item) for item in characters if clean(item)]
+        names = [clean(x) for x in characters if clean(x)]
         if names:
             details.append("named characters: " + ", ".join(names))
     elif isinstance(characters, str) and clean(characters):
@@ -233,142 +280,105 @@ def identity_details(scene):
     return "; ".join(details)
 
 
-def source_visual(scene):
-    return text_value(
-        scene, "visual", "visual_prompt", "image_prompt",
-        "scene_prompt", "visual_description", "description",
-    )
-
-
 def make_scene(
-    source,
-    previous_source,
-    next_source,
-    part_number,
-    scene_number,
-    global_number,
-    config,
-    title,
+    source, previous_source, next_source, part_number,
+    scene_number, global_number, config, title
 ):
     scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
-
     narration = text_value(source, "narration", "text", "dialogue")
     visual = source_visual(source)
     dialogue = text_value(source, "dialogue")
     suspense = text_value(source, "suspense", "suspense_prompt")
 
     realism = clean(config.get("REALISM", "high")) or "high"
-    visual_style = (
-        clean(config.get("VISUAL_STYLE", "cinematic_realistic"))
-        or "cinematic_realistic"
-    )
-    camera_style = clean(config.get("CAMERA_STYLE", "cinematic")) or "cinematic"
-    lighting_style = clean(config.get("LIGHTING", "cinematic")) or "cinematic"
-    mood = clean(config.get("MOOD", "dramatic")) or "dramatic"
+    style = clean(config.get("VISUAL_STYLE", "cinematic_realistic"))
+    camera = clean(config.get("CAMERA_STYLE", "cinematic"))
+    lighting = clean(config.get("LIGHTING", "cinematic"))
+    mood = clean(config.get("MOOD", "dramatic"))
 
-    location = text_value(source, "location", "setting", "world_context")
-    time_period = text_value(source, "time_period", "time", "era")
+    context = [f"Story title/context: {title}"]
+    for label, keys in (
+        ("location", ("location", "setting", "world_context")),
+        ("time period", ("time_period", "time", "era")),
+    ):
+        value = text_value(source, *keys)
+        if value:
+            context.append(f"{label}: {value}")
+
     identity = identity_details(source)
-
-    context = []
-    if title:
-        context.append(f"story title/context: {title}")
-    if location:
-        context.append(f"location: {location}")
-    if time_period:
-        context.append(f"time period: {time_period}")
     if identity:
-        context.append("explicit character details: " + identity)
+        context.append("Explicit character details: " + identity)
 
     if previous_source:
         previous_identity = identity_details(previous_source)
         previous_visual = source_visual(previous_source)
         if previous_identity:
             context.append(
-                "previous-scene identity continuity: preserve compatible "
-                "explicit details only (" + previous_identity + ")"
+                "Continuity: preserve these explicit details when applicable: "
+                + previous_identity
             )
         if previous_visual:
-            context.append("previous scene: " + previous_visual[:220])
+            context.append("Previous scene reference: " + previous_visual[:220])
 
     if next_source:
         next_visual = source_visual(next_source)
         if next_visual:
-            context.append("next-scene continuity reference: " + next_visual[:180])
+            context.append("Next-scene continuity reference: " + next_visual[:180])
 
     context_text = " ".join(context)
 
     visual_prompt = (
-        f"Story scene: {visual}. "
-        f"Narrative context: {narration[:500]}. "
-        f"{context_text} "
-        f"Visual style: {visual_style}; realism: {realism}. "
+        f"Story scene: {visual}. Narrative context: {narration[:500]}. "
+        f"{context_text} Visual style: {style}; realism: {realism}. "
         "Photorealistic live-action cinematic photography, believable anatomy, "
-        "natural skin texture, realistic materials, physically plausible "
-        "lighting and environmental detail. Keep character faces, age, "
-        "clothing and identity consistent when explicit source information "
-        "exists. Do not infer or change gender, age, relationship or identity. "
-        "Show one coherent moment with motivated composition, not a collage "
-        "or slideshow. Do not render text, captions, logos or watermarks."
+        "natural skin texture, realistic materials and physically plausible "
+        "lighting. Preserve explicit character face, age, clothing and identity "
+        "between connected scenes. Never infer or change gender or identity. "
+        "Show one coherent moment, not a collage or slideshow. No text, "
+        "captions, logos or watermarks."
     )
 
     camera_prompt = (
-        f"{camera_style} camera language chosen for the described action. "
-        "Use an establishing wide shot for locations, medium framing for "
-        "interaction and close-ups for important expressions or clues. "
-        "Keep camera movement physically plausible and purposeful. "
-        "Avoid identical framing in every scene, arbitrary dutch angles, "
-        "unmotivated movement and framing that contradicts the action."
+        f"{camera} camera language suited to the action. Use establishing "
+        "wide shots for locations, medium framing for interactions and "
+        "close-ups for important expressions or clues. Vary framing with "
+        "purpose. Keep camera movement physically plausible; avoid arbitrary "
+        "angles and movement that contradicts the action."
     )
 
     lighting_prompt = (
-        f"{lighting_style} lighting matched to the scene's location, time "
-        f"and mood ({mood}). Preserve natural skin tones, realistic shadow "
-        "direction, highlight detail and shadow detail. Avoid crushed blacks, "
-        "blown highlights, excessive contrast, oversaturation and arbitrary "
-        "neon lighting unless the scene specifically requires it."
+        f"{lighting} lighting appropriate to the scene location, time and "
+        f"mood ({mood}). Preserve natural skin tones, shadow detail and "
+        "highlight detail. Avoid crushed blacks, blown highlights, excessive "
+        "contrast and oversaturation unless explicitly required by the scene."
     )
 
-    negative_parts = [
-        "cartoon",
-        "comic illustration",
-        "anime",
-        "slideshow",
-        "collage",
-        "unintended text",
-        "embedded subtitles",
-        "watermark",
-        "logo",
-        "distorted anatomy",
-        "duplicate people",
-        "inconsistent character identity",
-        "unsupported gender or age change",
-        "unmotivated extreme contrast",
-        "blown highlights",
-        "crushed shadows",
+    negatives = [
+        "cartoon", "comic illustration", "anime", "slideshow", "collage",
+        "unintended text", "embedded subtitles", "watermark", "logo",
+        "distorted anatomy", "duplicate people", "inconsistent character identity",
+        "unsupported gender or age change", "excessive contrast",
+        "blown highlights", "crushed shadows",
     ]
-
     configured_negative = clean(config.get("NEGATIVE_PROMPT"))
     if configured_negative:
-        negative_parts.append(configured_negative)
-
+        negatives.append(configured_negative)
     if bool_value(config, "AVOID_NEON", True):
-        negative_parts.append("unmotivated neon lighting")
+        negatives.append("unmotivated neon lighting")
     if bool_value(config, "AVOID_GLITCH_EFFECTS", True):
-        negative_parts.append("glitch effects")
+        negatives.append("glitch effects")
 
     sfx_prompt = (
         f"Scene-relevant sound effects for: {visual[:300]}. "
-        "Align effects with visible actions and narration. Use silence when "
-        "appropriate. Avoid unrelated impacts, unrequested voices and "
-        "repetitive dramatic stingers."
+        "Align effects with visible actions. Use silence when appropriate. "
+        "Avoid unrelated impacts, unrequested voices and repetitive stingers."
     )
 
     music_prompt = (
         f"{mood} cinematic background music appropriate to this scene. "
         "Maintain continuity between connected scenes. Keep music beneath "
-        "the narration, avoid abrupt volume changes, lyrics and intelligible "
-        "speech. Do not substitute music for scene-specific sound effects."
+        "narration; avoid abrupt volume changes, lyrics and intelligible speech. "
+        "Do not substitute music for scene-specific sound effects."
     )
 
     return {
@@ -384,7 +394,7 @@ def make_scene(
         "narration": narration,
         "dialogue": dialogue,
         "visual_prompt": visual_prompt,
-        "negative_prompt": ", ".join(negative_parts),
+        "negative_prompt": ", ".join(negatives),
         "camera_prompt": camera_prompt,
         "lighting_prompt": lighting_prompt,
         "sfx_prompt": sfx_prompt,
@@ -398,28 +408,28 @@ def make_scene(
 def validate_mapped_scenes(mapped, source_part, part_number):
     source_scenes = source_part.get("scenes")
     if not isinstance(mapped, list) or not isinstance(source_scenes, list):
-        raise RuntimeError(f"Invalid mapped scenes for part {part_number}.")
+        raise RuntimeError(f"Invalid mapped scenes for part {part_number}")
     if len(mapped) != len(source_scenes):
-        raise RuntimeError(f"Mapped scene count mismatch for part {part_number}.")
+        raise RuntimeError(f"Mapped scene count mismatch for part {part_number}")
 
     validated = []
-    for scene_number, item in enumerate(mapped, 1):
-        expected_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
+    for number, item in enumerate(mapped, 1):
+        expected_id = f"part_{part_number:02d}_scene_{number:02d}"
         if not isinstance(item, dict):
-            raise RuntimeError(f"Invalid mapped record: {expected_id}.")
+            raise RuntimeError(f"Invalid mapped scene: {expected_id}")
         if item.get("scene_id") != expected_id:
-            raise RuntimeError(f"Scene ID mismatch: {expected_id}.")
+            raise RuntimeError(f"Scene ID mismatch: {expected_id}")
         if item.get("status") != "completed":
-            raise RuntimeError(f"Scene is not completed: {expected_id}.")
+            raise RuntimeError(f"Scene status invalid: {expected_id}")
 
         for field in SCENE_FIELDS:
             if not isinstance(item.get(field, ""), str):
-                raise RuntimeError(f"Invalid {field} in {expected_id}.")
+                raise RuntimeError(f"Invalid {field}: {expected_id}")
 
         if not clean(item.get("narration")):
-            raise RuntimeError(f"Empty narration in {expected_id}.")
+            raise RuntimeError(f"Empty narration: {expected_id}")
         if not clean(item.get("visual_prompt")):
-            raise RuntimeError(f"Empty visual prompt in {expected_id}.")
+            raise RuntimeError(f"Empty visual prompt: {expected_id}")
 
         validated.append(item)
 
@@ -438,30 +448,44 @@ def main():
     scenes_expected = int(get_scenes(config))
 
     if mode not in {"short", "full"}:
-        raise RuntimeError("FORMAT must be short or full.")
+        raise RuntimeError("FORMAT must be short or full")
     if parts_expected < 1 or scenes_expected < 1:
-        raise RuntimeError("PARTS and SCENES must be positive.")
+        raise RuntimeError("PARTS and SCENES must be positive")
 
     story = read_json(SOURCE_FILE, required=True)
-    total = validate_source(story, mode, parts_expected, scenes_expected)
+    total, source_part_word_counts = validate_source(
+        story, mode, parts_expected, scenes_expected
+    )
+
+    plan = validate_plan(
+        read_json(PLAN_FILE, required=True),
+        mode, parts_expected, scenes_expected
+    )
+
+    for p, (source_part, plan_part) in enumerate(
+        zip(story["parts"], plan["parts"]), 1
+    ):
+        for s, (source_scene, plan_scene) in enumerate(
+            zip(source_part["scenes"], plan_part["scenes"]), 1
+        ):
+            expected_id = f"part_{p:02d}_scene_{s:02d}"
+            if clean(source_scene.get("scene_id")) not in {"", expected_id}:
+                raise RuntimeError(f"Story/plan scene mismatch: {expected_id}")
+            if clean(plan_scene.get("scene_id")) != expected_id:
+                raise RuntimeError(f"Plan scene mismatch: {expected_id}")
 
     topic = clean(get_topic(config) or story.get("topic") or story.get("title"))
-    source_text = clean(
-        get_story_text(config) or story.get("source_text", "")
-    )
-    story_title = clean(story.get("title") or topic)
+    source_text = clean(get_story_text(config) or story.get("source_text", ""))
+    title = clean(story.get("title") or topic)
+    if not title:
+        raise RuntimeError("Story title/topic is missing")
 
     visual_settings = {
         key: config.get(key)
         for key in (
-            "VISUAL_STYLE",
-            "REALISM",
-            "CAMERA_STYLE",
-            "LIGHTING",
-            "MOOD",
-            "NEGATIVE_PROMPT",
-            "AVOID_NEON",
-            "AVOID_GLITCH_EFFECTS",
+            "VISUAL_STYLE", "REALISM", "CAMERA_STYLE", "LIGHTING", "MOOD",
+            "NEGATIVE_PROMPT", "AVOID_NEON", "AVOID_GLITCH_EFFECTS",
+            "PART_HOOK", "PART_SUSPENSE", "FINAL_RESOLUTION",
         )
     }
 
@@ -469,6 +493,7 @@ def main():
         "version": VERSION,
         "mapping_version": MAPPING_VERSION,
         "story": story,
+        "plan": plan,
         "format": mode,
         "parts": parts_expected,
         "scenes_per_part": scenes_expected,
@@ -487,21 +512,22 @@ def main():
         and previous.get("mapping_version") == MAPPING_VERSION
         and isinstance(previous.get("parts"), list)
     ):
-        for saved_part in previous["parts"]:
-            if not isinstance(saved_part, dict):
+        for saved in previous["parts"]:
+            if not isinstance(saved, dict):
                 continue
             try:
-                number = int(saved_part.get("part", -1))
+                number = int(saved.get("part", -1))
             except (TypeError, ValueError):
                 continue
-            if saved_part.get("status") == "completed":
-                reusable_parts[number] = saved_part
+            if saved.get("status") == "completed":
+                reusable_parts[number] = saved
 
     result = {
         "status": "in_progress",
         "version": VERSION,
         "mapping_version": MAPPING_VERSION,
         "scene_order": "part_then_scene",
+        "title": title,
         "topic": topic,
         "story_text": source_text,
         "format": mode,
@@ -510,6 +536,7 @@ def main():
         "api_calls": 0,
         "source_fingerprint": source_fingerprint,
         "total_scenes": total,
+        "source_part_word_counts": source_part_word_counts,
         "parts": [],
         "completed_scenes": 0,
         "last_completed": None,
@@ -520,8 +547,8 @@ def main():
 
     for part_number, source_part in enumerate(story["parts"], 1):
         source_scenes = source_part["scenes"]
-        saved_part = reusable_parts.get(part_number)
         mapped = None
+        saved_part = reusable_parts.get(part_number)
 
         if saved_part:
             try:
@@ -529,7 +556,7 @@ def main():
                     saved_part.get("scenes"), source_part, part_number
                 )
                 reused_count += len(mapped)
-                log(f"Part {part_number}: validated checkpoint reused.")
+                log(f"Part {part_number}: validated checkpoint reused")
             except (RuntimeError, TypeError, ValueError, KeyError) as exc:
                 log(f"Part {part_number}: checkpoint rejected: {exc}")
 
@@ -537,8 +564,7 @@ def main():
             mapped = []
             for scene_number, source_scene in enumerate(source_scenes, 1):
                 previous_source = (
-                    source_scenes[scene_number - 2]
-                    if scene_number > 1 else None
+                    source_scenes[scene_number - 2] if scene_number > 1 else None
                 )
                 next_source = (
                     source_scenes[scene_number]
@@ -555,12 +581,10 @@ def main():
                     scene_number,
                     global_number,
                     config,
-                    story_title,
+                    title,
                 ))
 
-            mapped = validate_mapped_scenes(
-                mapped, source_part, part_number
-            )
+            mapped = validate_mapped_scenes(mapped, source_part, part_number)
 
         for scene_number, scene in enumerate(mapped, 1):
             scene["global_scene_number"] = (
@@ -573,12 +597,9 @@ def main():
             "status": "completed",
             "title": clean(source_part.get("title")) or f"भाग {part_number}",
             "hook_required": (
-                part_number == 1
-                or bool_value(config, "PART_HOOK", True)
+                part_number == 1 or bool_value(config, "PART_HOOK", True)
             ),
-            "suspense_required": bool_value(
-                config, "PART_SUSPENSE", True
-            ),
+            "suspense_required": bool_value(config, "PART_SUSPENSE", True),
             "final_resolution": (
                 bool_value(config, "FINAL_RESOLUTION", True)
                 and part_number == parts_expected
@@ -592,20 +613,16 @@ def main():
         result["last_completed"] = {
             "part": part_number,
             "scene": scenes_expected,
-            "scene_id": (
-                f"part_{part_number:02d}_scene_{scenes_expected:02d}"
-            ),
+            "scene_id": f"part_{part_number:02d}_scene_{scenes_expected:02d}",
         }
         save_json(result)
         log(
             f"Part {part_number}/{parts_expected} saved; "
-            f"{result['completed_scenes']}/{total} scenes mapped."
+            f"{result['completed_scenes']}/{total} scenes mapped"
         )
 
     all_scenes = [
-        scene
-        for part in result["parts"]
-        for scene in part["scenes"]
+        scene for part in result["parts"] for scene in part["scenes"]
     ]
     expected_ids = [
         f"part_{part:02d}_scene_{scene:02d}"
@@ -615,18 +632,39 @@ def main():
     actual_ids = [scene["scene_id"] for scene in all_scenes]
 
     if len(all_scenes) != total or actual_ids != expected_ids:
-        raise RuntimeError("Final scene count or ordering validation failed.")
+        raise RuntimeError("Final scene count or ordering validation failed")
+
+    mapped_part_word_counts = [
+        sum(word_count(scene["narration"]) for scene in part["scenes"])
+        for part in result["parts"]
+    ]
+
+    if mode == "short":
+        for p, amount in enumerate(mapped_part_word_counts, 1):
+            if not SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS:
+                raise RuntimeError(
+                    f"Mapped short part {p} has {amount} words; "
+                    f"required {SHORT_MIN_WORDS}-{SHORT_MAX_WORDS}"
+                )
 
     result.update({
         "status": "completed",
         "completed_scenes": total,
         "api_calls": 0,
+        "part_word_counts": mapped_part_word_counts,
         "validation": {
             "exact_scene_count": True,
             "stable_scene_ids": True,
             "sequential_scene_order": True,
             "all_scenes_have_narration": True,
             "all_scenes_have_visual_prompts": True,
+            "story_plan_matches_story": True,
+            "short_part_word_counts_valid": (
+                all(
+                    SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS
+                    for amount in mapped_part_word_counts
+                ) if mode == "short" else None
+            ),
             "source_mapping_only": True,
             "external_api_calls": 0,
         },
@@ -639,6 +677,8 @@ def main():
     log("Parts:", parts_expected)
     log("Scenes per part:", scenes_expected)
     log("Total scenes:", total)
+    log("Source words per part:", source_part_word_counts)
+    log("Mapped words per part:", mapped_part_word_counts)
     log("Reused scenes:", reused_count)
     log("External API calls: 0")
     log("Output:", OUTPUT_FILE)
