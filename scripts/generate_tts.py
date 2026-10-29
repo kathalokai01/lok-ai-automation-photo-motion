@@ -480,6 +480,7 @@ def normalize_provider(value):
 
 
 def provider_groups(config):
+    """Use the three primary providers and only the configured fallbacks."""
     defaults = ("fish_audio", "gemini_tts", "edge_tts")
     primary = [
         normalize_provider(config.get(f"TTS_MAIN_{i}", defaults[i - 1]))
@@ -492,8 +493,11 @@ def provider_groups(config):
 
     fallback = []
     if truthy(config.get("TTS_FALLBACK_ENABLED", True)):
-        raw = config.get("TTS_FALLBACK_ORDER", ",".join(PROVIDERS))
-        values = raw if isinstance(raw, (list, tuple)) else re.split(r"[,;]", str(raw))
+        raw = config.get("TTS_FALLBACK_ORDER", "")
+        values = (
+            raw if isinstance(raw, (list, tuple))
+            else re.split(r"[,;]", str(raw))
+        )
         for item in values:
             provider = normalize_provider(item)
             if not provider:
@@ -503,18 +507,15 @@ def provider_groups(config):
             if provider not in primary and provider not in fallback:
                 fallback.append(provider)
 
-        for provider in PROVIDERS:
-            if provider not in primary and provider not in fallback:
-                fallback.append(provider)
-
     return primary, fallback
 
 
 def paid_allowed(config):
     # Workflow-level explicit opt-in takes precedence over the Input default.
-    # This resolves the previous conflict where Input/topic.txt defaulted
-    # TTS_ALLOW_PAID=false while the workflow explicitly allowed billable APIs.
-    workflow_opt_in = truthy(os.environ.get("ALLOW_BILLABLE_PROVIDERS", "false"))
+    # Input TTS_ALLOW_PAID=false alone does not override a workflow opt-in.
+    workflow_opt_in = truthy(
+        os.environ.get("ALLOW_BILLABLE_PROVIDERS", "false")
+    )
     input_opt_in = truthy(config.get("TTS_ALLOW_PAID", False))
     env_opt_in = truthy(os.environ.get("TTS_ALLOW_PAID", "false"))
     return workflow_opt_in or (input_opt_in and env_opt_in)
