@@ -1,13 +1,11 @@
-
 #!/usr/bin/env python3
-"""Select an available Gemini text model without running a paid generation test."""
+"""Select an available Gemini text model and preserve only valid checkpoints."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,10 +18,11 @@ OUTPUT_FILE = ROOT / "output" / "config" / "selected_model.json"
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 PREFERRED_MODEL = "gemini-3.5-flash-lite"
-TIMEOUT = 30
+TIMEOUT_SECONDS = 30
 MAX_MODEL_PAGES = 5
-VERSION = "safe-gemini-selector-v5-list-available-models"
+VERSION = "safe-gemini-selector-v6-checkpoint-safe"
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+SUCCESS_TEST = "GEMINI_OK"
 
 
 def log(*items: object) -> None:
@@ -73,6 +72,37 @@ def atomic_save(data: dict[str, Any]) -> None:
         raise RuntimeError("Model selection read-back validation failed.")
 
 
+def copy_valid_test_checkpoint(
+    previous: dict[str, Any] | None,
+    new_model: str,
+    destination: dict[str, Any],
+) -> None:
+    """Preserve a success marker only when its recorded model matches."""
+
+    if not previous:
+        return
+
+    previous_model = str(previous.get("model", "")).strip()
+    tested_model = str(previous.get("test_model", "")).strip()
+    test_value = str(previous.get("test", "")).strip()
+
+    # A success marker without its model identity is not safe to reuse.
+    if (
+        previous_model != new_model
+        or tested_model != new_model
+        or test_value != SUCCESS_TEST
+    ):
+        return
+
+    verified_at = str(previous.get("test_verified_at", "")).strip()
+    if not verified_at:
+        return
+
+    destination["test"] = SUCCESS_TEST
+    destination["test_model"] = new_model
+    destination["test_verified_at"] = verified_at
+
+
 def save_selection(
     model: str,
     *,
@@ -80,11 +110,12 @@ def save_selection(
     reason: str,
     display_name: str = "",
     models_listed: int = 0,
+    previous: dict[str, Any] | None = None,
 ) -> None:
     if not valid_model_name(model):
         raise RuntimeError("Refusing to save an invalid model identifier.")
 
-    atomic_save({
+    data: dict[str, Any] = {
         "version": VERSION,
         "status": "selected",
         "model": model,
@@ -100,15 +131,16 @@ def save_selection(
         "generation_test_performed": False,
         "external_generation_calls": 0,
         "paid_generation_test_performed": False,
-    })
+    }
+
+    copy_valid_test_checkpoint(previous, model, data)
+    atomic_save(data)
 
 
 def api_get(url: str, api_key: str) -> dict[str, Any]:
     separator = "&" if "?" in url else "?"
-    request_url = (
-        url + separator
-        + urllib.parse.urlencode({"key": api_key})
-    )
+    request_url = url + separator + urllib.parse.urlencode({"key": api_key})
+
     request = urllib.request.Request(
         request_url,
         headers={"Accept": "application/json"},
@@ -116,17 +148,22 @@ def api_get(url: str, api_key: str) -> dict[str, Any]:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=TIMEOUT_SECONDS,
+        ) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:400]
         raise RuntimeError(
             f"Gemini model-list HTTP {exc.code}: {detail}"
         ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise RuntimeError(
             f"Gemini model-list request failed ({type(exc).__name__})."
         ) from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Gemini returned invalid JSON for model listing.") from exc
 
     if not isinstance(result, dict):
         raise RuntimeError("Gemini returned an invalid model-list response.")
@@ -158,7 +195,10 @@ def list_compatible_models(api_key: str) -> list[dict[str, str]]:
 
             if not resource.startswith("models/"):
                 continue
-            if not isinstance(methods, list) or "generateContent" not in methods:
+            if (
+                not isinstance(methods, list)
+                or "generateContent" not in methods
+            ):
                 continue
 
             model = resource.split("/", 1)[1]
@@ -168,10 +208,18 @@ def list_compatible_models(api_key: str) -> list[dict[str, str]]:
                 continue
             if "gemini" not in lowered:
                 continue
-            if any(term in lowered for term in (
-                "embedding", "image", "vision", "audio", "tts",
-                "robotics", "aqa",
-            )):
+            if any(
+                term in lowered
+                for term in (
+                    "embedding",
+                    "image",
+                    "vision",
+                    "audio",
+                    "tts",
+                    "robotics",
+                    "aqa",
+                )
+            ):
                 continue
 
             seen_models.add(model)
@@ -212,18 +260,17 @@ def choose_model(
 
     by_name = {item["model"]: item for item in models}
 
-    # Preserve the current model if it is still available.
+    # Keep the existing configured model if the API still lists it.
     if existing_model in by_name:
         return by_name[existing_model]
 
-    # Use the preferred model only when the API lists it.
+    # Preferred model is used only if the API confirms it is available.
     if PREFERRED_MODEL in by_name:
         return by_name[PREFERRED_MODEL]
 
     def priority(item: dict[str, str]) -> tuple[int, str]:
         name = item["model"].lower()
 
-        # Prefer stable names over experimental/preview variants.
         experimental = any(
             token in name
             for token in ("preview", "experimental", "exp-", "latest")
@@ -249,7 +296,6 @@ def main() -> int:
     api_key = get_api_key()
 
     if not api_key:
-        # Avoid network calls when no key is configured.
         if (
             existing.get("status") == "selected"
             and valid_model_name(existing_model)
@@ -257,7 +303,7 @@ def main() -> int:
         ):
             log("No API key: retaining existing configured model.")
             log("Model:", existing_model)
-            log("Availability verified: no")
+            log("Availability verified in this run: no")
             log("Network requests: 0")
             return 0
 
@@ -265,22 +311,24 @@ def main() -> int:
             PREFERRED_MODEL,
             verified=False,
             reason=(
-                "No Gemini API key available. Local default only; model "
+                "No Gemini API key available. Local default only; "
                 "availability is unverified. No generation request made."
             ),
+            previous=existing,
         )
         log("No API key; saved unverified local default:", PREFERRED_MODEL)
         log("Network requests: 0")
         return 0
 
-    log("Checking available Gemini text models.")
-    log("This step only lists models; it does not generate text.")
+    log("Listing compatible Gemini text models.")
+    log("No text-generation test is performed in this step.")
 
     models = list_compatible_models(api_key)
     selected = choose_model(models, existing_model)
+    model = selected["model"]
 
     save_selection(
-        selected["model"],
+        model,
         verified=True,
         display_name=selected.get("display_name", ""),
         reason=(
@@ -288,13 +336,22 @@ def main() -> int:
             "No generation test was performed."
         ),
         models_listed=len(models),
+        previous=existing,
     )
 
-    log("Selected model:", selected["model"])
+    log("Selected model:", model)
     log("Compatible text models listed:", len(models))
-    log("Available in model list: yes")
-    log("Generation test performed: no")
-    log("Paid generation test performed: no")
+    log("Availability confirmed by model listing: yes")
+    log("Generation request made: no")
+
+    saved = read_json(OUTPUT_FILE) or {}
+    if saved.get("test") == SUCCESS_TEST and saved.get("test_model") == model:
+        log("Successful test checkpoint preserved for the same model.")
+    elif existing_model and existing_model != model:
+        log("Model changed; old model's successful test was not reused.")
+    elif existing.get("test") == SUCCESS_TEST:
+        log("Old test checkpoint was not reused because its model identity was missing or mismatched.")
+
     log("Saved:", OUTPUT_FILE)
     return 0
 
