@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Resume-safe photo-motion renderer with narration-first audio mixing."""
+"""Resume-safe format-aware renderer with narration-first audio mixing."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ PART_DIR = OUT / "parts"
 VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 
-VERSION = "render-video-v22-schema-safe-resume"
+VERSION = "render-video-v23-format-aware-schema-safe-resume"
 WIDTH, HEIGHT = 1280, 720
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -259,6 +259,11 @@ def validate_photo_scenes(data, parts, scenes):
             MIN_VIDEO_BYTES,
         )
         info = probe(path)
+        if (info["width"], info["height"]) != (WIDTH, HEIGHT):
+            raise RuntimeError(
+                f"Photo-motion scene {key} has {info['width']}x{info['height']}; "
+                f"expected {WIDTH}x{HEIGHT} for FORMAT"
+            )
         mapping[key] = {
             "part": part,
             "scene": scene,
@@ -608,7 +613,6 @@ def save_manifest(status, mode, fps, parts, scenes, completed_scenes,
         "resolution": [WIDTH, HEIGHT],
         "parts_expected": parts,
         "scenes_per_part": scenes,
-        "scenes_per_part": scenes,
         "expected_scenes": parts * scenes,
         "completed_count": len(completed_scenes),
         "completed_scenes": completed_scenes,
@@ -623,6 +627,8 @@ def save_manifest(status, mode, fps, parts, scenes, completed_scenes,
 
 
 def main():
+    global WIDTH, HEIGHT
+
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("Both ffmpeg and ffprobe are required")
 
@@ -632,8 +638,13 @@ def main():
     scenes = int(get_scenes(config))
     fps = int(get_fps(config))
 
-    if mode not in {"short", "full"}:
+    if mode == "short":
+        WIDTH, HEIGHT = 720, 1280
+    elif mode == "full":
+        WIDTH, HEIGHT = 1280, 720
+    else:
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
+
     if min(parts, scenes, fps) < 1:
         raise RuntimeError("PARTS, SCENES and FPS must be positive")
 
