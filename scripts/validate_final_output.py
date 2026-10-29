@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Validate actual Katha Lok AI manifests and final selected-format videos."""
 
@@ -29,7 +30,8 @@ METADATA = OUT / "youtube_metadata.txt"
 FINAL_SRT = OUT / "captions" / "final_captions.srt"
 REPORT = OUT / "validation_report.json"
 
-VERSION = "final-validator-v26-manifest-aligned"
+VERSION = "final-validator-v27-format-aware-manifest-aligned"
+# Video dimensions are selected from FORMAT in main(); thumbnails stay landscape.
 WIDTH, HEIGHT = 1280, 720
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -157,7 +159,7 @@ def require_video(path, label, require_audio=True):
         raise RuntimeError(f"{label}: audio stream missing")
     if (info["width"], info["height"]) != (WIDTH, HEIGHT):
         raise RuntimeError(
-            f"{label}: expected 1280x720, got "
+            f"{label}: expected {WIDTH}x{HEIGHT} for selected FORMAT, got "
             f"{info['width']}x{info['height']}"
         )
     return info
@@ -522,7 +524,8 @@ def validate_thumbnail(mode):
     except Exception as exc:
         raise RuntimeError(f"Invalid thumbnail: {exc}") from exc
 
-    if dimensions != (WIDTH, HEIGHT) or image_format != "JPEG":
+    # YouTube thumbnail remains 16:9 in both short and full video modes.
+    if dimensions != (1280, 720) or image_format != "JPEG":
         raise RuntimeError(
             f"Thumbnail must be 1280x720 JPEG; got {image_format} {dimensions}"
         )
@@ -591,6 +594,14 @@ def main():
 
     if mode not in ("short", "full"):
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
+
+    # Shorts are portrait 9:16; full videos remain landscape 16:9.
+    global WIDTH, HEIGHT
+    if mode == "short":
+        WIDTH, HEIGHT = 720, 1280
+    else:
+        WIDTH, HEIGHT = 1280, 720
+
     if parts < 1 or scenes < 1:
         raise RuntimeError("PARTS and SCENES must be positive")
     if not OUT.is_dir():
