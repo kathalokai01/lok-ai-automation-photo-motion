@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Katha Lok AI scene preparation with schema validation and safe checkpoints."""
+"""Katha Lok AI scene preparation with schema validation and resumable checkpoints."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -34,21 +35,21 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "scene-preparation-v8-validated-checkpoint"
-MAPPING_VERSION = 8
+VERSION = "scene-preparation-v9-resumable-schema-safe"
+MAPPING_VERSION = 9
 
 
-def log(*items):
-    print(*items, flush=True)
+def log(*values: Any) -> None:
+    print(*values, flush=True)
 
 
-def clean(value):
+def clean(value: Any) -> str:
     if isinstance(value, (dict, list, tuple)):
         return ""
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def digest(data):
+def digest(data: Any) -> str:
     raw = json.dumps(
         data,
         ensure_ascii=False,
@@ -59,8 +60,7 @@ def digest(data):
     return hashlib.sha256(raw).hexdigest()
 
 
-def read_json(path, required=False):
-    path = Path(path)
+def read_json(path: Path, required: bool = False) -> dict | None:
     if not path.is_file():
         if required:
             raise RuntimeError(f"Required file is missing: {path}")
@@ -71,20 +71,21 @@ def read_json(path, required=False):
     except (OSError, json.JSONDecodeError) as exc:
         if required:
             raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
-        log(f"WARNING: Optional JSON unavailable: {path.name}: {exc}")
+        log(f"WARNING: Could not read optional {path.name}: {exc}")
         return None
 
     if not isinstance(data, dict):
         if required:
             raise RuntimeError(f"Expected a JSON object in {path}")
         return None
+
     return data
 
 
-def write_json(path, data):
-    path = Path(path)
+def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
+
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -96,91 +97,80 @@ def write_json(path, data):
         temporary.unlink(missing_ok=True)
 
 
-def text_value(item, *keys, default=""):
+def text_value(item: Any, *keys: str, default: str = "") -> str:
     if not isinstance(item, dict):
         return default
+
     for key in keys:
         value = clean(item.get(key))
         if value:
             return value
+
     return default
 
 
-def bool_value(value, default=False):
+def bool_value(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     if value is None:
         return default
+
     value = str(value).strip().lower()
+
     if value in {"true", "1", "yes", "on", "enabled"}:
         return True
     if value in {"false", "0", "no", "off", "disabled"}:
         return False
+
     return default
 
 
-def positive_int(value, label):
+def positive_int(value: Any, label: str) -> int:
     try:
         number = int(value)
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"{label} must be an integer") from exc
+
     if number < 1:
         raise RuntimeError(f"{label} must be greater than zero")
+
     return number
 
 
-def selected_story():
-    errors = []
-
-    for path, label in (
-        (AI_STORY_FILE, "ai_story"),
-        (SOURCE_STORY_FILE, "story"),
-    ):
-        data = read_json(path)
-        if not isinstance(data, dict):
-            errors.append(f"{path.name} missing or invalid")
-            continue
-        if data.get("status") != "completed":
-            errors.append(f"{path.name} is not completed")
-            continue
-        if not isinstance(data.get("parts"), list) or not data["parts"]:
-            errors.append(f"{path.name} has no parts")
-            continue
-
-        log("Story source:", path.relative_to(ROOT).as_posix())
-        return data, label, path
-
-    raise RuntimeError("No completed story source: " + "; ".join(errors))
+def expected_scene_id(part: int, scene: int) -> str:
+    return f"part_{part:02d}_scene_{scene:02d}"
 
 
-def load_character_bible():
-    data = read_json(BIBLE_FILE)
-    if not isinstance(data, dict):
-        return {}
-    if data.get("status") not in {"completed", "disabled"}:
-        return {}
-    return data
+def validate_layout(
+    data: dict,
+    parts_count: int,
+    scenes_per_part: int,
+    label: str,
+) -> None:
+    parts = data.get("parts")
 
-
-def validate_layout(story, parts_count, scenes_per_part, label):
-    parts = story.get("parts")
     if not isinstance(parts, list) or len(parts) != parts_count:
         actual = len(parts) if isinstance(parts, list) else 0
         raise RuntimeError(
             f"{label}: expected {parts_count} parts, found {actual}"
         )
 
+    global_number = 0
+
     for p, part in enumerate(parts, 1):
         if not isinstance(part, dict):
             raise RuntimeError(f"{label}: invalid part {p}")
+
         try:
             declared_part = int(part.get("part", p))
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"{label}: invalid part number {p}") from exc
+
         if declared_part != p:
             raise RuntimeError(f"{label}: part ordering mismatch at {p}")
 
         scenes = part.get("scenes")
+
         if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
             actual = len(scenes) if isinstance(scenes, list) else 0
             raise RuntimeError(
@@ -189,67 +179,151 @@ def validate_layout(story, parts_count, scenes_per_part, label):
             )
 
         for s, scene in enumerate(scenes, 1):
+            global_number += 1
+
             if not isinstance(scene, dict):
                 raise RuntimeError(f"{label}: invalid scene {p}:{s}")
+
             try:
                 declared_scene = int(scene.get("scene", s))
             except (TypeError, ValueError) as exc:
-                raise RuntimeError(f"{label}: invalid scene number {p}:{s}") from exc
+                raise RuntimeError(
+                    f"{label}: invalid scene number {p}:{s}"
+                ) from exc
+
             if declared_scene != s:
                 raise RuntimeError(f"{label}: scene order mismatch at {p}:{s}")
 
             scene_id = clean(scene.get("scene_id"))
-            expected_id = f"part_{p:02d}_scene_{s:02d}"
+            expected_id = expected_scene_id(p, s)
+
             if scene_id and scene_id != expected_id:
                 raise RuntimeError(
-                    f"{label}: scene ID mismatch; expected {expected_id}, "
-                    f"found {scene_id}"
+                    f"{label}: expected scene ID {expected_id}, found {scene_id}"
                 )
 
+            if "global_scene_number" in scene:
+                try:
+                    declared_global = int(scene["global_scene_number"])
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"{label}: invalid global scene number for {expected_id}"
+                    ) from exc
 
-def load_plan(format_type, parts_count, scenes_per_part):
+                if declared_global != global_number:
+                    raise RuntimeError(
+                        f"{label}: global scene number mismatch for {expected_id}"
+                    )
+
+
+def selected_story(format_type: str) -> tuple[dict, str, Path]:
+    errors = []
+
+    # Prefer the mapped story only if it belongs to the requested format.
+    for path, label in (
+        (AI_STORY_FILE, "ai_story"),
+        (SOURCE_STORY_FILE, "story"),
+    ):
+        data = read_json(path)
+
+        if not isinstance(data, dict):
+            errors.append(f"{path.name} missing or invalid")
+            continue
+
+        if data.get("status") != "completed":
+            errors.append(f"{path.name} status is not completed")
+            continue
+
+        source_format = clean(data.get("format")).lower()
+
+        if source_format != format_type:
+            errors.append(
+                f"{path.name} format is {source_format or '(missing)'}, "
+                f"requested {format_type}"
+            )
+            continue
+
+        if not isinstance(data.get("parts"), list) or not data["parts"]:
+            errors.append(f"{path.name} has no parts")
+            continue
+
+        log("Selected story:", path.relative_to(ROOT).as_posix())
+        return data, label, path
+
+    raise RuntimeError(
+        "No completed story matches the requested FORMAT. "
+        + "; ".join(errors)
+    )
+
+
+def load_character_bible() -> dict:
+    data = read_json(BIBLE_FILE)
+
+    if not isinstance(data, dict):
+        return {}
+
+    if data.get("status") not in {"completed", "disabled"}:
+        return {}
+
+    return data
+
+
+def load_plan(
+    format_type: str,
+    parts_count: int,
+    scenes_per_part: int,
+) -> dict[tuple[int, int], dict]:
     plan = read_json(PLAN_FILE)
+
     if plan is None:
-        log("WARNING: story_plan.json unavailable; using source story fields")
+        log("WARNING: story_plan.json unavailable; using story scene fields")
         return {}
 
     if plan.get("status") != "planned":
         raise RuntimeError("story_plan.json status must be planned")
+
     if clean(plan.get("format")).lower() != format_type:
         raise RuntimeError("Story plan FORMAT does not match Input/topic.txt")
 
     try:
         plan_parts = int(plan.get("parts_count", -1))
         plan_scenes = int(plan.get("scenes_per_part", -1))
+        total_scenes = int(plan.get("total_scenes", -1))
     except (TypeError, ValueError) as exc:
         raise RuntimeError("Story plan counts are invalid") from exc
 
+    expected_total = parts_count * scenes_per_part
+
     if plan_parts != parts_count:
         raise RuntimeError("Story plan PARTS does not match input")
+
     if plan_scenes != scenes_per_part:
         raise RuntimeError("Story plan SCENES does not match input")
 
-    validate_layout(plan, parts_count, scenes_per_part, "Story plan")
-
-    expected_total = parts_count * scenes_per_part
-    try:
-        declared_total = int(plan.get("total_scenes", expected_total))
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("Story plan total_scenes is invalid") from exc
-    if declared_total != expected_total:
+    if total_scenes != expected_total:
         raise RuntimeError("Story plan total_scenes does not match input")
 
-    result = {}
-    for part in plan["parts"]:
-        p = int(part["part"])
-        for scene in part["scenes"]:
-            s = int(scene["scene"])
-            expected_id = f"part_{p:02d}_scene_{s:02d}"
+    validate_layout(plan, parts_count, scenes_per_part, "Story plan")
+
+    result: dict[tuple[int, int], dict] = {}
+
+    for p, part in enumerate(plan["parts"], 1):
+        for s, scene in enumerate(part["scenes"], 1):
+            expected_id = expected_scene_id(p, s)
+
             if clean(scene.get("scene_id")) != expected_id:
-                raise RuntimeError(f"Story plan scene ID mismatch: {expected_id}")
+                raise RuntimeError(
+                    f"Story plan scene ID mismatch: {expected_id}"
+                )
+
+            if not clean(scene.get("purpose")):
+                raise RuntimeError(f"Story plan purpose missing: {expected_id}")
+
             key = (p, s)
+
             if key in result:
                 raise RuntimeError(f"Duplicate story-plan scene: {expected_id}")
+
             result[key] = scene
 
     if len(result) != expected_total:
@@ -260,18 +334,15 @@ def load_plan(format_type, parts_count, scenes_per_part):
 
 
 def normalize_scene(
-    source,
-    plan_scene,
-    part_number,
-    scene_number,
-    global_number,
-    settings,
-    bible,
-):
-    if not isinstance(source, dict):
-        raise RuntimeError(f"Invalid source scene {part_number}:{scene_number}")
-
-    plan_scene = plan_scene if isinstance(plan_scene, dict) else {}
+    source: dict,
+    plan_scene: dict,
+    part_number: int,
+    scene_number: int,
+    global_number: int,
+    settings: dict,
+    bible: dict,
+) -> dict:
+    scene_id = expected_scene_id(part_number, scene_number)
 
     narration = text_value(source, "narration", "text", "dialogue")
     visual = text_value(
@@ -284,10 +355,9 @@ def normalize_scene(
         "description",
     )
 
-    scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
-
     if not narration:
         raise RuntimeError(f"Missing narration: {scene_id}")
+
     if len(visual) < 20:
         raise RuntimeError(f"Visual prompt missing or too short: {scene_id}")
 
@@ -297,6 +367,7 @@ def normalize_scene(
         )
     except (TypeError, ValueError):
         duration = 5.0
+
     if not 0.5 <= duration <= 3600:
         duration = 5.0
 
@@ -309,6 +380,7 @@ def normalize_scene(
             "inconsistent character identity, duplicate limbs, unintended text"
         ),
     )
+
     camera = text_value(
         source,
         "camera_prompt",
@@ -316,6 +388,7 @@ def normalize_scene(
         "camera_direction",
         default="Natural cinematic framing appropriate to the scene",
     )
+
     lighting = text_value(
         source,
         "lighting_prompt",
@@ -323,41 +396,43 @@ def normalize_scene(
         "lighting_direction",
         default=(
             "Physically plausible cinematic lighting, natural skin tones, "
-            "visible shadow detail, no excessive contrast"
+            "visible shadow detail, balanced exposure, no excessive contrast"
         ),
     )
+
     mood = text_value(
         source, "mood", "emotion", "emotional_tone", default="cinematic"
     )
+
     sfx = text_value(source, "sfx_prompt", "sfx", "sound_effects")
     ambient = text_value(
         source, "ambient_sound", "ambient_prompt", "ambience"
     )
-    music = text_value(
-        source, "music_prompt", "music_direction", "music"
-    )
+    music = text_value(source, "music_prompt", "music_direction", "music")
     suspense = text_value(source, "suspense_prompt", "suspense")
     title = text_value(
         source, "title", "scene_title", default=f"Scene {global_number}"
     )
+
     source_role = text_value(source, "role", "purpose", "scene_purpose")
     plan_role = text_value(plan_scene, "role")
     role = plan_role or source_role
 
-    world_context = text_value(
-        source, "world_context", "location", "setting"
-    )
+    world_context = text_value(source, "world_context", "location", "setting")
     dialogue = text_value(source, "dialogue", "spoken_dialogue")
 
     if not bool_value(settings.get("SFX", True), True):
         sfx = ""
+
     if not bool_value(settings.get("MUSIC", True), True):
         music = ""
+
     if not bool_value(settings.get("AMBIENT_SOUND", True), True):
         ambient = ""
 
     final_part = positive_int(settings["PARTS"], "PARTS")
     last_scene = positive_int(settings["SCENES"], "SCENES")
+
     part_hook = bool_value(settings.get("PART_HOOK", True), True)
     part_suspense = bool_value(settings.get("PART_SUSPENSE", True), True)
     final_resolution = bool_value(
@@ -379,7 +454,7 @@ def normalize_scene(
     continuity = (
         "Preserve established character identity, facial features, age range, "
         "gender presentation, hair, clothing, body type and carried objects. "
-        "Maintain location, time order and causal continuity. Do not invent "
+        "Maintain location, chronology and causal continuity. Do not invent "
         "unsupported identity changes. Follow the character bible when present."
     )
 
@@ -456,6 +531,7 @@ def normalize_scene(
         "narration_language",
         "translations",
     )
+
     for field in caption_fields:
         if field in source:
             row[field] = source[field]
@@ -463,33 +539,93 @@ def normalize_scene(
     return row
 
 
-def validate_rows(rows, parts_count, scenes_per_part):
+def validate_rows(
+    rows: list[dict],
+    parts_count: int,
+    scenes_per_part: int,
+) -> None:
     expected_ids = [
-        f"part_{p:02d}_scene_{s:02d}"
+        expected_scene_id(p, s)
         for p in range(1, parts_count + 1)
         for s in range(1, scenes_per_part + 1)
     ]
+
     actual_ids = []
+
     for row in rows:
         if not isinstance(row, dict):
             raise RuntimeError("Output contains an invalid scene record")
+
         if row.get("status") != "completed":
             raise RuntimeError("Output contains an incomplete scene")
+
         if not clean(row.get("narration")):
             raise RuntimeError(f"Empty narration: {row.get('scene_id')}")
+
         if not clean(row.get("visual_prompt")):
             raise RuntimeError(f"Empty visual prompt: {row.get('scene_id')}")
+
         actual_ids.append(row.get("scene_id"))
 
     if len(rows) != len(expected_ids):
         raise RuntimeError(
             f"Scene count mismatch: {len(rows)}/{len(expected_ids)}"
         )
+
     if actual_ids != expected_ids:
         raise RuntimeError("Scene IDs are missing, duplicated or out of order")
 
 
-def main():
+def make_result(
+    status: str,
+    source_type: str,
+    source_path: Path,
+    source_fingerprint: str,
+    format_type: str,
+    topic: str,
+    story_text: str,
+    parts_count: int,
+    scenes_per_part: int,
+    rows: list[dict],
+    plan_map: dict,
+    bible: dict,
+    reused: int,
+) -> dict:
+    return {
+        "status": status,
+        "version": VERSION,
+        "mapping_version": MAPPING_VERSION,
+        "scene_order": "part_then_scene",
+        "source_type": source_type,
+        "source_file": source_path.relative_to(ROOT).as_posix(),
+        "source_fingerprint": source_fingerprint,
+        "model": "not_required",
+        "api_calls": 0,
+        "format": format_type,
+        "topic": topic,
+        "story_text": story_text,
+        "total_parts": parts_count,
+        "scenes_per_part": scenes_per_part,
+        "total_scenes": parts_count * scenes_per_part,
+        "completed_scenes": len(rows),
+        "reused_scenes": reused,
+        "character_bible_available": bool(bible),
+        "story_plan_integrated": bool(plan_map),
+        "story_plan_scene_count": len(plan_map),
+        "validation": {
+            "exact_scene_count": status == "completed",
+            "unique_scene_ids": True,
+            "sequential_scene_order": True,
+            "narration_present": True,
+            "visual_prompts_present": True,
+            "format_matches_input": True,
+            "external_api_calls": 0,
+        },
+        "scenes": rows,
+    }
+
+
+def main() -> None:
     log("=" * 60)
     log("KATHA LOK AI — VALIDATED SCENE PREPARATION")
     log("External API calls in this stage: 0")
@@ -497,26 +633,28 @@ def main():
 
     config = load_and_validate(CONFIG_FILE)
     format_type = clean(normalize_format(config)).lower()
+
     if format_type not in {"short", "full"}:
         raise RuntimeError("FORMAT must be short or full")
 
     parts_count = positive_int(get_parts(config), "PARTS")
     scenes_per_part = positive_int(get_scenes(config), "SCENES")
 
-    story, source_type, source_path = selected_story()
-    if clean(story.get("format")).lower() != format_type:
-        raise RuntimeError("Selected story FORMAT does not match input")
-
+    story, source_type, source_path = selected_story(format_type)
     validate_layout(story, parts_count, scenes_per_part, "Story")
+
     plan_map = load_plan(format_type, parts_count, scenes_per_part)
     bible = load_character_bible()
 
     topic = clean(get_topic(config))
     story_text = clean(get_story_text(config))
+
     if not topic:
         topic = clean(story.get("title") or story.get("topic"))
+
     if not topic and story_text:
         topic = story_text.splitlines()[0].strip()
+
     if not topic:
         raise RuntimeError("Could not determine story title/topic")
 
@@ -529,7 +667,10 @@ def main():
         "SCENE_CONTINUITY", "NATURAL_MOTION", "MUSIC",
         "MUSIC_STYLE", "SFX", "AMBIENT_SOUND",
     )
-    settings_snapshot = {key: config.get(key) for key in settings_keys}
+
+    settings_snapshot = {
+        key: config.get(key) for key in settings_keys
+    }
 
     source_fingerprint = digest({
         "version": VERSION,
@@ -546,36 +687,46 @@ def main():
         "settings": settings_snapshot,
     })
 
+    # A matching in-progress output is a valid resume source too.
     old = read_json(OUTPUT_FILE)
-    old_scenes = {}
+    old_scenes: dict[tuple[int, int], dict] = {}
+
     if (
         isinstance(old, dict)
         and old.get("source_fingerprint") == source_fingerprint
         and old.get("mapping_version") == MAPPING_VERSION
+        and old.get("format") == format_type
         and isinstance(old.get("scenes"), list)
     ):
         for item in old["scenes"]:
             if not isinstance(item, dict):
                 continue
+
             try:
                 key = (int(item["part"]), int(item["scene"]))
             except (KeyError, TypeError, ValueError):
                 continue
+
             if item.get("status") == "completed":
                 old_scenes[key] = item
 
-    rows = []
+    rows: list[dict] = []
     reused = 0
     global_number = 0
+    expected_total = parts_count * scenes_per_part
 
+    # Save an in-progress result after each scene so interruption does not
+    # discard already-normalized records.
     for p, part in enumerate(story["parts"], 1):
         for s, source_scene in enumerate(part["scenes"], 1):
             global_number += 1
             key = (p, s)
 
+            plan_scene = plan_map.get(key, {})
+
             expected = normalize_scene(
                 source_scene,
-                plan_map.get(key, {}),
+                plan_scene,
                 p,
                 s,
                 global_number,
@@ -584,55 +735,85 @@ def main():
             )
 
             previous = old_scenes.get(key)
+
             if previous == expected:
-                rows.append(previous)
+                row = previous
                 reused += 1
             else:
-                rows.append(expected)
+                row = expected
+
+            rows.append(row)
+
+            progress = make_result(
+                "in_progress",
+                source_type,
+                source_path,
+                source_fingerprint,
+                format_type,
+                topic,
+                story_text,
+                parts_count,
+                scenes_per_part,
+                rows,
+                plan_map,
+                bible,
+                reused,
+            )
+
+            write_json(OUTPUT_FILE, progress)
+
+            write_json(CHECKPOINT_FILE, {
+                "status": "in_progress",
+                "version": VERSION,
+                "mapping_version": MAPPING_VERSION,
+                "source_fingerprint": source_fingerprint,
+                "format": format_type,
+                "total_scenes": expected_total,
+                "completed_count": len(rows),
+                "completed_scene_ids": [
+                    item["scene_id"] for item in rows
+                ],
+                "failed_scene": None,
+            })
 
     validate_rows(rows, parts_count, scenes_per_part)
 
-    expected_total = parts_count * scenes_per_part
-    result = {
-        "status": "completed",
-        "version": VERSION,
-        "mapping_version": MAPPING_VERSION,
-        "scene_order": "part_then_scene",
-        "source_type": source_type,
-        "source_file": source_path.relative_to(ROOT).as_posix(),
-        "source_fingerprint": source_fingerprint,
-        "model": "not_required",
-        "api_calls": 0,
-        "format": format_type,
-        "topic": topic,
-        "story_text": story_text,
-        "total_parts": parts_count,
-        "scenes_per_part": scenes_per_part,
-        "total_scenes": expected_total,
-        "completed_scenes": len(rows),
-        "reused_scenes": reused,
-        "character_bible_available": bool(bible),
-        "story_plan_integrated": bool(plan_map),
-        "story_plan_scene_count": len(plan_map),
-        "validation": {
-            "exact_scene_count": True,
-            "unique_scene_ids": True,
-            "sequential_scene_order": True,
-            "narration_present": True,
-            "visual_prompts_present": True,
-            "format_matches_input": True,
-            "external_api_calls": 0,
-        },
-        "scenes": rows,
+    result = make_result(
+        "completed",
+        source_type,
+        source_path,
+        source_fingerprint,
+        format_type,
+        topic,
+        story_text,
+        parts_count,
+        scenes_per_part,
+        rows,
+        plan_map,
+        bible,
+        reused,
+    )
+
+    result["validation"] = {
+        "exact_scene_count": len(rows) == expected_total,
+        "unique_scene_ids": len({
+            item["scene_id"] for item in rows
+        }) == expected_total,
+        "sequential_scene_order": True,
+        "narration_present": True,
+        "visual_prompts_present": True,
+        "format_matches_input": True,
+        "external_api_calls": 0,
     }
 
     write_json(OUTPUT_FILE, result)
+
     write_json(CHECKPOINT_FILE, {
         "status": "completed",
         "version": VERSION,
         "mapping_version": MAPPING_VERSION,
         "source_fingerprint": source_fingerprint,
-        "source_file": source_path.relative_to(ROOT).as_posix(),
+        "format": format_type,
         "total_scenes": expected_total,
         "completed_count": len(rows),
         "completed_scene_ids": [row["scene_id"] for row in rows],
