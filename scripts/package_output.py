@@ -24,8 +24,10 @@ METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 sys.path.insert(0, str(ROOT / "scripts"))
 from input_config import load_and_validate, get_format, get_parts, get_scenes
 
-VERSION = "output-packager-v14-zip-manifest-consistency"
+VERSION = "output-packager-v15-format-aware-zip-manifest-consistency"
+# Video dimensions are set from FORMAT in main(); thumbnails remain landscape.
 VIDEO_SIZE = (1280, 720)
+THUMBNAIL_SIZE = (1280, 720)
 MIN_BYTES = 1000
 
 REQUIRED_PATHS: set[Path] = set()
@@ -138,7 +140,7 @@ def media_info(path):
         None,
     )
 
-    if duration <= 0 or video is None or audio is None:
+    if not math_is_positive_finite(duration) or video is None or audio is None:
         raise RuntimeError(
             f"{path.name}: positive duration, video and audio are required"
         )
@@ -149,10 +151,16 @@ def media_info(path):
     )
     if dimensions != VIDEO_SIZE:
         raise RuntimeError(
-            f"{path.name}: expected {VIDEO_SIZE}, got {dimensions}"
+            f"{path.name}: expected {VIDEO_SIZE} for selected FORMAT, "
+            f"got {dimensions}"
         )
 
     return duration
+
+
+def math_is_positive_finite(value):
+    import math
+    return math.isfinite(value) and value > 0
 
 
 def validate_render(mode, parts, scenes):
@@ -329,7 +337,7 @@ def validate_thumbnail():
     except Exception as exc:
         raise RuntimeError(f"Invalid thumbnail: {exc}") from exc
 
-    if image_format != "JPEG" or dimensions != VIDEO_SIZE:
+    if image_format != "JPEG" or dimensions != THUMBNAIL_SIZE:
         raise RuntimeError(
             f"Thumbnail must be 1280x720 JPEG; got {image_format} {dimensions}"
         )
@@ -540,9 +548,6 @@ def packaged_render_manifest(render, packaged_names):
     alias_path = archive_name(render["alias"])
 
     if render["final_video_same_content_as_alias"]:
-        # The final MP4 and selected-format alias have identical SHA-256.
-        # Keep one physical video in the ZIP and point both manifest fields
-        # to that one packaged copy.
         data["final_video"] = alias_path
         data["alias"] = alias_path
         data["package_video_deduplication"] = {
@@ -577,8 +582,6 @@ def packaged_render_manifest(render, packaged_names):
                     )
                 row["video"] = packaged_path
 
-        # These fields describe intermediate inputs, not the captioned scene
-        # asset delivered in this ZIP. Avoid dangling paths in the ZIP manifest.
         for key in (
             "source_video",
             "narration",
@@ -701,7 +704,7 @@ def create_archive(files, render):
 
 
 def main():
-    global REQUIRED_PATHS
+    global REQUIRED_PATHS, VIDEO_SIZE
 
     if not shutil.which("ffprobe"):
         raise RuntimeError("ffprobe is required")
@@ -717,11 +720,15 @@ def main():
     if mode not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
 
+    # Shorts are portrait 9:16; full videos are landscape 16:9.
+    VIDEO_SIZE = (720, 1280) if mode == "short" else (1280, 720)
+
     if parts < 1 or scenes < 1:
         raise RuntimeError("PARTS and SCENES must be positive")
 
     log("PACKAGE VERSION:", VERSION)
     log("FORMAT:", mode, "| PARTS:", parts, "| SCENES/PART:", scenes)
+    log("EXPECTED VIDEO DIMENSIONS:", VIDEO_SIZE)
 
     validation = validate_validation_report(mode, parts, scenes)
     render = validate_render(mode, parts, scenes)
@@ -805,7 +812,6 @@ def main():
             archive.read(archived_render_name).decode("utf-8")
         )
 
-        # Ensure the packaged manifest resolves its primary deliverables.
         for key in ("final_video", "alias"):
             value = archived_render.get(key)
             if not isinstance(value, str) or value not in names:
@@ -836,6 +842,8 @@ def main():
         "parts": parts,
         "scenes_per_part": scenes,
         "expected_scenes": parts * scenes,
+        "video_dimensions": list(VIDEO_SIZE),
+        "thumbnail_dimensions": list(THUMBNAIL_SIZE),
         "archive": ARCHIVE.name,
         "archive_bytes": ARCHIVE.stat().st_size,
         "archive_sha256": sha256(ARCHIVE),
