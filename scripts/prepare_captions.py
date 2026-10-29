@@ -1,10 +1,12 @@
+
 #!/usr/bin/env python3
-"""Prepare language-aware, validated and resumable scene captions."""
+"""Prepare validated, resumable captions compatible with burn_captions.py."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -26,25 +28,13 @@ NARRATION_FILE = ROOT / "output" / "narration" / "narration.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v7-consistent-auto-font-size"
-
-SUPPORTED_MODES = {"hindi", "english", "hinglish"}
+VERSION = "prepare-captions-v8-renderer-aligned"
 
 SUPPORTED_FONTS = {
     "Noto Sans Devanagari",
     "Mukta",
     "Hind",
     "Tiro Devanagari Hindi",
-}
-
-LANGUAGE_FIELDS = {
-    "hindi": ("caption_hindi", "hindi_caption", "caption_hi"),
-    "english": ("caption_english", "english_caption", "caption_en"),
-    "hinglish": (
-        "caption_hinglish",
-        "hinglish_caption",
-        "caption_mixed",
-    ),
 }
 
 LANGUAGE_ALIASES = {
@@ -62,9 +52,31 @@ LANGUAGE_ALIASES = {
     "en-hi": "hinglish",
 }
 
+LANGUAGE_FIELDS = {
+    "hindi": ("caption_hindi", "hindi_caption", "caption_hi"),
+    "english": ("caption_english", "english_caption", "caption_en"),
+    "hinglish": (
+        "caption_hinglish",
+        "hinglish_caption",
+        "caption_mixed",
+    ),
+}
+
+LANGUAGE_KEYS = {
+    "hindi": ("hindi", "hi", "hin", "हिंदी"),
+    "english": ("english", "en", "eng", "अंग्रेज़ी"),
+    "hinglish": ("hinglish", "mixed", "hi-en", "en-hi"),
+}
+
 
 def log(*values):
     print(*values, flush=True)
+
+
+def normalize_text(value):
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def digest(value):
@@ -83,77 +95,40 @@ def canonical_json(value):
     )
 
 
-def read_json(path, required=True):
+def read_json(path):
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
-        if required:
-            raise RuntimeError(f"Cannot read {path}: {exc}") from exc
-        return None
-
-    if not isinstance(data, (dict, list)):
-        raise RuntimeError(f"Unexpected JSON structure: {path}")
-    return data
+        raise RuntimeError(f"Cannot read JSON {path}: {exc}") from exc
 
 
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_name(path.name + ".tmp")
     try:
-        temporary.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(path)
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-
-
-def normalize_text(value):
-    if not isinstance(value, str):
-        return ""
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def normalize_mode(config):
-    raw = normalize_text(str(config.get("CAPTIONS", "hindi"))).lower()
-    mode = LANGUAGE_ALIASES.get(raw, raw)
-    if mode not in SUPPORTED_MODES:
-        raise RuntimeError(
-            f"Invalid CAPTIONS={raw!r}; choose hindi, english, or hinglish."
-        )
-    return mode
-
-
-def resolve_font_size(config, video_format):
-    """Keep auto font size consistent with burn_captions.py."""
-    configured = get_caption_font_size(config)
-
-    if str(configured).strip().lower() == "auto":
-        size = 30
-    else:
-        try:
-            size = int(configured)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "CAPTION_FONT_SIZE must be auto or an integer from 16 to 64."
-            ) from exc
-
-    if not 16 <= size <= 64:
-        raise RuntimeError("CAPTION_FONT_SIZE must be between 16 and 64.")
-    return size
 
 
 def first_text(row, fields):
     if not isinstance(row, dict):
         return "", ""
-
     for field in fields:
         value = normalize_text(row.get(field))
         if value:
             return value, field
-
     return "", ""
+
+
+def normalize_language(value):
+    raw = normalize_text(str(value or "")).lower()
+    return LANGUAGE_ALIASES.get(raw, raw)
 
 
 def source_narration(row):
@@ -162,39 +137,21 @@ def source_narration(row):
     )[0]
 
 
-def normalize_language(value):
-    raw = normalize_text(str(value or "")).lower()
-    return LANGUAGE_ALIASES.get(raw, raw)
-
-
-def language_keys(mode):
-    keys = {
-        "hindi": ("hindi", "hi", "hin", "हिंदी"),
-        "english": ("english", "en", "eng", "अंग्रेज़ी"),
-        "hinglish": ("hinglish", "mixed", "hi-en", "en-hi"),
-    }
-    return keys[mode]
-
-
-def text_from_nested_value(value, preferred_fields):
+def nested_text(value):
     if isinstance(value, str):
         return normalize_text(value)
-
     if isinstance(value, dict):
-        text, _ = first_text(value, preferred_fields)
-        if text:
-            return text
-
+        return first_text(
+            value, ("caption", "caption_text", "text", "value")
+        )[0]
     return ""
 
 
-def find_language_entry(container, mode, preferred_fields):
+def find_nested(container, mode):
     if isinstance(container, dict):
-        for key in language_keys(mode):
+        for key in LANGUAGE_KEYS[mode]:
             if key in container:
-                text = text_from_nested_value(
-                    container[key], preferred_fields
-                )
+                text = nested_text(container[key])
                 if text:
                     return text, key
 
@@ -205,64 +162,45 @@ def find_language_entry(container, mode, preferred_fields):
             )
         )
         if declared == mode:
-            text = text_from_nested_value(container, preferred_fields)
+            text = nested_text(container)
             if text:
                 return text, "language-labelled-entry"
 
-    elif isinstance(container, list):
+    if isinstance(container, list):
         for index, item in enumerate(container):
             if not isinstance(item, dict):
                 continue
-
             declared = normalize_language(
                 item.get(
                     "language",
                     item.get("lang", item.get("language_code", "")),
                 )
             )
-            if declared != mode:
-                continue
-
-            text = text_from_nested_value(item, preferred_fields)
-            if text:
-                return text, f"list-entry-{index}"
-
-    return "", ""
-
-
-def nested_caption(row, mode):
-    containers = (
-        ("caption_texts", ("caption", "caption_text", "text", "value")),
-        ("translations", ("caption", "caption_text", "text", "value")),
-        ("captions", ("caption", "caption_text", "text", "value")),
-    )
-
-    for container_name, fields in containers:
-        container = row.get(container_name)
-        text, nested_key = find_language_entry(container, mode, fields)
-        if text:
-            return text, f"{container_name}.{nested_key}"
+            if declared == mode:
+                text = nested_text(item)
+                if text:
+                    return text, f"list-entry-{index}"
 
     return "", ""
 
 
 def choose_caption(row, mode):
-    """Select existing caption text; never silently claim translation."""
-    translated, field = first_text(row, LANGUAGE_FIELDS[mode])
-    if translated:
-        return translated, field, "explicit_language_field"
+    text, field = first_text(row, LANGUAGE_FIELDS[mode])
+    if text:
+        return text, field, "explicit_language_field"
 
-    translated, field = nested_caption(row, mode)
-    if translated:
-        return translated, field, "nested_language_text"
+    for container_name in ("caption_texts", "translations", "captions"):
+        text, nested_key = find_nested(row.get(container_name), mode)
+        if text:
+            return text, f"{container_name}.{nested_key}", "nested_language_text"
 
     generic, generic_field = first_text(
         row, ("caption_text", "display_caption")
     )
-    declared_language = normalize_language(
+    declared = normalize_language(
         row.get("caption_language", row.get("caption_lang", ""))
     )
-    if generic and declared_language == mode:
+    if generic and declared == mode:
         return generic, generic_field, "declared_generic_caption"
 
     if mode == "hindi":
@@ -284,33 +222,50 @@ def choose_caption(row, mode):
 def normalize_rows(data):
     if isinstance(data, list):
         return data
-    if isinstance(data, dict):
-        rows = data.get("scenes")
-        if isinstance(rows, list):
-            return rows
+    if isinstance(data, dict) and isinstance(data.get("scenes"), list):
+        return data["scenes"]
     raise RuntimeError("narration.json must contain a scenes list.")
 
 
-def load_existing_checkpoint(path, fingerprint, expected_text_hash):
+def resolve_font_size(config):
+    configured = get_caption_font_size(config)
+    if str(configured).strip().lower() == "auto":
+        # Must match burn_captions.py exactly.
+        return 28
+
+    try:
+        size = int(configured)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "CAPTION_FONT_SIZE must be auto or an integer from 16 to 32."
+        ) from exc
+
+    if not 16 <= size <= 32:
+        raise RuntimeError(
+            "CAPTION_FONT_SIZE must be between 16 and 32 "
+            "to match the video renderer."
+        )
+    return size
+
+
+def checkpoint_reusable(path, fingerprint, caption_hash):
     if not path.is_file():
         return False
-
     try:
         cached = read_json(path)
     except RuntimeError:
         return False
-
     return (
         isinstance(cached, dict)
         and cached.get("status") == "completed"
         and cached.get("fingerprint") == fingerprint
-        and cached.get("caption_sha256") == expected_text_hash
+        and cached.get("caption_sha256") == caption_hash
     )
 
 
 def main():
     config = load_and_validate(CONFIG_FILE)
-    video_format = get_format(config)
+    video_format = str(get_format(config)).strip().lower()
     parts = int(get_parts(config))
     scenes_per_part = int(get_scenes(config))
 
@@ -319,16 +274,21 @@ def main():
     if parts < 1 or scenes_per_part < 1:
         raise RuntimeError("PARTS and SCENES must be positive integers.")
 
-    mode = normalize_mode(config)
-    font = get_caption_font(config)
+    raw_mode = normalize_text(str(config.get("CAPTIONS", "hindi"))).lower()
+    mode = LANGUAGE_ALIASES.get(raw_mode, raw_mode)
+    if mode not in {"hindi", "english", "hinglish"}:
+        raise RuntimeError(
+            f"Invalid CAPTIONS={raw_mode!r}; choose hindi, english, or hinglish."
+        )
 
+    font = get_caption_font(config)
     if font not in SUPPORTED_FONTS:
         raise RuntimeError(
-            f"Unsupported CAPTION_FONT={font!r}. Choose one of: "
+            f"Unsupported CAPTION_FONT={font!r}. Choose: "
             + ", ".join(sorted(SUPPORTED_FONTS))
         )
 
-    font_size = resolve_font_size(config, video_format)
+    font_size = resolve_font_size(config)
 
     if not NARRATION_FILE.is_file():
         raise RuntimeError(f"Narration manifest missing: {NARRATION_FILE}")
@@ -354,8 +314,8 @@ def main():
 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     mapping = {}
-    missing = []
     seen = set()
+    missing = []
 
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
@@ -370,7 +330,6 @@ def main():
             ) from exc
 
         key = (part, scene)
-
         if key in seen:
             raise RuntimeError(f"Duplicate narration scene: {key}.")
         seen.add(key)
@@ -382,20 +341,13 @@ def main():
         if not original:
             raise RuntimeError(f"Empty source narration for {key}.")
 
-        text, source_field, selection_method = choose_caption(row, mode)
-
+        text, source_field, method = choose_caption(row, mode)
         if not text:
-            missing.append({
-                "part": part,
-                "scene": scene,
-                "mode": mode,
-                "reason": selection_method,
-            })
+            missing.append(f"part {part} scene {scene}")
             continue
 
         source_hash = digest(original)
         caption_hash = digest(text)
-
         fingerprint = digest(canonical_json({
             "settings": settings,
             "part": part,
@@ -403,14 +355,13 @@ def main():
             "source_sha256": source_hash,
             "caption_sha256": caption_hash,
             "source_field": source_field,
-            "selection_method": selection_method,
+            "selection_method": method,
         }))
 
         checkpoint_path = (
             CHECKPOINT_DIR / f"part_{part:02d}_scene_{scene:02d}.json"
         )
-
-        reused = load_existing_checkpoint(
+        reused = checkpoint_reusable(
             checkpoint_path, fingerprint, caption_hash
         )
 
@@ -425,12 +376,11 @@ def main():
             "source_text_sha256": source_hash,
             "caption_mode": mode,
             "caption_source_field": source_field,
-            "selection_method": selection_method,
+            "selection_method": method,
             "translation_performed_here": False,
             "font": font,
             "font_size": font_size,
         }
-
         write_json(checkpoint_path, checkpoint)
 
         mapping[key] = {
@@ -442,7 +392,7 @@ def main():
             "status": "completed",
             "checkpoint_reused": reused,
             "caption_source_field": source_field,
-            "selection_method": selection_method,
+            "selection_method": method,
             "caption_language": mode,
         }
 
@@ -453,18 +403,11 @@ def main():
         )
 
     if missing:
-        details = ", ".join(
-            f"part {item['part']} scene {item['scene']}"
-            for item in missing[:20]
-        )
-
         raise RuntimeError(
-            f"CAPTIONS={mode} was requested, but matching caption text "
-            f"is missing for {len(missing)} scene(s): {details}. "
-            "This script does not translate. Add matching language-specific "
-            "caption text, use a language-keyed translations/caption_texts "
-            "entry, or explicitly label a generic caption with "
-            "caption_language."
+            f"CAPTIONS={mode}: matching caption text is missing for "
+            f"{len(missing)} scene(s): {', '.join(missing[:20])}. "
+            "This script selects existing text; it does not translate. "
+            "Add language-specific text or use Hindi narration captions."
         )
 
     expected_keys = {
@@ -472,7 +415,6 @@ def main():
         for part in range(1, parts + 1)
         for scene in range(1, scenes_per_part + 1)
     }
-
     if seen != expected_keys:
         raise RuntimeError(
             "Narration scene mapping mismatch: "
@@ -497,12 +439,9 @@ def main():
         "api_calls": 0,
         "translation_performed": False,
         "translation_note": (
-            "Selects and validates existing caption text only. Supports "
-            "direct language-specific fields, language-labelled generic "
-            "captions, and nested translations/caption_texts/captions. "
-            "Hindi may use source narration when no conflicting source "
-            "language is declared. English and Hinglish require matching "
-            "text already present in the manifest."
+            "Selects and validates existing caption text only. "
+            "Hindi can use narration when no conflicting language is declared. "
+            "English and Hinglish require matching text already present."
         ),
         "total_scenes": expected_count,
         "parts": parts,
@@ -524,7 +463,6 @@ def main():
     log("Scenes:", expected_count)
     log("Font:", font)
     log("Font size:", font_size)
-    log("Auto font size is aligned with burn_captions.py: 30")
     log("Automatic translation: not performed")
     log("External API calls: 0")
     log("Output:", CAPTION_FILE.relative_to(ROOT))
