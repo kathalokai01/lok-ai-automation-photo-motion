@@ -39,7 +39,7 @@ AUDIO_MANIFEST = OUT / "narration" / "audio_jobs.json"
 PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v23-silence-aware-duration-safe"
+VERSION = "burn-captions-v24-format-aware-portrait-safe"
 WIDTH, HEIGHT = 1280, 720
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -356,7 +356,6 @@ def silence_boundaries(audio_path, duration):
                 if 0.05 < midpoint < duration - 0.05:
                     points.append(midpoint)
 
-        # Also handle a silence that reaches the end of the audio.
         if len(starts) > len(ends):
             start = starts[-1]
             if duration > start:
@@ -394,8 +393,6 @@ def make_cues(text, audio_duration, video_duration, audio_path):
     boundaries = [0.0]
 
     for target in raw[1:-1]:
-        # Only snap to a silence near the proportional target. This avoids
-        # shifting a cue across a long pause or far away from its text.
         candidates = [
             point for point in silences
             if abs(point - target) <= min(0.75, max(0.25, limit * 0.06))
@@ -419,8 +416,10 @@ def make_cues(text, audio_duration, video_duration, audio_path):
 
     if not cues:
         raise RuntimeError("No valid caption cues were generated")
-    return cues, ("silence-assisted-estimate" if silences else
-                  "phrase-level-proportional-estimate")
+    return cues, (
+        "silence-assisted-estimate" if silences
+        else "phrase-level-proportional-estimate"
+    )
 
 
 def srt_time(seconds):
@@ -501,7 +500,8 @@ def escape_filter_path(path):
 
 
 def caption_filter(srt_path, font_path, family, size, contrast):
-    font_size = max(16, min(int(size), 32))
+    max_font_size = 28 if HEIGHT > WIDTH else 32
+    font_size = max(16, min(int(size), max_font_size))
     subtitle_file = escape_filter_path(srt_path)
     font_directory = escape_filter_path(font_path.parent)
     style = (
@@ -618,6 +618,8 @@ def concat_videos(paths, destination):
 
 
 def main():
+    global WIDTH, HEIGHT
+
     for command in ("ffmpeg", "ffprobe", "fc-match"):
         if not shutil.which(command):
             raise RuntimeError(f"Required command not installed: {command}")
@@ -629,16 +631,22 @@ def main():
 
     if mode not in ("short", "full"):
         raise RuntimeError(f"Unsupported format: {mode}")
+
+    # Match caption processing to the selected delivery format.
+    WIDTH, HEIGHT = (720, 1280) if mode == "short" else (1280, 720)
+
     if parts < 1 or scenes < 1:
         raise RuntimeError("PARTS and SCENES must be positive")
 
     family = get_caption_font(config)
     configured_size = get_caption_font_size(config)
+    auto_size = 24 if mode == "short" else 28
+    max_size = 28 if mode == "short" else 32
     size = (
-        28 if str(configured_size).strip().lower() == "auto"
+        auto_size if str(configured_size).strip().lower() == "auto"
         else int(configured_size)
     )
-    size = max(16, min(size, 32))
+    size = max(16, min(size, max_size))
 
     font_path = resolve_font(family)
     font_hash = digest_file(font_path)
@@ -713,7 +721,13 @@ def main():
         if not info["has_video"] or not info["has_audio"]:
             raise RuntimeError(f"Rendered source lacks audio/video: {key}")
         if (info["width"], info["height"]) != (WIDTH, HEIGHT):
-            raise RuntimeError(f"Rendered source is not 1280x720: {key}")
+            raise RuntimeError(
+                f"Rendered source dimensions mismatch for FORMAT={mode}: "
+                f"expected {WIDTH}x{HEIGHT}, found {info['width']}x{info['height']} "
+                f"at scene {key}. The upstream photo-motion renderer must "
+                "produce the same dimensions; captions will not stretch or "
+                "crop mismatched video."
+            )
 
         # Keep the complete rendered scene. Use narration duration only to
         # place captions, never to shorten the scene video itself.
