@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Resumable 16:9 photo-motion renderer with verified scene checkpoints."""
+"""Resumable format-aware photo-motion renderer with verified scene checkpoints."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ DEPTH_MANIFEST = VISUALS / "depth_maps" / "depth_manifest.json"
 OUTPUT_DIR = OUT / "photo_motion"
 MANIFEST_FILE = OUTPUT_DIR / "photo_motion_manifest.json"
 
-VERSION = "photo-motion-v6-landscape-resume-integrity"
+VERSION = "photo-motion-v7-format-aware-resume-integrity"
 WIDTH = 1280
 HEIGHT = 720
 CRF = 20
@@ -588,12 +588,20 @@ def render_parallax(item, depth_path, target, frames, fps):
 
 
 def main():
+    global WIDTH, HEIGHT
+
     config = load_and_validate(ROOT / "Input" / "topic.txt")
     mode = str(get_format(config)).strip().lower()
     fps = int(get_fps(config))
 
-    if mode not in {"short", "full"}:
+    # Short videos are portrait (9:16); full videos are landscape (16:9).
+    if mode == "short":
+        WIDTH, HEIGHT = 720, 1280
+    elif mode == "full":
+        WIDTH, HEIGHT = 1280, 720
+    else:
         raise RuntimeError(f"Unsupported video format: {mode}")
+
     if not 1 <= fps <= 60:
         raise RuntimeError(f"FPS must be between 1 and 60, got {fps}")
 
