@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Render photo-motion clips with narration into caption-ready scene videos."""
+"""Render photo-motion clips with narration and durable scene checkpoints."""
 
 from __future__ import annotations
 
@@ -15,7 +16,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import load_and_validate, get_format, get_parts, get_scenes, get_fps
+from input_config import (
+    load_and_validate,
+    get_format,
+    get_parts,
+    get_scenes,
+    get_fps,
+)
 
 OUT = ROOT / "output"
 PHOTO_MANIFEST = OUT / "photo_motion" / "photo_motion_manifest.json"
@@ -26,9 +33,10 @@ PART_DIR = OUT / "parts"
 VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 
-VERSION = "render-video-v30-photo-motion-caption-manifest"
+VERSION = "render-video-v31-durable-checkpoints"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
+DURATION_TOLERANCE = 1.25
 
 
 def log(*args):
@@ -75,14 +83,17 @@ def read_json(path, label):
         raise RuntimeError(f"Required manifest missing: {path}")
 
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
-        raise RuntimeError(
-            f"Invalid JSON in {label}: {exc}"
-        ) from exc
+        raise RuntimeError(f"Invalid JSON in {label}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} must be a JSON object")
+
+    return data
 
 
-def resolve_path(value, label):
+def safe_project_path(value, label):
     if not isinstance(value, str) or not value.strip():
         raise RuntimeError(f"Missing file path: {label}")
 
@@ -94,9 +105,7 @@ def resolve_path(value, label):
     path = path.resolve()
 
     if not path.is_relative_to(ROOT.resolve()):
-        raise RuntimeError(
-            f"Unsafe path outside project directory: {label}"
-        )
+        raise RuntimeError(f"Unsafe path outside project: {label}")
 
     if not path.is_file():
         raise RuntimeError(f"File does not exist: {path}")
@@ -105,13 +114,16 @@ def resolve_path(value, label):
 
 
 def require_file(path, label, minimum=MIN_VIDEO_BYTES):
+    path = Path(path)
+
     if not path.is_file():
         raise RuntimeError(f"{label} is missing: {path}")
 
-    if path.stat().st_size < minimum:
+    size = path.stat().st_size
+
+    if size < minimum:
         raise RuntimeError(
-            f"{label} is too small: {path} "
-            f"({path.stat().st_size} bytes)"
+            f"{label} is too small: {path} ({size} bytes)"
         )
 
     return path
@@ -147,7 +159,7 @@ def probe(path):
             "ffprobe",
             "-v", "error",
             "-show_entries",
-            "format=duration:stream=codec_type,width,height",
+            "format=duration:stream=codec_type,width,height,avg_frame_rate",
             "-of", "json",
             str(path),
         ],
@@ -166,9 +178,7 @@ def probe(path):
         data = json.loads(result.stdout)
         duration = float(data["format"]["duration"])
     except Exception as exc:
-        raise RuntimeError(
-            f"Invalid media information: {path}"
-        ) from exc
+        raise RuntimeError(f"Invalid media information: {path}") from exc
 
     streams = data.get("streams", [])
 
@@ -176,7 +186,6 @@ def probe(path):
         (row for row in streams if row.get("codec_type") == "video"),
         None,
     )
-
     audio = next(
         (row for row in streams if row.get("codec_type") == "audio"),
         None,
@@ -194,24 +203,30 @@ def probe(path):
         "height": int(video.get("height", 0)),
         "has_video": True,
         "has_audio": audio is not None,
+        "avg_frame_rate": video.get("avg_frame_rate"),
     }
 
 
-def validate_manifest_status(data, label):
-    if not isinstance(data, dict):
-        raise RuntimeError(f"{label} must be a JSON object")
-
+def validate_status(data, label):
     if data.get("status") != "completed":
         raise RuntimeError(
             f"{label} is not completed: {data.get('status')}"
         )
 
 
+def expected_mapping(index, scenes):
+    return (
+        (index - 1) // scenes + 1,
+        (index - 1) % scenes + 1,
+        index,
+    )
+
+
 def load_photo_map(parts, scenes, mode, width, height, fps):
     data = read_json(PHOTO_MANIFEST, "photo-motion manifest")
-    validate_manifest_status(data, "Photo-motion manifest")
+    validate_status(data, "Photo-motion manifest")
 
-    if str(data.get("format", "")).lower() != mode:
+    if str(data.get("format", "")).strip().lower() != mode:
         raise RuntimeError("Photo-motion FORMAT does not match Input/topic.txt")
 
     if int(data.get("width", 0)) != width:
@@ -224,16 +239,13 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
         raise RuntimeError("Photo-motion manifest FPS mismatch")
 
     rows = data.get("scenes")
-
-    if not isinstance(rows, list):
-        raise RuntimeError("Photo-motion manifest scenes must be a list")
-
     expected_count = parts * scenes
 
-    if len(rows) != expected_count:
+    if not isinstance(rows, list) or len(rows) != expected_count:
         raise RuntimeError(
             f"Photo-motion scene count mismatch: "
-            f"expected {expected_count}, found {len(rows)}"
+            f"expected {expected_count}, found "
+            f"{len(rows) if isinstance(rows, list) else 'invalid'}"
         )
 
     if int(data.get("completed_count", -1)) != expected_count:
@@ -243,7 +255,7 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
 
     for index, row in enumerate(rows, 1):
         if not isinstance(row, dict):
-            raise RuntimeError(f"Invalid photo-motion scene row {index}")
+            raise RuntimeError(f"Invalid photo-motion row {index}")
 
         if row.get("status") != "completed":
             raise RuntimeError(f"Photo-motion scene {index} is incomplete")
@@ -254,22 +266,15 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
             global_scene = int(row["global_scene"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError(
-                f"Invalid photo-motion scene mapping at row {index}"
+                f"Invalid photo-motion mapping at row {index}"
             ) from exc
 
-        expected_part = (index - 1) // scenes + 1
-        expected_scene = (index - 1) % scenes + 1
-
-        if (part, scene, global_scene) != (
-            expected_part,
-            expected_scene,
-            index,
-        ):
+        if (part, scene, global_scene) != expected_mapping(index, scenes):
             raise RuntimeError(
                 f"Photo-motion scene order mismatch at row {index}"
             )
 
-        video = resolve_path(
+        video = safe_project_path(
             row.get("video"),
             f"photo-motion scene {index}",
         )
@@ -279,9 +284,11 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
 
         if (info["width"], info["height"]) != (width, height):
             raise RuntimeError(
-                f"Photo-motion dimensions mismatch at scene {index}: "
-                f"{info['width']}x{info['height']}"
+                f"Photo-motion dimensions mismatch at scene {index}"
             )
+
+        if not info["has_video"]:
+            raise RuntimeError(f"Photo-motion video stream missing: {index}")
 
         actual_hash = sha256_file(video)
         declared_hash = row.get("video_sha256")
@@ -305,19 +312,14 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
 
 def load_audio_map(parts, scenes):
     data = read_json(AUDIO_MANIFEST, "narration audio manifest")
-    validate_manifest_status(data, "Narration audio manifest")
+    validate_status(data, "Narration audio manifest")
 
     rows = data.get("jobs")
-
-    if not isinstance(rows, list):
-        raise RuntimeError("audio_jobs.json must contain a jobs list")
-
     expected_count = parts * scenes
 
-    if len(rows) != expected_count:
+    if not isinstance(rows, list) or len(rows) != expected_count:
         raise RuntimeError(
-            f"Narration scene count mismatch: "
-            f"expected {expected_count}, found {len(rows)}"
+            f"Narration scene count mismatch: expected {expected_count}"
         )
 
     mapping = {}
@@ -334,8 +336,7 @@ def load_audio_map(parts, scenes):
                 f"Invalid narration mapping at row {index}"
             ) from exc
 
-        expected_part = (index - 1) // scenes + 1
-        expected_scene = (index - 1) % scenes + 1
+        expected_part, expected_scene, _ = expected_mapping(index, scenes)
 
         if (part, scene) != (expected_part, expected_scene):
             raise RuntimeError(
@@ -344,10 +345,10 @@ def load_audio_map(parts, scenes):
 
         if row.get("status") != "completed":
             raise RuntimeError(
-                f"Narration is incomplete: Part {part}, Scene {scene}"
+                f"Narration incomplete: Part {part}, Scene {scene}"
             )
 
-        audio = resolve_path(
+        audio = safe_project_path(
             row.get("output"),
             f"narration Part {part} Scene {scene}",
         )
@@ -356,9 +357,7 @@ def load_audio_map(parts, scenes):
         info = probe(audio)
 
         if not info["has_audio"]:
-            raise RuntimeError(
-                f"Narration has no audio stream: {audio}"
-            )
+            raise RuntimeError(f"Narration has no audio stream: {audio}")
 
         mapping[(part, scene)] = {
             "part": part,
@@ -385,7 +384,7 @@ def load_previous_manifest(mode):
     if not isinstance(data, dict):
         return {}
 
-    if data.get("format") != mode:
+    if str(data.get("format", "")).strip().lower() != mode:
         return {}
 
     rows = data.get("completed_scenes", [])
@@ -400,10 +399,7 @@ def load_previous_manifest(mode):
             continue
 
         try:
-            key = (
-                int(row["part"]),
-                int(row["local_scene"]),
-            )
+            key = (int(row["part"]), int(row["local_scene"]))
         except (KeyError, TypeError, ValueError):
             continue
 
@@ -421,7 +417,40 @@ def scene_fingerprint(photo, audio, mode, width, height, fps):
         "fps": fps,
         "photo_sha256": photo["video_sha256"],
         "audio_sha256": audio["audio_sha256"],
+        "audio_duration": round(audio["duration"], 5),
     })
+
+
+def reusable_scene(output, previous, fingerprint, width, height):
+    if not isinstance(previous, dict):
+        return None
+
+    if previous.get("status") != "completed":
+        return None
+
+    if previous.get("fingerprint") != fingerprint:
+        return None
+
+    if not output.is_file() or output.stat().st_size < MIN_VIDEO_BYTES:
+        return None
+
+    try:
+        actual_hash = sha256_file(output)
+
+        if previous.get("sha256") != actual_hash:
+            return None
+
+        info = probe(output)
+
+        if not info["has_video"] or not info["has_audio"]:
+            return None
+
+        if (info["width"], info["height"]) != (width, height):
+            return None
+
+        return info, actual_hash
+    except Exception:
+        return None
 
 
 def render_scene(photo, audio, output, fingerprint, previous,
@@ -429,37 +458,24 @@ def render_scene(photo, audio, output, fingerprint, previous,
 
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    if (
-        resume
-        and skip_completed
-        and isinstance(previous, dict)
-        and previous.get("status") == "completed"
-        and previous.get("fingerprint") == fingerprint
-        and output.is_file()
-        and output.stat().st_size >= MIN_VIDEO_BYTES
-    ):
-        try:
-            actual_hash = sha256_file(output)
-            old_hash = previous.get("sha256")
+    if resume and skip_completed:
+        cached = reusable_scene(
+            output,
+            previous,
+            fingerprint,
+            width,
+            height,
+        )
 
-            info = probe(output)
-
-            if (
-                old_hash == actual_hash
-                and info["has_audio"]
-                and info["has_video"]
-                and (info["width"], info["height"]) == (width, height)
-            ):
-                log(
-                    f"REUSED Part {photo['part']} "
-                    f"Scene {photo['scene']}"
-                )
-                return info, actual_hash, True
-        except Exception:
-            pass
+        if cached:
+            info, actual_hash = cached
+            log(
+                f"REUSED Part {photo['part']} "
+                f"Scene {photo['scene']}"
+            )
+            return info, actual_hash, True
 
     audio_duration = audio["duration"]
-
     temporary = output.with_name(output.stem + ".rendering.mp4")
     temporary.unlink(missing_ok=True)
 
@@ -506,7 +522,7 @@ def render_scene(photo, audio, output, fingerprint, previous,
 
         if not info["has_audio"]:
             raise RuntimeError(
-                f"Rendered scene has no audio: {temporary}"
+                f"Rendered scene has no narration audio: {temporary}"
             )
 
         if (info["width"], info["height"]) != (width, height):
@@ -514,9 +530,10 @@ def render_scene(photo, audio, output, fingerprint, previous,
                 f"Rendered scene dimensions mismatch: {temporary}"
             )
 
-        if abs(info["duration"] - audio_duration) > 1.0:
+        if abs(info["duration"] - audio_duration) > DURATION_TOLERANCE:
             raise RuntimeError(
-                f"Rendered duration differs from narration: {temporary}"
+                f"Rendered duration differs from narration: "
+                f"{info['duration']:.2f}s vs {audio_duration:.2f}s"
             )
 
         os.replace(temporary, output)
@@ -532,6 +549,9 @@ def render_scene(photo, audio, output, fingerprint, previous,
 def concat_videos(paths, destination):
     if not paths:
         raise RuntimeError("Cannot concatenate an empty video list")
+
+    for path in paths:
+        require_file(path, "Concatenation input")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -571,6 +591,7 @@ def concat_videos(paths, destination):
         )
 
         require_file(temporary, "Joined video", 10000)
+
         info = probe(temporary)
 
         if not info["has_audio"] or not info["has_video"]:
@@ -586,6 +607,38 @@ def concat_videos(paths, destination):
         temporary.unlink(missing_ok=True)
 
 
+def build_manifest(mode, fps, width, height, expected_count,
+                   completed, parts, photo_manifest_hash,
+                   audio_manifest_hash):
+    ordered = [
+        completed[key]
+        for key in sorted(completed)
+    ]
+
+    return {
+        "status": (
+            "completed"
+            if len(ordered) == expected_count
+            else "in_progress"
+        ),
+        "version": VERSION,
+        "format": mode,
+        "fps": fps,
+        "width": width,
+        "height": height,
+        "expected_scene_count": expected_count,
+        "completed_count": len(ordered),
+        "captions_burned": False,
+        "source_photo_manifest": PHOTO_MANIFEST.relative_to(ROOT).as_posix(),
+        "source_audio_manifest": AUDIO_MANIFEST.relative_to(ROOT).as_posix(),
+        "source_photo_manifest_sha256": photo_manifest_hash,
+        "source_audio_manifest_sha256": audio_manifest_hash,
+        "completed_scenes": ordered,
+        "scenes": ordered,
+        "parts": list(parts),
+    }
+
+
 def main():
     for command in ("ffmpeg", "ffprobe"):
         if not shutil.which(command):
@@ -593,15 +646,25 @@ def main():
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
 
-    mode = get_format(config)
-    parts = get_parts(config)
-    scenes = get_scenes(config)
-    fps = get_fps(config)
+    mode = str(get_format(config)).strip().lower()
+    parts = int(get_parts(config))
+    scenes = int(get_scenes(config))
+    fps = int(get_fps(config))
 
-    if mode == "short":
-        width, height = 720, 1280
-    else:
-        width, height = 1280, 720
+    if mode not in ("short", "full"):
+        raise RuntimeError(f"Unsupported FORMAT: {mode}")
+
+    if parts < 1 or scenes < 1:
+        raise RuntimeError("PARTS and SCENES must be positive")
+
+    if fps < 1 or fps > 60:
+        raise RuntimeError(f"Invalid FPS: {fps}")
+
+    width, height = (
+        (720, 1280)
+        if mode == "short"
+        else (1280, 720)
+    )
 
     expected_count = parts * scenes
 
@@ -625,9 +688,11 @@ def main():
             "Photo-motion and narration scene mappings do not match"
         )
 
+    photo_manifest_hash = sha256_file(PHOTO_MANIFEST)
+    audio_manifest_hash = sha256_file(AUDIO_MANIFEST)
+
     resume = bool(config.get("RESUME_ENABLED", True))
     skip_completed = bool(config.get("SKIP_COMPLETED_SCENES", True))
-    save_each = bool(config.get("SAVE_CHECKPOINT_AFTER_EACH_SCENE", True))
 
     previous = load_previous_manifest(mode)
 
@@ -640,27 +705,34 @@ def main():
     reused_count = 0
     rendered_count = 0
 
-    manifest = {
-        "status": "in_progress",
-        "version": VERSION,
-        "format": mode,
-        "fps": fps,
-        "width": width,
-        "height": height,
-        "expected_scene_count": expected_count,
-        "completed_count": 0,
-        "captions_burned": False,
-        "source_photo_manifest": str(
-            PHOTO_MANIFEST.relative_to(ROOT)
-        ),
-        "source_audio_manifest": str(
-            AUDIO_MANIFEST.relative_to(ROOT)
-        ),
-        "completed_scenes": [],
-        "scenes": [],
-        "parts": [],
-    }
+    # Save an initial checkpoint without discarding recoverable scene rows.
+    initial_rows = {}
 
+    for key, old_row in previous.items():
+        if key not in photo_map:
+            continue
+
+        expected_part, expected_scene = key
+
+        if not (
+            1 <= expected_part <= parts
+            and 1 <= expected_scene <= scenes
+        ):
+            continue
+
+        initial_rows[key] = old_row
+
+    manifest = build_manifest(
+        mode,
+        fps,
+        width,
+        height,
+        expected_count,
+        {},
+        [],
+        photo_manifest_hash,
+        audio_manifest_hash,
+    )
     write_json(RENDER_MANIFEST, manifest)
 
     for part in range(1, parts + 1):
@@ -677,7 +749,12 @@ def main():
             audio = audio_map[key]
 
             fingerprint = scene_fingerprint(
-                photo, audio, mode, width, height, fps
+                photo,
+                audio,
+                mode,
+                width,
+                height,
+                fps,
             )
 
             output = (
@@ -691,7 +768,7 @@ def main():
                 audio,
                 output,
                 fingerprint,
-                previous.get(key),
+                initial_rows.get(key),
                 width,
                 height,
                 fps,
@@ -716,9 +793,7 @@ def main():
                 ),
                 "source_photo_sha256": photo["video_sha256"],
                 "source_audio_sha256": audio["audio_sha256"],
-                "source_rendered_video": (
-                    output.relative_to(ROOT).as_posix()
-                ),
+                "source_rendered_video": output.relative_to(ROOT).as_posix(),
                 "video": output.relative_to(ROOT).as_posix(),
                 "output": output.relative_to(ROOT).as_posix(),
                 "duration": round(info["duration"], 4),
@@ -734,17 +809,19 @@ def main():
             completed[key] = row
             scene_paths.append(output)
 
-            manifest["completed_scenes"] = [
-                completed[(p, s)]
-                for p in range(1, parts + 1)
-                for s in range(1, scenes + 1)
-                if (p, s) in completed
-            ]
-            manifest["scenes"] = manifest["completed_scenes"]
-            manifest["completed_count"] = len(completed)
-
-            if save_each:
-                write_json(RENDER_MANIFEST, manifest)
+            # Always checkpoint after every successful scene.
+            manifest = build_manifest(
+                mode,
+                fps,
+                width,
+                height,
+                expected_count,
+                completed,
+                part_rows,
+                photo_manifest_hash,
+                audio_manifest_hash,
+            )
+            write_json(RENDER_MANIFEST, manifest)
 
             log(
                 f"CHECKPOINT {len(completed)}/{expected_count}: "
@@ -764,8 +841,23 @@ def main():
             "sha256": sha256_file(part_output),
         })
 
-        manifest["parts"] = list(part_rows)
+        manifest = build_manifest(
+            mode,
+            fps,
+            width,
+            height,
+            expected_count,
+            completed,
+            part_rows,
+            photo_manifest_hash,
+            audio_manifest_hash,
+        )
         write_json(RENDER_MANIFEST, manifest)
+
+        log(
+            f"PART CHECKPOINT {part}/{parts}: "
+            f"{part_output.relative_to(ROOT)}"
+        )
 
     if len(completed) != expected_count:
         raise RuntimeError(
@@ -779,16 +871,13 @@ def main():
         for scene in range(1, scenes + 1)
     ]
 
-    if len(ordered_rows) != expected_count:
-        raise RuntimeError("Final scene order/count validation failed")
-
     for index, row in enumerate(ordered_rows, 1):
-        if row["global_scene"] != index:
+        if int(row["global_scene"]) != index:
             raise RuntimeError(
                 f"Global scene order mismatch at row {index}"
             )
 
-        path = resolve_path(row["video"], f"rendered scene {index}")
+        path = safe_project_path(row["video"], f"rendered scene {index}")
 
         if sha256_file(path) != row["sha256"]:
             raise RuntimeError(
@@ -807,8 +896,8 @@ def main():
                 f"Rendered scene dimensions mismatch: {index}"
             )
 
-    # Keep only the selected format's pre-caption output.
     pre_caption = VIDEO_DIR / "pre_caption_render.mp4"
+
     concat_videos(
         [
             PART_DIR / f"part_{part:02d}.mp4"
@@ -817,20 +906,34 @@ def main():
         pre_caption,
     )
 
+    pre_caption_info = probe(pre_caption)
+
+    if not pre_caption_info["has_audio"]:
+        raise RuntimeError("Pre-caption video has no audio stream")
+
+    if (pre_caption_info["width"], pre_caption_info["height"]) != (
+        width,
+        height,
+    ):
+        raise RuntimeError("Pre-caption video dimensions mismatch")
+
+    manifest = build_manifest(
+        mode,
+        fps,
+        width,
+        height,
+        expected_count,
+        completed,
+        part_rows,
+        photo_manifest_hash,
+        audio_manifest_hash,
+    )
+
     manifest.update({
         "status": "completed",
-        "version": VERSION,
-        "format": mode,
-        "fps": fps,
-        "width": width,
-        "height": height,
-        "expected_scene_count": expected_count,
-        "completed_count": expected_count,
-        "completed_scenes": ordered_rows,
-        "scenes": ordered_rows,
-        "parts": part_rows,
         "pre_caption_video": pre_caption.relative_to(ROOT).as_posix(),
         "pre_caption_sha256": sha256_file(pre_caption),
+        "pre_caption_duration": round(pre_caption_info["duration"], 4),
         "captions_burned": False,
         "rendered_new": rendered_count,
         "rendered_reused": reused_count,
