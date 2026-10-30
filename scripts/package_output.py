@@ -621,6 +621,11 @@ def make_portable_render_manifest(render, packaged_names):
         row["video"] = mapped
         row.pop("output", None)
 
+        # Source videos are intentionally excluded from the portable ZIP.
+        # Preserve hashes and provenance fields, but remove dangling paths.
+        row.pop("source_rendered_video", None)
+        row.pop("source_photo_motion_video", None)
+
     part_rows = data.get("parts")
     if not isinstance(part_rows, list):
         fail("Render manifest parts missing")
