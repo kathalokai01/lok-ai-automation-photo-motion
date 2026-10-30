@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Build a resumable, schema-compatible visual generation queue."""
 
 import hashlib
 import json
@@ -8,13 +9,11 @@ import sys
 import zipfile
 from pathlib import Path
 
-from input_config import (
-    load_input_config,
-    normalize_format,
-)
+from input_config import load_input_config, normalize_format
 
 
-BASE = Path("output")
+ROOT = Path.cwd()
+BASE = ROOT / "output"
 
 SCENES_FILE = BASE / "scenes" / "scenes.json"
 CHARACTER_BIBLE_FILE = BASE / "story" / "character_bible.json"
@@ -27,17 +26,13 @@ QUEUE_JSON = WORKER_DIR / "visual_generation_queue.json"
 QUEUE_ZIP = BASE / "i2v" / "visual_generation_queue.zip"
 
 
-# ============================================================
-# CONFIG HELPERS
-# ============================================================
+def log(*args):
+    print(*args, flush=True)
+
 
 def cfg_text(config, key, default=""):
     value = config.get(key, default)
-
-    if value is None:
-        return str(default)
-
-    return str(value).strip()
+    return str(default if value is None else value).strip()
 
 
 def cfg_bool(config, key, default=False):
@@ -67,46 +62,32 @@ def cfg_int(config, key, default=0):
         return default
 
 
-# ============================================================
-# JSON HELPERS
-# ============================================================
-
 def load_json(path, default=None):
+    path = Path(path)
+
     if not path.is_file():
         return default
 
     try:
-        with path.open("r", encoding="utf-8-sig") as file:
-            return json.load(file)
-
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
-        print(f"WARNING: Failed to read {path}: {exc}")
-        return default
+        raise RuntimeError(f"Cannot read {path}: {exc}") from exc
 
 
 def save_json(path, data):
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    temp = path.with_suffix(
-        path.suffix + ".tmp"
-    )
+    temporary = path.with_name(path.name + ".tmp")
 
-    with temp.open("w", encoding="utf-8") as file:
-        json.dump(
-            data,
-            file,
-            ensure_ascii=False,
-            indent=2
+    try:
+        temporary.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
-        file.write("\n")
-
-    os.replace(
-        temp,
-        path
-    )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def sha256_text(value):
@@ -118,11 +99,8 @@ def sha256_text(value):
 def sha256_file(path):
     digest = hashlib.sha256()
 
-    with path.open("rb") as file:
-        for chunk in iter(
-            lambda: file.read(1024 * 1024),
-            b""
-        ):
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
 
     return digest.hexdigest()
@@ -132,9 +110,15 @@ def scene_key(part, scene):
     return f"part_{part:02d}/scene_{scene:02d}"
 
 
-# ============================================================
-# PROMPT SETTINGS
-# ============================================================
+def get_image_size(format_name):
+    if format_name == "short":
+        return "768x1024"
+
+    if format_name == "full":
+        return "1024x576"
+
+    raise RuntimeError(f"Unsupported format: {format_name}")
+
 
 def build_negative_prompt(config):
     negative = []
@@ -181,50 +165,31 @@ def build_negative_prompt(config):
     return ", ".join(negative)
 
 
-# ============================================================
-# CHARACTER CONTEXT
-# ============================================================
-
 def get_character_context(scene, character_bible):
     if not isinstance(character_bible, dict):
         return ""
 
     characters = scene.get(
         "characters",
-        scene.get("character_ids", [])
+        scene.get("character_ids", []),
     )
 
-    if not isinstance(characters, list):
+    if not isinstance(characters, list) or not characters:
         return ""
 
-    if not characters:
-        return ""
-
-    bible_characters = character_bible.get(
-        "characters",
-        []
-    )
+    bible_characters = character_bible.get("characters", [])
 
     if not isinstance(bible_characters, list):
         return ""
 
-    wanted = {
-        str(value)
-        for value in characters
-    }
+    wanted = {str(value) for value in characters}
 
-    selected = []
-
-    for character in bible_characters:
-        if not isinstance(character, dict):
-            continue
-
-        char_id = str(
-            character.get("id", "")
-        )
-
-        if char_id in wanted:
-            selected.append(character)
+    selected = [
+        character
+        for character in bible_characters
+        if isinstance(character, dict)
+        and str(character.get("id", "")) in wanted
+    ]
 
     if not selected:
         return ""
@@ -232,79 +197,35 @@ def get_character_context(scene, character_bible):
     return json.dumps(
         selected,
         ensure_ascii=False,
-        separators=(",", ":")
+        separators=(",", ":"),
     )
 
 
-# ============================================================
-# VISUAL PROMPT
-# ============================================================
-
-def build_visual_prompt(
-    config,
-    scene,
-    character_bible
-):
+def build_visual_prompt(config, scene, character_bible):
     visual_style = cfg_text(
-        config,
-        "VISUAL_STYLE",
-        "cinematic_realistic"
+        config, "VISUAL_STYLE", "cinematic_realistic"
     )
-
-    realism = cfg_text(
-        config,
-        "REALISM",
-        "high"
-    )
-
-    camera_style = cfg_text(
-        config,
-        "CAMERA_STYLE",
-        "cinematic"
-    )
-
-    lighting = cfg_text(
-        config,
-        "LIGHTING",
-        "cinematic"
-    )
-
-    mood = cfg_text(
-        config,
-        "MOOD",
-        "dramatic"
-    )
-
-    quality = cfg_text(
-        config,
-        "QUALITY",
-        "high"
-    )
+    realism = cfg_text(config, "REALISM", "high")
+    camera_style = cfg_text(config, "CAMERA_STYLE", "cinematic")
+    lighting = cfg_text(config, "LIGHTING", "cinematic")
+    mood = cfg_text(config, "MOOD", "dramatic")
+    quality = cfg_text(config, "QUALITY", "high")
 
     scene_prompt = str(
         scene.get(
             "visual_prompt",
-            scene.get(
-                "visual",
-                scene.get("description", "")
-            )
+            scene.get("visual", scene.get("description", "")),
         )
     ).strip()
 
     world_context = str(
-        scene.get(
-            "world_context",
-            scene.get("world", "")
-        )
+        scene.get("world_context", scene.get("world", ""))
     ).strip()
 
-    action = str(
-        scene.get("action", "")
-    ).strip()
+    action = str(scene.get("action", "")).strip()
 
     character_context = get_character_context(
-        scene,
-        character_bible
+        scene, character_bible
     )
 
     prompt_parts = [
@@ -333,8 +254,8 @@ def build_visual_prompt(
 
     if cfg_bool(config, "WORLD_CONSISTENCY", True):
         prompt_parts.append(
-            "Preserve the same world, architecture, "
-            "time period and environmental details."
+            "Preserve the same world, architecture, time period "
+            "and environmental details."
         )
 
     if cfg_bool(config, "SCENE_CONTINUITY", True):
@@ -343,43 +264,21 @@ def build_visual_prompt(
         )
 
     if scene_prompt:
-        prompt_parts.append(
-            f"Scene description: {scene_prompt}"
-        )
+        prompt_parts.append(f"Scene description: {scene_prompt}")
 
     if action:
-        prompt_parts.append(
-            f"Scene action: {action}"
-        )
+        prompt_parts.append(f"Scene action: {action}")
 
     if world_context:
-        prompt_parts.append(
-            f"World context: {world_context}"
-        )
+        prompt_parts.append(f"World context: {world_context}")
 
     if character_context:
         prompt_parts.append(
-            "Character Bible reference: "
-            + character_context
+            "Character Bible reference: " + character_context
         )
 
     return " ".join(prompt_parts)
 
-
-# ============================================================
-# IMAGE SIZE
-# ============================================================
-
-def get_image_size(format_name):
-    if format_name == "short":
-        return "768x1024"
-
-    return "1024x576"
-
-
-# ============================================================
-# CONFIG SIGNATURE
-# ============================================================
 
 def make_config_signature(config, format_name):
     relevant = {
@@ -402,9 +301,7 @@ def make_config_signature(config, format_name):
         "avoid_cartoon": cfg_bool(
             config, "AVOID_CARTOON_LOOK", True
         ),
-        "avoid_neon": cfg_bool(
-            config, "AVOID_NEON", True
-        ),
+        "avoid_neon": cfg_bool(config, "AVOID_NEON", True),
         "avoid_glitch": cfg_bool(
             config, "AVOID_GLITCH_EFFECTS", True
         ),
@@ -413,21 +310,15 @@ def make_config_signature(config, format_name):
     raw = json.dumps(
         relevant,
         ensure_ascii=False,
-        sort_keys=True
+        sort_keys=True,
     )
 
     return sha256_text(raw)
 
 
-# ============================================================
-# VALIDATE SCENES
-# ============================================================
-
 def validate_scenes(scenes):
     if not isinstance(scenes, list) or not scenes:
-        raise RuntimeError(
-            "scenes.json contains no scenes."
-        )
+        raise RuntimeError("scenes.json contains no scenes.")
 
     result = []
     seen = set()
@@ -440,18 +331,18 @@ def validate_scenes(scenes):
 
         try:
             part = int(scene.get("part"))
-            scene_number = int(scene.get("scene"))
-        except (TypeError, ValueError):
+            local_scene = int(scene.get("scene"))
+        except (TypeError, ValueError) as exc:
             raise RuntimeError(
                 f"Scene {index} has invalid part/scene numbers."
-            )
+            ) from exc
 
-        if part < 1 or scene_number < 1:
+        if part < 1 or local_scene < 1:
             raise RuntimeError(
                 f"Scene {index} has non-positive numbering."
             )
 
-        key = scene_key(part, scene_number)
+        key = scene_key(part, local_scene)
 
         if key in seen:
             raise RuntimeError(
@@ -462,56 +353,20 @@ def validate_scenes(scenes):
 
         result.append({
             "part": part,
-            "scene": scene_number,
+            "scene": local_scene,
             "source": scene,
         })
 
     return sorted(
         result,
-        key=lambda item: (
-            item["part"],
-            item["scene"]
-        )
+        key=lambda item: (item["part"], item["scene"]),
     )
 
-
-# ============================================================
-# EXISTING MANIFEST
-# ============================================================
-
-def load_existing_jobs():
-    existing = load_json(
-        JOBS_FILE,
-        {}
-    )
-
-    if not isinstance(existing, dict):
-        return {}, ""
-
-    jobs = existing.get(
-        "jobs",
-        {}
-    )
-
-    if not isinstance(jobs, dict):
-        jobs = {}
-
-    signature = str(
-        existing.get("config_signature", "")
-    )
-
-    return jobs, signature
-
-
-# ============================================================
-# CHECK COMPLETED IMAGE
-# ============================================================
 
 def image_is_valid(path):
-    if not path.is_file():
-        return False
+    path = Path(path)
 
-    if path.stat().st_size <= 1000:
+    if not path.is_file() or path.stat().st_size <= 1000:
         return False
 
     try:
@@ -523,11 +378,58 @@ def image_is_valid(path):
         return True
 
     except ImportError:
-        # If Pillow is unavailable, retain basic file checks.
         return True
 
     except Exception:
         return False
+
+
+def load_existing_jobs():
+    document = load_json(JOBS_FILE, {})
+
+    if isinstance(document, list):
+        rows = document
+        metadata = {}
+    elif isinstance(document, dict):
+        rows = (
+            document.get("jobs")
+            or document.get("visual_jobs")
+            or document.get("scenes")
+            or []
+        )
+        metadata = document
+    else:
+        rows = []
+        metadata = {}
+
+    existing = {}
+
+    if isinstance(rows, dict):
+        for key, row in rows.items():
+            if isinstance(row, dict):
+                existing[str(key)] = row
+
+    elif isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            key = row.get("id") or row.get("scene_id")
+
+            if not key:
+                try:
+                    key = scene_key(
+                        int(row["part"]),
+                        int(row.get("local_scene", row["scene"])),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+            existing[str(key)] = row
+
+    signature = str(metadata.get("config_signature", ""))
+
+    return existing, signature
 
 
 def can_reuse_image(
@@ -535,7 +437,7 @@ def can_reuse_image(
     old_job,
     old_signature,
     new_signature,
-    prompt_hash
+    prompt_hash,
 ):
     if not image_is_valid(output_path):
         return False
@@ -549,67 +451,160 @@ def can_reuse_image(
     if old_job.get("status") != "completed":
         return False
 
-    old_prompt_hash = old_job.get(
-        "prompt_hash"
+    old_hash = old_job.get("prompt_hash")
+
+    return bool(old_hash and old_hash == prompt_hash)
+
+
+def make_job(
+    item,
+    index,
+    config,
+    character_bible,
+    negative_prompt,
+    image_size,
+    signature,
+    existing_jobs,
+    old_signature,
+):
+    part = item["part"]
+    local_scene = item["scene"]
+    scene = item["source"]
+
+    key = scene_key(part, local_scene)
+    output_path = (
+        VISUALS_DIR
+        / f"part_{part:02d}"
+        / f"scene_{local_scene:02d}.png"
     )
 
-    # Older manifests did not store prompt_hash.
-    # Do not trust them when validating a changed queue.
-    if not old_prompt_hash:
-        return False
+    prompt = build_visual_prompt(
+        config, scene, character_bible
+    )
 
-    if old_prompt_hash != prompt_hash:
-        return False
+    prompt_hash = sha256_text(
+        prompt + "\n" + negative_prompt
+    )
 
-    return True
+    old_job = existing_jobs.get(key, {})
+
+    reusable = (
+        cfg_bool(config, "SKIP_COMPLETED_SCENES", True)
+        and can_reuse_image(
+            output_path,
+            old_job,
+            old_signature,
+            signature,
+            prompt_hash,
+        )
+    )
+
+    status = "completed" if reusable else "pending"
+
+    # Global scene numbering is independent of local scene numbering.
+    global_scene = index
+
+    return {
+        "id": key,
+        "scene_id": key,
+        "part": part,
+        "scene": local_scene,
+        "local_scene": local_scene,
+        "global_scene": global_scene,
+        "scene_index": global_scene,
+        "status": status,
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "image_size": image_size,
+        "format": normalize_format(config),
+        "output_path": str(output_path),
+        "image_path": str(output_path),
+        "scene_duration": scene.get("duration"),
+        "duration": scene.get("duration"),
+        "prompt_hash": prompt_hash,
+        "config_signature": signature,
+        "source_scene": scene,
+    }
 
 
-# ============================================================
-# WORKER QUEUE
-# ============================================================
+def verify_zip(zip_path, expected):
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        names = set(archive.namelist())
+
+        required = {
+            "visual_generation_queue.json",
+            "scenes.json",
+            "worker_config.json",
+        }
+
+        missing = required - names
+
+        if missing:
+            raise RuntimeError(
+                "Worker ZIP missing required files: "
+                + ", ".join(sorted(missing))
+            )
+
+        corrupt = archive.testzip()
+
+        if corrupt:
+            raise RuntimeError(
+                f"Corrupt ZIP entry: {corrupt}"
+            )
+
+        archived_queue = json.loads(
+            archive.read(
+                "visual_generation_queue.json"
+            ).decode("utf-8")
+        )
+
+        jobs = archived_queue.get("jobs")
+
+        if not isinstance(jobs, list):
+            raise RuntimeError(
+                "Worker ZIP queue jobs must be a list."
+            )
+
+        if len(jobs) != expected:
+            raise RuntimeError(
+                "Worker ZIP scene count mismatch."
+            )
+
+        numbers = [
+            int(job.get("global_scene", 0))
+            for job in jobs
+        ]
+
+        if numbers != list(range(1, expected + 1)):
+            raise RuntimeError(
+                "Worker ZIP global scene numbers are not continuous."
+            )
+
 
 def build_worker_queue():
-    print("=" * 70)
-    print("       BUILDING FREE VISUAL WORKER QUEUE")
-    print("=" * 70)
+    log("=" * 70)
+    log("BUILDING SCHEMA-COMPATIBLE VISUAL WORKER QUEUE")
+    log("=" * 70)
 
     config = load_input_config()
-
     format_name = normalize_format(config)
 
-    parts = cfg_int(
-        config,
-        "PARTS",
-        1
-    )
-
-    scenes_per_part = cfg_int(
-        config,
-        "SCENES",
-        1
-    )
+    parts = cfg_int(config, "PARTS", 1)
+    scenes_per_part = cfg_int(config, "SCENES", 1)
 
     if parts < 1 or scenes_per_part < 1:
         raise RuntimeError(
             "PARTS and SCENES must both be positive."
         )
 
-    image_size = get_image_size(
-        format_name
-    )
+    image_size = get_image_size(format_name)
 
-    print(f"FORMAT          : {format_name}")
-    print(f"IMAGE SIZE      : {image_size}")
-    print(f"PARTS           : {parts}")
-    print(f"SCENES/PART     : {scenes_per_part}")
+    log("FORMAT:", format_name)
+    log("IMAGE SIZE:", image_size)
+    log("PARTS:", parts)
+    log("SCENES/PART:", scenes_per_part)
 
-    # --------------------------------------------------------
-    # LOAD SCENES
-    # --------------------------------------------------------
-
-    scenes_data = load_json(
-        SCENES_FILE
-    )
+    scenes_data = load_json(SCENES_FILE)
 
     if not isinstance(scenes_data, dict):
         raise RuntimeError(
@@ -633,10 +628,6 @@ def build_worker_queue():
             f"but scenes.json contains {len(scenes)}."
         )
 
-    # --------------------------------------------------------
-    # CHARACTER BIBLE
-    # --------------------------------------------------------
-
     character_bible = {}
 
     if cfg_bool(config, "CHARACTER_BIBLE", True):
@@ -647,8 +638,7 @@ def build_worker_queue():
             )
 
         character_bible = load_json(
-            CHARACTER_BIBLE_FILE,
-            {}
+            CHARACTER_BIBLE_FILE, {}
         )
 
         if not isinstance(character_bible, dict):
@@ -656,114 +646,39 @@ def build_worker_queue():
                 "character_bible.json is invalid."
             )
 
-    # --------------------------------------------------------
-    # PREVIOUS JOBS
-    # --------------------------------------------------------
-
     existing_jobs, old_signature = load_existing_jobs()
 
     signature = make_config_signature(
-        config,
-        format_name
+        config, format_name
     )
 
-    negative_prompt = build_negative_prompt(
-        config
-    )
+    negative_prompt = build_negative_prompt(config)
 
     jobs = []
-    completed = 0
-    pending = 0
-
-    # --------------------------------------------------------
-    # BUILD JOBS
-    # --------------------------------------------------------
 
     for index, item in enumerate(scenes, start=1):
-        part = item["part"]
-        scene_number = item["scene"]
-        scene = item["source"]
-
-        key = scene_key(
-            part,
-            scene_number
-        )
-
-        output_path = (
-            VISUALS_DIR
-            / f"part_{part:02d}"
-            / f"scene_{scene_number:02d}.png"
-        )
-
-        prompt = build_visual_prompt(
-            config,
-            scene,
-            character_bible
-        )
-
-        prompt_hash = sha256_text(
-            prompt + "\n" + negative_prompt
-        )
-
-        old_job = existing_jobs.get(
-            key,
-            {}
-        )
-
-        reusable = (
-            cfg_bool(
-                config,
-                "SKIP_COMPLETED_SCENES",
-                True
-            )
-            and can_reuse_image(
-                output_path,
-                old_job,
-                old_signature,
-                signature,
-                prompt_hash
+        jobs.append(
+            make_job(
+                item=item,
+                index=index,
+                config=config,
+                character_bible=character_bible,
+                negative_prompt=negative_prompt,
+                image_size=image_size,
+                signature=signature,
+                existing_jobs=existing_jobs,
+                old_signature=old_signature,
             )
         )
 
-        status = (
-            "completed"
-            if reusable
-            else "pending"
-        )
-
-        if reusable:
-            completed += 1
-        else:
-            pending += 1
-
-        jobs.append({
-            "id": key,
-            "part": part,
-            "scene": scene_number,
-            "status": status,
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "image_size": image_size,
-            "format": format_name,
-            "output_path": str(output_path),
-            "scene_duration": scene.get("duration"),
-            "scene_index": index,
-            "prompt_hash": prompt_hash,
-            "config_signature": signature,
-            "source_scene": scene,
-        })
-
-    # --------------------------------------------------------
-    # QUEUE DOCUMENT
-    # --------------------------------------------------------
+    completed = sum(
+        job["status"] == "completed" for job in jobs
+    )
+    pending = len(jobs) - completed
 
     queue = {
-        "queue_version": 1,
-        "status": (
-            "completed"
-            if pending == 0
-            else "pending"
-        ),
+        "queue_version": 2,
+        "status": "completed" if pending == 0 else "pending",
         "worker_type": "free_gpu_visual_worker",
         "generation_mode": "text_to_image",
         "format": format_name,
@@ -774,196 +689,93 @@ def build_worker_queue():
         "config_signature": signature,
         "character_bible_path": (
             str(CHARACTER_BIBLE_FILE)
-            if character_bible
-            else None
+            if character_bible else None
         ),
         "jobs": jobs,
     }
 
-    # --------------------------------------------------------
-    # PREPARE WORKER DIRECTORY
-    # --------------------------------------------------------
+    WORKER_DIR.mkdir(parents=True, exist_ok=True)
 
-    WORKER_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    save_json(QUEUE_JSON, queue)
 
-    save_json(
-        QUEUE_JSON,
-        queue
-    )
-
-    worker_scenes = (
-        WORKER_DIR / "scenes.json"
-    )
-
-    shutil.copy2(
-        SCENES_FILE,
-        worker_scenes
-    )
+    worker_scenes = WORKER_DIR / "scenes.json"
+    shutil.copy2(SCENES_FILE, worker_scenes)
 
     if character_bible:
         shutil.copy2(
             CHARACTER_BIBLE_FILE,
-            WORKER_DIR / "character_bible.json"
+            WORKER_DIR / "character_bible.json",
         )
 
-    worker_config = (
-        WORKER_DIR / "worker_config.json"
-    )
+    worker_config = WORKER_DIR / "worker_config.json"
 
     save_json(
         worker_config,
         {
-            "queue_version": 1,
+            "queue_version": 2,
             "format": format_name,
             "image_size": image_size,
             "generation_mode": "text_to_image",
             "visual_style": cfg_text(
-                config,
-                "VISUAL_STYLE",
-                "cinematic_realistic"
+                config, "VISUAL_STYLE", "cinematic_realistic"
             ),
-            "realism": cfg_text(
-                config,
-                "REALISM",
-                "high"
-            ),
+            "realism": cfg_text(config, "REALISM", "high"),
             "camera_style": cfg_text(
-                config,
-                "CAMERA_STYLE",
-                "cinematic"
+                config, "CAMERA_STYLE", "cinematic"
             ),
             "lighting": cfg_text(
-                config,
-                "LIGHTING",
-                "cinematic"
+                config, "LIGHTING", "cinematic"
             ),
-            "mood": cfg_text(
-                config,
-                "MOOD",
-                "dramatic"
-            ),
+            "mood": cfg_text(config, "MOOD", "dramatic"),
             "negative_prompt": negative_prompt,
             "config_signature": signature,
-        }
+        },
     )
 
-    # --------------------------------------------------------
-    # CREATE ZIP ATOMICALLY
-    # --------------------------------------------------------
+    QUEUE_ZIP.parent.mkdir(parents=True, exist_ok=True)
 
-    QUEUE_ZIP.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    temporary_zip = QUEUE_ZIP.with_suffix(
-        ".zip.tmp"
-    )
-
-    if temporary_zip.exists():
-        temporary_zip.unlink()
+    temporary_zip = QUEUE_ZIP.with_suffix(".zip.tmp")
+    temporary_zip.unlink(missing_ok=True)
 
     try:
         with zipfile.ZipFile(
             temporary_zip,
             "w",
-            compression=zipfile.ZIP_DEFLATED
+            compression=zipfile.ZIP_DEFLATED,
         ) as archive:
-
             archive.write(
                 QUEUE_JSON,
-                "visual_generation_queue.json"
+                "visual_generation_queue.json",
             )
-
             archive.write(
                 worker_scenes,
-                "scenes.json"
+                "scenes.json",
             )
 
             if character_bible:
                 archive.write(
                     WORKER_DIR / "character_bible.json",
-                    "character_bible.json"
+                    "character_bible.json",
                 )
 
             archive.write(
                 worker_config,
-                "worker_config.json"
-            )
-
-        with zipfile.ZipFile(
-            temporary_zip,
-            "r"
-        ) as archive:
-
-            names = set(
-                archive.namelist()
-            )
-
-            required = {
-                "visual_generation_queue.json",
-                "scenes.json",
                 "worker_config.json",
-            }
-
-            missing = required - names
-
-            if missing:
-                raise RuntimeError(
-                    "Worker ZIP missing required files: "
-                    + ", ".join(sorted(missing))
-                )
-
-            corrupt = archive.testzip()
-
-            if corrupt:
-                raise RuntimeError(
-                    f"Corrupt ZIP entry: {corrupt}"
-                )
-
-            # Verify the queue can be read back.
-            archived_queue = json.loads(
-                archive.read(
-                    "visual_generation_queue.json"
-                ).decode("utf-8")
             )
 
-            if not isinstance(
-                archived_queue.get("jobs"),
-                list
-            ):
-                raise RuntimeError(
-                    "Worker ZIP queue jobs must be a list."
-                )
-
-            if len(archived_queue["jobs"]) != expected:
-                raise RuntimeError(
-                    "Worker ZIP scene count mismatch."
-                )
-
-        os.replace(
-            temporary_zip,
-            QUEUE_ZIP
-        )
+        verify_zip(temporary_zip, expected)
+        temporary_zip.replace(QUEUE_ZIP)
 
     finally:
-        if temporary_zip.exists():
-            temporary_zip.unlink()
+        temporary_zip.unlink(missing_ok=True)
 
-    # --------------------------------------------------------
-    # LOCAL VISUAL MANIFEST
-    # --------------------------------------------------------
-
+    # IMPORTANT:
+    # jobs is now a LIST, not a dictionary.
+    # This matches free_image_generator.py, generate_depth_maps.py
+    # and photo_motion.py input readers.
     visual_manifest = {
-        "version": 2,
-        "status": (
-            "completed"
-            if pending == 0
-            else "pending"
-        ),
+        "version": 3,
+        "status": "completed" if pending == 0 else "pending",
         "format": format_name,
         "image_size": image_size,
         "expected_total": expected,
@@ -973,68 +785,34 @@ def build_worker_queue():
         "queue_json": str(QUEUE_JSON),
         "queue_zip": str(QUEUE_ZIP),
         "config_signature": signature,
-        "jobs": {
-            job["id"]: {
-                "part": job["part"],
-                "scene": job["scene"],
-                "status": job["status"],
-                "visual_path": job["output_path"],
-                "prompt_hash": job["prompt_hash"],
-                "config_signature": signature,
-            }
-            for job in jobs
-        },
+        "jobs": jobs,
     }
 
-    save_json(
-        JOBS_FILE,
-        visual_manifest
-    )
+    save_json(JOBS_FILE, visual_manifest)
 
-    # --------------------------------------------------------
-    # REPORT
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 70)
-    print("          FREE VISUAL QUEUE READY")
-    print("=" * 70)
-
-    print(f"Expected visuals : {expected}")
-    print(f"Reusable images  : {completed}")
-    print(f"Pending visuals  : {pending}")
-    print(f"Config signature : {signature[:16]}")
-
-    print()
-    print(f"Queue JSON       : {QUEUE_JSON}")
-    print(f"Queue ZIP        : {QUEUE_ZIP}")
-    print(f"Local manifest   : {JOBS_FILE}")
-
-    print()
-    print("No placeholder images were created.")
-    print("No image-generation API was called.")
-    print("Pending jobs require the configured GPU worker.")
-
-    print("=" * 70)
+    log("=" * 70)
+    log("VISUAL QUEUE READY")
+    log("Expected visuals:", expected)
+    log("Reusable images:", completed)
+    log("Pending visuals:", pending)
+    log("Global scene numbering: 1..", expected)
+    log("Jobs schema: LIST")
+    log("Queue JSON:", QUEUE_JSON)
+    log("Queue ZIP:", QUEUE_ZIP)
+    log("Visual manifest:", JOBS_FILE)
+    log("=" * 70)
 
     return 0
 
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
 if __name__ == "__main__":
     try:
-        sys.exit(
-            build_worker_queue()
-        )
+        sys.exit(build_worker_queue())
 
     except KeyboardInterrupt:
-        print("Interrupted.")
+        log("Interrupted.")
         sys.exit(130)
 
     except Exception as exc:
-        print()
-        print(f"ERROR: {exc}")
+        log("ERROR:", exc)
         sys.exit(1)
