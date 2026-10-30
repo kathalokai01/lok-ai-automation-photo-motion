@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Cinematic, story-matched thumbnail generator; no external API calls."""
+"""Story-grounded cinematic thumbnail generator."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import (
+    Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -22,19 +24,21 @@ from input_config import load_and_validate, get_format
 OUT = ROOT / "output"
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = OUT / "story" / "ai_story.json"
+STORY_JSON = OUT / "story" / "story.json"
 TITLE_FILE = OUT / "story" / "final_title.txt"
+YOUTUBE_METADATA = OUT / "publish" / "youtube_metadata.json"
 IMAGE_MANIFEST = OUT / "visuals" / "image_manifest.json"
 VISUAL_JOBS = OUT / "visuals" / "visual_jobs.json"
 PHOTO_MANIFEST = OUT / "photo_motion" / "photo_motion_manifest.json"
+
 THUMBNAIL = OUT / "thumbnail.jpg"
 WORK_DIR = OUT / "thumbnail"
 MANIFEST = WORK_DIR / "thumbnail_manifest.json"
 
-VERSION = "thumbnail-v15-cinematic-story-matched-composition"
+VERSION = "thumbnail-v16-story-title-priority"
 W, H = 1280, 720
 MIN_BYTES = 1000
 
-# Separate looks; deliberately not a fixed red-and-gold design.
 PALETTES = {
     "horror": ((239, 72, 88), (255, 245, 244), (18, 10, 23)),
     "mystery": ((62, 220, 231), (250, 255, 255), (8, 20, 34)),
@@ -95,11 +99,11 @@ def write_json(path, data):
 
 
 def sha256(path):
-    h = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def safe_path(value, image_only=False):
@@ -115,8 +119,8 @@ def safe_path(value, image_only=False):
         if path.stat().st_size < MIN_BYTES:
             return None
         if image_only:
-            with Image.open(path) as im:
-                im.verify()
+            with Image.open(path) as image:
+                image.verify()
         return path
     except (OSError, ValueError):
         return None
@@ -132,6 +136,134 @@ def all_rows(data, *keys):
     return []
 
 
+def story_text_from(data):
+    """Collect story narrative without truncating its ending."""
+    parts = []
+
+    def visit(value, depth=0):
+        if depth > 5:
+            return
+        if isinstance(value, str):
+            text = value.strip()
+            if len(text) > 35:
+                parts.append(text)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, depth + 1)
+        elif isinstance(value, dict):
+            preferred = (
+                "story_text", "full_story", "story", "narrative",
+                "content", "text", "body", "paragraph",
+                "summary", "synopsis", "logline",
+            )
+            for key in preferred:
+                if key in value:
+                    visit(value[key], depth + 1)
+            for key in ("parts", "chapters", "scenes", "sections"):
+                if key in value:
+                    visit(value[key], depth + 1)
+
+    visit(data)
+    # Preserve order while avoiding repeated copies of the same text.
+    result, seen = [], set()
+    for item in parts:
+        normalized = clean(item, 100000)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return "\n".join(result)
+
+
+def explicit_input_title(config):
+    """Use only a short explicit topic/title, never a pasted story paragraph."""
+    for key in ("TITLE", "TOPIC"):
+        value = clean(str(config.get(key, "")), 180)
+        if not value:
+            continue
+        if len(value.split()) > 18 or len(value) > 140:
+            continue
+        if len(value) > 12 and re.search(r"[.!?।]\s+\S", value):
+            continue
+        return value
+    return ""
+
+
+def title_from_file():
+    if not TITLE_FILE.is_file():
+        return ""
+    try:
+        for line in TITLE_FILE.read_text(
+            encoding="utf-8-sig"
+        ).splitlines():
+            value = clean(line, 180)
+            if value and not value.startswith("#"):
+                return value
+    except OSError:
+        pass
+    return ""
+
+
+def title_from_story(data):
+    if not isinstance(data, dict):
+        return ""
+    objects = [
+        data,
+        data.get("metadata", {}),
+        data.get("story_metadata", {}),
+        data.get("meta", {}),
+    ]
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for key in (
+            "final_title", "story_title", "generated_title",
+            "title", "youtube_title",
+        ):
+            value = clean(obj.get(key), 180)
+            if value:
+                return value
+    return ""
+
+
+def get_title(config, story, second_story):
+    """
+    Workflow order: thumbnail runs before YouTube metadata.
+    Therefore prefer the story pipeline's final title and never trust
+    a possibly stale YouTube metadata file over current story files.
+    """
+    candidates = [
+        title_from_file(),
+        title_from_story(story),
+        title_from_story(second_story),
+    ]
+    for candidate in candidates:
+        if candidate:
+            return candidate
+
+    # A prior metadata file is accepted only if it explicitly matches
+    # the current story fingerprint; this script does not use stale data.
+    input_title = explicit_input_title(config)
+    if input_title:
+        return input_title
+
+    raise RuntimeError(
+        "Story title missing. Expected final_title.txt, a story title "
+        "field, or a short explicit TITLE/TOPIC in Input/topic.txt."
+    )
+
+
+def detect_category(text):
+    low = text.casefold()
+    scores = {
+        category: sum(
+            1 for word in words if word.casefold() in low
+        )
+        for category, words in KEYWORDS.items()
+    }
+    best = max(scores, key=scores.get)
+    return best if scores[best] else "general"
+
+
 def scene_no(row):
     for key in ("global_scene", "global_scene_number", "scene"):
         try:
@@ -141,43 +273,6 @@ def scene_no(row):
         except (TypeError, ValueError, AttributeError):
             pass
     return 999999
-
-
-def get_title(config, story):
-    for key in ("TOPIC", "TITLE"):
-        value = clean(str(config.get(key, "")), 180)
-        if value:
-            return value
-
-    if TITLE_FILE.is_file():
-        for line in TITLE_FILE.read_text(encoding="utf-8-sig").splitlines():
-            value = clean(line, 180)
-            if value and not value.startswith("#"):
-                return value
-
-    if isinstance(story, dict):
-        for obj in (story, story.get("metadata", {}), story.get("story_metadata", {})):
-            if isinstance(obj, dict):
-                for key in ("title", "story_title", "generated_title"):
-                    value = clean(obj.get(key), 180)
-                    if value:
-                        return value
-        for key in ("logline", "summary", "synopsis", "description"):
-            value = clean(story.get(key), 300)
-            if value:
-                return clean(re.split(r"(?<=[.!?।])\s+", value)[0], 75)
-
-    raise RuntimeError("Story title missing; expected TOPIC/TITLE or final_title.txt")
-
-
-def detect_category(text):
-    low = text.casefold()
-    scores = {
-        category: sum(1 for word in words if word.casefold() in low)
-        for category, words in KEYWORDS.items()
-    }
-    best = max(scores, key=scores.get)
-    return best if scores[best] else "general"
 
 
 def collect_images():
@@ -191,7 +286,9 @@ def collect_images():
         number = scene_no(row)
         prompt_map[number] = " ".join(
             clean(str(row.get(key, "")), 2000)
-            for key in ("prompt", "visual_prompt", "description", "scene_id")
+            for key in (
+                "prompt", "visual_prompt", "description", "scene_id"
+            )
             if row.get(key)
         )
 
@@ -201,14 +298,20 @@ def collect_images():
             continue
         status = str(row.get("status", "")).casefold()
         if status and status not in {
-            "generated", "existing", "reused", "completed", "success", "ready"
+            "generated", "existing", "reused", "completed",
+            "success", "ready",
         }:
             continue
 
         value = next(
-            (row.get(k) for k in (
-                "image_path", "image", "image_file", "output_image", "path"
-            ) if isinstance(row.get(k), str) and row.get(k).strip()),
+            (
+                row.get(key)
+                for key in (
+                    "image_path", "image", "image_file",
+                    "output_image", "path",
+                )
+                if isinstance(row.get(key), str) and row.get(key).strip()
+            ),
             None,
         )
         path = safe_path(value, image_only=True)
@@ -224,41 +327,52 @@ def collect_images():
             clean(str(row.get("description", "")), 1000),
             clean(str(row.get("scene_id", "")), 300),
         ))
-        found.append({"path": path, "scene": number, "context": context})
-
+        found.append({
+            "path": path,
+            "scene": number,
+            "context": context,
+        })
     return found
 
 
-def choose_image(images, title, category, story):
+def choose_image(images, title, category, story_content):
     if not images:
         return None
 
     ignored = {
-        "कहानी", "एक", "और", "था", "थी", "the", "story", "this",
-        "that", "with", "from", "into", "में", "का", "की", "के",
+        "कहानी", "एक", "और", "था", "थी", "the", "story",
+        "this", "that", "with", "from", "into", "में",
+        "का", "की", "के",
     }
     title_tokens = {
-        x for x in re.findall(r"[\w\u0900-\u097f]+", title.casefold())
-        if len(x) >= 3 and x not in ignored
+        token for token in re.findall(
+            r"[\w\u0900-\u097f]+", title.casefold()
+        )
+        if len(token) >= 3 and token not in ignored
     }
     story_tokens = {
-        x for x in re.findall(r"[\w\u0900-\u097f]+", story.casefold())
-        if len(x) >= 4 and x not in ignored
+        token for token in re.findall(
+            r"[\w\u0900-\u097f]+", story_content.casefold()
+        )
+        if len(token) >= 4 and token not in ignored
     }
 
     def score(item):
         context = item["context"].casefold()
-        score_value = sum(
+        value = sum(
             4 for word in KEYWORDS.get(category, ())
             if word.casefold() in context
         )
-        score_value += 8 * sum(1 for word in title_tokens if word in context)
-        context_tokens = set(re.findall(r"[\w\u0900-\u097f]+", context))
-        score_value += min(18, len(story_tokens & context_tokens))
-        # Earlier scenes only break ties; do not outweigh story relevance.
+        value += 8 * sum(
+            1 for word in title_tokens if word in context
+        )
+        context_tokens = set(re.findall(
+            r"[\w\u0900-\u097f]+", context
+        ))
+        value += min(18, len(story_tokens & context_tokens))
         if item["scene"] <= 3:
-            score_value += 1
-        return score_value
+            value += 1
+        return value
 
     return max(images, key=score)
 
@@ -267,8 +381,10 @@ def fit_cover(image):
     image = image.convert("RGB")
     scale = max(W / image.width, H / image.height)
     image = image.resize(
-        (max(W, round(image.width * scale)),
-         max(H, round(image.height * scale))),
+        (
+            max(W, round(image.width * scale)),
+            max(H, round(image.height * scale)),
+        ),
         Image.Resampling.LANCZOS,
     )
     left = (image.width - W) // 2
@@ -277,17 +393,20 @@ def fit_cover(image):
 
 
 def extract_video_frame(mode):
-    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         return None
 
     candidates = [
         OUT / "videos" / (
-            "katha_lok_ai_short.mp4" if mode == "short"
+            "katha_lok_ai_short.mp4"
+            if mode == "short"
             else "katha_lok_ai_full.mp4"
         ),
         OUT / "videos" / "katha_lok_ai_final.mp4",
     ]
+
     for row in all_rows(read_json(PHOTO_MANIFEST), "scenes"):
         if isinstance(row, dict):
             for key in ("video", "source_video", "output", "path"):
@@ -306,26 +425,34 @@ def extract_video_frame(mode):
         try:
             probe = subprocess.run(
                 [
-                    ffprobe, "-v", "error", "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1", str(video),
+                    ffprobe, "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(video),
                 ],
-                capture_output=True, text=True, timeout=25, check=False,
+                capture_output=True, text=True,
+                timeout=25, check=False,
             )
             duration = float(probe.stdout.strip())
             if probe.returncode or duration <= 0:
                 continue
+
             temp = target.with_suffix(".tmp.jpg")
             result = subprocess.run(
                 [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                     "-ss", f"{min(duration * 0.3, max(0, duration - 0.1)):.3f}",
                     "-i", str(video), "-frames:v", "1",
-                    "-vf", "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720",
+                    "-vf",
+                    "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720",
                     "-q:v", "2", str(temp),
                 ],
-                capture_output=True, text=True, timeout=60, check=False,
+                capture_output=True, text=True,
+                timeout=60, check=False,
             )
-            if result.returncode == 0 and safe_path(str(temp), image_only=True):
+            if result.returncode == 0 and safe_path(
+                str(temp), image_only=True
+            ):
                 temp.replace(target)
                 return target
             temp.unlink(missing_ok=True)
@@ -341,7 +468,8 @@ def find_font(size):
             try:
                 result = subprocess.run(
                     [matcher, "-f", "%{file}", family],
-                    capture_output=True, text=True, timeout=10, check=False,
+                    capture_output=True, text=True,
+                    timeout=10, check=False,
                 )
                 path = Path(result.stdout.strip())
                 if result.returncode == 0 and path.is_file():
@@ -352,11 +480,12 @@ def find_font(size):
 
 
 def wrap_title(draw, title, font, max_width):
-    words = title.split()
     lines, current = [], ""
-    for word in words:
+    for word in title.split():
         candidate = (current + " " + word).strip()
-        if current and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
+        if current and draw.textbbox(
+            (0, 0), candidate, font=font
+        )[2] > max_width:
             lines.append(current)
             current = word
         else:
@@ -364,13 +493,14 @@ def wrap_title(draw, title, font, max_width):
     if current:
         lines.append(current)
 
-    # Split long unbroken words safely rather than clipping the title.
     result = []
     for line in lines:
         part = ""
         for char in line:
             candidate = part + char
-            if part and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
+            if part and draw.textbbox(
+                (0, 0), candidate, font=font
+            )[2] > max_width:
                 result.append(part)
                 part = char
             else:
@@ -389,7 +519,9 @@ def compact_title(title):
                 title = first
                 break
     if len(title) > 70:
-        title = title[:70].rsplit(" ", 1)[0].rstrip(" ,;:-।") + "…"
+        title = title[:70].rsplit(" ", 1)[0].rstrip(
+            " ,;:-।"
+        ) + "…"
     return title
 
 
@@ -402,7 +534,6 @@ def render_thumbnail(title, background, category):
     else:
         image = Image.new("RGB", (W, H), dark)
 
-    # Avoid aggressive contrast/saturation changes that destroy image detail.
     image = ImageEnhance.Color(image).enhance(0.99)
     image = ImageEnhance.Contrast(image).enhance(1.025)
     image = ImageEnhance.Brightness(image).enhance(1.015)
@@ -410,15 +541,18 @@ def render_thumbnail(title, background, category):
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     overlay = ImageDraw.Draw(layer)
 
-    # Cinematic bottom gradient and a subtle side vignette.
     for y in range(H):
         strength = max(0, (y - 265) / (H - 265))
         alpha = int(min(205, strength * 205))
         overlay.line((0, y, W, y), fill=(*dark, alpha))
+
     for x in range(W):
         edge = max(0, (130 - min(x, W - x)) / 130)
         if edge > 0:
-            overlay.line((x, 0, x, H), fill=(*dark, int(edge * 55)))
+            overlay.line(
+                (x, 0, x, H),
+                fill=(*dark, int(edge * 55)),
+            )
 
     image = Image.alpha_composite(image.convert("RGBA"), layer)
     draw = ImageDraw.Draw(image)
@@ -430,51 +564,81 @@ def render_thumbnail(title, background, category):
         lines = wrap_title(draw, title, font, int(W * 0.82))
         if not 1 <= len(lines) <= 3:
             continue
-        boxes = [draw.textbbox((0, 0), line, font=font, stroke_width=2) for line in lines]
-        heights = [max(1, box[3] - box[1]) for box in boxes]
+        boxes = [
+            draw.textbbox((0, 0), line, font=font, stroke_width=2)
+            for line in lines
+        ]
+        heights = [
+            max(1, box[3] - box[1]) for box in boxes
+        ]
         gap = max(4, size // 9)
         total = sum(heights) + gap * (len(lines) - 1)
         if total <= 225:
-            chosen = font, font_path, lines, heights, gap, size
+            chosen = (
+                font, font_path, lines, heights, gap, size
+            )
             break
 
     if chosen:
         font, font_path, lines, heights, gap, size = chosen
     else:
         font, font_path = find_font(36)
-        lines = wrap_title(draw, title, font, int(W * 0.82))[:3]
+        lines = wrap_title(
+            draw, title, font, int(W * 0.82)
+        )[:3]
         heights = [
-            max(1, draw.textbbox((0, 0), line, font=font)[3])
+            max(
+                1,
+                draw.textbbox((0, 0), line, font=font)[3],
+            )
             for line in lines
         ]
         gap, size = 5, 36
 
-    total_height = sum(heights) + gap * max(0, len(heights) - 1)
+    total_height = sum(heights) + gap * max(
+        0, len(heights) - 1
+    )
     text_y = max(420, H - total_height - 45)
     panel_top = max(395, text_y - 22)
-    panel_bottom = min(H - 16, text_y + total_height + 26)
+    panel_bottom = min(
+        H - 16, text_y + total_height + 26
+    )
 
     draw.rounded_rectangle(
         (34, panel_top, W - 34, panel_bottom),
-        radius=24, fill=(*dark, 218), outline=(*accent, 245), width=4,
+        radius=24,
+        fill=(*dark, 218),
+        outline=(*accent, 245),
+        width=4,
     )
     draw.rounded_rectangle(
         (58, panel_top + 13, 180, panel_top + 21),
-        radius=4, fill=(*accent, 255),
+        radius=4,
+        fill=(*accent, 255),
     )
 
     y = text_y
     for line, height in zip(lines, heights):
-        box = draw.textbbox((0, 0), line, font=font, stroke_width=2)
+        box = draw.textbbox(
+            (0, 0), line, font=font, stroke_width=2
+        )
         x = max(12, (W - (box[2] - box[0])) // 2)
+
         draw.text(
-            (x + 2, y + 3), line, font=font,
-            fill=(0, 0, 0, 220), stroke_width=5,
+            (x + 2, y + 3),
+            line,
+            font=font,
+            fill=(0, 0, 0, 220),
+            stroke_width=5,
             stroke_fill=(0, 0, 0, 220),
         )
         draw.text(
-            (x, y), line, font=font, fill=(*text_color, 255),
-            stroke_width=2, stroke_fill=(*dark, 255),
+            (x, y),
+            line,
+            font=font,
+            fill=(*text_color, 255),
+            stroke_width=2,
+            stroke_fill=(*dark, 255),
         )
         y += height + gap
 
@@ -482,13 +646,18 @@ def render_thumbnail(title, background, category):
     temp = THUMBNAIL.with_suffix(".tmp.jpg")
     try:
         image.convert("RGB").filter(
-            ImageFilter.UnsharpMask(radius=0.8, percent=35, threshold=5)
+            ImageFilter.UnsharpMask(
+                radius=0.8, percent=35, threshold=5
+            )
         ).save(temp, "JPEG", quality=94, optimize=True)
+
         with Image.open(temp) as check:
             check.verify()
         with Image.open(temp) as check:
             if check.size != (W, H) or check.format != "JPEG":
-                raise RuntimeError("Thumbnail must be 1280x720 JPEG")
+                raise RuntimeError(
+                    "Thumbnail must be 1280x720 JPEG"
+                )
         if temp.stat().st_size < MIN_BYTES:
             raise RuntimeError("Thumbnail output is too small")
         temp.replace(THUMBNAIL)
@@ -504,7 +673,10 @@ def render_thumbnail(title, background, category):
         "display_title": title,
         "category_style": category,
         "design_mood": f"cinematic-{category}-scene-matched",
-        "background_selection": "prompt-matched-scene" if background else "solid-fallback",
+        "background_selection": (
+            "prompt-matched-scene"
+            if background else "solid-fallback"
+        ),
     }
 
 
@@ -515,20 +687,51 @@ def main():
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
 
     story = read_json(STORY_FILE)
-    title = get_title(config, story)
-    story_text = json.dumps(story or {}, ensure_ascii=False)[:25000]
-    category = detect_category(title + " " + story_text)
+    second_story = read_json(STORY_JSON)
+
+    # Include both available story sources for image matching and style.
+    story_content = "\n".join(
+        part for part in (
+            story_text_from(story),
+            story_text_from(second_story),
+        ) if part
+    )
+
+    title = get_title(config, story, second_story)
+    category = detect_category(
+        title + " " + story_content
+    )
 
     images = collect_images()
-    selected = choose_image(images, title, category, story_text)
-    background = selected["path"] if selected else extract_video_frame(mode)
+    selected = choose_image(
+        images, title, category, story_content
+    )
+    background = (
+        selected["path"] if selected
+        else extract_video_frame(mode)
+    )
     if background:
-        background = safe_path(str(background), image_only=True)
+        background = safe_path(
+            str(background), image_only=True
+        )
 
-    title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()
-    background_hash = sha256(background) if background else "solid-color-fallback"
+    title_hash = hashlib.sha256(
+        title.encode("utf-8")
+    ).hexdigest()
+    background_hash = (
+        sha256(background)
+        if background else "solid-color-fallback"
+    )
+
+    # Include story text and selected background in resume identity.
+    story_hash = hashlib.sha256(
+        story_content.encode("utf-8")
+    ).hexdigest()
     fingerprint = hashlib.sha256(
-        f"{VERSION}|{mode}|{title_hash}|{category}|{background_hash}".encode("utf-8")
+        (
+            f"{VERSION}|{mode}|{title_hash}|{story_hash}|"
+            f"{category}|{background_hash}"
+        ).encode("utf-8")
     ).hexdigest()
 
     old = read_json(MANIFEST)
@@ -545,22 +748,37 @@ def main():
             with Image.open(THUMBNAIL) as check:
                 check.verify()
             with Image.open(THUMBNAIL) as check:
-                if check.size == (W, H) and check.format == "JPEG":
+                if (
+                    check.size == (W, H)
+                    and check.format == "JPEG"
+                ):
                     log("RESUME: valid matching thumbnail reused")
                     return
         except (OSError, ValueError):
             pass
 
-    details = render_thumbnail(title, background, category)
+    details = render_thumbnail(
+        title, background, category
+    )
+
     write_json(MANIFEST, {
         "status": "completed",
         "version": VERSION,
         "fingerprint": fingerprint,
         "format": mode,
         "title": title,
+        "title_source": (
+            "final_title.txt"
+            if title == title_from_file()
+            else "story_json_or_explicit_input"
+        ),
         "title_sha256": title_hash,
+        "story_sha256": story_hash,
         "category": category,
-        "background_image": background.relative_to(ROOT).as_posix() if background else None,
+        "background_image": (
+            background.relative_to(ROOT).as_posix()
+            if background else None
+        ),
         "background_sha256": background_hash,
         "thumbnail": THUMBNAIL.relative_to(ROOT).as_posix(),
         **details,
