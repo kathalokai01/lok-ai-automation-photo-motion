@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Story-aware, contrast-safe, resumable caption burning."""
+"""Story-aware, contrast-safe, resumable caption burning with chunk-aware timing."""
 
 from __future__ import annotations
 
@@ -39,22 +39,21 @@ AUDIO_MANIFEST = OUT / "narration" / "audio_jobs.json"
 PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v25-story-scene-adaptive"
+VERSION = "burn-captions-v26-chunk-aware-timing"
 WIDTH, HEIGHT = 1280, 720
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.0
 
-# ASS colors use &HAABBGGRR. Alpha 00 is opaque.
 STYLE_PALETTES = [
     {"name": "cinematic-white", "light": "&H00FFFFFF",
-     "dark": "&H00141414", "outline": "&H00000000"},
+     "dark": "&H00141414"},
     {"name": "warm-gold", "light": "&H0000D7FF",
-     "dark": "&H00202020", "outline": "&H00000000"},
+     "dark": "&H00202020"},
     {"name": "soft-cream", "light": "&H00E8F1FF",
-     "dark": "&H00202020", "outline": "&H00000000"},
+     "dark": "&H00202020"},
     {"name": "mint-accent", "light": "&H0098FFD8",
-     "dark": "&H00141414", "outline": "&H00000000"},
+     "dark": "&H00141414"},
 ]
 
 
@@ -122,8 +121,11 @@ def safe_file(value, label, minimum=1):
 
 def run(command, label, timeout=900):
     result = subprocess.run(
-        command, capture_output=True, text=True,
-        timeout=timeout, check=False,
+        command,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
     )
     if result.returncode:
         raise RuntimeError(
@@ -140,7 +142,8 @@ def media_info(path):
             "format=duration:stream=codec_type,width,height",
             "-of", "json", str(path),
         ],
-        f"Inspect {Path(path).name}", timeout=90,
+        f"Inspect {Path(path).name}",
+        timeout=90,
     )
     try:
         data = json.loads(result.stdout)
@@ -190,15 +193,14 @@ def find_path(row, keys):
 def resolve_font(family):
     if not shutil.which("fc-match"):
         raise RuntimeError("fontconfig fc-match is required")
-
     result = run(
         ["fc-match", "-f", "%{file}\n", family],
-        f"Resolve font {family}", timeout=60,
+        f"Resolve font {family}",
+        timeout=60,
     )
     candidates = result.stdout.strip().splitlines()
     if not candidates:
         raise RuntimeError(f"No font found for {family}")
-
     path = Path(candidates[0]).resolve()
     if not path.is_file():
         raise RuntimeError(f"Font file does not exist: {path}")
@@ -265,17 +267,49 @@ def load_audio_map(parts, scenes):
             raise RuntimeError(f"Narration is incomplete for {key}")
 
         path = safe_file(
-            find_path(row, ("output", "audio_path", "path", "file", "audio")),
-            f"Narration {key}", MIN_AUDIO_BYTES,
+            find_path(
+                row,
+                ("output", "audio_path", "path", "file", "audio"),
+            ),
+            f"Narration {key}",
+            MIN_AUDIO_BYTES,
         )
         info = media_info(path)
         if not info["has_audio"]:
             raise RuntimeError(f"Narration has no audio stream: {key}")
 
+        # Read actual chunk durations from generate_tts.py manifest.
+        chunks = []
+        for chunk in row.get("chunks", []):
+            if not isinstance(chunk, dict):
+                continue
+            if str(chunk.get("status", "")).lower() != "completed":
+                continue
+            try:
+                duration = float(chunk.get("duration", 0))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(duration) and duration > 0:
+                chunks.append({
+                    "index": int(chunk.get("index", len(chunks))),
+                    "duration": duration,
+                })
+
+        chunks.sort(key=lambda x: x["index"])
+        chunk_total = sum(x["duration"] for x in chunks)
+
+        # Normalize chunk durations to the measured final audio duration.
+        # This handles small encoder/concat duration differences.
+        if chunks and chunk_total > 0:
+            scale = info["duration"] / chunk_total
+            for chunk in chunks:
+                chunk["duration"] *= scale
+
         mapping[key] = {
             "path": path,
             "duration": info["duration"],
             "sha256": digest_file(path),
+            "chunks": chunks,
         }
 
     expected = {
@@ -324,7 +358,6 @@ def split_phrases(text):
 
 
 def silence_boundaries(audio_path, duration):
-    """Find actual quiet gaps; these are timing hints, not word alignment."""
     if duration <= 0:
         return []
 
@@ -335,11 +368,14 @@ def silence_boundaries(audio_path, duration):
                 "-vn", "-af", "silencedetect=noise=-35dB:d=0.18",
                 "-f", "null", "-",
             ],
-            capture_output=True, text=True, timeout=180, check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
         )
         log_text = (result.stderr or "") + "\n" + (result.stdout or "")
         if result.returncode:
-            log("WARNING: silence detection failed; proportional timing used")
+            log("WARNING: silence detection failed; chunk timing retained")
             return []
 
         starts = [
@@ -373,56 +409,170 @@ def silence_boundaries(audio_path, duration):
         return []
 
 
-def make_cues(text, audio_duration, video_duration, audio_path):
+def chunk_boundaries(chunks, limit):
+    """Return cumulative chunk boundaries scaled to the final audio length."""
+    if not chunks:
+        return []
+
+    durations = [
+        float(x["duration"])
+        for x in chunks
+        if isinstance(x, dict) and float(x.get("duration", 0)) > 0
+    ]
+    if not durations:
+        return []
+
+    total = sum(durations)
+    if total <= 0:
+        return []
+
+    result = [0.0]
+    running = 0.0
+    for duration in durations:
+        running += duration
+        result.append(limit * running / total)
+    result[-1] = limit
+    return result
+
+
+def make_cues(text, audio_duration, video_duration, audio_path, chunks=None):
     phrases = split_phrases(text)
     limit = min(float(audio_duration), float(video_duration))
     if not phrases or limit <= 0:
         raise RuntimeError("Cannot create captions for empty text/duration")
 
     weights = [max(1, len(x.split())) for x in phrases]
-    total = sum(weights)
-    raw = [0.0]
-    running = 0
+    total_words = sum(weights)
 
-    for weight in weights[:-1]:
-        running += weight
-        raw.append(limit * running / total)
-    raw.append(limit)
+    # If TTS chunks exist, use their actual measured durations as timing
+    # regions. Phrase boundaries are estimated inside each chunk region.
+    chunk_edges = chunk_boundaries(chunks or [], limit)
+    chunk_used = bool(len(chunk_edges) > 2)
+
+    if chunk_used:
+        durations = [
+            chunk_edges[i + 1] - chunk_edges[i]
+            for i in range(len(chunk_edges) - 1)
+        ]
+        chunk_word_targets = [
+            total_words * duration / limit for duration in durations
+        ]
+
+        # Assign phrase groups to sequential chunk regions using cumulative
+        # word weight. This is an estimate because manifest lacks text offsets.
+        groups = []
+        phrase_index = 0
+        remaining_words = total_words
+
+        for chunk_index, duration in enumerate(durations):
+            if phrase_index >= len(phrases):
+                break
+
+            if chunk_index == len(durations) - 1:
+                end_index = len(phrases)
+            else:
+                target = chunk_word_targets[chunk_index]
+                accumulated = 0
+                end_index = phrase_index
+                while end_index < len(phrases):
+                    next_weight = weights[end_index]
+                    if end_index > phrase_index and accumulated >= target:
+                        break
+                    accumulated += next_weight
+                    end_index += 1
+                end_index = max(phrase_index + 1, end_index)
+
+            group_phrases = phrases[phrase_index:end_index]
+            group_weights = weights[phrase_index:end_index]
+            groups.append((
+                chunk_edges[chunk_index],
+                chunk_edges[chunk_index + 1],
+                group_phrases,
+                group_weights,
+            ))
+            phrase_index = end_index
+
+        # Any phrases not assigned due to more phrases than chunks are
+        # distributed in the final chunk rather than silently discarded.
+        if phrase_index < len(phrases):
+            start, end, old_phrases, old_weights = groups[-1]
+            groups[-1] = (
+                start, end,
+                old_phrases + phrases[phrase_index:],
+                old_weights + weights[phrase_index:],
+            )
+
+        raw_cues = []
+        for start, end, group_phrases, group_weights in groups:
+            group_total = sum(group_weights)
+            cursor = start
+            for index, (phrase, weight) in enumerate(
+                zip(group_phrases, group_weights)
+            ):
+                next_cursor = (
+                    end if index == len(group_phrases) - 1
+                    else cursor + (end - start) * weight / group_total
+                )
+                raw_cues.append({
+                    "start": cursor,
+                    "end": next_cursor,
+                    "text": phrase,
+                })
+                cursor = next_cursor
+    else:
+        raw_cues = []
+        cursor = 0.0
+        for index, (phrase, weight) in enumerate(zip(phrases, weights)):
+            next_cursor = (
+                limit if index == len(phrases) - 1
+                else cursor + limit * weight / total_words
+            )
+            raw_cues.append({
+                "start": cursor,
+                "end": next_cursor,
+                "text": phrase,
+            })
+            cursor = next_cursor
 
     silences = silence_boundaries(audio_path, limit)
-    boundaries = [0.0]
-
-    for target in raw[1:-1]:
-        candidates = [
-            point for point in silences
-            if abs(point - target) <= min(0.75, max(0.25, limit * 0.06))
-            and point > boundaries[-1] + 0.12
-            and point < limit - 0.12
-        ]
-        if candidates:
-            target = min(candidates, key=lambda p: abs(p - target))
-
-        target = max(
-            boundaries[-1] + 0.12,
-            min(target, limit - 0.12),
-        )
-        boundaries.append(target)
-
-    boundaries.append(limit)
     cues = []
 
-    for index, phrase in enumerate(phrases):
-        start, end = boundaries[index], boundaries[index + 1]
+    for cue in raw_cues:
+        start = max(0.0, min(float(cue["start"]), limit))
+        end = max(start, min(float(cue["end"]), limit))
+
+        # Snap only cue ends to nearby real silence; do not reorder cues.
+        candidates = [
+            point for point in silences
+            if abs(point - end) <= min(0.65, max(0.20, limit * 0.04))
+            and point > start + 0.12
+            and point < limit - 0.05
+        ]
+        if candidates:
+            end = min(candidates, key=lambda point: abs(point - end))
+
+        if end - start < 0.10:
+            end = min(limit, start + 0.10)
+
         if end > start:
-            cues.append({"start": start, "end": end, "text": phrase})
+            cues.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": cue["text"],
+            })
 
     if not cues:
         raise RuntimeError("No valid caption cues were generated")
 
-    method = (
-        "silence-assisted-estimate" if silences
-        else "phrase-level-proportional-estimate"
-    )
+    if chunk_used and silences:
+        method = "chunk-aware-silence-assisted-estimate"
+    elif chunk_used:
+        method = "chunk-aware-proportional-estimate"
+    elif silences:
+        method = "silence-assisted-estimate"
+    else:
+        method = "phrase-level-proportional-estimate"
+
     return cues, method
 
 
@@ -448,7 +598,6 @@ def write_srt(path, cues):
 
 
 def sample_luma(video, timestamp, region="bottom"):
-    # Measure the lower caption area, not the entire frame average.
     crop = (
         "crop=iw:ih*0.38:0:ih*0.62"
         if region == "bottom"
@@ -462,7 +611,9 @@ def sample_luma(video, timestamp, region="bottom"):
             f"{crop},scale=1:1:flags=area,format=gray",
             "-f", "rawvideo", "-",
         ],
-        capture_output=True, timeout=90, check=False,
+        capture_output=True,
+        timeout=90,
+        check=False,
     )
     if result.returncode or not result.stdout:
         return 64
@@ -481,7 +632,6 @@ def contrast_style(video, duration, part, scene, story_seed):
     ).digest()
     palette = STYLE_PALETTES[seed[0] % len(STYLE_PALETTES)]
 
-    # Use dark lettering on bright backgrounds and bright lettering on dark.
     if average >= 145:
         primary = palette["dark"]
         outline = "&H00FFFFFF"
@@ -491,10 +641,7 @@ def contrast_style(video, duration, part, scene, story_seed):
         outline = "&H00101010"
         mode = "dark-background"
 
-    # A slightly stronger outline on scenes with uncertain brightness.
     spread = max(samples) - min(samples)
-    outline_width = 3 if spread < 90 else 4
-
     return {
         "mode": mode,
         "palette": palette["name"],
@@ -503,7 +650,7 @@ def contrast_style(video, duration, part, scene, story_seed):
         "primary": primary,
         "outline": outline,
         "back": "&H00000000",
-        "outline_width": outline_width,
+        "outline_width": 3 if spread < 90 else 4,
         "shadow": 1,
         "alignment": 2,
         "margin_vertical": 48 if HEIGHT > WIDTH else 42,
@@ -546,7 +693,7 @@ def caption_filter(srt_path, font_path, family, size, contrast):
 
 def burn_one(
     source, destination, text, video_duration, audio_duration, audio_path,
-    font_path, family, size, style,
+    chunks, font_path, family, size, style,
 ):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_srt = destination.with_suffix(".srt")
@@ -555,7 +702,7 @@ def burn_one(
 
     try:
         cues, timing_method = make_cues(
-            text, audio_duration, video_duration, audio_path
+            text, audio_duration, video_duration, audio_path, chunks
         )
         write_srt(temp_srt, cues)
         vf = caption_filter(temp_srt, font_path, family, size, style)
@@ -573,7 +720,8 @@ def burn_one(
                 "-t", f"{video_duration:.3f}",
                 "-movflags", "+faststart", str(temp_video),
             ],
-            f"Burn captions into {destination.name}", timeout=900,
+            f"Burn captions into {destination.name}",
+            timeout=900,
         )
 
         info = media_info(temp_video)
@@ -630,14 +778,19 @@ def concat_videos(paths, destination):
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
                 "-movflags", "+faststart", str(temporary),
             ],
-            f"Merge {destination.name}", timeout=1800,
+            f"Merge {destination.name}",
+            timeout=1800,
         )
 
         info = media_info(temporary)
         if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(f"Merged video lacks audio/video: {destination}")
+            raise RuntimeError(
+                f"Merged video lacks audio/video: {destination}"
+            )
         if (info["width"], info["height"]) != (WIDTH, HEIGHT):
-            raise RuntimeError(f"Merged video has wrong dimensions: {destination}")
+            raise RuntimeError(
+                f"Merged video has wrong dimensions: {destination}"
+            )
 
         os.replace(temporary, destination)
         return media_info(destination)
@@ -748,8 +901,8 @@ def main():
     log("FORMAT:", mode, "| PARTS:", parts, "| SCENES/PART:", scenes)
     log("FONT:", family, "| SIZE:", size)
     log("STYLE: scene-aware contrast, story-seeded palette, outline")
-    log("TIMING: narration-duration and silence-assisted estimates")
-    log("NOTE: no forced word-level alignment model is used")
+    log("TIMING: chunk-duration-aware estimates with silence refinement")
+    log("NOTE: this is not forced word-level audio alignment")
 
     for index in range(1, expected_count + 1):
         part = (index - 1) // scenes + 1
@@ -762,7 +915,8 @@ def main():
                 row,
                 ("source_rendered_video", "source_video", "video", "output"),
             ),
-            f"Rendered source {key}", MIN_VIDEO_BYTES,
+            f"Rendered source {key}",
+            MIN_VIDEO_BYTES,
         )
         info = media_info(source)
         if not info["has_video"] or not info["has_audio"]:
@@ -780,6 +934,7 @@ def main():
 
         video_duration = info["duration"]
         audio_duration = audio[key]["duration"]
+        chunks = audio[key]["chunks"]
         style = contrast_style(
             source, video_duration, part, scene, story_seed
         )
@@ -798,6 +953,7 @@ def main():
             "size": size,
             "video_duration": round(video_duration, 4),
             "audio_duration": round(audio_duration, 4),
+            "chunks": chunks,
             "style": style,
             "story_seed": story_seed,
         })
@@ -824,15 +980,15 @@ def main():
         if reused:
             result_info = media_info(destination)
             cues, timing_method = make_cues(
-                captions[key], audio_duration,
-                video_duration, audio[key]["path"],
+                captions[key], audio_duration, video_duration,
+                audio[key]["path"], chunks,
             )
             log(f"REUSED {index}/{expected_count}: {destination.name}")
         else:
             result_info, cues, timing_method = burn_one(
                 source, destination, captions[key],
                 video_duration, audio_duration, audio[key]["path"],
-                font_path, family, size, style,
+                chunks, font_path, family, size, style,
             )
             log(
                 f"BURNED {index}/{expected_count}: {destination.name}; "
@@ -857,6 +1013,7 @@ def main():
             "captions_burned": True,
             "caption_style": style,
             "caption_timing": timing_method,
+            "caption_chunk_count": len(chunks),
             "signature": signature,
             "sha256": digest_file(destination),
             "cache_reused": reused,
@@ -868,6 +1025,7 @@ def main():
             "path": relative(destination),
             "caption_style": style,
             "caption_timing": timing_method,
+            "caption_chunk_count": len(chunks),
         }
 
         for cue in cues:
@@ -937,7 +1095,11 @@ def main():
         "captions_burned": True,
         "caption_style": "story-scene-adaptive-contrast",
         "caption_timing": (
-            "silence-assisted-estimate"
+            "chunk-aware-silence-assisted-estimate"
+            if timing_methods.get("chunk-aware-silence-assisted-estimate", 0)
+            else "chunk-aware-proportional-estimate"
+            if timing_methods.get("chunk-aware-proportional-estimate", 0)
+            else "silence-assisted-estimate"
             if timing_methods.get("silence-assisted-estimate", 0)
             else "phrase-level-proportional-estimate"
         ),
