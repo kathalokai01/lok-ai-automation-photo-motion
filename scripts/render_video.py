@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,10 +33,11 @@ PART_DIR = OUT / "parts"
 VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 
-VERSION = "render-video-v32-persistent-scene-checkpoints"
+VERSION = "render-video-v33-duration-fps-checkpoints"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.25
+FPS_TOLERANCE = 0.02
 
 
 def log(*values):
@@ -142,6 +144,32 @@ def run(command, label, timeout=1800):
         )
 
 
+def parse_fps(value):
+    if not value or value in ("0/0", "N/A"):
+        return None
+
+    try:
+        rate = Fraction(str(value))
+        if rate <= 0:
+            return None
+        return float(rate)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def validate_fps(info, expected_fps, label):
+    actual_fps = info.get("fps")
+
+    if actual_fps is None:
+        raise RuntimeError(f"FPS unavailable: {label}")
+
+    if abs(actual_fps - float(expected_fps)) > FPS_TOLERANCE:
+        raise RuntimeError(
+            f"FPS mismatch at {label}: "
+            f"{actual_fps:.4f} vs expected {expected_fps}"
+        )
+
+
 def probe(path):
     result = subprocess.run(
         [
@@ -188,7 +216,7 @@ def probe(path):
         "height": int(video.get("height", 0)) if video else 0,
         "has_video": video is not None,
         "has_audio": audio is not None,
-        "avg_frame_rate": video.get("avg_frame_rate") if video else None,
+        "fps": parse_fps(video.get("avg_frame_rate")) if video else None,
     }
 
 
@@ -277,6 +305,8 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
             raise RuntimeError(
                 f"Photo-motion dimensions mismatch at scene {index}"
             )
+
+        validate_fps(info, fps, f"photo-motion scene {index}")
 
         actual_hash = sha256_file(video)
         declared_hash = row.get("video_sha256")
@@ -399,7 +429,10 @@ def load_previous_manifest(mode):
             continue
 
         try:
-            key = (int(row["part"]), int(row.get("local_scene", row["scene"])))
+            key = (
+                int(row["part"]),
+                int(row.get("local_scene", row["scene"])),
+            )
         except (KeyError, TypeError, ValueError):
             continue
 
@@ -408,7 +441,15 @@ def load_previous_manifest(mode):
     return result
 
 
-def reusable_scene(output, previous, fingerprint, width, height):
+def reusable_scene(
+    output,
+    previous,
+    fingerprint,
+    width,
+    height,
+    fps,
+    audio_duration,
+):
     if not isinstance(previous, dict):
         return None
 
@@ -435,15 +476,38 @@ def reusable_scene(output, previous, fingerprint, width, height):
         if (info["width"], info["height"]) != (width, height):
             return None
 
+        validate_fps(info, fps, str(output))
+
+        if abs(info["duration"] - audio_duration) > DURATION_TOLERANCE:
+            log(
+                "CACHE REJECTED — duration mismatch:",
+                output,
+                f"render={info['duration']:.2f}s",
+                f"audio={audio_duration:.2f}s",
+            )
+            return None
+
         return info, actual_hash
+
     except Exception:
         return None
 
 
-def render_scene(photo, audio, output, fingerprint, previous,
-                 width, height, fps, resume, skip_completed):
-
+def render_scene(
+    photo,
+    audio,
+    output,
+    fingerprint,
+    previous,
+    width,
+    height,
+    fps,
+    resume,
+    skip_completed,
+):
     output.parent.mkdir(parents=True, exist_ok=True)
+
+    audio_duration = audio["duration"]
 
     if resume and skip_completed:
         cached = reusable_scene(
@@ -452,6 +516,8 @@ def render_scene(photo, audio, output, fingerprint, previous,
             fingerprint,
             width,
             height,
+            fps,
+            audio_duration,
         )
         if cached:
             info, actual_hash = cached
@@ -461,7 +527,6 @@ def render_scene(photo, audio, output, fingerprint, previous,
             )
             return info, actual_hash, True
 
-    audio_duration = audio["duration"]
     temporary = output.with_name(output.stem + ".rendering.mp4")
     temporary.unlink(missing_ok=True)
 
@@ -486,6 +551,7 @@ def render_scene(photo, audio, output, fingerprint, previous,
                 "-map", "1:a:0",
                 "-t", f"{audio_duration:.4f}",
                 "-r", str(fps),
+                "-fps_mode", "cfr",
                 "-c:v", "libx264",
                 "-preset", "medium",
                 "-crf", "18",
@@ -502,11 +568,13 @@ def render_scene(photo, audio, output, fingerprint, previous,
         require_file(temporary, "Rendered scene")
         info = probe(temporary)
 
-        if not info["has_audio"]:
-            raise RuntimeError("Rendered scene has no narration audio")
+        if not info["has_video"] or not info["has_audio"]:
+            raise RuntimeError("Rendered scene missing audio/video")
 
         if (info["width"], info["height"]) != (width, height):
             raise RuntimeError("Rendered scene dimensions mismatch")
+
+        validate_fps(info, fps, "newly rendered scene")
 
         if abs(info["duration"] - audio_duration) > DURATION_TOLERANCE:
             raise RuntimeError(
@@ -524,7 +592,7 @@ def render_scene(photo, audio, output, fingerprint, previous,
     return probe(output), actual_hash, False
 
 
-def concat_videos(paths, destination, width, height):
+def concat_videos(paths, destination, width, height, fps):
     if not paths:
         raise RuntimeError(f"No videos supplied for {destination.name}")
 
@@ -538,26 +606,32 @@ def concat_videos(paths, destination, width, height):
         if (info["width"], info["height"]) != (width, height):
             raise RuntimeError(f"Concat input dimensions mismatch: {path}")
 
+        validate_fps(info, fps, f"concat input {path.name}")
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.stem + ".joining.mp4")
     temporary.unlink(missing_ok=True)
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".txt",
-        prefix="katha_concat_",
-        encoding="utf-8",
-        delete=False,
-    ) as stream:
-        list_file = Path(stream.name)
-
-        for path in paths:
-            resolved = str(Path(path).resolve())
-            if "\n" in resolved or "\r" in resolved:
-                raise RuntimeError("Invalid newline in concat path")
-            stream.write("file '" + resolved.replace("'", "'\\''") + "'\n")
+    list_file = None
 
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".txt",
+            prefix="katha_concat_",
+            encoding="utf-8",
+            delete=False,
+        ) as stream:
+            list_file = Path(stream.name)
+
+            for path in paths:
+                resolved = str(Path(path).resolve())
+                if "\n" in resolved or "\r" in resolved:
+                    raise RuntimeError("Invalid newline in concat path")
+                stream.write(
+                    "file '" + resolved.replace("'", "'\\''") + "'\n"
+                )
+
         run(
             [
                 "ffmpeg",
@@ -565,6 +639,8 @@ def concat_videos(paths, destination, width, height):
                 "-f", "concat",
                 "-safe", "0",
                 "-i", str(list_file),
+                "-r", str(fps),
+                "-fps_mode", "cfr",
                 "-c:v", "libx264",
                 "-preset", "veryfast",
                 "-crf", "19",
@@ -587,18 +663,28 @@ def concat_videos(paths, destination, width, height):
         if (info["width"], info["height"]) != (width, height):
             raise RuntimeError("Joined video dimensions mismatch")
 
+        validate_fps(info, fps, f"joined video {destination.name}")
+
         os.replace(temporary, destination)
         return probe(destination)
 
     finally:
-        list_file.unlink(missing_ok=True)
+        if list_file is not None:
+            list_file.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)
 
 
-def build_manifest(mode, fps, width, height, expected_count,
-                   completed, parts, photo_manifest_hash,
-                   audio_manifest_hash):
-
+def build_manifest(
+    mode,
+    fps,
+    width,
+    height,
+    expected_count,
+    completed,
+    parts,
+    photo_manifest_hash,
+    audio_manifest_hash,
+):
     ordered = [
         completed[key]
         for key in sorted(completed)
@@ -698,8 +784,7 @@ def main():
     reused_count = 0
     rendered_count = 0
 
-    # Retain only old checkpoints whose files and source fingerprints
-    # still match the current input manifests.
+    # Retain only checkpoints whose source and media validation still pass.
     for part in range(1, parts + 1):
         for scene in range(1, scenes + 1):
             key = (part, scene)
@@ -724,7 +809,13 @@ def main():
                 continue
 
             cached = reusable_scene(
-                output, old_row, fingerprint, width, height
+                output,
+                old_row,
+                fingerprint,
+                width,
+                height,
+                fps,
+                audio["duration"],
             )
             if not cached:
                 continue
@@ -756,13 +847,18 @@ def main():
                 "cache_reused": True,
             }
 
-    # Persist retained checkpoints immediately. An interruption after this
-    # point will not erase valid completed scenes from the previous run.
     write_json(
         RENDER_MANIFEST,
         build_manifest(
-            mode, fps, width, height, expected_count,
-            completed, [], photo_manifest_hash, audio_manifest_hash,
+            mode,
+            fps,
+            width,
+            height,
+            expected_count,
+            completed,
+            [],
+            photo_manifest_hash,
+            audio_manifest_hash,
         ),
     )
 
@@ -795,6 +891,14 @@ def main():
             if was_cached:
                 info = probe(output)
                 actual_hash = sha256_file(output)
+
+                if abs(info["duration"] - audio["duration"]) > DURATION_TOLERANCE:
+                    raise RuntimeError(
+                        f"Cached scene duration changed: Part {part} "
+                        f"Scene {scene}"
+                    )
+
+                validate_fps(info, fps, f"cached Part {part} Scene {scene}")
                 reused = True
             else:
                 info, actual_hash, reused = render_scene(
@@ -841,13 +945,19 @@ def main():
             completed[key] = row
             scene_paths.append(output)
 
-            # Checkpoint after every successful scene.
+            # Save a durable checkpoint after every successful scene.
             write_json(
                 RENDER_MANIFEST,
                 build_manifest(
-                    mode, fps, width, height, expected_count,
-                    completed, part_rows,
-                    photo_manifest_hash, audio_manifest_hash,
+                    mode,
+                    fps,
+                    width,
+                    height,
+                    expected_count,
+                    completed,
+                    part_rows,
+                    photo_manifest_hash,
+                    audio_manifest_hash,
                 ),
             )
 
@@ -858,7 +968,11 @@ def main():
 
         part_output = PART_DIR / f"part_{part:02d}.mp4"
         part_info = concat_videos(
-            scene_paths, part_output, width, height
+            scene_paths,
+            part_output,
+            width,
+            height,
+            fps,
         )
 
         part_rows.append({
@@ -869,14 +983,21 @@ def main():
             "output": part_output.relative_to(ROOT).as_posix(),
             "duration": round(part_info["duration"], 4),
             "sha256": sha256_file(part_output),
+            "fps": fps,
         })
 
         write_json(
             RENDER_MANIFEST,
             build_manifest(
-                mode, fps, width, height, expected_count,
-                completed, part_rows,
-                photo_manifest_hash, audio_manifest_hash,
+                mode,
+                fps,
+                width,
+                height,
+                expected_count,
+                completed,
+                part_rows,
+                photo_manifest_hash,
+                audio_manifest_hash,
             ),
         )
 
@@ -919,6 +1040,17 @@ def main():
                 f"Rendered scene dimensions mismatch: {index}"
             )
 
+        validate_fps(info, fps, f"final scene {index}")
+
+        audio_duration = audio_map[
+            (int(row["part"]), int(row["scene"]))
+        ]["duration"]
+
+        if abs(info["duration"] - audio_duration) > DURATION_TOLERANCE:
+            raise RuntimeError(
+                f"Final scene duration mismatch: {index}"
+            )
+
     pre_caption = VIDEO_DIR / "pre_caption_render.mp4"
 
     concat_videos(
@@ -929,6 +1061,7 @@ def main():
         pre_caption,
         width,
         height,
+        fps,
     )
 
     pre_caption_info = probe(pre_caption)
@@ -937,14 +1070,23 @@ def main():
         raise RuntimeError("Pre-caption video has no audio stream")
 
     if (pre_caption_info["width"], pre_caption_info["height"]) != (
-        width, height
+        width,
+        height,
     ):
         raise RuntimeError("Pre-caption video dimensions mismatch")
 
+    validate_fps(pre_caption_info, fps, "pre-caption video")
+
     manifest = build_manifest(
-        mode, fps, width, height, expected_count,
-        completed, part_rows,
-        photo_manifest_hash, audio_manifest_hash,
+        mode,
+        fps,
+        width,
+        height,
+        expected_count,
+        completed,
+        part_rows,
+        photo_manifest_hash,
+        audio_manifest_hash,
     )
 
     manifest.update({
