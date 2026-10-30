@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Resumable format-aware photo-motion renderer with verified scene checkpoints."""
+"""Resumable format-aware cinematic photo-motion renderer."""
 
 from __future__ import annotations
 
@@ -24,25 +23,23 @@ DEPTH_MANIFEST = VISUALS / "depth_maps" / "depth_manifest.json"
 OUTPUT_DIR = OUT / "photo_motion"
 MANIFEST_FILE = OUTPUT_DIR / "photo_motion_manifest.json"
 
-VERSION = "photo-motion-v7-format-aware-resume-integrity"
-WIDTH = 1280
-HEIGHT = 720
+VERSION = "photo-motion-v8-depth-guided-checkpoints"
 CRF = 20
 PRESET = "medium"
 MIN_IMAGE_BYTES = 1000
 MIN_VIDEO_BYTES = 1000
+MIN_DEPTH_BYTES = 100
 
 EFFECTS = (
     "zoom_in",
     "pan_left",
-    "parallax",
-    "tilt_up",
+    "cinematic_sweep",
     "zoom_out",
     "pan_right",
-    "tilt_down",
+    "tilt_up",
     "diagonal_drift",
     "handheld_drift",
-    "cinematic_sweep",
+    "tilt_down",
     "dutch_angle",
 )
 
@@ -153,13 +150,19 @@ def scene_number(row, index):
 
 
 def scene_duration(row):
-    for key in ("duration", "scene_duration", "duration_seconds", "seconds"):
+    for key in (
+        "duration",
+        "scene_duration",
+        "duration_seconds",
+        "seconds",
+    ):
         try:
             value = float(row.get(key))
         except (TypeError, ValueError):
             continue
         if math.isfinite(value) and 0.5 <= value <= 3600:
             return value
+
     raise RuntimeError(
         "Each scene requires a valid duration between 0.5 and 3600 seconds"
     )
@@ -197,6 +200,7 @@ def prepare_jobs(rows):
             row.get("image_path") or row.get("image"),
             f"scene {number} image",
         )
+
         if not image.is_file() or image.stat().st_size < MIN_IMAGE_BYTES:
             raise RuntimeError(f"Missing or too-small scene image: {image}")
 
@@ -204,10 +208,13 @@ def prepare_jobs(rows):
             with Image.open(image) as opened:
                 opened.verify()
             with Image.open(image) as opened:
-                if opened.width < 64 or opened.height < 64:
+                width, height = opened.size
+                if width < 64 or height < 64:
                     raise ValueError("Image is smaller than 64x64")
                 if opened.format not in ("PNG", "JPEG", "WEBP"):
-                    raise ValueError(f"Unsupported image format: {opened.format}")
+                    raise ValueError(
+                        f"Unsupported image format: {opened.format}"
+                    )
         except Exception as exc:
             raise RuntimeError(
                 f"Cannot validate image for scene {number}: {exc}"
@@ -219,6 +226,8 @@ def prepare_jobs(rows):
             "local_scene": local,
             "image": image,
             "image_sha256": sha256_file(image),
+            "image_width": width,
+            "image_height": height,
             "duration": scene_duration(row),
             "target": OUTPUT_DIR / f"scene_{number:04d}.mp4",
         })
@@ -241,7 +250,7 @@ def prepare_jobs(rows):
     return prepared
 
 
-def read_depth_maps():
+def read_depth_maps(prepared):
     data = read_json(DEPTH_MANIFEST)
     if data is None:
         log("NOTICE: No depth manifest; using 2D motion.")
@@ -259,6 +268,14 @@ def read_depth_maps():
     else:
         rows = []
 
+    if not isinstance(rows, list):
+        raise RuntimeError("Depth manifest scene list is invalid")
+
+    expected = {
+        item["number"]: item["image_sha256"]
+        for item in prepared
+    }
+
     result = {}
     from PIL import Image
 
@@ -267,7 +284,10 @@ def read_depth_maps():
             continue
 
         try:
-            number = int(row.get("global_scene", row.get("scene")))
+            number = positive_int(
+                row.get("global_scene", row.get("scene")),
+                "depth manifest scene number",
+            )
             path = safe_path(
                 row.get("depth_map") or row.get("path") or row.get("file"),
                 f"depth map scene {number}",
@@ -275,7 +295,11 @@ def read_depth_maps():
         except (TypeError, ValueError, RuntimeError):
             continue
 
-        if number < 1 or not path.is_file() or path.stat().st_size < 100:
+        if number not in expected:
+            continue
+
+        if not path.is_file() or path.stat().st_size < MIN_DEPTH_BYTES:
+            log(f"WARNING: Missing or undersized depth map for scene {number}")
             continue
 
         try:
@@ -283,23 +307,31 @@ def read_depth_maps():
                 opened.verify()
             with Image.open(path) as opened:
                 if opened.width < 64 or opened.height < 64:
-                    continue
-        except Exception:
-            log(f"WARNING: Invalid depth map for scene {number}")
+                    raise ValueError("Depth map is too small")
+                if opened.mode not in ("1", "L", "I", "I;16", "F"):
+                    opened.convert("L")
+        except Exception as exc:
+            log(f"WARNING: Invalid depth map for scene {number}: {exc}")
             continue
 
         source_hash = row.get("image_sha256")
-        if not isinstance(source_hash, str) or len(source_hash) != 64:
+        if source_hash != expected[number]:
+            log(f"WARNING: Stale depth map ignored for scene {number}")
             continue
 
         actual_depth_hash = sha256_file(path)
-        expected_hash = row.get("depth_sha256")
-        if expected_hash and expected_hash != actual_depth_hash:
+        expected_depth_hash = row.get("depth_sha256")
+
+        if (
+            expected_depth_hash
+            and expected_depth_hash != actual_depth_hash
+        ):
             log(f"WARNING: Depth checksum mismatch for scene {number}")
             continue
 
         model = str(row.get("model", "unknown"))
         status = str(row.get("status", "unknown"))
+
         ai_depth = (
             model == "depth-anything/Depth-Anything-V2-Small-hf"
             and status not in {
@@ -319,6 +351,14 @@ def read_depth_maps():
         }
 
     log("Validated depth maps:", len(result))
+    log(
+        "AI depth maps:",
+        sum(1 for item in result.values() if item["is_ai_depth"]),
+    )
+    log(
+        "Approximate depth maps:",
+        sum(1 for item in result.values() if not item["is_ai_depth"]),
+    )
     return result
 
 
@@ -345,33 +385,52 @@ def previous_entries():
     return result
 
 
-def write_manifest(entries, mode, fps, status):
+def write_manifest(entries, mode, width, height, fps, expected_count, status):
     rows = [entries[number] for number in sorted(entries)]
+
     atomic_json(
         MANIFEST_FILE,
         {
             "status": status,
             "version": VERSION,
             "format": mode,
-            "width": WIDTH,
-            "height": HEIGHT,
+            "width": width,
+            "height": height,
             "fps": fps,
-            "expected_scene_count": len(rows),
+            "expected_scene_count": expected_count,
             "completed_count": sum(
                 row.get("status") == "completed" for row in rows
+            ),
+            "ai_depth_parallax_count": sum(
+                row.get("effect_uses_ai_depth") is True for row in rows
+            ),
+            "approximate_depth_parallax_count": sum(
+                row.get("depth_is_approximate_fallback") is True
+                for row in rows
             ),
             "scenes": rows,
         },
     )
 
 
-def choose_effect(index):
+def choose_effect(index, depth):
+    """
+    Use real AI depth more often; do not mislabel pseudo-depth as AI.
+    Approximate depth is used more sparingly.
+    """
+    if depth and depth["is_ai_depth"] and index % 3 == 1:
+        return "parallax"
+
+    if depth and not depth["is_ai_depth"] and index % 7 == 4:
+        return "parallax"
+
     return EFFECTS[index % len(EFFECTS)]
 
 
 def make_filter(effect, frames, width, height, fps):
     denominator = max(frames - 1, 1)
-    source_width, source_height = width * 2, height * 2
+    source_width = width * 2
+    source_height = height * 2
 
     zoom = "1.06"
     x = "(iw-iw/zoom)/2"
@@ -425,25 +484,31 @@ def make_filter(effect, frames, width, height, fps):
         "setsar=1",
         "format=yuv420p",
     ])
+
     return ",".join(filters)
 
 
 def probe_clip(path, ffprobe, width, height, expected_duration, fps):
+    path = Path(path)
+
     if not path.is_file() or path.stat().st_size < MIN_VIDEO_BYTES:
         raise RuntimeError(f"Missing or too-small video: {path}")
 
     result = subprocess.run(
         [
-            ffprobe, "-v", "error",
+            ffprobe,
+            "-v", "error",
             "-show_entries",
             "stream=codec_type,width,height,r_frame_rate:format=duration",
-            "-of", "json", str(path),
+            "-of", "json",
+            str(path),
         ],
         capture_output=True,
         text=True,
         timeout=60,
         check=False,
     )
+
     if result.returncode:
         raise RuntimeError(
             f"ffprobe failed for {path.name}: {result.stderr[-600:]}"
@@ -469,6 +534,7 @@ def probe_clip(path, ffprobe, width, height, expected_duration, fps):
         int(stream.get("width", 0)),
         int(stream.get("height", 0)),
     )
+
     if actual_size != (width, height):
         raise RuntimeError(
             f"{path.name}: expected {width}x{height}, got {actual_size}"
@@ -501,7 +567,7 @@ def probe_clip(path, ffprobe, width, height, expected_duration, fps):
     return duration
 
 
-def signature(item, effect, depth, frames, fps, mode):
+def signature(item, effect, depth, frames, fps, mode, width, height):
     payload = {
         "version": VERSION,
         "renderer_sha256": sha256_file(Path(__file__)),
@@ -518,34 +584,54 @@ def signature(item, effect, depth, frames, fps, mode):
         "effect": effect,
         "depth_sha256": depth["depth_sha256"] if depth else None,
         "depth_model": depth["model"] if depth else None,
-        "width": WIDTH,
-        "height": HEIGHT,
+        "width": width,
+        "height": height,
         "fps": fps,
         "format": mode,
         "crf": CRF,
         "preset": PRESET,
     }
+
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
     ).hexdigest()
 
 
-def try_reuse(item, old, sig, ffprobe, duration, fps):
-    if not isinstance(old, dict) or old.get("cache_signature") != sig:
+def try_reuse(
+    item,
+    old,
+    sig,
+    ffprobe,
+    duration,
+    fps,
+    width,
+    height,
+):
+    if not isinstance(old, dict):
+        return None
+
+    if old.get("cache_signature") != sig:
         return None
 
     try:
         path = safe_path(old.get("video"), "cached scene video")
+
         if path != item["target"] or not path.is_file():
             return None
 
         actual_hash = sha256_file(path)
-        if old.get("video_sha256") and old["video_sha256"] != actual_hash:
+        if old.get("video_sha256") != actual_hash:
             return None
 
         actual_duration = probe_clip(
-            path, ffprobe, WIDTH, HEIGHT, duration, fps
+            path,
+            ffprobe,
+            width,
+            height,
+            duration,
+            fps,
         )
+
         row = dict(old)
         row.update({
             "scene": item["number"],
@@ -558,29 +644,32 @@ def try_reuse(item, old, sig, ffprobe, duration, fps):
             "video_sha256": actual_hash,
             "duration": actual_duration,
             "size_bytes": path.stat().st_size,
-            "width": WIDTH,
-            "height": HEIGHT,
+            "width": width,
+            "height": height,
             "fps": fps,
             "format": row.get("format"),
             "status": "completed",
         })
         return row
+
     except (OSError, ValueError, RuntimeError):
         return None
 
 
-def render_parallax(item, depth_path, target, frames, fps):
+def render_parallax(item, depth_path, target, frames, fps, width, height):
     script = ROOT / "scripts" / "depth_parallax.py"
+
     if not script.is_file():
         raise RuntimeError(f"Missing parallax renderer: {script}")
 
     run_command([
-        sys.executable, str(script),
+        sys.executable,
+        str(script),
         "--image", str(item["image"]),
         "--depth", str(depth_path),
         "--output", str(target),
-        "--width", str(WIDTH),
-        "--height", str(HEIGHT),
+        "--width", str(width),
+        "--height", str(height),
         "--fps", str(fps),
         "--frames", str(frames),
         "--strength", "0.018",
@@ -588,17 +677,14 @@ def render_parallax(item, depth_path, target, frames, fps):
 
 
 def main():
-    global WIDTH, HEIGHT
-
     config = load_and_validate(ROOT / "Input" / "topic.txt")
     mode = str(get_format(config)).strip().lower()
-    fps = int(get_fps(config))
+    fps = positive_int(get_fps(config), "FPS")
 
-    # Short videos are portrait (9:16); full videos are landscape (16:9).
     if mode == "short":
-        WIDTH, HEIGHT = 720, 1280
+        width, height = 720, 1280
     elif mode == "full":
-        WIDTH, HEIGHT = 1280, 720
+        width, height = 1280, 720
     else:
         raise RuntimeError(f"Unsupported video format: {mode}")
 
@@ -607,55 +693,81 @@ def main():
 
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
+
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and ffprobe are required")
 
     prepared = prepare_jobs(read_jobs())
-    depth_maps = read_depth_maps()
+    depth_maps = read_depth_maps(prepared)
     previous = previous_entries()
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    current = {item["number"] for item in prepared}
+    expected_numbers = {item["number"] for item in prepared}
     entries = {
         number: row
         for number, row in previous.items()
-        if number in current
+        if number in expected_numbers
     }
 
     def checkpoint(status="in_progress"):
-        write_manifest(entries, mode, fps, status)
+        write_manifest(
+            entries,
+            mode,
+            width,
+            height,
+            fps,
+            len(prepared),
+            status,
+        )
 
     checkpoint()
     generated = 0
     reused = 0
     ai_parallax = 0
-    fallback_parallax = 0
+    approximate_parallax = 0
+    two_d_motion = 0
 
     log("PHOTO MOTION:", VERSION)
-    log("FORMAT:", mode, "| SIZE:", f"{WIDTH}x{HEIGHT}", "| FPS:", fps)
+    log("FORMAT:", mode, "| SIZE:", f"{width}x{height}", "| FPS:", fps)
     log("SCENES:", len(prepared))
+    log("DEPTH MAPS:", len(depth_maps))
 
     for index, item in enumerate(prepared):
         number = item["number"]
         frames = max(1, round(item["duration"] * fps))
         duration = frames / fps
-        effect = choose_effect(index)
         depth = depth_maps.get(number)
 
-        if depth and depth["image_sha256"] != item["image_sha256"]:
-            log(f"Scene {number}: ignoring stale depth map")
-            depth = None
+        effect = choose_effect(index, depth)
 
-        has_depth = depth is not None
-        if effect == "parallax" and not has_depth:
-            effect = "cinematic_sweep"
+        if effect == "parallax" and depth is None:
+            effect = EFFECTS[index % len(EFFECTS)]
 
         used_depth = depth if effect == "parallax" else None
-        sig = signature(item, effect, used_depth, frames, fps, mode)
+
+        sig = signature(
+            item,
+            effect,
+            used_depth,
+            frames,
+            fps,
+            mode,
+            width,
+            height,
+        )
 
         cached = try_reuse(
-            item, previous.get(number), sig, ffprobe, duration, fps
+            item,
+            previous.get(number),
+            sig,
+            ffprobe,
+            duration,
+            fps,
+            width,
+            height,
         )
+
         if cached:
             entries[number] = cached
             reused += 1
@@ -664,23 +776,37 @@ def main():
             continue
 
         target = item["target"]
-        temporary = target.with_name(target.stem + ".rendering.mp4")
+        temporary = target.with_name(
+            target.stem + ".rendering.mp4"
+        )
         temporary.unlink(missing_ok=True)
 
         try:
             if effect == "parallax" and used_depth:
                 render_parallax(
-                    item, used_depth["path"], temporary, frames, fps
+                    item,
+                    used_depth["path"],
+                    temporary,
+                    frames,
+                    fps,
+                    width,
+                    height,
                 )
             else:
                 run_command([
                     ffmpeg,
-                    "-hide_banner", "-loglevel", "error", "-y",
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-y",
                     "-loop", "1",
                     "-framerate", str(fps),
                     "-i", str(item["image"]),
                     "-vf", make_filter(
-                        effect, frames, WIDTH, HEIGHT, fps
+                        effect,
+                        frames,
+                        width,
+                        height,
+                        fps,
                     ),
                     "-frames:v", str(frames),
                     "-an",
@@ -694,16 +820,26 @@ def main():
                 ])
 
             actual_duration = probe_clip(
-                temporary, ffprobe, WIDTH, HEIGHT, duration, fps
+                temporary,
+                ffprobe,
+                width,
+                height,
+                duration,
+                fps,
             )
             temporary.replace(target)
+
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
 
         video_hash = sha256_file(target)
-        ai_depth = bool(used_depth and used_depth["is_ai_depth"])
-        fallback_depth = bool(used_depth and not used_depth["is_ai_depth"])
+        ai_depth = bool(
+            used_depth and used_depth["is_ai_depth"]
+        )
+        fallback_depth = bool(
+            used_depth and not used_depth["is_ai_depth"]
+        )
 
         entries[number] = {
             "scene": number,
@@ -718,18 +854,20 @@ def main():
                 used_depth["path"].relative_to(ROOT).as_posix()
                 if used_depth else None
             ),
-            "depth_map_available": has_depth,
-            "depth_model": used_depth["model"] if used_depth else None,
+            "depth_map_available": depth is not None,
+            "depth_model": (
+                used_depth["model"] if used_depth else None
+            ),
             "depth_is_ai_estimated": ai_depth,
             "depth_is_approximate_fallback": fallback_depth,
             "effect": effect,
-            "effect_is_depth_guided": effect == "parallax" and has_depth,
-            "effect_uses_ai_depth": effect == "parallax" and ai_depth,
+            "effect_is_depth_guided": effect == "parallax",
+            "effect_uses_ai_depth": ai_depth,
             "duration": actual_duration,
             "requested_duration": item["duration"],
             "frames": frames,
-            "width": WIDTH,
-            "height": HEIGHT,
+            "width": width,
+            "height": height,
             "fps": fps,
             "format": mode,
             "size_bytes": target.stat().st_size,
@@ -739,38 +877,70 @@ def main():
         }
 
         generated += 1
-        ai_parallax += int(effect == "parallax" and ai_depth)
-        fallback_parallax += int(effect == "parallax" and fallback_depth)
-        checkpoint()
-        log(f"Scene {number}: checkpoint saved; effect={effect}")
+        ai_parallax += int(ai_depth)
+        approximate_parallax += int(fallback_depth)
+        two_d_motion += int(effect != "parallax")
 
-    # Validate every expected scene before marking the manifest completed.
+        checkpoint()
+        log(
+            f"Scene {number}: checkpoint saved; "
+            f"effect={effect}; "
+            f"depth={'AI' if ai_depth else 'approximate' if fallback_depth else 'unused'}"
+        )
+
+    if set(entries) != expected_numbers:
+        missing = sorted(expected_numbers - set(entries))
+        raise RuntimeError(f"Scene manifest is missing scenes: {missing}")
+
     for item in prepared:
         number = item["number"]
         row = entries.get(number)
+
         if not isinstance(row, dict) or row.get("status") != "completed":
             raise RuntimeError(f"Scene {number} is not complete")
+
         if row.get("image_sha256") != item["image_sha256"]:
             raise RuntimeError(f"Scene {number} image checksum mismatch")
 
-        target = safe_path(row.get("video"), f"scene {number} output")
+        target = safe_path(
+            row.get("video"),
+            f"scene {number} output",
+        )
+
         if target != item["target"]:
-            raise RuntimeError(f"Scene {number} has an unexpected output path")
+            raise RuntimeError(
+                f"Scene {number} has an unexpected output path"
+            )
 
         frames = max(1, round(item["duration"] * fps))
-        probe_clip(target, ffprobe, WIDTH, HEIGHT, frames / fps, fps)
+        expected_duration = frames / fps
+
+        probe_clip(
+            target,
+            ffprobe,
+            width,
+            height,
+            expected_duration,
+            fps,
+        )
+
         if row.get("video_sha256") != sha256_file(target):
-            raise RuntimeError(f"Scene {number} video checksum mismatch")
+            raise RuntimeError(
+                f"Scene {number} video checksum mismatch"
+            )
 
     checkpoint(status="completed")
 
+    log("=" * 55)
     log("PHOTO MOTION COMPLETE")
     log("SCENES:", len(prepared))
     log("NEW CLIPS:", generated)
     log("REUSED CLIPS:", reused)
     log("AI-DEPTH PARALLAX CLIPS:", ai_parallax)
-    log("FALLBACK-DEPTH PARALLAX CLIPS:", fallback_parallax)
+    log("APPROXIMATE-DEPTH PARALLAX CLIPS:", approximate_parallax)
+    log("2D MOTION CLIPS:", two_d_motion)
     log("MANIFEST:", MANIFEST_FILE.relative_to(ROOT))
+    log("=" * 55)
 
 
 if __name__ == "__main__":
