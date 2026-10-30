@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Offline story planner with story-grounded hooks, suspense and safe checkpoints."""
+"""Offline story planner with story-grounded hooks and safe checkpoints."""
 
 from __future__ import annotations
 
@@ -20,14 +20,13 @@ from input_config import (
     get_scenes,
     get_topic,
     get_story_text,
-    get_title_source,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "offline-structural-story-plan-v3-story-grounded-hooks"
+VERSION = "offline-structural-story-plan-v4-no-first-line-title"
 
 SHORT_BEATS = (
     ("hook", "Open with an immediate mystery, danger, surprising choice or unanswered question grounded in the story."),
@@ -138,10 +137,7 @@ def split_sentences(text: str) -> list[str]:
 
 
 def story_anchors(story_text: str, topic: str, total_scenes: int) -> list[str]:
-    """
-    Select source-story excerpts as planning anchors.
-    This does not invent events or call an external model.
-    """
+    """Select source-story excerpts without inventing events."""
     sentences = split_sentences(story_text)
     if not sentences:
         return [clean_text(topic)] if clean_text(topic) else []
@@ -151,7 +147,9 @@ def story_anchors(story_text: str, topic: str, total_scenes: int) -> list[str]:
 
     selected = []
     for index in range(total_scenes):
-        position = round(index * (len(sentences) - 1) / max(1, total_scenes - 1))
+        position = round(
+            index * (len(sentences) - 1) / max(1, total_scenes - 1)
+        )
         selected.append(sentences[position])
 
     return selected
@@ -233,7 +231,11 @@ def build_plan(
         scenes = []
 
         for scene_number in range(1, scenes_per_part + 1):
-            anchor = anchors[global_number] if global_number < len(anchors) else ""
+            anchor = (
+                anchors[global_number]
+                if global_number < len(anchors)
+                else ""
+            )
             beat, description = select_beat(
                 format_type, global_number, total
             )
@@ -275,7 +277,9 @@ def build_plan(
                 role, beat, description, anchor, topic
             )
 
-            scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
+            scene_id = (
+                f"part_{part_number:02d}_scene_{scene_number:02d}"
+            )
             scenes.append({
                 "scene": scene_number,
                 "global_scene_number": global_number + 1,
@@ -320,13 +324,22 @@ def build_plan(
         "parts": parts,
     }
 
+    # A pasted story without an explicit topic has no title at planning time.
+    # generate_story.py will create the final title after reading the full story.
+    planned_title = topic if topic else ""
+
     return {
         "status": "planned",
         "script_version": VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "format": format_type,
         "topic": topic,
-        "title": get_title_source(config),
+        "title": planned_title,
+        "title_source": (
+            "explicit_topic"
+            if planned_title
+            else "deferred_to_full_story_generation"
+        ),
         "parts_count": parts_count,
         "scenes_per_part": scenes_per_part,
         "total_scenes": total,
@@ -378,7 +391,9 @@ def validate_plan(
     global_number = 0
     for part_number, part in enumerate(parts, 1):
         if not isinstance(part, dict) or part.get("part") != part_number:
-            raise RuntimeError(f"Invalid part numbering at part {part_number}.")
+            raise RuntimeError(
+                f"Invalid part numbering at part {part_number}."
+            )
 
         scenes = part.get("scenes")
         if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
@@ -389,20 +404,39 @@ def validate_plan(
 
         for scene_number, scene in enumerate(scenes, 1):
             global_number += 1
-            expected_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
+            expected_id = (
+                f"part_{part_number:02d}_scene_{scene_number:02d}"
+            )
 
             if not isinstance(scene, dict):
                 raise RuntimeError(f"Invalid scene: {expected_id}.")
             if scene.get("scene") != scene_number:
-                raise RuntimeError(f"Incorrect local scene number: {expected_id}.")
+                raise RuntimeError(
+                    f"Incorrect local scene number: {expected_id}."
+                )
             if scene.get("global_scene_number") != global_number:
-                raise RuntimeError(f"Incorrect global scene number: {expected_id}.")
+                raise RuntimeError(
+                    f"Incorrect global scene number: {expected_id}."
+                )
             if scene.get("scene_id") != expected_id:
-                raise RuntimeError(f"Incorrect scene ID: {expected_id}.")
+                raise RuntimeError(
+                    f"Incorrect scene ID: {expected_id}."
+                )
             if not str(scene.get("purpose", "")).strip():
-                raise RuntimeError(f"Missing scene purpose: {expected_id}.")
+                raise RuntimeError(
+                    f"Missing scene purpose: {expected_id}."
+                )
             if not isinstance(scene.get("story_anchor", ""), str):
-                raise RuntimeError(f"Invalid story anchor: {expected_id}.")
+                raise RuntimeError(
+                    f"Invalid story anchor: {expected_id}."
+                )
+
+    expected_title = topic if topic else ""
+    if plan.get("title", "") != expected_title:
+        raise RuntimeError(
+            "Story plan title must be the explicit topic or empty "
+            "until full-story title generation."
+        )
 
 
 def main() -> None:
@@ -417,7 +451,7 @@ def main() -> None:
     scenes_per_part = int(get_scenes(config))
 
     if format_type not in {"short", "full"}:
-        raise RuntimeError(f"Unsupported FORMAT: {format_type}")
+        raise RuntimeError(f"Unsupported format: {format_type}")
     if parts_count < 1 or scenes_per_part < 1:
         raise RuntimeError("PARTS and SCENES must be positive integers.")
     if not topic and not story_text:
@@ -456,6 +490,7 @@ def main() -> None:
     log("Version:", VERSION)
     log("Format:", format_type)
     log("Topic:", topic or "(story text only)")
+    log("Title:", plan["title"] or "(deferred to full-story generation)")
     log("Parts:", parts_count)
     log("Scenes per part:", scenes_per_part)
     log("Total scenes:", parts_count * scenes_per_part)
