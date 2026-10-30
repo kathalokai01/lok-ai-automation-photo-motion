@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Katha Lok AI — strict story, title, format and plan verification."""
+"""Katha Lok AI — independent story, title, hook and format verification."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 SHORT_MIN_WORDS = 120
 SHORT_MAX_WORDS = 150
 
-VERSION = "story-verifier-v5-short-count-title-plan-integrity"
+VERSION = "story-verifier-v6-generator-compatible-hook-ending"
 
 
 def fail(message: str) -> None:
@@ -43,8 +43,12 @@ def clean(value) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
-def word_count(text: str) -> int:
-    return len(re.findall(r"\S+", clean(text)))
+def word_count(value: str) -> int:
+    # Must match generate_story.py word-count rules.
+    return len(re.findall(
+        r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*|[\u0900-\u097F]+",
+        clean(value),
+    ))
 
 
 def positive_int(value, field: str) -> int:
@@ -110,11 +114,10 @@ def verify_plan(plan, mode, parts_expected, scenes_expected, topic):
         fail("story_plan.json FORMAT does not match Input/topic.txt.")
 
     if clean(plan.get("topic")) != topic:
-        fail("story_plan.json topic does not match current input.")
+        fail("story_plan.json topic does not match Input/topic.txt.")
 
-    # v4 planner deliberately leaves title empty when only story text exists.
-    expected_plan_title = topic
-    if clean(plan.get("title")) != expected_plan_title:
+    # The planner leaves title empty for pasted-story-only input.
+    if clean(plan.get("title")) != topic:
         fail(
             "story_plan.json title must equal the explicit topic, "
             "or remain empty when no topic was supplied."
@@ -210,8 +213,8 @@ def verify_story(
 
     if not topic and story_topic != title:
         fail(
-            "When no topic is supplied, story.json topic "
-            "must match its generated title."
+            "Without an explicit topic, story.json topic "
+            "must match its generated whole-story title."
         )
 
     hook = clean(story.get("hook"))
@@ -227,12 +230,13 @@ def verify_story(
             f"found {len(parts) if isinstance(parts, list) else 0}."
         )
 
-    if len(plan_parts) != parts_expected:
+    if not isinstance(plan_parts, list) or len(plan_parts) != parts_expected:
         fail("Story and plan part counts do not match.")
 
     total_scenes = parts_expected * scenes_expected
     seen_ids = set()
     actual_word_counts = []
+    nonfinal_suspense_count = 0
 
     for p, part in enumerate(parts, 1):
         if not isinstance(part, dict):
@@ -291,7 +295,7 @@ def verify_story(
                 plan_scene.get("global_scene_number"),
                 scene_id + " plan global number",
             ) != global_number:
-                fail(f"Plan global scene number mismatch: {scene_id}.")
+                fail(f"Plan global number mismatch: {scene_id}.")
 
             if scene_id in seen_ids:
                 fail(f"Duplicate scene ID: {scene_id}.")
@@ -314,13 +318,33 @@ def verify_story(
 
         actual_word_counts.append(part_words)
 
+        last_scene = scenes[-1]
+        suspense = clean(last_scene.get("suspense"))
+
+        if p < parts_expected:
+            if not suspense:
+                fail(f"Part {p} has no ending suspense marker.")
+
+            ending_narration = clean(last_scene.get("narration"))
+            if not ending_narration:
+                fail(f"Part {p} has no ending narration.")
+
+            # The current story builder stores the ending sentence as
+            # the suspense marker. Verify that it belongs to this scene.
+            if suspense not in ending_narration:
+                fail(
+                    f"Part {p} suspense marker does not match "
+                    "its final scene narration."
+                )
+
+            nonfinal_suspense_count += 1
+
     if len(seen_ids) != total_scenes:
         fail(
             f"Total scene count mismatch: expected {total_scenes}, "
             f"found {len(seen_ids)}."
         )
 
-    # Strict independent short-format validation.
     if mode == "short":
         for p, amount in enumerate(actual_word_counts, 1):
             if not SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS:
@@ -330,40 +354,75 @@ def verify_story(
                 )
 
     declared_counts = story.get("part_word_counts")
-    if isinstance(declared_counts, list):
-        if len(declared_counts) != parts_expected:
-            fail("story.json part_word_counts has an incorrect length.")
+    if not isinstance(declared_counts, list):
+        fail("story.json part_word_counts is missing or invalid.")
 
-        for p, (declared, actual) in enumerate(
-            zip(declared_counts, actual_word_counts), 1
-        ):
-            try:
-                declared = int(declared)
-            except (TypeError, ValueError):
-                fail(f"Invalid declared word count for part {p}.")
+    if len(declared_counts) != parts_expected:
+        fail("story.json part_word_counts has an incorrect length.")
 
-            if declared != actual:
-                fail(
-                    f"Part {p} word count mismatch: "
-                    f"declared {declared}, actual {actual}."
-                )
+    for p, (declared, actual) in enumerate(
+        zip(declared_counts, actual_word_counts), 1
+    ):
+        try:
+            declared = int(declared)
+        except (TypeError, ValueError):
+            fail(f"Invalid declared word count for part {p}.")
+
+        if declared != actual:
+            fail(
+                f"Part {p} word count mismatch: "
+                f"declared {declared}, actual {actual}."
+            )
 
     generation = story.get("_generation", {})
-    if isinstance(generation, dict):
-        expected_generation = {
-            "format": mode,
-            "parts": parts_expected,
-            "scenes_per_part": scenes_expected,
-            "total_scenes": total_scenes,
-        }
+    if not isinstance(generation, dict):
+        fail("story.json _generation metadata must be an object.")
 
-        for field, expected in expected_generation.items():
-            if field not in generation:
-                continue
-            if generation[field] != expected:
-                fail(f"story.json _generation.{field} mismatch.")
+    expected_generation = {
+        "format": mode,
+        "parts": parts_expected,
+        "scenes_per_part": scenes_expected,
+        "total_scenes": total_scenes,
+    }
 
-    # Check source text fingerprint when the field is present.
+    for field, expected in expected_generation.items():
+        if field in generation and generation[field] != expected:
+            fail(f"story.json _generation.{field} mismatch.")
+
+    # Verify that the opening hook is actually part of the first scene.
+    first_scene = parts[0]["scenes"][0]
+    first_narration = clean(first_scene.get("narration"))
+
+    if hook not in first_narration:
+        fail("Opening hook does not match the first scene narration.")
+
+    first_sentence = re.split(
+        r"(?<=[.!?।॥])\s+",
+        first_narration,
+        maxsplit=1,
+    )[0].strip()
+
+    if not first_sentence:
+        fail("The first scene has no usable opening sentence.")
+
+    if hook != first_sentence:
+        fail(
+            "Story hook must match the first complete sentence "
+            "of the first scene."
+        )
+
+    # The final part must have a real final narration and a declared
+    # resolution ending. Do not require a fabricated suspense marker.
+    final_scene = parts[-1]["scenes"][-1]
+    final_narration = clean(final_scene.get("narration"))
+
+    if not final_narration:
+        fail("Final story ending narration is empty.")
+
+    if clean(story.get("ending_type")).lower() != "resolution":
+        fail("Final story ending_type must be resolution.")
+
+    # Confirm source text integrity when the hash is present.
     expected_hash = hashlib.sha256(
         clean(source_text).encode("utf-8")
     ).hexdigest()
@@ -372,11 +431,23 @@ def verify_story(
     if stored_hash and stored_hash != expected_hash:
         fail("story.json source text fingerprint does not match input.")
 
-    # The plan must not invent a generated title when no topic was supplied.
+    # The planner must not invent a title for pasted-story-only input.
     if not topic and clean(plan.get("title")):
         fail("Story plan contains an unexpected generated title.")
 
-    return title, actual_word_counts, total_scenes
+    # The current generator emits mapping version 5.
+    try:
+        mapping_version = int(story.get("mapping_version", -1))
+    except (TypeError, ValueError):
+        mapping_version = -1
+
+    if mapping_version != 5:
+        fail(
+            "story.json mapping_version mismatch: "
+            f"expected 5, found {mapping_version}."
+        )
+
+    return title, actual_word_counts, total_scenes, nonfinal_suspense_count
 
 
 def verify_title_file(title):
@@ -389,7 +460,10 @@ def verify_title_file(title):
     except OSError as exc:
         fail(f"Cannot read final_title.txt: {exc}")
 
-    if saved_title and saved_title != title:
+    if not saved_title:
+        fail("final_title.txt is empty.")
+
+    if saved_title != title:
         fail(
             "final_title.txt does not match story.json title. "
             "Regenerate the story title file."
@@ -409,7 +483,12 @@ def main():
 
     verify_plan(plan, mode, parts, scenes, topic)
 
-    title, word_counts, total = verify_story(
+    (
+        title,
+        word_counts,
+        total,
+        suspense_count,
+    ) = verify_story(
         story,
         mode,
         parts,
@@ -428,11 +507,15 @@ def main():
     print("Scenes per part:", scenes)
     print("Total scenes:", total)
     print("Words per part:", word_counts)
+    print("Non-final suspense markers:", suspense_count)
     print("Short word limit:", (
         f"{SHORT_MIN_WORDS}-{SHORT_MAX_WORDS}"
         if mode == "short" else "not applicable"
     ))
-    print("Verified: input, title, plan, scene IDs, numbering and word counts.")
+    print(
+        "Verified: input, title, plan mapping, scene IDs, "
+        "numbering, narration, visual prompts, hook, ending and word counts."
+    )
     print("=" * 58)
 
 
