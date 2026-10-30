@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate story-based cinematic thumbnails compatible with final validation."""
+"""Create story-aware cinematic thumbnails from completed visual assets."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -28,6 +28,7 @@ THUMBNAIL_VERTICAL = OUTPUT_DIR / "thumbnail_1080x1920.jpg"
 MANIFEST = OUTPUT_DIR / "thumbnail_manifest.json"
 
 MIN_IMAGE_BYTES = 1000
+VERSION = "thumbnail-v31-story-hero-cinematic-adaptive"
 
 
 def log(*args):
@@ -42,10 +43,8 @@ def read_json(path):
 
 
 def write_json(path, data):
-    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-
     try:
         temporary.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -62,49 +61,52 @@ def clean_text(value):
     return re.sub(r"\s+", " ", value).strip().strip("\"' ")
 
 
-def read_topic(config):
-    return clean_text(config.get("TOPIC", ""))
+def first_text(data, keys):
+    if not isinstance(data, dict):
+        return ""
+    for key in keys:
+        value = clean_text(data.get(key))
+        if value:
+            return value
+    return ""
+
+
+def get_story_data():
+    for path in (AI_STORY, STORY):
+        data = read_json(path)
+        if isinstance(data, dict):
+            return data, path.relative_to(ROOT).as_posix()
+    return {}, ""
 
 
 def get_story_title(config):
-    for path in (AI_STORY, STORY):
-        data = read_json(path)
+    data, source = get_story_data()
 
-        if not isinstance(data, dict):
-            continue
+    title = first_text(data, (
+        "title",
+        "final_title",
+        "story_title",
+        "generated_title",
+    ))
 
-        for key in (
-            "title",
-            "final_title",
-            "story_title",
-            "generated_title",
-        ):
-            title = clean_text(data.get(key))
-            if title:
-                return title, path.relative_to(ROOT).as_posix()
+    if title:
+        return title, source
 
     if FINAL_TITLE.is_file():
-        title = clean_text(
-            FINAL_TITLE.read_text(encoding="utf-8-sig")
-        )
+        title = clean_text(FINAL_TITLE.read_text(encoding="utf-8-sig"))
         if title:
             return title, FINAL_TITLE.relative_to(ROOT).as_posix()
 
-    topic = read_topic(config)
-
+    topic = clean_text(config.get("TOPIC", ""))
     if topic:
-        log("WARNING: Story title unavailable; TOPIC fallback used.")
-        return topic, "Input/topic.txt fallback"
+        log("WARNING: Story title missing; TOPIC fallback used.")
+        return topic, "Input/topic.txt"
 
-    raise RuntimeError(
-        "No story title found in AI story, story file, "
-        "final_title.txt or TOPIC."
-    )
+    raise RuntimeError("Story title is missing.")
 
 
 def valid_image(path):
     path = Path(path)
-
     if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
         return False
 
@@ -121,7 +123,6 @@ def resolve_image(value):
         return None
 
     path = Path(value.strip())
-
     if not path.is_absolute():
         path = ROOT / path
 
@@ -136,9 +137,6 @@ def resolve_image(value):
 
 
 def job_image(job):
-    if not isinstance(job, dict):
-        return None
-
     for key in (
         "visual_path",
         "asset_path",
@@ -146,11 +144,11 @@ def job_image(job):
         "file",
         "path",
         "image_path",
+        "image",
     ):
         path = resolve_image(job.get(key))
         if path:
             return path
-
     return None
 
 
@@ -158,27 +156,76 @@ def load_visual_jobs():
     data = read_json(VISUAL_MANIFEST)
 
     if not isinstance(data, dict):
-        raise RuntimeError(
-            f"Visual manifest missing or invalid: {VISUAL_MANIFEST}"
-        )
+        raise RuntimeError("Visual jobs manifest is missing or invalid.")
 
     jobs = data.get("jobs")
 
     if isinstance(jobs, dict):
-        return [(str(key), value) for key, value in jobs.items()
-                if isinstance(value, dict)]
+        return [(str(k), v) for k, v in jobs.items()
+                if isinstance(v, dict)]
 
     if isinstance(jobs, list):
-        return [(str(index), value) for index, value in enumerate(jobs)
-                if isinstance(value, dict)]
+        return [(str(i), v) for i, v in enumerate(jobs)
+                if isinstance(v, dict)]
 
     for key in ("scenes", "visuals", "items"):
         rows = data.get(key)
         if isinstance(rows, list):
-            return [(str(index), value) for index, value in enumerate(rows)
-                    if isinstance(value, dict)]
+            return [(str(i), v) for i, v in enumerate(rows)
+                    if isinstance(v, dict)]
 
-    raise RuntimeError("Visual manifest has no supported jobs collection.")
+    raise RuntimeError("Visual jobs collection is unsupported.")
+
+
+def scene_score(job):
+    """Prefer visually dramatic scenes instead of always selecting scene 1."""
+    text_fields = (
+        "prompt",
+        "image_prompt",
+        "visual_prompt",
+        "scene_prompt",
+        "description",
+        "mood",
+        "suspense",
+        "hook",
+        "camera",
+    )
+
+    text = " ".join(
+        clean_text(job.get(key)) for key in text_fields
+    ).lower()
+
+    positive = (
+        "dramatic", "cinematic", "suspense", "mystery",
+        "danger", "fear", "shock", "reveal", "climax",
+        "storm", "fire", "dark", "night", "shadow",
+        "chase", "battle", "crying", "emotional",
+        "surprise", "secret", "haunted", "ghost",
+        "expression", "close-up", "close up",
+        "intense", "threat", "conflict", "twist",
+    )
+
+    negative = (
+        "empty room", "plain background", "establishing shot",
+        "wide landscape", "title card", "text overlay",
+    )
+
+    score = sum(3 for word in positive if word in text)
+    score -= sum(2 for word in negative if word in text)
+
+    if job.get("hook") or job.get("is_hook"):
+        score += 8
+
+    if job.get("is_climax") or job.get("climax"):
+        score += 10
+
+    if job.get("is_suspense") or job.get("suspense"):
+        score += 5
+
+    if job.get("character_focus") or job.get("close_up"):
+        score += 3
+
+    return score
 
 
 def choose_hero_visual():
@@ -198,81 +245,62 @@ def choose_hero_visual():
 
         try:
             part = int(job.get("part", 0))
-            scene = int(job.get("scene", job.get("local_scene", 0)))
+            scene = int(job.get(
+                "global_scene",
+                job.get("scene", job.get("local_scene", 0)),
+            ))
         except (TypeError, ValueError):
-            match = re.search(
-                r"part[_/](\d+).*scene[_/](\d+)",
-                key,
-                re.IGNORECASE,
-            )
-            if match:
-                part, scene = int(match.group(1)), int(match.group(2))
-            else:
-                part, scene = 999999, 999999
+            part, scene = 999999, 999999
 
         candidates.append({
             "part": part,
             "scene": scene,
             "path": path,
             "key": key,
+            "score": scene_score(job),
+            "prompt": clean_text(
+                job.get("visual_prompt")
+                or job.get("image_prompt")
+                or job.get("prompt")
+                or job.get("description")
+            ),
         })
 
-    if candidates:
-        candidates.sort(
-            key=lambda item: (item["part"], item["scene"])
+    if not candidates:
+        raise RuntimeError(
+            "No valid completed image found in visual_jobs.json."
         )
-        chosen = candidates[0]
-        log(
-            "Selected hero visual:",
-            chosen["part"],
-            chosen["scene"],
-            chosen["path"],
-        )
-        return chosen
 
-    # Fallback only when the visual manifest has no usable completed image.
-    search_dirs = [
-        ROOT / "output" / "visuals",
-        ROOT / "output" / "images",
-    ]
+    candidates.sort(
+        key=lambda item: (
+            item["score"],
+            -item["part"],
+            -item["scene"],
+        ),
+        reverse=True,
+    )
 
-    extensions = {".png", ".jpg", ".jpeg", ".webp"}
-    found = []
+    chosen = candidates[0]
 
-    for directory in search_dirs:
-        if not directory.is_dir():
-            continue
+    log("HERO IMAGE SELECTED:", chosen["path"])
+    log("HERO SCENE:", chosen["scene"])
+    log("HERO SCORE:", chosen["score"])
 
-        for path in sorted(directory.rglob("*")):
-            if path.is_file() and path.suffix.lower() in extensions:
-                if valid_image(path):
-                    found.append(path)
-
-    if not found:
-        raise RuntimeError("No valid completed visual image found.")
-
-    log("WARNING: Using first valid image as fallback:", found[0])
-
-    return {
-        "part": 0,
-        "scene": 0,
-        "path": found[0],
-        "key": "fallback",
-    }
+    return chosen
 
 
 def find_font(size):
     candidates = [
         "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
         "/usr/share/fonts/truetype/mukta/Mukta-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     ]
 
-    for value in candidates:
-        path = Path(value)
+    for candidate in candidates:
+        path = Path(candidate)
         if path.is_file():
             try:
                 return ImageFont.truetype(str(path), size=size)
@@ -282,7 +310,7 @@ def find_font(size):
     try:
         return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
     except Exception as exc:
-        raise RuntimeError("No usable thumbnail font is installed.") from exc
+        raise RuntimeError("No usable thumbnail font found.") from exc
 
 
 def crop_to_ratio(image, ratio):
@@ -299,18 +327,48 @@ def crop_to_ratio(image, ratio):
     return image.crop((0, top, width, top + new_height))
 
 
-def sample_accent(image):
-    small = image.resize((1, 1)).convert("RGB")
-    red, green, blue = small.getpixel((0, 0))
+def sample_palette(image):
+    small = image.resize((32, 32)).convert("RGB")
+    pixels = list(small.getdata())
 
-    if blue > red * 1.15:
-        return (100, 190, 255)
-    if green > red * 1.15:
-        return (130, 230, 160)
-    if red > blue * 1.25:
-        return (255, 145, 105)
+    red = sum(p[0] for p in pixels) / len(pixels)
+    green = sum(p[1] for p in pixels) / len(pixels)
+    blue = sum(p[2] for p in pixels) / len(pixels)
+    brightness = (red + green + blue) / 3
 
-    return (255, 205, 115)
+    if brightness < 75:
+        return {
+            "accent": (255, 190, 65),
+            "text": (255, 248, 225),
+            "shadow": (0, 0, 0),
+        }
+
+    if blue > red * 1.12:
+        return {
+            "accent": (110, 195, 255),
+            "text": (245, 250, 255),
+            "shadow": (5, 12, 30),
+        }
+
+    if green > red * 1.12:
+        return {
+            "accent": (125, 235, 170),
+            "text": (245, 255, 245),
+            "shadow": (5, 25, 15),
+        }
+
+    if red > blue * 1.2:
+        return {
+            "accent": (255, 135, 95),
+            "text": (255, 245, 235),
+            "shadow": (35, 5, 5),
+        }
+
+    return {
+        "accent": (255, 205, 100),
+        "text": (255, 250, 235),
+        "shadow": (25, 15, 5),
+    }
 
 
 def wrap_text(draw, text, font, max_width):
@@ -335,100 +393,144 @@ def wrap_text(draw, text, font, max_width):
     return lines
 
 
-def add_cinematic_overlay(image, title, vertical=False):
-    image = image.convert("RGB")
+def shorten_title(title, max_chars=85):
+    title = clean_text(title)
+    if len(title) <= max_chars:
+        return title
+
+    shortened = title[:max_chars]
+    if " " in shortened:
+        shortened = shortened.rsplit(" ", 1)[0]
+
+    return shortened.rstrip(" ,.!?;:") + "…"
+
+
+def add_gradient(image, vertical=False):
     width, height = image.size
-    accent = sample_accent(image)
-
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
+    draw = ImageDraw.Draw(overlay)
 
-    start_y = int(height * (0.55 if vertical else 0.56))
+    start = int(height * (0.48 if vertical else 0.52))
 
-    for y in range(start_y, height):
-        progress = (y - start_y) / max(1, height - start_y)
-        alpha = int(15 + progress * 190)
-        overlay_draw.line(
+    for y in range(start, height):
+        progress = (y - start) / max(1, height - start)
+        alpha = int(10 + progress * 205)
+        draw.line(
             [(0, y), (width, y)],
             fill=(0, 0, 0, alpha),
         )
 
-    image = Image.alpha_composite(
+    return Image.alpha_composite(
         image.convert("RGBA"), overlay
     ).convert("RGB")
 
+
+def add_side_vignette(image):
+    width, height = image.size
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    band = max(1, int(width * 0.12))
+
+    for x in range(band):
+        alpha = int(95 * (1 - x / band))
+        draw.line(
+            [(x, 0), (x, height)],
+            fill=(0, 0, 0, alpha),
+        )
+        draw.line(
+            [(width - x - 1, 0), (width - x - 1, height)],
+            fill=(0, 0, 0, alpha),
+        )
+
+    return Image.alpha_composite(
+        image.convert("RGBA"), overlay
+    ).convert("RGB")
+
+
+def draw_title(image, title, vertical=False):
+    width, height = image.size
+    palette = sample_palette(image)
+
+    image = add_gradient(image, vertical)
+    image = add_side_vignette(image)
     draw = ImageDraw.Draw(image)
 
+    title = shorten_title(title, 75 if vertical else 65)
+
     if vertical:
-        max_width = int(width * 0.86)
-        max_height = int(height * 0.27)
-        base_size = max(38, width // 12)
-        title_y = int(height * 0.69)
+        max_width = int(width * 0.88)
+        max_height = int(height * 0.24)
+        base_size = max(38, width // 11)
+        title_y = int(height * 0.70)
     else:
         max_width = int(width * 0.88)
-        max_height = int(height * 0.29)
-        base_size = max(34, width // 19)
-        title_y = int(height * 0.68)
+        max_height = int(height * 0.30)
+        base_size = max(34, width // 18)
+        title_y = int(height * 0.67)
 
-    font = None
-    lines = []
+    selected_font = None
+    selected_lines = []
 
-    for size in range(base_size, max(18, base_size // 2), -2):
-        candidate = find_font(size)
-        candidate_lines = wrap_text(
-            draw, title, candidate, max_width
-        )
-        line_height = int(size * 1.28)
+    for size in range(base_size, 17, -2):
+        font = find_font(size)
+        lines = wrap_text(draw, title, font, max_width)
+        line_height = int(size * 1.22)
 
-        if (
-            len(candidate_lines) <= 3
-            and len(candidate_lines) * line_height <= max_height
-        ):
-            font = candidate
-            lines = candidate_lines
+        if len(lines) <= 3 and len(lines) * line_height <= max_height:
+            selected_font = font
+            selected_lines = lines
             break
 
-    if font is None:
-        font = find_font(max(18, base_size // 2))
-        lines = wrap_text(draw, title, font, max_width)[:3]
+    if selected_font is None:
+        selected_font = find_font(20)
+        selected_lines = wrap_text(
+            draw, title, selected_font, max_width
+        )[:3]
 
-    line_height = int(font.size * 1.28)
-    accent_y = title_y - int(font.size * 0.45)
+    font = selected_font
+    line_height = int(font.size * 1.22)
 
+    accent_y = title_y - max(12, font.size // 2)
     draw.rounded_rectangle(
         (
-            int(width * 0.08),
+            int(width * 0.07),
             accent_y,
-            int(width * 0.30),
-            accent_y + max(5, font.size // 16),
+            int(width * 0.34),
+            accent_y + max(5, font.size // 15),
         ),
         radius=5,
-        fill=accent,
+        fill=palette["accent"],
     )
 
     y = title_y
 
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=3)
-        text_width = bbox[2] - bbox[0]
-        x = (width - text_width) // 2
-
-        draw.text(
-            (x + 4, y + 5),
+    for line in selected_lines:
+        bbox = draw.textbbox(
+            (0, 0),
             line,
             font=font,
-            fill=(0, 0, 0),
-            stroke_width=6,
-            stroke_fill=(0, 0, 0),
+            stroke_width=4,
+        )
+        text_width = bbox[2] - bbox[0]
+        x = max(8, (width - text_width) // 2)
+
+        draw.text(
+            (x + 3, y + 5),
+            line,
+            font=font,
+            fill=palette["shadow"],
+            stroke_width=8,
+            stroke_fill=palette["shadow"],
         )
 
         draw.text(
             (x, y),
             line,
             font=font,
-            fill=(255, 255, 255),
-            stroke_width=3,
-            stroke_fill=(20, 20, 20),
+            fill=palette["text"],
+            stroke_width=4,
+            stroke_fill=palette["shadow"],
         )
 
         y += line_height
@@ -443,11 +545,15 @@ def create_thumbnail(source, title, dimensions, destination):
     with Image.open(source) as opened:
         image = opened.convert("RGB")
 
+    image = ImageEnhance.Color(image).enhance(1.12)
+    image = ImageEnhance.Contrast(image).enhance(1.10)
+    image = ImageEnhance.Sharpness(image).enhance(1.15)
+
     ratio = dimensions[0] / dimensions[1]
     image = crop_to_ratio(image, ratio)
     image = image.resize(dimensions, Image.Resampling.LANCZOS)
 
-    image = add_cinematic_overlay(
+    image = draw_title(
         image,
         title,
         vertical=dimensions[1] > dimensions[0],
@@ -466,9 +572,7 @@ def create_thumbnail(source, title, dimensions, destination):
         )
 
         if not valid_image(temporary):
-            raise RuntimeError(
-                f"Generated thumbnail failed image validation: {temporary}"
-            )
+            raise RuntimeError("Generated thumbnail failed validation.")
 
         temporary.replace(destination)
     finally:
@@ -477,11 +581,14 @@ def create_thumbnail(source, title, dimensions, destination):
 
 def main():
     log("=" * 65)
-    log("KATHA LOK AI — STORY-BASED CINEMATIC THUMBNAILS")
+    log("KATHA LOK AI — STORY-AWARE CINEMATIC THUMBNAILS")
     log("=" * 65)
 
     config = load_and_validate(INPUT)
-    mode = get_format(config)
+    mode = str(get_format(config)).strip().lower()
+
+    if mode not in {"short", "full"}:
+        raise RuntimeError(f"Unsupported FORMAT: {mode}")
 
     title, title_source = get_story_title(config)
     hero = choose_hero_visual()
@@ -494,7 +601,6 @@ def main():
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # The final validator and ZIP packager require this exact primary path.
     create_thumbnail(
         source,
         title,
@@ -502,7 +608,6 @@ def main():
         THUMBNAIL_MAIN,
     )
 
-    # Keep the organized 16:9 copy and vertical thumbnail too.
     create_thumbnail(
         source,
         title,
@@ -517,30 +622,34 @@ def main():
         THUMBNAIL_VERTICAL,
     )
 
-    for path, expected_size in (
+    outputs = (
         (THUMBNAIL_MAIN, (1280, 720)),
         (THUMBNAIL_16_9, (1280, 720)),
         (THUMBNAIL_VERTICAL, (1080, 1920)),
-    ):
+    )
+
+    for path, expected_size in outputs:
         if not valid_image(path):
-            raise RuntimeError(f"Thumbnail output invalid: {path}")
+            raise RuntimeError(f"Invalid thumbnail output: {path}")
 
         with Image.open(path) as image:
             if image.size != expected_size:
                 raise RuntimeError(
-                    f"Thumbnail dimensions mismatch: {path}: "
-                    f"{image.size}, expected {expected_size}"
+                    f"Thumbnail dimensions mismatch: {path}; "
+                    f"found {image.size}, expected {expected_size}"
                 )
 
     manifest = {
         "status": "completed",
-        "version": "thumbnail-v30-validator-compatible",
+        "version": VERSION,
         "format": mode,
         "title": title,
         "title_source": title_source,
         "source_visual": source.relative_to(ROOT).as_posix(),
         "source_part": hero["part"],
         "source_scene": hero["scene"],
+        "source_scene_score": hero["score"],
+        "source_visual_prompt": hero["prompt"],
         "thumbnail": THUMBNAIL_MAIN.relative_to(ROOT).as_posix(),
         "path": THUMBNAIL_MAIN.relative_to(ROOT).as_posix(),
         "output": THUMBNAIL_MAIN.relative_to(ROOT).as_posix(),
@@ -571,7 +680,6 @@ def main():
 
     write_json(MANIFEST, manifest)
 
-    log("")
     log("THUMBNAILS COMPLETE")
     log("FORMAT:", mode)
     log("PRIMARY:", THUMBNAIL_MAIN.relative_to(ROOT))
