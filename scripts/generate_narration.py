@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Prepare validated narration records and preserve caption-language fields."""
 
@@ -27,11 +26,11 @@ from input_config import (
 CONFIG_FILE = ROOT / "Input" / "topic.txt"
 SCENES_FILE = ROOT / "output" / "scenes" / "scenes.json"
 AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
+SOURCE_STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "narration" / "narration.json"
 
-VERSION = 6
+VERSION = 7
 
-# Preserve explicitly authored translations. This script does not translate.
 CAPTION_FIELDS = (
     "caption_hindi",
     "hindi_caption",
@@ -76,6 +75,7 @@ def digest(value):
 def save_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
+
     try:
         with temp.open("w", encoding="utf-8") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -199,6 +199,43 @@ def load_source_scenes():
     return scenes, AI_STORY_FILE.relative_to(ROOT).as_posix()
 
 
+def load_story_title():
+    """Prefer generated full-story titles over pasted story first lines."""
+    for path in (AI_STORY_FILE, SOURCE_STORY_FILE):
+        data = read_json(path, required=False)
+        if not isinstance(data, dict):
+            continue
+
+        title = str(data.get("title") or "").strip()
+        if title:
+            return title
+
+        topic = str(data.get("topic") or "").strip()
+        if topic:
+            return topic
+
+    return ""
+
+
+def resolve_title(config):
+    # An explicitly entered TOPIC is the user's chosen title/topic.
+    explicit_topic = get_topic(config).strip()
+    if explicit_topic:
+        return explicit_topic
+
+    # Generated story title is authoritative for pasted-story input.
+    generated_title = load_story_title()
+    if generated_title:
+        return generated_title
+
+    # Do not silently use the first sentence as a generated title.
+    story_text = get_story_text(config).strip()
+    if story_text:
+        return ""
+
+    return ""
+
+
 def normalize_settings(config):
     return {
         "format": get_format(config),
@@ -218,7 +255,6 @@ def normalize_settings(config):
 
 
 def caption_metadata(source):
-    """Copy only explicitly supplied caption/language fields."""
     result = {}
     for field in CAPTION_FIELDS:
         if field in source:
@@ -340,7 +376,6 @@ def load_reusable(settings_hash, source_map, settings):
             continue
 
         expected = make_record(source_map[key], settings)
-        # Include all caption metadata so changed translations invalidate cache.
         fields = set(expected)
         if all(row.get(field) == expected.get(field) for field in fields):
             reusable[key] = expected
@@ -363,13 +398,7 @@ def main():
     source, source_path = load_source_scenes()
     source_map = validate_scenes(source, settings)
 
-    topic = get_topic(config)
-    if not topic:
-        story_text = get_story_text(config)
-        topic = story_text.splitlines()[0].strip() if story_text else ""
-    if not topic:
-        story = read_json(AI_STORY_FILE, required=False) or {}
-        topic = str(story.get("title") or story.get("topic") or "").strip()
+    topic = resolve_title(config)
 
     source_fingerprint = digest(canonical_json([
         {
@@ -383,6 +412,7 @@ def main():
     settings_hash = digest(canonical_json({
         "version": VERSION,
         "settings": settings,
+        "title": topic,
         "source_fingerprint": source_fingerprint,
         "source_path": source_path,
     }))
@@ -410,6 +440,7 @@ def main():
     save_json(OUTPUT_FILE, output)
 
     print("Format:", settings["format"])
+    print("Title:", topic or "(not available)")
     print("Expected scenes:", total)
     print("Source:", source_path)
     print("Reusable scenes:", len(reusable))
@@ -464,6 +495,7 @@ def main():
             "word_counts_verified": True,
             "caption_language_fields_preserved": True,
             "duration_estimates_are_not_actual_audio_timings": True,
+            "generated_story_title_preferred_over_story_first_line": True,
         },
     })
     save_json(OUTPUT_FILE, output)
