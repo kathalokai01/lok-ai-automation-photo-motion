@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-
-from input_config import load_input_config, normalize_format
 
 
 CONFIG_FILE = Path("Input/topic.txt")
@@ -15,28 +15,232 @@ SCENES_FILE = Path("output/scenes/scenes.json")
 
 I2V_DIR = Path("output/i2v")
 AUDIO_DIR = Path("output/narration/audio")
+
 SCENES_OUT = Path("output/scenes/rendered")
 PARTS_OUT = Path("output/parts")
-VIDEOS_OUT = Path("output/videos")
 
 MANIFEST_OUT = Path("output/video_render_manifest.json")
 
 
-def run(command, label):
-    print(f"\n{'=' * 65}\n{label}\n{'=' * 65}")
+# ============================================================
+# CONFIG
+# ============================================================
+
+def load_config():
+    if not CONFIG_FILE.is_file():
+        raise RuntimeError(
+            "Input/topic.txt not found."
+        )
+
+    config = {}
+
+    for raw in CONFIG_FILE.read_text(
+        encoding="utf-8-sig"
+    ).splitlines():
+
+        line = raw.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+
+        config[key.strip().upper()] = (
+            value.strip().strip('"').strip("'")
+        )
+
+    return config
+
+
+CONFIG = load_config()
+
+FORMAT = CONFIG.get(
+    "FORMAT",
+    "full"
+).strip().lower()
+
+if FORMAT in {
+    "short",
+    "shorts",
+    "vertical",
+    "reels",
+    "reel",
+    "youtube_short",
+    "youtube-shorts",
+}:
+    FORMAT = "short"
+
+elif FORMAT in {
+    "full",
+    "long",
+    "landscape",
+    "youtube",
+    "youtube_full",
+    "youtube-long",
+}:
+    FORMAT = "full"
+
+else:
+    raise RuntimeError(
+        f"Unsupported FORMAT: {FORMAT}"
+    )
+
+
+def config_bool(key, default):
+    value = CONFIG.get(key)
+
+    if value is None:
+        return default
+
+    return str(value).strip().lower() in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }
+
+
+def config_int(key, default, minimum=1, maximum=120):
+    try:
+        value = int(CONFIG.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+
+    return max(
+        minimum,
+        min(maximum, value)
+    )
+
+
+FPS = config_int(
+    "FPS",
+    24,
+    1,
+    60
+)
+
+RESUME_ENABLED = config_bool(
+    "RESUME_ENABLED",
+    True
+)
+
+SKIP_COMPLETED = config_bool(
+    "SKIP_COMPLETED_SCENES",
+    True
+)
+
+SAVE_CHECKPOINT = config_bool(
+    "SAVE_CHECKPOINT_AFTER_EACH_SCENE",
+    True
+)
+
+WIDTH, HEIGHT = (
+    (720, 1280)
+    if FORMAT == "short"
+    else (1920, 1080)
+)
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def log(message):
+    print(message, flush=True)
+
+
+def atomic_json(path, data):
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    temp = path.with_suffix(
+        path.suffix + ".tmp"
+    )
+
+    temp.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2
+        ) + "\n",
+        encoding="utf-8"
+    )
+
+    os.replace(
+        temp,
+        path
+    )
+
+
+def load_json(path):
+    if not path.is_file():
+        raise RuntimeError(
+            f"Required JSON not found: {path}"
+        )
+
+    try:
+        return json.loads(
+            path.read_text(
+                encoding="utf-8-sig"
+            )
+        )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Invalid JSON {path}: {exc}"
+        )
+
+
+def load_optional_json(path):
+    if not path.is_file():
+        return {}
+
+    try:
+        data = json.loads(
+            path.read_text(
+                encoding="utf-8-sig"
+            )
+        )
+
+        return data if isinstance(data, dict) else {}
+
+    except Exception:
+        return {}
+
+
+def valid_file(path, minimum_size=1000):
+    return (
+        path.is_file()
+        and path.stat().st_size >= minimum_size
+    )
+
+
+def run_command(command, label):
+    log("")
+    log("=" * 65)
+    log(label)
+    log("=" * 65)
 
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        check=False
     )
 
-    print(result.stdout)
+    if result.stdout:
+        print(result.stdout, flush=True)
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"{label} failed with exit code {result.returncode}"
+            f"{label} failed with exit code "
+            f"{result.returncode}"
         )
 
 
@@ -44,574 +248,778 @@ def probe_duration(path):
     result = subprocess.run(
         [
             "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(path),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path)
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        check=False
     )
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"Cannot read media duration: {path}"
+            f"ffprobe failed for {path}: "
+            f"{result.stderr.strip()}"
         )
 
     try:
         duration = float(result.stdout.strip())
-    except ValueError as exc:
+    except Exception:
         raise RuntimeError(
-            f"Invalid media duration: {path}"
-        ) from exc
+            f"Invalid duration for {path}"
+        )
 
     if duration <= 0:
-        raise RuntimeError(f"Invalid duration: {path}")
+        raise RuntimeError(
+            f"Zero or negative duration: {path}"
+        )
 
     return duration
 
 
-def valid_media(path, minimum_size=1000):
-    if not path.is_file():
-        return False
+def file_fingerprint(*paths):
+    digest = hashlib.sha256()
 
-    if path.stat().st_size < minimum_size:
-        return False
-
-    try:
-        probe_duration(path)
-        return True
-    except Exception:
-        return False
-
-
-def natural_sort(path):
-    match = re.search(r"(\d+)", path.stem)
-    return int(match.group(1)) if match else 999999
-
-
-def find_existing(directory, names):
-    for name in names:
-        path = directory / name
-        if valid_media(path):
-            return path
-    return None
-
-
-def find_i2v_clip(part, scene):
-    directory = I2V_DIR / f"part_{part:02d}"
-
-    return find_existing(
-        directory,
-        [
-            f"scene_{scene:02d}.mp4",
-            f"scene_{scene}.mp4",
-        ],
+    digest.update(
+        f"{FORMAT}|{WIDTH}|{HEIGHT}|{FPS}".encode()
     )
 
+    for path in paths:
+        digest.update(
+            str(path).encode("utf-8")
+        )
 
-def find_audio(part, scene):
-    directory = AUDIO_DIR / f"part_{part:02d}"
+        if not path.is_file():
+            digest.update(b"MISSING")
+            continue
 
-    return find_existing(
-        directory,
-        [
-            f"scene_{scene:02d}.mp3",
-            f"scene_{scene}.mp3",
-            f"scene_{scene:02d}.wav",
-            f"scene_{scene}.wav",
-        ],
+        stat = path.stat()
+
+        digest.update(
+            f"{stat.st_size}:{stat.st_mtime_ns}".encode()
+        )
+
+    return digest.hexdigest()
+
+
+# ============================================================
+# INPUT SCENES
+# ============================================================
+
+def load_scenes():
+    data = load_json(
+        SCENES_FILE
     )
 
+    if isinstance(data, list):
+        scenes = data
 
-def load_project():
-    if not CONFIG_FILE.is_file():
-        raise RuntimeError("Input/topic.txt not found.")
-
-    config = load_input_config()
-    format_name = normalize_format(config)
-
-    if format_name not in {"short", "full"}:
-        raise RuntimeError(
-            f"Unsupported FORMAT: {format_name}"
+    elif isinstance(data, dict):
+        scenes = data.get(
+            "scenes",
+            []
         )
 
-    if not SCENES_FILE.is_file():
+        if not isinstance(scenes, list):
+            raise RuntimeError(
+                "scenes.json 'scenes' must be a list."
+            )
+
+        if data.get("status") not in {
+            None,
+            "completed",
+        }:
+            raise RuntimeError(
+                "scenes.json is not completed. "
+                f"Current status: {data.get('status')}"
+            )
+
+    else:
         raise RuntimeError(
-            "output/scenes/scenes.json not found."
+            "Unsupported scenes.json structure."
         )
 
-    data = json.loads(
-        SCENES_FILE.read_text(encoding="utf-8")
-    )
-
-    if not isinstance(data, dict):
-        raise RuntimeError("scenes.json must contain a JSON object.")
-
-    if data.get("status") != "completed":
+    if not scenes:
         raise RuntimeError(
-            "Scene generation is not marked completed."
+            "No scenes found in scenes.json."
         )
-
-    scenes = data.get("scenes")
-
-    if not isinstance(scenes, list) or not scenes:
-        raise RuntimeError("No valid scenes found.")
 
     normalized = []
     seen = set()
 
-    for index, item in enumerate(scenes, start=1):
+    for item in scenes:
         if not isinstance(item, dict):
             raise RuntimeError(
-                f"Scene {index} is not a JSON object."
+                "Invalid scene entry: expected object."
             )
 
         try:
             part = int(item["part"])
             scene = int(item["scene"])
-        except (KeyError, TypeError, ValueError):
+
+        except Exception:
             raise RuntimeError(
-                f"Scene {index} has invalid part/scene numbers."
+                f"Scene has invalid part/scene fields: {item}"
             )
 
-        if part < 1 or scene < 1:
+        if part <= 0 or scene <= 0:
             raise RuntimeError(
-                f"Invalid scene coordinates: part={part}, scene={scene}"
+                f"Invalid scene number: {part}/{scene}"
             )
 
         key = (part, scene)
 
         if key in seen:
             raise RuntimeError(
-                f"Duplicate scene entry: part={part}, scene={scene}"
+                f"Duplicate scene detected: {key}"
             )
 
         seen.add(key)
-        normalized.append(item)
 
-    normalized.sort(
-        key=lambda item: (
-            int(item["part"]),
-            int(item["scene"]),
+        normalized.append({
+            "part": part,
+            "scene": scene,
+            "source": item
+        })
+
+    return sorted(
+        normalized,
+        key=lambda x: (
+            x["part"],
+            x["scene"]
         )
     )
 
-    return config, format_name, normalized
+
+# ============================================================
+# SOURCE FILE DISCOVERY
+# ============================================================
+
+def find_video(part, scene):
+    directory = I2V_DIR / f"part_{part:02d}"
+
+    candidates = [
+        directory / f"scene_{scene:02d}.mp4",
+        directory / f"scene_{scene}.mp4",
+        I2V_DIR / f"part_{part:02d}_scene_{scene:02d}.mp4",
+        I2V_DIR / f"part_{part}_scene_{scene}.mp4",
+    ]
+
+    for path in candidates:
+        if valid_file(path):
+            return path
+
+    return None
 
 
-def output_geometry(format_name):
-    if format_name == "short":
-        return 720, 1280
-    return 1920, 1080
+def find_audio(part, scene):
+    directory = AUDIO_DIR / f"part_{part:02d}"
 
+    candidates = [
+        directory / f"scene_{scene:02d}.mp3",
+        directory / f"scene_{scene}.mp3",
+        directory / f"scene_{scene:02d}.wav",
+        directory / f"scene_{scene}.wav",
+        directory / f"scene_{scene:02d}.m4a",
+        directory / f"scene_{scene}.m4a",
+    ]
+
+    for path in candidates:
+        if valid_file(path, 500):
+            return path
+
+    return None
+
+
+# ============================================================
+# RENDER MANIFEST
+# ============================================================
+
+def load_manifest():
+    manifest = load_optional_json(
+        MANIFEST_OUT
+    )
+
+    if manifest.get("format") != FORMAT:
+        manifest = {}
+
+    if not isinstance(
+        manifest.get("scenes"),
+        dict
+    ):
+        manifest["scenes"] = {}
+
+    if not isinstance(
+        manifest.get("parts"),
+        list
+    ):
+        manifest["parts"] = []
+
+    manifest.update({
+        "version": 2,
+        "format": FORMAT,
+        "fps": FPS,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "status": "in_progress",
+        "source": "image_to_video",
+    })
+
+    return manifest
+
+
+def scene_manifest_key(part, scene):
+    return (
+        f"part_{part:02d}/"
+        f"scene_{scene:02d}"
+    )
+
+
+def save_scene_checkpoint(
+    manifest,
+    part,
+    scene,
+    output,
+    fingerprint,
+    status
+):
+    key = scene_manifest_key(
+        part,
+        scene
+    )
+
+    manifest["scenes"][key] = {
+        "part": part,
+        "scene": scene,
+        "status": status,
+        "output": str(output),
+        "fingerprint": fingerprint,
+        "size": (
+            output.stat().st_size
+            if output.exists()
+            else 0
+        ),
+    }
+
+    if SAVE_CHECKPOINT:
+        atomic_json(
+            MANIFEST_OUT,
+            manifest
+        )
+
+
+# ============================================================
+# RENDER SCENE
+# ============================================================
 
 def render_scene(
     part,
     scene,
-    source_video,
-    source_audio,
-    output_path,
-    width,
-    height,
-    fps,
+    video,
+    audio,
+    output,
+    manifest
 ):
-    output_path.parent.mkdir(
+    output.parent.mkdir(
         parents=True,
-        exist_ok=True,
+        exist_ok=True
     )
 
-    audio_duration = probe_duration(source_audio)
-
-    filter_graph = (
-        f"[0:v]"
-        f"scale={width}:{height}:"
-        f"force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},"
-        f"setsar=1,"
-        f"fps={fps},"
-        f"format=yuv420p"
-        f"[v]"
+    fingerprint = file_fingerprint(
+        video,
+        audio
     )
 
-    temporary = output_path.with_name(
-        output_path.stem + ".tmp.mp4"
+    key = scene_manifest_key(
+        part,
+        scene
     )
+
+    previous = manifest["scenes"].get(
+        key,
+        {}
+    )
+
+    # Reuse only when the old output and both source
+    # fingerprints are still valid.
+    if (
+        RESUME_ENABLED
+        and SKIP_COMPLETED
+        and valid_file(output)
+        and previous.get("status") == "completed"
+        and previous.get("fingerprint") == fingerprint
+    ):
+        log(
+            f"REUSE: Part {part} Scene {scene}"
+        )
+
+        return output
+
+    audio_duration = probe_duration(
+        audio
+    )
+
+    video_duration = probe_duration(
+        video
+    )
+
+    log(
+        f"Part {part} Scene {scene} | "
+        f"Video {video_duration:.2f}s | "
+        f"Audio {audio_duration:.2f}s"
+    )
+
+    # The I2V clip is looped only as needed and trimmed
+    # to the narration duration.
+    video_filter = (
+        f"scale={WIDTH}:{HEIGHT}:"
+        "force_original_aspect_ratio=increase,"
+        f"crop={WIDTH}:{HEIGHT},"
+        "setsar=1,"
+        f"fps={FPS},"
+        "format=yuv420p"
+    )
+
+    temp_output = output.with_name(
+        output.stem + ".rendering.mp4"
+    )
+
+    if temp_output.exists():
+        temp_output.unlink()
 
     command = [
         "ffmpeg",
+        "-hide_banner",
         "-y",
-        "-stream_loop", "-1",
-        "-i", str(source_video),
-        "-i", str(source_audio),
-        "-filter_complex", filter_graph,
-        "-map", "[v]",
-        "-map", "1:a:0",
-        "-t", f"{audio_duration:.3f}",
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "19",
-        "-pix_fmt", "yuv420p",
-        "-r", str(fps),
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "48000",
-        "-shortest",
-        "-movflags", "+faststart",
-        str(temporary),
+
+        "-stream_loop",
+        "-1",
+
+        "-i",
+        str(video),
+
+        "-i",
+        str(audio),
+
+        "-filter_complex",
+        f"[0:v]{video_filter}[v]",
+
+        "-map",
+        "[v]",
+
+        "-map",
+        "1:a:0",
+
+        "-t",
+        f"{audio_duration:.3f}",
+
+        "-r",
+        str(FPS),
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "medium",
+
+        "-crf",
+        "18",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "192k",
+
+        "-ar",
+        "48000",
+
+        "-movflags",
+        "+faststart",
+
+        str(temp_output)
     ]
 
     try:
-        run(
+        run_command(
             command,
-            f"Render part {part}, scene {scene}",
+            f"Rendering Part {part} Scene {scene}"
         )
 
-        if not valid_media(temporary):
+        if not valid_file(temp_output):
             raise RuntimeError(
-                f"Rendered scene is invalid: {temporary}"
+                f"Rendered scene is missing or too small: "
+                f"{temp_output}"
             )
 
-        os.replace(temporary, output_path)
+        probe_duration(
+            temp_output
+        )
 
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+        os.replace(
+            temp_output,
+            output
+        )
+
+    except Exception:
+        if temp_output.exists():
+            temp_output.unlink()
+        raise
+
+    save_scene_checkpoint(
+        manifest,
+        part,
+        scene,
+        output,
+        fingerprint,
+        "completed"
+    )
+
+    return output
 
 
-def concat_videos(files, output_path, label):
-    if not files:
+# ============================================================
+# CONCATENATION
+# ============================================================
+
+def concat_files(input_files, output):
+    if not input_files:
         raise RuntimeError(
-            f"No input videos supplied for {label}."
+            "No input videos provided for concatenation."
         )
 
-    for path in files:
-        if not valid_media(path):
-            raise RuntimeError(
-                f"Invalid concat input: {path}"
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # Use a temporary concat list inside /tmp.
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".txt",
+        prefix="lok_ai_concat_",
+        encoding="utf-8",
+        delete=False
+    ) as handle:
+
+        concat_list = Path(
+            handle.name
+        )
+
+        for path in input_files:
+            escaped = str(
+                path.resolve()
+            ).replace("'", "'\\''")
+
+            handle.write(
+                f"file '{escaped}'\n"
             )
 
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
+    temp_output = output.with_name(
+        output.stem + ".joining.mp4"
     )
 
-    concat_file = output_path.with_suffix(".concat.txt")
-    temporary = output_path.with_name(
-        output_path.stem + ".tmp.mp4"
-    )
-
-    with concat_file.open(
-        "w",
-        encoding="utf-8",
-    ) as handle:
-        for path in files:
-            escaped = str(path.resolve()).replace("'", "'\\''")
-            handle.write(f"file '{escaped}'\n")
+    if temp_output.exists():
+        temp_output.unlink()
 
     try:
-        run(
+        run_command(
             [
                 "ffmpeg",
+                "-hide_banner",
                 "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", str(concat_file),
-                "-c", "copy",
-                "-movflags", "+faststart",
-                str(temporary),
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_list),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(temp_output)
             ],
-            label,
+            f"Joining {output.name}"
         )
 
-        if not valid_media(temporary, minimum_size=10000):
+        if not valid_file(temp_output, 10000):
             raise RuntimeError(
-                f"Concat output is invalid: {temporary}"
+                f"Concatenated video invalid: {temp_output}"
             )
 
-        os.replace(temporary, output_path)
+        probe_duration(
+            temp_output
+        )
+
+        os.replace(
+            temp_output,
+            output
+        )
 
     finally:
-        if concat_file.exists():
-            concat_file.unlink()
+        if concat_list.exists():
+            concat_list.unlink()
 
-        if temporary.exists():
-            temporary.unlink()
-
-
-def load_previous_manifest():
-    if not MANIFEST_OUT.is_file():
-        return {}
-
-    try:
-        data = json.loads(
-            MANIFEST_OUT.read_text(encoding="utf-8")
-        )
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+        if temp_output.exists():
+            temp_output.unlink()
 
 
-def save_manifest(manifest):
-    MANIFEST_OUT.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    temporary = MANIFEST_OUT.with_suffix(".tmp")
-
-    temporary.write_text(
-        json.dumps(
-            manifest,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    os.replace(temporary, MANIFEST_OUT)
-
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-    config, format_name, scenes = load_project()
+    log("=" * 70)
+    log("KATHA LOK AI — RESUMABLE VIDEO RENDER")
+    log("=" * 70)
 
-    width, height = output_geometry(format_name)
+    log(f"FORMAT          : {FORMAT}")
+    log(f"OUTPUT SIZE     : {WIDTH}x{HEIGHT}")
+    log(f"FPS             : {FPS}")
+    log(f"RESUME          : {RESUME_ENABLED}")
+    log(f"SKIP COMPLETED  : {SKIP_COMPLETED}")
 
-    try:
-        fps = int(config.get("FPS", 24))
-    except (TypeError, ValueError):
-        fps = 24
+    scenes = load_scenes()
 
-    if fps < 1 or fps > 60:
-        raise RuntimeError(
-            f"FPS must be between 1 and 60, got {fps}."
-        )
-
-    resume = str(
-        config.get("RESUME_ENABLED", True)
-    ).strip().lower() not in {
-        "false", "0", "no", "off"
-    }
-
-    skip_completed = str(
-        config.get("SKIP_COMPLETED_SCENES", True)
-    ).strip().lower() not in {
-        "false", "0", "no", "off"
-    }
-
-    SCENES_OUT.mkdir(parents=True, exist_ok=True)
-    PARTS_OUT.mkdir(parents=True, exist_ok=True)
-    VIDEOS_OUT.mkdir(parents=True, exist_ok=True)
-
-    previous = load_previous_manifest()
-
-    same_project = (
-        previous.get("format") == format_name
-        and previous.get("width") == width
-        and previous.get("height") == height
-        and previous.get("fps") == fps
-    )
-
-    previous_scenes = {}
-
-    if resume and same_project:
-        for item in previous.get("scenes", []):
-            if isinstance(item, dict):
-                key = (
-                    item.get("part"),
-                    item.get("scene"),
-                )
-                previous_scenes[key] = item
+    manifest = load_manifest()
 
     grouped = {}
 
     for item in scenes:
-        part = int(item["part"])
-        scene = int(item["scene"])
-        grouped.setdefault(part, []).append(scene)
+        grouped.setdefault(
+            item["part"],
+            []
+        ).append(
+            item["scene"]
+        )
 
-    manifest = {
-        "status": "rendering",
-        "format": format_name,
-        "width": width,
-        "height": height,
-        "fps": fps,
-        "source": "image_to_video",
-        "expected_scenes": len(scenes),
-        "completed_scenes": 0,
-        "parts": [],
-        "scenes": [],
-        "final_video": None,
-    }
+    total_scenes = len(scenes)
+    completed_scenes = 0
 
-    rendered_parts = []
+    log(
+        f"Total scenes: {total_scenes}"
+    )
 
-    print(f"FORMAT: {format_name}")
-    print(f"SIZE: {width}x{height}")
-    print(f"FPS: {fps}")
-    print(f"SCENES: {len(scenes)}")
-    print(f"RESUME: {resume}")
+    # Do not delete old rendered scenes or part videos.
+    # Each valid scene is independently reused.
 
     for part in sorted(grouped):
-        scene_outputs = []
+        log("")
+        log("#" * 65)
+        log(f"PART {part}")
+        log("#" * 65)
 
-        print(f"\n========== PART {part} ==========")
+        rendered_scenes = []
 
         for scene in sorted(grouped[part]):
-            source_video = find_i2v_clip(part, scene)
-            source_audio = find_audio(part, scene)
+            video = find_video(
+                part,
+                scene
+            )
 
-            if source_video is None:
+            if video is None:
                 raise RuntimeError(
-                    f"Missing AI video: part {part}, scene {scene}. "
+                    f"Missing I2V video: "
+                    f"Part {part} Scene {scene}. "
                     "Expected output/i2v/part_XX/scene_XX.mp4"
                 )
 
-            if source_audio is None:
+            audio = find_audio(
+                part,
+                scene
+            )
+
+            if audio is None:
                 raise RuntimeError(
-                    f"Missing narration audio: part {part}, scene {scene}. "
+                    f"Missing narration audio: "
+                    f"Part {part} Scene {scene}. "
                     "Expected output/narration/audio/part_XX/"
+                    "scene_XX.mp3 or supported audio extension."
                 )
 
-            output_path = (
+            output = (
                 SCENES_OUT
                 / f"part_{part:02d}"
                 / f"scene_{scene:02d}.mp4"
             )
 
-            old = previous_scenes.get((part, scene), {})
-
-            reusable = (
-                resume
-                and skip_completed
-                and old.get("status") == "completed"
-                and old.get("source_video") == str(source_video)
-                and old.get("source_audio") == str(source_audio)
-                and valid_media(output_path)
+            rendered = render_scene(
+                part,
+                scene,
+                video,
+                audio,
+                output,
+                manifest
             )
 
-            if reusable:
-                print(
-                    f"REUSE: Part {part}, scene {scene}"
-                )
-            else:
-                render_scene(
-                    part,
-                    scene,
-                    source_video,
-                    source_audio,
-                    output_path,
-                    width,
-                    height,
-                    fps,
-                )
+            rendered_scenes.append(
+                rendered
+            )
 
-            duration = probe_duration(output_path)
+            completed_scenes += 1
 
-            scene_outputs.append(output_path)
+            log(
+                f"Progress: {completed_scenes}/{total_scenes}"
+            )
 
-            manifest["scenes"].append({
-                "part": part,
-                "scene": scene,
-                "status": "completed",
-                "source_video": str(source_video),
-                "source_audio": str(source_audio),
-                "output": str(output_path),
-                "duration": round(duration, 3),
-                "reused": reusable,
-            })
-
-            manifest["completed_scenes"] += 1
-
-            # Persist progress after every successful scene.
-            save_manifest(manifest)
-
-        expected_in_part = len(grouped[part])
-
-        if len(scene_outputs) != expected_in_part:
+        if len(rendered_scenes) != len(grouped[part]):
             raise RuntimeError(
-                f"Part {part} scene count mismatch: "
-                f"{len(scene_outputs)}/{expected_in_part}"
+                f"Part {part} scene count mismatch."
             )
 
-        part_output = PARTS_OUT / f"part_{part:02d}.mp4"
+        part_output = (
+            PARTS_OUT
+            / f"part_{part:02d}.mp4"
+        )
 
-        # Rebuild part only when its current output is missing.
-        # Scene outputs are already individually checkpointed.
-        if not valid_media(part_output):
-            concat_videos(
-                scene_outputs,
-                part_output,
-                f"Create part {part}",
+        concat_files(
+            rendered_scenes,
+            part_output
+        )
+
+        manifest["parts"] = [
+            item
+            for item in manifest["parts"]
+            if not (
+                isinstance(item, dict)
+                and item.get("part") == part
             )
-        else:
-            print(f"REUSE: {part_output}")
-
-        rendered_parts.append(part_output)
+        ]
 
         manifest["parts"].append({
             "part": part,
-            "scenes": len(scene_outputs),
+            "scene_count": len(rendered_scenes),
             "output": str(part_output),
-            "duration": round(
-                probe_duration(part_output),
-                3,
-            ),
+            "duration": probe_duration(part_output),
+            "status": "completed",
         })
 
-        save_manifest(manifest)
+        manifest["parts"].sort(
+            key=lambda x: int(x.get("part", 0))
+        )
 
-    if len(manifest["scenes"]) != len(scenes):
+        atomic_json(
+            MANIFEST_OUT,
+            manifest
+        )
+
+    # --------------------------------------------------------
+    # FINAL VALIDATION
+    # --------------------------------------------------------
+
+    expected_parts = len(grouped)
+
+    actual_part_files = []
+
+    for part in sorted(grouped):
+        path = (
+            PARTS_OUT
+            / f"part_{part:02d}.mp4"
+        )
+
+        if not valid_file(path, 10000):
+            raise RuntimeError(
+                f"Part output missing or invalid: {path}"
+            )
+
+        actual_part_files.append(path)
+
+    if len(actual_part_files) != expected_parts:
         raise RuntimeError(
-            "Final scene count does not match scenes.json."
+            f"Part count mismatch: "
+            f"{len(actual_part_files)}/{expected_parts}"
         )
 
-    if format_name == "full":
-        final_video = VIDEOS_OUT / "final_full.mp4"
+    # --------------------------------------------------------
+    # FORMAT-SPECIFIC FINAL OUTPUT
+    # --------------------------------------------------------
 
-        concat_videos(
-            rendered_parts,
-            final_video,
-            "Create final full video",
+    videos_dir = Path(
+        "output/videos"
+    )
+
+    videos_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    if FORMAT == "short":
+        final_output = (
+            videos_dir
+            / "final_short.mp4"
         )
-
-        manifest["final_video"] = str(final_video)
-
     else:
-        # Short format intentionally remains separate per part.
-        # Do not create an additional full-length video.
-        manifest["final_video"] = None
-
-    manifest["status"] = "completed"
-    manifest["completed_scenes"] = len(scenes)
-
-    save_manifest(manifest)
-
-    print("\n========== RENDER COMPLETE ==========")
-    print(f"Format: {format_name}")
-    print(f"Scenes: {len(scenes)}")
-    print(f"Parts: {len(rendered_parts)}")
-
-    for path in rendered_parts:
-        print(
-            f"{path} | "
-            f"{probe_duration(path):.2f}s | "
-            f"{path.stat().st_size / (1024 * 1024):.2f} MB"
+        final_output = (
+            videos_dir
+            / "final_full.mp4"
         )
 
-    if manifest["final_video"]:
-        print(f"FINAL VIDEO: {manifest['final_video']}")
+    concat_files(
+        actual_part_files,
+        final_output
+    )
 
-    print(f"MANIFEST: {MANIFEST_OUT}")
+    if not valid_file(final_output, 10000):
+        raise RuntimeError(
+            "Final MP4 validation failed."
+        )
+
+    final_duration = probe_duration(
+        final_output
+    )
+
+    manifest.update({
+        "status": "completed",
+        "format": FORMAT,
+        "fps": FPS,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "total_scenes": total_scenes,
+        "total_parts": expected_parts,
+        "final_output": str(final_output),
+        "final_duration": final_duration,
+    })
+
+    atomic_json(
+        MANIFEST_OUT,
+        manifest
+    )
+
+    log("")
+    log("=" * 70)
+    log("VIDEO RENDER COMPLETED")
+    log("=" * 70)
+
+    log(f"Format       : {FORMAT}")
+    log(f"Scenes       : {total_scenes}")
+    log(f"Parts        : {expected_parts}")
+    log(f"FPS          : {FPS}")
+    log(f"Duration     : {final_duration:.2f}s")
+    log(f"Final video  : {final_output}")
+    log(f"Manifest     : {MANIFEST_OUT}")
+
+    log("=" * 70)
 
 
 if __name__ == "__main__":
     try:
         main()
+
     except KeyboardInterrupt:
-        print("Interrupted.")
+        log("Interrupted.")
         sys.exit(130)
+
     except Exception as exc:
-        print(f"ERROR: {exc}")
+        log("")
+        log(f"RENDER ERROR: {exc}")
         sys.exit(1)
