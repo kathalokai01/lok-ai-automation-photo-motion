@@ -1,804 +1,706 @@
-
 #!/usr/bin/env python3
-"""Story-grounded cinematic thumbnail generator."""
 
-from __future__ import annotations
-
-import hashlib
 import json
 import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
-from PIL import (
-    Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
-)
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from input_config import load_and_validate, get_format
-
-OUT = ROOT / "output"
-INPUT_FILE = ROOT / "Input" / "topic.txt"
-STORY_FILE = OUT / "story" / "ai_story.json"
-STORY_JSON = OUT / "story" / "story.json"
-TITLE_FILE = OUT / "story" / "final_title.txt"
-YOUTUBE_METADATA = OUT / "publish" / "youtube_metadata.json"
-IMAGE_MANIFEST = OUT / "visuals" / "image_manifest.json"
-VISUAL_JOBS = OUT / "visuals" / "visual_jobs.json"
-PHOTO_MANIFEST = OUT / "photo_motion" / "photo_motion_manifest.json"
-
-THUMBNAIL = OUT / "thumbnail.jpg"
-WORK_DIR = OUT / "thumbnail"
-MANIFEST = WORK_DIR / "thumbnail_manifest.json"
-
-VERSION = "thumbnail-v16-story-title-priority"
-W, H = 1280, 720
-MIN_BYTES = 1000
-
-PALETTES = {
-    "horror": ((239, 72, 88), (255, 245, 244), (18, 10, 23)),
-    "mystery": ((62, 220, 231), (250, 255, 255), (8, 20, 34)),
-    "devotional": ((255, 199, 87), (255, 251, 232), (44, 28, 17)),
-    "historical": ((210, 180, 132), (255, 248, 231), (38, 27, 23)),
-    "emotional": ((255, 157, 185), (255, 249, 250), (38, 20, 31)),
-    "nature": ((151, 228, 156), (250, 255, 244), (15, 35, 27)),
-    "general": ((115, 198, 255), (255, 253, 245), (14, 24, 39)),
-}
-
-KEYWORDS = {
-    "horror": "भूत प्रेत डर खौफ चुड़ैल आत्मा हवेली शैतान horror ghost haunted witch demon".split(),
-    "mystery": "रहस्य गुमशुदा गायब पहेली अनजान खोज सस्पेंस mystery secret unknown disappearance".split(),
-    "devotional": "भक्ति भगवान देवी मंदिर पूजा कृष्ण राम शिव विष्णु हनुमान दुर्गा गणेश devotional".split(),
-    "historical": "राजा रानी सम्राट महाराज युद्ध किला इतिहास योद्धा साम्राज्य historical king queen warrior".split(),
-    "emotional": "माँ मां पिता परिवार बेटा बेटी प्यार प्रेम बलिदान दर्द mother father family love".split(),
-    "nature": "जंगल वन पहाड़ नदी प्रकृति गाँव गांव किसान forest nature mountain river village".split(),
-}
-
-FONT_FAMILIES = (
-    "Noto Sans Devanagari:style=Bold",
-    "Mukta:style=Bold",
-    "Hind:style=Bold",
-    "Noto Sans:style=Bold",
-    "DejaVu Sans:style=Bold",
-)
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 
-def log(*args):
-    print(*args, flush=True)
+TOPIC_FILE = Path("Input/topic.txt")
+AI_STORY_FILE = Path("output/story/ai_story.json")
+STORY_FILE = Path("output/story/story.json")
+FINAL_TITLE_FILE = Path("output/story/final_title.txt")
+
+VISUAL_MANIFEST = Path("output/visuals/visual_jobs.json")
+SCENES_FILE = Path("output/scenes/scenes.json")
+
+OUTPUT_DIR = Path("output/thumbnail")
+
+THUMBNAIL_16_9 = OUTPUT_DIR / "thumbnail_1280x720.jpg"
+THUMBNAIL_VERTICAL = OUTPUT_DIR / "thumbnail_1080x1920.jpg"
+THUMBNAIL_MANIFEST = OUTPUT_DIR / "thumbnail_manifest.json"
 
 
-def clean(value, limit=2000):
+def load_json(path):
+    if not path.is_file():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"WARNING: Could not read {path}: {exc}")
+        return None
+
+
+def clean_text(value):
     if not isinstance(value, str):
         return ""
-    return re.sub(r"\s+", " ", value).strip()[:limit]
+
+    value = re.sub(r"\s+", " ", value).strip()
+    return value.strip("\"' ")
 
 
-def read_json(path):
-    try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-        return value if isinstance(value, (dict, list)) else None
-    except (OSError, ValueError):
-        return None
+def read_topic():
+    if not TOPIC_FILE.is_file():
+        return ""
 
+    for line in TOPIC_FILE.read_text(
+        encoding="utf-8"
+    ).splitlines():
 
-def write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        temp.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temp.replace(path)
-    finally:
-        temp.unlink(missing_ok=True)
+        line = line.strip()
 
-
-def sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def safe_path(value, image_only=False):
-    if not isinstance(value, str) or not value.strip():
-        return None
-    path = Path(value.strip())
-    if not path.is_absolute():
-        path = ROOT / path
-    try:
-        path = path.resolve()
-        if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
-            return None
-        if path.stat().st_size < MIN_BYTES:
-            return None
-        if image_only:
-            with Image.open(path) as image:
-                image.verify()
-        return path
-    except (OSError, ValueError):
-        return None
-
-
-def all_rows(data, *keys):
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in keys:
-            if isinstance(data.get(key), list):
-                return data[key]
-    return []
-
-
-def story_text_from(data):
-    """Collect story narrative without truncating its ending."""
-    parts = []
-
-    def visit(value, depth=0):
-        if depth > 5:
-            return
-        if isinstance(value, str):
-            text = value.strip()
-            if len(text) > 35:
-                parts.append(text)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item, depth + 1)
-        elif isinstance(value, dict):
-            preferred = (
-                "story_text", "full_story", "story", "narrative",
-                "content", "text", "body", "paragraph",
-                "summary", "synopsis", "logline",
-            )
-            for key in preferred:
-                if key in value:
-                    visit(value[key], depth + 1)
-            for key in ("parts", "chapters", "scenes", "sections"):
-                if key in value:
-                    visit(value[key], depth + 1)
-
-    visit(data)
-    # Preserve order while avoiding repeated copies of the same text.
-    result, seen = [], set()
-    for item in parts:
-        normalized = clean(item, 100000)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            result.append(normalized)
-    return "\n".join(result)
-
-
-def explicit_input_title(config):
-    """Use only a short explicit topic/title, never a pasted story paragraph."""
-    for key in ("TITLE", "TOPIC"):
-        value = clean(str(config.get(key, "")), 180)
-        if not value:
+        if not line or line.startswith("#") or "=" not in line:
             continue
-        if len(value.split()) > 18 or len(value) > 140:
-            continue
-        if len(value) > 12 and re.search(r"[.!?।]\s+\S", value):
-            continue
-        return value
+
+        key, value = line.split("=", 1)
+
+        if key.strip().upper() == "TOPIC":
+            return clean_text(value)
+
     return ""
 
 
-def title_from_file():
-    if not TITLE_FILE.is_file():
-        return ""
-    try:
-        for line in TITLE_FILE.read_text(
-            encoding="utf-8-sig"
-        ).splitlines():
-            value = clean(line, 180)
-            if value and not value.startswith("#"):
-                return value
-    except OSError:
-        pass
-    return ""
+def get_story_title():
+    for path in (AI_STORY_FILE, STORY_FILE):
+        data = load_json(path)
 
-
-def title_from_story(data):
-    if not isinstance(data, dict):
-        return ""
-    objects = [
-        data,
-        data.get("metadata", {}),
-        data.get("story_metadata", {}),
-        data.get("meta", {}),
-    ]
-    for obj in objects:
-        if not isinstance(obj, dict):
+        if not isinstance(data, dict):
             continue
+
         for key in (
-            "final_title", "story_title", "generated_title",
-            "title", "youtube_title",
+            "title",
+            "final_title",
+            "story_title",
+            "generated_title",
         ):
-            value = clean(obj.get(key), 180)
-            if value:
-                return value
-    return ""
+            title = clean_text(data.get(key, ""))
+            if title:
+                return title, str(path)
 
+    if FINAL_TITLE_FILE.is_file():
+        title = clean_text(
+            FINAL_TITLE_FILE.read_text(encoding="utf-8")
+        )
+        if title:
+            return title, str(FINAL_TITLE_FILE)
 
-def get_title(config, story, second_story):
-    """
-    Workflow order: thumbnail runs before YouTube metadata.
-    Therefore prefer the story pipeline's final title and never trust
-    a possibly stale YouTube metadata file over current story files.
-    """
-    candidates = [
-        title_from_file(),
-        title_from_story(story),
-        title_from_story(second_story),
-    ]
-    for candidate in candidates:
-        if candidate:
-            return candidate
+    topic = read_topic()
 
-    # A prior metadata file is accepted only if it explicitly matches
-    # the current story fingerprint; this script does not use stale data.
-    input_title = explicit_input_title(config)
-    if input_title:
-        return input_title
+    if topic:
+        print(
+            "WARNING: Story title unavailable; "
+            "using TOPIC as fallback."
+        )
+        return topic, "Input/topic.txt fallback"
 
     raise RuntimeError(
-        "Story title missing. Expected final_title.txt, a story title "
-        "field, or a short explicit TITLE/TOPIC in Input/topic.txt."
+        "No usable story title found in AI story, "
+        "story file, final_title.txt or TOPIC."
     )
 
 
-def detect_category(text):
-    low = text.casefold()
-    scores = {
-        category: sum(
-            1 for word in words if word.casefold() in low
-        )
-        for category, words in KEYWORDS.items()
-    }
-    best = max(scores, key=scores.get)
-    return best if scores[best] else "general"
+def valid_image(path):
+    if not path.is_file():
+        return False
+
+    if path.stat().st_size < 1000:
+        return False
+
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        return True
+    except Exception:
+        return False
 
 
-def scene_no(row):
-    for key in ("global_scene", "global_scene_number", "scene"):
-        try:
-            value = int(row.get(key))
-            if value > 0:
-                return value
-        except (TypeError, ValueError, AttributeError):
-            pass
-    return 999999
-
-
-def collect_images():
-    image_data = read_json(IMAGE_MANIFEST)
-    jobs_data = read_json(VISUAL_JOBS)
-    prompt_map = {}
-
-    for row in all_rows(jobs_data, "jobs", "scenes", "visual_jobs"):
-        if not isinstance(row, dict):
-            continue
-        number = scene_no(row)
-        prompt_map[number] = " ".join(
-            clean(str(row.get(key, "")), 2000)
-            for key in (
-                "prompt", "visual_prompt", "description", "scene_id"
-            )
-            if row.get(key)
-        )
-
-    found, seen = [], set()
-    for row in all_rows(image_data, "scenes", "images"):
-        if not isinstance(row, dict):
-            continue
-        status = str(row.get("status", "")).casefold()
-        if status and status not in {
-            "generated", "existing", "reused", "completed",
-            "success", "ready",
-        }:
-            continue
-
-        value = next(
-            (
-                row.get(key)
-                for key in (
-                    "image_path", "image", "image_file",
-                    "output_image", "path",
-                )
-                if isinstance(row.get(key), str) and row.get(key).strip()
-            ),
-            None,
-        )
-        path = safe_path(value, image_only=True)
-        if path is None or str(path) in seen:
-            continue
-        seen.add(str(path))
-
-        number = scene_no(row)
-        context = " ".join((
-            prompt_map.get(number, ""),
-            clean(str(row.get("prompt", "")), 2000),
-            clean(str(row.get("visual_prompt", "")), 2000),
-            clean(str(row.get("description", "")), 1000),
-            clean(str(row.get("scene_id", "")), 300),
-        ))
-        found.append({
-            "path": path,
-            "scene": number,
-            "context": context,
-        })
-    return found
-
-
-def choose_image(images, title, category, story_content):
-    if not images:
+def get_visual_path(job):
+    if not isinstance(job, dict):
         return None
 
-    ignored = {
-        "कहानी", "एक", "और", "था", "थी", "the", "story",
-        "this", "that", "with", "from", "into", "में",
-        "का", "की", "के",
-    }
-    title_tokens = {
-        token for token in re.findall(
-            r"[\w\u0900-\u097f]+", title.casefold()
-        )
-        if len(token) >= 3 and token not in ignored
-    }
-    story_tokens = {
-        token for token in re.findall(
-            r"[\w\u0900-\u097f]+", story_content.casefold()
-        )
-        if len(token) >= 4 and token not in ignored
-    }
+    for key in (
+        "visual_path",
+        "asset_path",
+        "output",
+        "file",
+        "path",
+        "image_path",
+    ):
+        value = job.get(key)
 
-    def score(item):
-        context = item["context"].casefold()
-        value = sum(
-            4 for word in KEYWORDS.get(category, ())
-            if word.casefold() in context
-        )
-        value += 8 * sum(
-            1 for word in title_tokens if word in context
-        )
-        context_tokens = set(re.findall(
-            r"[\w\u0900-\u097f]+", context
-        ))
-        value += min(18, len(story_tokens & context_tokens))
-        if item["scene"] <= 3:
-            value += 1
-        return value
-
-    return max(images, key=score)
-
-
-def fit_cover(image):
-    image = image.convert("RGB")
-    scale = max(W / image.width, H / image.height)
-    image = image.resize(
-        (
-            max(W, round(image.width * scale)),
-            max(H, round(image.height * scale)),
-        ),
-        Image.Resampling.LANCZOS,
-    )
-    left = (image.width - W) // 2
-    top = (image.height - H) // 2
-    return image.crop((left, top, left + W, top + H))
-
-
-def extract_video_frame(mode):
-    ffmpeg = shutil.which("ffmpeg")
-    ffprobe = shutil.which("ffprobe")
-    if not ffmpeg or not ffprobe:
-        return None
-
-    candidates = [
-        OUT / "videos" / (
-            "katha_lok_ai_short.mp4"
-            if mode == "short"
-            else "katha_lok_ai_full.mp4"
-        ),
-        OUT / "videos" / "katha_lok_ai_final.mp4",
-    ]
-
-    for row in all_rows(read_json(PHOTO_MANIFEST), "scenes"):
-        if isinstance(row, dict):
-            for key in ("video", "source_video", "output", "path"):
-                path = safe_path(row.get(key))
-                if path:
-                    candidates.append(path)
-                    break
-
-    WORK_DIR.mkdir(parents=True, exist_ok=True)
-    target = WORK_DIR / "video_frame.jpg"
-
-    for video in candidates:
-        video = safe_path(str(video))
-        if not video:
+        if not value:
             continue
-        try:
-            probe = subprocess.run(
-                [
-                    ffprobe, "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    str(video),
-                ],
-                capture_output=True, text=True,
-                timeout=25, check=False,
-            )
-            duration = float(probe.stdout.strip())
-            if probe.returncode or duration <= 0:
-                continue
 
-            temp = target.with_suffix(".tmp.jpg")
-            result = subprocess.run(
-                [
-                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                    "-ss", f"{min(duration * 0.3, max(0, duration - 0.1)):.3f}",
-                    "-i", str(video), "-frames:v", "1",
-                    "-vf",
-                    "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720",
-                    "-q:v", "2", str(temp),
-                ],
-                capture_output=True, text=True,
-                timeout=60, check=False,
-            )
-            if result.returncode == 0 and safe_path(
-                str(temp), image_only=True
-            ):
-                temp.replace(target)
-                return target
-            temp.unlink(missing_ok=True)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            continue
+        path = Path(str(value))
+
+        if not path.is_absolute():
+            path = Path(".") / path
+
+        if valid_image(path):
+            return path
+
     return None
 
 
+def load_visual_jobs():
+    data = load_json(VISUAL_MANIFEST)
+
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            "Visual manifest missing or invalid: "
+            f"{VISUAL_MANIFEST}"
+        )
+
+    jobs = data.get("jobs", {})
+
+    # Current prepare_visuals.py writes jobs as a dictionary:
+    # part_01/scene_01 -> {status, visual_path, ...}
+    if isinstance(jobs, dict):
+        result = []
+
+        for key, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+
+            result.append((str(key), job))
+
+        return result
+
+    # Backward compatibility for list-based manifests.
+    if isinstance(jobs, list):
+        return [
+            (str(index), job)
+            for index, job in enumerate(jobs)
+            if isinstance(job, dict)
+        ]
+
+    for key in ("scenes", "visuals", "items"):
+        value = data.get(key)
+
+        if isinstance(value, list):
+            return [
+                (str(index), job)
+                for index, job in enumerate(value)
+                if isinstance(job, dict)
+            ]
+
+    raise RuntimeError(
+        "Visual manifest contains no supported jobs collection."
+    )
+
+
+def scene_image_candidates():
+    entries = load_visual_jobs()
+
+    candidates = []
+
+    for key, job in entries:
+        status = str(job.get("status", "")).lower()
+
+        if status and status not in {
+            "completed",
+            "complete",
+            "success",
+            "done",
+            "generated",
+        }:
+            continue
+
+        path = get_visual_path(job)
+
+        if path is None:
+            continue
+
+        try:
+            part = int(job.get("part", 0))
+            scene = int(job.get("scene", 0))
+        except (TypeError, ValueError):
+            match = re.search(
+                r"part[_/](\d+).*scene[_/](\d+)",
+                key,
+                re.IGNORECASE,
+            )
+
+            if match:
+                part = int(match.group(1))
+                scene = int(match.group(2))
+            else:
+                part, scene = 999999, 999999
+
+        candidates.append({
+            "part": part,
+            "scene": scene,
+            "path": path,
+            "key": key,
+            "job": job,
+        })
+
+    candidates.sort(
+        key=lambda item: (
+            item["part"],
+            item["scene"],
+        )
+    )
+
+    if candidates:
+        return candidates
+
+    # Fallback for old projects with missing/incomplete manifest.
+    search_dirs = [
+        Path("output/visuals"),
+        Path("output"),
+    ]
+
+    extensions = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+    }
+
+    found = []
+
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+
+        for path in sorted(directory.rglob("*")):
+            if (
+                path.is_file()
+                and path.suffix.lower() in extensions
+                and valid_image(path)
+            ):
+                found.append(path)
+
+    if found:
+        print(
+            "WARNING: No usable manifest job found; "
+            "using first valid image as fallback."
+        )
+
+        return [{
+            "part": 999999,
+            "scene": 999999,
+            "path": found[0],
+            "key": "fallback",
+            "job": {},
+        }]
+
+    raise RuntimeError(
+        "No completed visual image found."
+    )
+
+
+def choose_hero_visual():
+    candidates = scene_image_candidates()
+
+    # Prefer the opening scene because it normally carries
+    # the story hook and establishes the main characters.
+    first_part = min(item["part"] for item in candidates)
+
+    first_part_items = [
+        item for item in candidates
+        if item["part"] == first_part
+    ]
+
+    chosen = min(
+        first_part_items,
+        key=lambda item: item["scene"],
+    )
+
+    print(
+        "Selected thumbnail visual: "
+        f"part={chosen['part']} "
+        f"scene={chosen['scene']} "
+        f"path={chosen['path']}"
+    )
+
+    return chosen
+
+
 def find_font(size):
-    matcher = shutil.which("fc-match")
-    if matcher:
-        for family in FONT_FAMILIES:
+    candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    ]
+
+    for font_path in candidates:
+        path = Path(font_path)
+
+        if path.is_file():
             try:
-                result = subprocess.run(
-                    [matcher, "-f", "%{file}", family],
-                    capture_output=True, text=True,
-                    timeout=10, check=False,
+                return ImageFont.truetype(
+                    str(path),
+                    size=size,
                 )
-                path = Path(result.stdout.strip())
-                if result.returncode == 0 and path.is_file():
-                    return ImageFont.truetype(str(path), size), str(path)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-    return ImageFont.load_default(), None
+            except Exception:
+                continue
+
+    try:
+        return ImageFont.truetype(
+            "DejaVuSans-Bold.ttf",
+            size=size,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "No usable thumbnail font is installed."
+        ) from exc
 
 
-def wrap_title(draw, title, font, max_width):
-    lines, current = [], ""
-    for word in title.split():
-        candidate = (current + " " + word).strip()
-        if current and draw.textbbox(
-            (0, 0), candidate, font=font
-        )[2] > max_width:
-            lines.append(current)
-            current = word
-        else:
+def crop_to_ratio(image, target_ratio):
+    width, height = image.size
+    current_ratio = width / height
+
+    if current_ratio > target_ratio:
+        new_width = int(height * target_ratio)
+        left = (width - new_width) // 2
+
+        return image.crop((
+            left,
+            0,
+            left + new_width,
+            height,
+        ))
+
+    new_height = int(width / target_ratio)
+    top = (height - new_height) // 2
+
+    return image.crop((
+        0,
+        top,
+        width,
+        top + new_height,
+    ))
+
+
+def wrap_text(draw, text, font, max_width):
+    words = text.split()
+
+    if not words:
+        return []
+
+    lines = []
+    current = ""
+
+    for word in words:
+        candidate = (
+            word if not current
+            else current + " " + word
+        )
+
+        bbox = draw.textbbox(
+            (0, 0),
+            candidate,
+            font=font,
+        )
+
+        if bbox[2] - bbox[0] <= max_width:
             current = candidate
+        else:
+            if current:
+                lines.append(current)
+
+            current = word
+
     if current:
         lines.append(current)
 
-    result = []
-    for line in lines:
-        part = ""
-        for char in line:
-            candidate = part + char
-            if part and draw.textbbox(
-                (0, 0), candidate, font=font
-            )[2] > max_width:
-                result.append(part)
-                part = char
-            else:
-                part = candidate
-        if part:
-            result.append(part)
-    return result
+    return lines
 
 
-def compact_title(title):
-    title = clean(title, 180)
-    for separator in (" | ", " — ", " – ", ": "):
-        if separator in title:
-            first = title.split(separator, 1)[0].strip()
-            if len(first) >= 5:
-                title = first
-                break
-    if len(title) > 70:
-        title = title[:70].rsplit(" ", 1)[0].rstrip(
-            " ,;:-।"
-        ) + "…"
-    return title
+def sample_accent(image):
+    small = image.resize((1, 1)).convert("RGB")
+    red, green, blue = small.getpixel((0, 0))
+
+    # Derive an accent from the actual scene instead of
+    # applying the same red/gold treatment to every story.
+    if blue > red * 1.15:
+        return (100, 190, 255)
+
+    if green > red * 1.15:
+        return (130, 230, 160)
+
+    if red > blue * 1.25:
+        return (255, 145, 105)
+
+    return (255, 205, 115)
 
 
-def render_thumbnail(title, background, category):
-    accent, text_color, dark = PALETTES[category]
+def add_cinematic_overlay(image, title, vertical=False):
+    image = image.convert("RGB")
+    width, height = image.size
 
-    if background:
-        with Image.open(background) as source:
-            image = fit_cover(source)
+    accent = sample_accent(image)
+
+    overlay = Image.new(
+        "RGBA",
+        image.size,
+        (0, 0, 0, 0),
+    )
+
+    draw_overlay = ImageDraw.Draw(overlay)
+
+    # Darken only the title area, retaining the original
+    # scene image and its important visual details.
+    if vertical:
+        start_y = int(height * 0.55)
     else:
-        image = Image.new("RGB", (W, H), dark)
+        start_y = int(height * 0.56)
 
-    image = ImageEnhance.Color(image).enhance(0.99)
-    image = ImageEnhance.Contrast(image).enhance(1.025)
-    image = ImageEnhance.Brightness(image).enhance(1.015)
+    for y in range(start_y, height):
+        progress = (y - start_y) / max(1, height - start_y)
 
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    overlay = ImageDraw.Draw(layer)
+        alpha = int(15 + progress * 185)
 
-    for y in range(H):
-        strength = max(0, (y - 265) / (H - 265))
-        alpha = int(min(205, strength * 205))
-        overlay.line((0, y, W, y), fill=(*dark, alpha))
+        draw_overlay.line(
+            [(0, y), (width, y)],
+            fill=(0, 0, 0, alpha),
+        )
 
-    for x in range(W):
-        edge = max(0, (130 - min(x, W - x)) / 130)
-        if edge > 0:
-            overlay.line(
-                (x, 0, x, H),
-                fill=(*dark, int(edge * 55)),
-            )
+    image = Image.alpha_composite(
+        image.convert("RGBA"),
+        overlay,
+    ).convert("RGB")
 
-    image = Image.alpha_composite(image.convert("RGBA"), layer)
     draw = ImageDraw.Draw(image)
-    title = compact_title(title)
-    chosen = None
 
-    for size in range(88, 35, -2):
-        font, font_path = find_font(size)
-        lines = wrap_title(draw, title, font, int(W * 0.82))
-        if not 1 <= len(lines) <= 3:
-            continue
-        boxes = [
-            draw.textbbox((0, 0), line, font=font, stroke_width=2)
-            for line in lines
-        ]
-        heights = [
-            max(1, box[3] - box[1]) for box in boxes
-        ]
-        gap = max(4, size // 9)
-        total = sum(heights) + gap * (len(lines) - 1)
-        if total <= 225:
-            chosen = (
-                font, font_path, lines, heights, gap, size
-            )
+    if vertical:
+        max_width = int(width * 0.86)
+        max_height = int(height * 0.27)
+        base_size = max(38, width // 12)
+        title_y = int(height * 0.69)
+    else:
+        max_width = int(width * 0.88)
+        max_height = int(height * 0.29)
+        base_size = max(34, width // 19)
+        title_y = int(height * 0.68)
+
+    font = None
+    lines = []
+
+    # Reduce font size until the full title fits.
+    for size in range(base_size, max(18, base_size // 2), -2):
+        candidate_font = find_font(size)
+
+        candidate_lines = wrap_text(
+            draw,
+            title,
+            candidate_font,
+            max_width,
+        )
+
+        line_height = int(size * 1.28)
+
+        if (
+            len(candidate_lines) <= 3
+            and len(candidate_lines) * line_height <= max_height
+        ):
+            font = candidate_font
+            lines = candidate_lines
             break
 
-    if chosen:
-        font, font_path, lines, heights, gap, size = chosen
-    else:
-        font, font_path = find_font(36)
-        lines = wrap_title(
-            draw, title, font, int(W * 0.82)
+    if font is None:
+        font = find_font(max(18, base_size // 2))
+        lines = wrap_text(
+            draw,
+            title,
+            font,
+            max_width,
         )[:3]
-        heights = [
-            max(
-                1,
-                draw.textbbox((0, 0), line, font=font)[3],
-            )
-            for line in lines
-        ]
-        gap, size = 5, 36
 
-    total_height = sum(heights) + gap * max(
-        0, len(heights) - 1
-    )
-    text_y = max(420, H - total_height - 45)
-    panel_top = max(395, text_y - 22)
-    panel_bottom = min(
-        H - 16, text_y + total_height + 26
-    )
+    line_height = int(font.size * 1.28)
+
+    # Accent line creates a cinematic title treatment.
+    accent_y = title_y - int(font.size * 0.45)
 
     draw.rounded_rectangle(
-        (34, panel_top, W - 34, panel_bottom),
-        radius=24,
-        fill=(*dark, 218),
-        outline=(*accent, 245),
-        width=4,
-    )
-    draw.rounded_rectangle(
-        (58, panel_top + 13, 180, panel_top + 21),
-        radius=4,
-        fill=(*accent, 255),
+        (
+            int(width * 0.08),
+            accent_y,
+            int(width * 0.30),
+            accent_y + max(5, font.size // 16),
+        ),
+        radius=5,
+        fill=accent,
     )
 
-    y = text_y
-    for line, height in zip(lines, heights):
-        box = draw.textbbox(
-            (0, 0), line, font=font, stroke_width=2
-        )
-        x = max(12, (W - (box[2] - box[0])) // 2)
+    y = title_y
 
-        draw.text(
-            (x + 2, y + 3),
+    for line in lines:
+        bbox = draw.textbbox(
+            (0, 0),
             line,
             font=font,
-            fill=(0, 0, 0, 220),
-            stroke_width=5,
-            stroke_fill=(0, 0, 0, 220),
+            stroke_width=3,
         )
+
+        text_width = bbox[2] - bbox[0]
+        x = (width - text_width) // 2
+
+        draw.text(
+            (x + 4, y + 5),
+            line,
+            font=font,
+            fill=(0, 0, 0),
+            stroke_width=6,
+            stroke_fill=(0, 0, 0),
+        )
+
         draw.text(
             (x, y),
             line,
             font=font,
-            fill=(*text_color, 255),
-            stroke_width=2,
-            stroke_fill=(*dark, 255),
+            fill=(255, 255, 255),
+            stroke_width=3,
+            stroke_fill=(20, 20, 20),
         )
-        y += height + gap
 
-    WORK_DIR.mkdir(parents=True, exist_ok=True)
-    temp = THUMBNAIL.with_suffix(".tmp.jpg")
-    try:
-        image.convert("RGB").filter(
-            ImageFilter.UnsharpMask(
-                radius=0.8, percent=35, threshold=5
-            )
-        ).save(temp, "JPEG", quality=94, optimize=True)
+        y += line_height
 
-        with Image.open(temp) as check:
-            check.verify()
-        with Image.open(temp) as check:
-            if check.size != (W, H) or check.format != "JPEG":
-                raise RuntimeError(
-                    "Thumbnail must be 1280x720 JPEG"
-                )
-        if temp.stat().st_size < MIN_BYTES:
-            raise RuntimeError("Thumbnail output is too small")
-        temp.replace(THUMBNAIL)
-    finally:
-        temp.unlink(missing_ok=True)
+    return image
 
-    return {
-        "width": W,
-        "height": H,
-        "font_size": size,
-        "font_file": font_path,
-        "title_lines": len(lines),
-        "display_title": title,
-        "category_style": category,
-        "design_mood": f"cinematic-{category}-scene-matched",
-        "background_selection": (
-            "prompt-matched-scene"
-            if background else "solid-fallback"
-        ),
-    }
+
+def create_thumbnail(source, title, size, output):
+    if not valid_image(source):
+        raise RuntimeError(
+            f"Invalid thumbnail source image: {source}"
+        )
+
+    with Image.open(source) as opened:
+        image = opened.convert("RGB")
+
+    image = crop_to_ratio(
+        image,
+        size[0] / size[1],
+    )
+
+    image = image.resize(
+        size,
+        Image.Resampling.LANCZOS,
+    )
+
+    vertical = size[1] > size[0]
+
+    image = add_cinematic_overlay(
+        image,
+        title,
+        vertical=vertical,
+    )
+
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temporary = output.with_suffix(".tmp.jpg")
+
+    image.save(
+        temporary,
+        "JPEG",
+        quality=94,
+        optimize=True,
+        progressive=True,
+    )
+
+    if not valid_image(temporary):
+        raise RuntimeError(
+            f"Thumbnail validation failed: {temporary}"
+        )
+
+    temporary.replace(output)
 
 
 def main():
-    config = load_and_validate(INPUT_FILE)
-    mode = str(get_format(config)).strip().lower()
-    if mode not in {"short", "full"}:
-        raise RuntimeError(f"Unsupported FORMAT: {mode}")
+    print("=" * 65)
+    print("       STORY-BASED CINEMATIC THUMBNAILS")
+    print("=" * 65)
 
-    story = read_json(STORY_FILE)
-    second_story = read_json(STORY_JSON)
-
-    # Include both available story sources for image matching and style.
-    story_content = "\n".join(
-        part for part in (
-            story_text_from(story),
-            story_text_from(second_story),
-        ) if part
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    title = get_title(config, story, second_story)
-    category = detect_category(
-        title + " " + story_content
+    title, title_source = get_story_title()
+
+    print(f"Story title: {title}")
+    print(f"Title source: {title_source}")
+
+    hero = choose_hero_visual()
+    source = hero["path"]
+
+    print(f"Hero image: {source}")
+
+    create_thumbnail(
+        source,
+        title,
+        (1280, 720),
+        THUMBNAIL_16_9,
     )
 
-    images = collect_images()
-    selected = choose_image(
-        images, title, category, story_content
-    )
-    background = (
-        selected["path"] if selected
-        else extract_video_frame(mode)
-    )
-    if background:
-        background = safe_path(
-            str(background), image_only=True
-        )
-
-    title_hash = hashlib.sha256(
-        title.encode("utf-8")
-    ).hexdigest()
-    background_hash = (
-        sha256(background)
-        if background else "solid-color-fallback"
+    create_thumbnail(
+        source,
+        title,
+        (1080, 1920),
+        THUMBNAIL_VERTICAL,
     )
 
-    # Include story text and selected background in resume identity.
-    story_hash = hashlib.sha256(
-        story_content.encode("utf-8")
-    ).hexdigest()
-    fingerprint = hashlib.sha256(
-        (
-            f"{VERSION}|{mode}|{title_hash}|{story_hash}|"
-            f"{category}|{background_hash}"
-        ).encode("utf-8")
-    ).hexdigest()
-
-    old = read_json(MANIFEST)
-    if (
-        isinstance(old, dict)
-        and old.get("status") == "completed"
-        and old.get("version") == VERSION
-        and old.get("fingerprint") == fingerprint
-        and old.get("format") == mode
-        and THUMBNAIL.is_file()
-        and THUMBNAIL.stat().st_size >= MIN_BYTES
-    ):
-        try:
-            with Image.open(THUMBNAIL) as check:
-                check.verify()
-            with Image.open(THUMBNAIL) as check:
-                if (
-                    check.size == (W, H)
-                    and check.format == "JPEG"
-                ):
-                    log("RESUME: valid matching thumbnail reused")
-                    return
-        except (OSError, ValueError):
-            pass
-
-    details = render_thumbnail(
-        title, background, category
-    )
-
-    write_json(MANIFEST, {
+    manifest = {
         "status": "completed",
-        "version": VERSION,
-        "fingerprint": fingerprint,
-        "format": mode,
         "title": title,
-        "title_source": (
-            "final_title.txt"
-            if title == title_from_file()
-            else "story_json_or_explicit_input"
-        ),
-        "title_sha256": title_hash,
-        "story_sha256": story_hash,
-        "category": category,
-        "background_image": (
-            background.relative_to(ROOT).as_posix()
-            if background else None
-        ),
-        "background_sha256": background_hash,
-        "thumbnail": THUMBNAIL.relative_to(ROOT).as_posix(),
-        **details,
-        "external_api_calls": 0,
-        "paid_services_used": False,
-    })
+        "title_source": title_source,
+        "source_visual": str(source),
+        "source_part": hero["part"],
+        "source_scene": hero["scene"],
+        "thumbnails": [
+            {
+                "type": "16:9",
+                "width": 1280,
+                "height": 720,
+                "path": str(THUMBNAIL_16_9),
+                "size_bytes": THUMBNAIL_16_9.stat().st_size,
+            },
+            {
+                "type": "9:16",
+                "width": 1080,
+                "height": 1920,
+                "path": str(THUMBNAIL_VERTICAL),
+                "size_bytes": THUMBNAIL_VERTICAL.stat().st_size,
+            },
+        ],
+    }
 
-    log("THUMBNAIL CREATED")
-    log("FORMAT:", mode)
-    log("TITLE:", title)
-    log("CATEGORY:", category)
-    log("BACKGROUND:", background or "solid-color fallback")
-    log("DIMENSIONS:", f"{W}x{H}")
-    log("EXTERNAL API CALLS: 0")
-    log("OUTPUT:", THUMBNAIL.relative_to(ROOT))
+    temporary = THUMBNAIL_MANIFEST.with_suffix(".tmp")
+
+    temporary.write_text(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    temporary.replace(THUMBNAIL_MANIFEST)
+
+    print("\n========== THUMBNAILS COMPLETE ==========")
+    print(f"16:9: {THUMBNAIL_16_9}")
+    print(f"9:16: {THUMBNAIL_VERTICAL}")
+    print(f"Manifest: {THUMBNAIL_MANIFEST}")
+    print("==========================================")
 
 
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        print("Interrupted.")
+        sys.exit(130)
     except Exception as exc:
-        log("THUMBNAIL GENERATION FAILED:", str(exc))
+        print(f"ERROR: {exc}")
         sys.exit(1)
