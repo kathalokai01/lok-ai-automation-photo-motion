@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from fractions import Fraction
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,10 +24,17 @@ RENDER = OUT / "scene_renders" / "render_manifest.json"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import load_and_validate, get_format, get_parts, get_scenes
+from input_config import (
+    load_and_validate,
+    get_format,
+    get_parts,
+    get_scenes,
+    get_fps,
+)
 
-VERSION = "output-packager-v20-strict-portable-manifest"
+VERSION = "output-packager-v21-fps-and-zip-video-validation"
 MIN_BYTES = 1000
+FPS_TOLERANCE = 0.02
 
 PATH_FIELDS = {
     "video", "output", "path", "final_video", "alias",
@@ -139,7 +147,20 @@ def zip_path(path):
     return "output/" + relative_output(path)
 
 
-def probe(path, expected_size=None):
+def parse_rate(value, label):
+    try:
+        rate = Fraction(str(value))
+        result = float(rate)
+    except (ValueError, ZeroDivisionError, TypeError):
+        fail(f"{label}: invalid video frame rate {value!r}")
+
+    if not math.isfinite(result) or result <= 0:
+        fail(f"{label}: invalid video frame rate {value!r}")
+
+    return result
+
+
+def probe(path, expected_size=None, expected_fps=None):
     executable = shutil.which("ffprobe")
     if not executable:
         fail("ffprobe is required")
@@ -148,7 +169,11 @@ def probe(path, expected_size=None):
         [
             executable, "-v", "error",
             "-show_entries",
-            "format=duration:stream=codec_type,width,height",
+            (
+                "format=duration:"
+                "stream=codec_type,width,height,"
+                "avg_frame_rate,r_frame_rate"
+            ),
             "-of", "json", str(path),
         ],
         capture_output=True,
@@ -189,11 +214,29 @@ def probe(path, expected_size=None):
 
     if expected_size and dimensions != expected_size:
         fail(
-            f"{Path(path).name}: expected {expected_size}, "
+            f"{Path(path).name}: expected dimensions {expected_size}, "
             f"got {dimensions}"
         )
 
-    return duration
+    rate_value = video.get("avg_frame_rate")
+    if not rate_value or rate_value in ("0/0", "N/A"):
+        rate_value = video.get("r_frame_rate")
+
+    actual_fps = parse_rate(rate_value, Path(path).name)
+
+    if expected_fps is not None:
+        if abs(actual_fps - expected_fps) > FPS_TOLERANCE:
+            fail(
+                f"FPS mismatch in {Path(path).name}: "
+                f"expected {expected_fps}, got {actual_fps:.4f}"
+            )
+
+    return {
+        "duration": duration,
+        "width": dimensions[0],
+        "height": dimensions[1],
+        "fps": actual_fps,
+    }
 
 
 def validate_validation_report(mode, parts, scenes):
@@ -241,7 +284,7 @@ def validate_validation_report(mode, parts, scenes):
     return data
 
 
-def validate_render(mode, parts, scenes, expected_size):
+def validate_render(mode, parts, scenes, expected_size, expected_fps):
     data = read_json(RENDER)
 
     if data.get("status") != "completed":
@@ -252,6 +295,17 @@ def validate_render(mode, parts, scenes, expected_size):
 
     if data.get("captions_burned") is not True:
         fail("Render manifest does not confirm burned captions")
+
+    try:
+        manifest_fps = float(data.get("fps"))
+    except (TypeError, ValueError):
+        fail("Render manifest FPS missing or invalid")
+
+    if abs(manifest_fps - expected_fps) > FPS_TOLERANCE:
+        fail(
+            f"Render manifest FPS mismatch: expected {expected_fps}, "
+            f"got {manifest_fps}"
+        )
 
     expected_count = parts * scenes
 
@@ -301,7 +355,7 @@ def validate_render(mode, parts, scenes, expected_size):
             MIN_BYTES,
         )
 
-        duration = probe(path, expected_size)
+        info = probe(path, expected_size, expected_fps)
         actual_hash = sha256(path)
         declared_hash = row.get("sha256") or row.get("video_sha256")
 
@@ -314,7 +368,8 @@ def validate_render(mode, parts, scenes, expected_size):
             "scene": local,
             "global_scene": global_scene,
             "path": relative_output(path),
-            "duration": round(duration, 3),
+            "duration": round(info["duration"], 3),
+            "fps": round(info["fps"], 4),
             "bytes": path.stat().st_size,
             "sha256": actual_hash,
         })
@@ -344,13 +399,14 @@ def validate_render(mode, parts, scenes, expected_size):
             value = row
 
         path = safe_file(value, f"Part video {index}", MIN_BYTES)
-        duration = probe(path, expected_size)
+        info = probe(path, expected_size, expected_fps)
         part_files.append(path)
 
         part_records.append({
             "part": index,
             "path": relative_output(path),
-            "duration": round(duration, 3),
+            "duration": round(info["duration"], 3),
+            "fps": round(info["fps"], 4),
             "bytes": path.stat().st_size,
             "sha256": sha256(path),
         })
@@ -358,8 +414,10 @@ def validate_render(mode, parts, scenes, expected_size):
     final_video = safe_file(data.get("final_video"), "Final video", MIN_BYTES)
     alias = safe_file(data.get("alias"), "Format alias", MIN_BYTES)
 
-    final_duration = probe(final_video, expected_size)
-    alias_duration = probe(alias, expected_size)
+    final_info = probe(final_video, expected_size, expected_fps)
+    alias_info = probe(alias, expected_size, expected_fps)
+    final_duration = final_info["duration"]
+    alias_duration = alias_info["duration"]
     final_hash = sha256(final_video)
     alias_hash = sha256(alias)
 
@@ -403,6 +461,7 @@ def validate_render(mode, parts, scenes, expected_size):
         "final_hash": final_hash,
         "alias_hash": alias_hash,
         "same_content": final_hash == alias_hash,
+        "fps": expected_fps,
     }
 
 
@@ -713,7 +772,37 @@ def create_zip(files, render):
     return records
 
 
-def verify_packaged_manifest(archive, mode, parts, scenes):
+def verify_zip_video(archive, member, label, expected_size, expected_fps, temp_dir):
+    if not isinstance(member, str) or member not in archive.namelist():
+        fail(f"{label}: video path missing from ZIP: {member}")
+
+    suffix = PurePosixPath(member).suffix or ".mp4"
+    destination = Path(temp_dir) / (
+        hashlib.sha256(member.encode("utf-8")).hexdigest() + suffix
+    )
+
+    try:
+        with archive.open(member, "r") as source:
+            with destination.open("wb") as target:
+                shutil.copyfileobj(source, target)
+
+        if destination.stat().st_size < MIN_BYTES:
+            fail(f"{label}: packaged video is too small")
+
+        info = probe(destination, expected_size, expected_fps)
+
+        return {
+            "duration": round(info["duration"], 3),
+            "fps": round(info["fps"], 4),
+        }
+
+    finally:
+        destination.unlink(missing_ok=True)
+
+
+def verify_packaged_manifest(
+    archive, mode, parts, scenes, expected_size, expected_fps
+):
     names = set(archive.namelist())
     manifest_name = "output/scene_renders/render_manifest.json"
 
@@ -728,6 +817,14 @@ def verify_packaged_manifest(archive, mode, parts, scenes):
     if str(data.get("format", "")).lower() != mode:
         fail("Packaged render FORMAT mismatch")
 
+    try:
+        packaged_fps = float(data.get("fps"))
+    except (TypeError, ValueError):
+        fail("Packaged render manifest FPS missing")
+
+    if abs(packaged_fps - expected_fps) > FPS_TOLERANCE:
+        fail("Packaged render manifest FPS mismatch")
+
     for key in ("final_video", "alias"):
         value = data.get(key)
         if not isinstance(value, str) or value not in names:
@@ -739,50 +836,79 @@ def verify_packaged_manifest(archive, mode, parts, scenes):
     if not isinstance(rows, list) or len(rows) != expected_count:
         fail("Packaged scene count mismatch")
 
-    for index, row in enumerate(rows, 1):
-        if not isinstance(row, dict):
-            fail(f"Invalid packaged scene row: {index}")
+    with tempfile.TemporaryDirectory(prefix="lokai-zip-fps-") as temp_dir:
+        for index, row in enumerate(rows, 1):
+            if not isinstance(row, dict):
+                fail(f"Invalid packaged scene row: {index}")
 
-        expected_part = (index - 1) // scenes + 1
-        expected_local = (index - 1) % scenes + 1
+            expected_part = (index - 1) // scenes + 1
+            expected_local = (index - 1) % scenes + 1
 
-        try:
-            mapping = (
-                int(row.get("part", 0)),
-                int(row.get("local_scene", row.get("scene", 0))),
-                int(row.get("global_scene", index)),
-            )
-        except (TypeError, ValueError):
-            fail(f"Invalid packaged scene mapping: {index}")
-
-        if mapping != (expected_part, expected_local, index):
-            fail(f"Packaged scene mapping mismatch: {index}")
-
-        if row.get("status") != "completed":
-            fail(f"Packaged scene incomplete: {index}")
-
-        value = row.get("video")
-        if not isinstance(value, str) or value not in names:
-            fail(f"Packaged scene path missing: {value}")
-
-    part_rows = data.get("parts")
-    if not isinstance(part_rows, list) or len(part_rows) != parts:
-        fail("Packaged part count mismatch")
-
-    for index, row in enumerate(part_rows, 1):
-        if isinstance(row, dict):
-            value = row.get("path") or row.get("video") or row.get("output")
             try:
-                part_number = int(row.get("part", index))
+                mapping = (
+                    int(row.get("part", 0)),
+                    int(row.get("local_scene", row.get("scene", 0))),
+                    int(row.get("global_scene", index)),
+                )
             except (TypeError, ValueError):
-                fail(f"Invalid packaged part mapping: {index}")
-            if part_number != index:
-                fail(f"Packaged part order mismatch: {index}")
-        else:
-            value = row
+                fail(f"Invalid packaged scene mapping: {index}")
 
-        if not isinstance(value, str) or value not in names:
-            fail(f"Packaged part path missing: {value}")
+            if mapping != (expected_part, expected_local, index):
+                fail(f"Packaged scene mapping mismatch: {index}")
+
+            if row.get("status") != "completed":
+                fail(f"Packaged scene incomplete: {index}")
+
+            value = row.get("video")
+            if not isinstance(value, str) or value not in names:
+                fail(f"Packaged scene path missing: {value}")
+
+            verify_zip_video(
+                archive,
+                value,
+                f"Packaged scene {index}",
+                expected_size,
+                expected_fps,
+                temp_dir,
+            )
+
+        part_rows = data.get("parts")
+        if not isinstance(part_rows, list) or len(part_rows) != parts:
+            fail("Packaged part count mismatch")
+
+        for index, row in enumerate(part_rows, 1):
+            if isinstance(row, dict):
+                value = row.get("path") or row.get("video") or row.get("output")
+                try:
+                    part_number = int(row.get("part", index))
+                except (TypeError, ValueError):
+                    fail(f"Invalid packaged part mapping: {index}")
+                if part_number != index:
+                    fail(f"Packaged part order mismatch: {index}")
+            else:
+                value = row
+
+            if not isinstance(value, str) or value not in names:
+                fail(f"Packaged part path missing: {value}")
+
+            verify_zip_video(
+                archive,
+                value,
+                f"Packaged part {index}",
+                expected_size,
+                expected_fps,
+                temp_dir,
+            )
+
+        for key in ("final_video", "alias"):
+            verify_zip_video(
+                archive,
+                data[key],
+                f"Packaged {key}",
+                expected_size,
+                expected_fps,
+                temp_dir,
+            )
 
     opposite = (
         "katha_lok_ai_full.mp4"
@@ -819,6 +945,7 @@ def main():
     mode = str(get_format(config)).strip().lower()
     parts = int(get_parts(config))
     scenes = int(get_scenes(config))
+    expected_fps = float(get_fps(config))
 
     if mode not in ("short", "full"):
         fail(f"Unsupported FORMAT: {mode}")
@@ -834,9 +961,12 @@ def main():
     log("FORMAT:", mode)
     log("PARTS:", parts)
     log("SCENES PER PART:", scenes)
+    log("EXPECTED FPS:", expected_fps)
 
     validation = validate_validation_report(mode, parts, scenes)
-    render = validate_render(mode, parts, scenes, expected_size)
+    render = validate_render(
+        mode, parts, scenes, expected_size, expected_fps
+    )
     thumbnail = validate_thumbnail()
     metadata, captions = validate_metadata_captions()
     metadata_json = optional_metadata_json(mode)
@@ -873,7 +1003,14 @@ def main():
         if archive.testzip():
             fail("Final ZIP integrity check failed")
 
-        verify_packaged_manifest(archive, mode, parts, scenes)
+        verify_packaged_manifest(
+            archive,
+            mode,
+            parts,
+            scenes,
+            expected_size,
+            expected_fps,
+        )
 
     report = {
         "status": "completed",
@@ -883,6 +1020,7 @@ def main():
         "scenes_per_part": scenes,
         "expected_scenes": parts * scenes,
         "video_dimensions": list(expected_size),
+        "expected_fps": expected_fps,
         "thumbnail_dimensions": [1280, 720],
         "archive": ARCHIVE.name,
         "archive_bytes": ARCHIVE.stat().st_size,
@@ -907,6 +1045,7 @@ def main():
         "files": records,
         "zip_integrity": "valid",
         "manifest_zip_consistency": "valid",
+        "zip_video_fps_validation": "valid",
         "validation_checks": validation.get("checks", {}),
     }
 
@@ -916,6 +1055,8 @@ def main():
     log("ZIP:", ARCHIVE.name)
     log("ZIP BYTES:", ARCHIVE.stat().st_size)
     log("FILES:", len(records))
+    log("FPS VALIDATION: valid")
+    log("ZIP VIDEO FPS VALIDATION: valid")
     log("ZIP CRC: valid")
     log("MANIFEST REFERENCES: valid")
     log("REPORT:", REPORT.relative_to(ROOT))
