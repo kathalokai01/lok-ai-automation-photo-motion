@@ -31,7 +31,7 @@ OUTPUT_FILE = STORY_DIR / "story.json"
 TITLE_FILE = STORY_DIR / "final_title.txt"
 FINGERPRINT_FILE = STORY_DIR / "story.fingerprint"
 
-VERSION = "story-builder-v14-hook-suspense-validation"
+VERSION = "story-builder-v15-whole-story-title-model-cache"
 SHORT_MIN_WORDS = 120
 SHORT_MAX_WORDS = 150
 SHORT_TARGET_WORDS = 135
@@ -97,53 +97,100 @@ def sentences(text):
 
 
 def derive_title_from_story(text):
-    """Offline fallback examines the complete story, not only its first line."""
+    """
+    Offline extractive title fallback.
+    Uses vocabulary distributed across the complete story and its ending;
+    it does not select the first or a single supposedly representative sentence.
+    """
     units = sentences(text)
     if not units:
         return "हिंदी कहानी"
 
-    terms = (
-        "रहस्य", "सच", "खुलासा", "खतरा", "गायब", "लापता",
-        "राज", "बदला", "धोखा", "विश्वासघात", "मौत", "साजिश",
-        "अचानक", "आखिर", "सामना", "पहचान", "चौंक", "आखिरी",
-    )
+    stop_words = {
+        "और", "या", "लेकिन", "मगर", "क्योंकि", "इसलिए", "फिर",
+        "तब", "जब", "जहाँ", "वहाँ", "जिस", "जिसने", "जिसका",
+        "उसने", "उसका", "उसकी", "उसके", "उनके", "उनकी",
+        "यह", "वह", "ये", "वे", "इस", "उस", "एक", "कोई",
+        "कुछ", "सभी", "बहुत", "काफी", "था", "थी", "थे",
+        "है", "हैं", "हो", "हुआ", "हुई", "हुए", "कर",
+        "करके", "किया", "किए", "की", "का", "के", "में",
+        "पर", "से", "तक", "लिए", "साथ", "अपने", "अपनी",
+        "अपना", "नहीं", "नही", "भी", "ही", "तो", "अब",
+        "आज", "कल", "वहां", "यहां", "रहा", "रही", "रहे",
+        "बाद", "पहले", "सामने", "दौरान", "तरह", "बात",
+        "कहानी", "कथा", "औरत", "आदमी",
+    }
 
-    scored = []
-    total = len(units)
+    weights = {}
+    first_seen = {}
+    total_units = len(units)
 
     for index, sentence in enumerate(units):
-        size = word_count(sentence)
-        if size < 3:
+        normalized = re.sub(r"[^\w\s]", " ", sentence.lower())
+        tokens = [
+            token for token in normalized.split()
+            if len(token) > 2 and token not in stop_words
+            and not token.isdigit()
+        ]
+
+        if not tokens:
             continue
 
-        position = index / max(total - 1, 1)
-        score = min(size, 18) * 0.25
+        # Give words appearing across multiple story sections more weight.
+        position = index / max(total_units - 1, 1)
+        section_weight = 1.0
+        if 0.20 <= position <= 0.80:
+            section_weight = 1.25
+        if position >= 0.80:
+            section_weight = 1.35
 
-        if 0.25 <= position <= 0.85:
-            score += 1.5
-        if position >= 0.70:
-            score += 1.0
-        if index == 0 and total > 2:
-            score -= 0.8
+        unique_tokens = set(tokens)
+        for token in unique_tokens:
+            weights[token] = weights.get(token, 0.0) + section_weight
+            first_seen.setdefault(token, index)
 
-        score += sum(
-            1.4 for term in terms if term in sentence.lower()
-        )
-        scored.append((score, index, sentence))
+    if not weights:
+        # Last-resort fallback still samples the complete text.
+        all_words = re.findall(r"\w+", clean(text))
+        candidate_words = all_words[-9:] if len(all_words) > 9 else all_words
+        return clean(" ".join(candidate_words))[:80] or "हिंदी कहानी"
 
-    if not scored:
-        candidate = " ".join(" ".join(units).split()[:9])
-    else:
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        candidate = scored[0][2]
+    ranked = sorted(
+        weights,
+        key=lambda token: (
+            -weights[token],
+            first_seen[token],
+            token,
+        ),
+    )
 
-    words = candidate.strip(" ।.!?！？—-:;,'\"“”‘’").split()
-    candidate = " ".join(words[:9]).strip(" ,;:-")
+    # Prefer central story concepts, then add a meaningful ending clue
+    # when it is not already represented.
+    chosen = ranked[:4]
+    ending_tokens = []
+    for sentence in units[max(0, int(total_units * 0.75)):]:
+        normalized = re.sub(r"[^\w\s]", " ", sentence.lower())
+        for token in normalized.split():
+            if (
+                len(token) > 2
+                and token not in stop_words
+                and token not in chosen
+                and token not in ending_tokens
+            ):
+                ending_tokens.append(token)
 
-    if len(candidate) > 80:
-        candidate = candidate[:77].rsplit(" ", 1)[0] + "..."
+    if ending_tokens and len(chosen) < 5:
+        chosen.append(ending_tokens[0])
 
-    return clean(candidate) or "हिंदी कहानी"
+    # Hindi title assembled from story-wide keywords, not a copied sentence.
+    title = " ".join(chosen[:5]).strip()
+    title = re.sub(r"\s+", " ", title)
+    title = title.strip(" ।.!?！？—-:;,'\"“”‘’")
+
+    if len(title) > 80:
+        title = title[:80].rsplit(" ", 1)[0]
+
+    return title or "हिंदी कहानी"
 
 
 def split_balanced(text, count):
@@ -536,6 +583,7 @@ No markdown fences and no extra keys.
         "parts": narratives,
         "method": "gemini",
     }
+
 def make_story(
     plan,
     mode,
@@ -815,6 +863,22 @@ def main():
         scenes_per_part,
     )
 
+    api_key = (
+        os.environ.get("GEMINI_API_KEY", "").strip()
+        or os.environ.get("GOOGLE_API_KEY", "").strip()
+    )
+
+    # Model selection is part of the cache identity. A model change must
+    # invalidate a story generated by a different model.
+    model_id = selected_model() if api_key else "offline-user-story"
+
+    generation_settings = {
+        "audience": clean(str(config.get("AUDIENCE", "adult"))),
+        "temperature": 0.75,
+        "max_output_tokens": MAX_RESPONSE_TOKENS,
+        "model": model_id,
+    }
+
     fingerprint = digest({
         "version": VERSION,
         "format": mode,
@@ -823,6 +887,7 @@ def main():
         "parts": parts_count,
         "scenes_per_part": scenes_per_part,
         "plan": plan,
+        "generation_settings": generation_settings,
     })
 
     try:
