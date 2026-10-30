@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Katha Lok AI scene preparation with schema validation and resumable checkpoints."""
 
@@ -35,7 +34,7 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "scene-preparation-v9-resumable-schema-safe"
+VERSION = "scene-preparation-v10-full-story-title"
 MAPPING_VERSION = 9
 
 
@@ -219,7 +218,6 @@ def validate_layout(
 def selected_story(format_type: str) -> tuple[dict, str, Path]:
     errors = []
 
-    # Prefer the mapped story only if it belongs to the requested format.
     for path, label in (
         (AI_STORY_FILE, "ai_story"),
         (SOURCE_STORY_FILE, "story"),
@@ -537,8 +535,6 @@ def normalize_scene(
             row[field] = source[field]
 
     return row
-
-
 def validate_rows(
     rows: list[dict],
     parts_count: int,
@@ -625,6 +621,32 @@ def make_result(
     }
 
 
+def resolve_story_title(config: dict, story: dict) -> str:
+    # Explicit TOPIC from input has first priority.
+    topic = clean(get_topic(config))
+    if topic:
+        return topic
+
+    # Use a title generated from the complete story.
+    # Never derive the title from the first line of pasted story text.
+    topic = text_value(
+        story,
+        "final_title",
+        "generated_title",
+        "story_title",
+        "title",
+        "topic",
+    )
+    if topic:
+        return topic
+
+    raise RuntimeError(
+        "Story title is missing. The story-generation stage must create "
+        "a title after reading the complete story. First-line title "
+        "fallback is disabled."
+    )
+
+
 def main() -> None:
     log("=" * 60)
     log("KATHA LOK AI — VALIDATED SCENE PREPARATION")
@@ -646,17 +668,8 @@ def main() -> None:
     plan_map = load_plan(format_type, parts_count, scenes_per_part)
     bible = load_character_bible()
 
-    topic = clean(get_topic(config))
+    topic = resolve_story_title(config, story)
     story_text = clean(get_story_text(config))
-
-    if not topic:
-        topic = clean(story.get("title") or story.get("topic"))
-
-    if not topic and story_text:
-        topic = story_text.splitlines()[0].strip()
-
-    if not topic:
-        raise RuntimeError("Could not determine story title/topic")
 
     settings_keys = (
         "PARTS", "SCENES", "AUDIENCE", "STORY_LENGTH",
@@ -687,7 +700,6 @@ def main() -> None:
         "settings": settings_snapshot,
     })
 
-    # A matching in-progress output is a valid resume source too.
     old = read_json(OUTPUT_FILE)
     old_scenes: dict[tuple[int, int], dict] = {}
 
@@ -715,8 +727,6 @@ def main() -> None:
     global_number = 0
     expected_total = parts_count * scenes_per_part
 
-    # Save an in-progress result after each scene so interruption does not
-    # discard already-normalized records.
     for p, part in enumerate(story["parts"], 1):
         for s, source_scene in enumerate(part["scenes"], 1):
             global_number += 1
