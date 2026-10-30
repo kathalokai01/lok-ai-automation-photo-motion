@@ -1,6 +1,5 @@
-
 #!/usr/bin/env python3
-"""Resumable scene-wise TTS with configurable providers and billing permission."""
+"""Resumable scene-wise TTS with ordered, text-bearing chunk manifests."""
 
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ CHUNK_DIR = AUDIO_DIR / "_chunks"
 NARRATION_FILE = OUT / "narration.json"
 MANIFEST_FILE = OUT / "audio_jobs.json"
 
-VERSION = "generate-tts-v10-billing-gate-resume-safe"
+VERSION = "generate-tts-v11-chunk-text-manifest"
 MIN_AUDIO_BYTES = 100
 
 PROVIDERS = (
@@ -511,8 +510,6 @@ def provider_groups(config):
 
 
 def paid_allowed(config):
-    # Workflow-level explicit opt-in takes precedence over the Input default.
-    # Input TTS_ALLOW_PAID=false alone does not override a workflow opt-in.
     workflow_opt_in = truthy(
         os.environ.get("ALLOW_BILLABLE_PROVIDERS", "false")
     )
@@ -698,11 +695,29 @@ def main():
             try:
                 duration = audio_info(destination)
                 if previous.get("sha256") == file_digest(destination):
-                    old_jobs[(part, scene)] = {
-                        **previous, "duration": round(duration, 3)
-                    }
-                    print(f"RESUME scene {part}/{scene}: cached audio")
-                    continue
+                    previous_chunks = previous.get("chunks", [])
+                    # Reuse only if the old manifest already has every exact
+                    # chunk text. Old v10 jobs are regenerated once so captions
+                    # never consume incomplete chunk metadata.
+                    chunks_valid = (
+                        isinstance(previous_chunks, list)
+                        and len(previous_chunks) == len(chunks)
+                        and all(
+                            isinstance(item, dict)
+                            and item.get("index") == index
+                            and item.get("text") == chunk
+                            and item.get("text_sha256") == sha_text(chunk)
+                            for index, (item, chunk) in enumerate(
+                                zip(previous_chunks, chunks), 1
+                            )
+                        )
+                    )
+                    if chunks_valid:
+                        old_jobs[(part, scene)] = {
+                            **previous, "duration": round(duration, 3)
+                        }
+                        print(f"RESUME scene {part}/{scene}: cached audio")
+                        continue
             except Exception:
                 pass
 
@@ -716,6 +731,7 @@ def main():
             chunk_path.parent.mkdir(parents=True, exist_ok=True)
             chunk_signature = digest({
                 "chunk_sha256": sha_text(chunk),
+                "text": chunk,
                 "settings_sha256": settings_hash,
                 "index": index,
             })
@@ -736,7 +752,11 @@ def main():
                     duration = audio_info(chunk_path)
                     if old_chunk.get("sha256") == file_digest(chunk_path):
                         chunk_records.append({
-                            **old_chunk, "duration": round(duration, 3)
+                            **old_chunk,
+                            "index": index,
+                            "text": chunk,
+                            "text_sha256": sha_text(chunk),
+                            "duration": round(duration, 3),
                         })
                         chunk_paths.append(chunk_path)
                         provider_history.append(old_chunk.get("provider", "unknown"))
@@ -757,6 +777,8 @@ def main():
             record = {
                 "index": index,
                 "status": "completed",
+                "text": chunk,
+                "text_sha256": sha_text(chunk),
                 "signature": chunk_signature,
                 "sha256": file_digest(chunk_path),
                 "output": rel(chunk_path),
@@ -863,6 +885,18 @@ def main():
         job.get("status") != "completed" for job in final_jobs
     ):
         raise RuntimeError("Not all expected narration scenes completed")
+
+    # Validate ordered text-bearing chunks before publishing the completed manifest.
+    for job in final_jobs:
+        chunk_rows = job.get("chunks", [])
+        if not isinstance(chunk_rows, list) or not chunk_rows:
+            raise RuntimeError("Missing TTS chunk records for scene")
+        for index, chunk_row in enumerate(chunk_rows, 1):
+            if not isinstance(chunk_row, dict) or int(chunk_row.get("index", 0)) != index:
+                raise RuntimeError("TTS chunk order is not continuous")
+            chunk_text = str(chunk_row.get("text", "")).strip()
+            if not chunk_text or chunk_row.get("text_sha256") != sha_text(chunk_text):
+                raise RuntimeError("TTS chunk text missing or hash mismatch")
 
     save_json(MANIFEST_FILE, {
         "version": VERSION,
