@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Validate, time, burn and checkpoint adaptive captions."""
 
@@ -13,6 +12,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from fractions import Fraction
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -22,6 +22,7 @@ from input_config import (
     get_format,
     get_parts,
     get_scenes,
+    get_fps,
     get_caption_font,
     get_caption_font_size,
 )
@@ -38,10 +39,12 @@ FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 PART_DIR = OUT / "parts"
 VIDEO_DIR = OUT / "videos"
 
-VERSION = "burn-captions-v28-tts-schema-safe"
+VERSION = "burn-captions-v29-fps-enforced"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.25
+FPS_TOLERANCE = 0.02
+EXPECTED_FPS = 24
 
 PALETTES = [
     {"name": "cinematic-white", "light": "&H00FFFFFF", "dark": "&H00141414"},
@@ -154,12 +157,38 @@ def run(command, label, timeout=900):
     return result
 
 
+def parse_fps(value, label):
+    try:
+        rate = float(Fraction(str(value)))
+    except (ValueError, ZeroDivisionError, TypeError):
+        raise RuntimeError(f"Invalid FPS in {label}: {value!r}")
+
+    if not math.isfinite(rate) or rate <= 0:
+        raise RuntimeError(f"Invalid FPS in {label}: {value!r}")
+
+    return rate
+
+
+def require_fps(info, label):
+    actual = float(info.get("fps", 0))
+
+    if actual <= 0 or abs(actual - EXPECTED_FPS) > FPS_TOLERANCE:
+        raise RuntimeError(
+            f"FPS mismatch in {label}: expected {EXPECTED_FPS}, "
+            f"got {actual:.4f}"
+        )
+
+
 def media_info(path):
     result = run(
         [
             "ffprobe", "-v", "error",
             "-show_entries",
-            "format=duration:stream=codec_type,width,height",
+            (
+                "format=duration:"
+                "stream=codec_type,width,height,"
+                "avg_frame_rate,r_frame_rate"
+            ),
             "-of", "json",
             str(path),
         ],
@@ -187,10 +216,19 @@ def media_info(path):
         None,
     )
 
+    rate_value = None
+    if video:
+        rate_value = video.get("avg_frame_rate")
+        if not rate_value or rate_value in ("0/0", "N/A"):
+            rate_value = video.get("r_frame_rate")
+
+    fps = parse_fps(rate_value, Path(path).name) if rate_value else 0.0
+
     return {
         "duration": duration,
         "width": int(video.get("width") or 0) if video else 0,
         "height": int(video.get("height") or 0) if video else 0,
+        "fps": fps,
         "has_video": video is not None,
         "has_audio": audio is not None,
     }
@@ -308,8 +346,6 @@ def validate_chunk_records(raw_chunks, key, audio_duration):
                 f"TTS chunk text checksum mismatch for scene {key}"
             )
 
-        # generate_tts.py records completed chunks without a status field.
-        # If a status is present, reject only explicitly failed/incomplete rows.
         status = str(chunk.get("status", "")).strip().lower()
 
         if status and status not in {"completed", "success", "ok"}:
@@ -331,8 +367,6 @@ def validate_chunk_records(raw_chunks, key, audio_duration):
     if total <= 0:
         raise RuntimeError(f"TTS chunk duration total is invalid: {key}")
 
-    # The chunk files are concatenated into the final scene audio.
-    # Scale measured chunk durations to the final normalized audio duration.
     scale = audio_duration / total
 
     for item in chunks:
@@ -560,7 +594,6 @@ def make_chunk_cues(caption_text, chunks, duration):
     if not result:
         raise RuntimeError("No caption cues could be generated")
 
-    # Remove overlaps and clamp every cue to the actual scene duration.
     clean = []
 
     for index, cue in enumerate(result):
@@ -750,7 +783,6 @@ def sample_luma(video, timestamp):
 
     return int(result.stdout[0])
 
-
 def contrast_style(video, duration, part, scene, story_seed, width, height):
     samples = [
         sample_luma(video, duration * fraction)
@@ -871,6 +903,8 @@ def burn_one(
                 "-preset", "veryfast",
                 "-crf", "20",
                 "-pix_fmt", "yuv420p",
+                "-r", str(EXPECTED_FPS),
+                "-fps_mode", "cfr",
                 "-c:a", "aac",
                 "-b:a", "160k",
                 "-ar", "44100",
@@ -890,6 +924,8 @@ def burn_one(
 
         if (require["width"], require["height"]) != (width, height):
             raise RuntimeError(f"Captioned dimensions mismatch: {destination}")
+
+        require_fps(require, destination.name)
 
         if abs(require["duration"] - video_duration) > DURATION_TOLERANCE:
             raise RuntimeError(f"Captioned duration mismatch: {destination}")
@@ -923,6 +959,8 @@ def concat_videos(paths, destination, width, height):
             if (info["width"], info["height"]) != (width, height):
                 raise RuntimeError(f"Wrong resolution in merge input: {path}")
 
+            require_fps(info, path.name)
+
             resolved = str(path.resolve())
 
             if "\n" in resolved or "\r" in resolved:
@@ -943,6 +981,8 @@ def concat_videos(paths, destination, width, height):
                 "-preset", "veryfast",
                 "-crf", "20",
                 "-pix_fmt", "yuv420p",
+                "-r", str(EXPECTED_FPS),
+                "-fps_mode", "cfr",
                 "-c:a", "aac",
                 "-b:a", "160k",
                 "-movflags", "+faststart",
@@ -959,6 +999,8 @@ def concat_videos(paths, destination, width, height):
 
         if (info["width"], info["height"]) != (width, height):
             raise RuntimeError(f"Merged dimensions mismatch: {destination}")
+
+        require_fps(info, destination.name)
 
         os.replace(temporary, destination)
         return media_info(destination)
@@ -1041,8 +1083,14 @@ def load_progress():
     return rows if isinstance(rows, dict) else {}
 
 
-def valid_cached_caption(destination, previous, signature, width, height,
-                         expected_duration):
+def valid_cached_caption(
+    destination,
+    previous,
+    signature,
+    width,
+    height,
+    expected_duration,
+):
     if not destination.is_file() or not isinstance(previous, dict):
         return False
 
@@ -1057,19 +1105,25 @@ def valid_cached_caption(destination, previous, signature, width, height,
 
         info = media_info(destination)
 
-        return (
-            info["has_video"]
-            and info["has_audio"]
-            and (info["width"], info["height"]) == (width, height)
-            and abs(info["duration"] - expected_duration)
-            <= DURATION_TOLERANCE
-        )
+        if not info["has_video"] or not info["has_audio"]:
+            return False
+
+        if (info["width"], info["height"]) != (width, height):
+            return False
+
+        if abs(info["duration"] - expected_duration) > DURATION_TOLERANCE:
+            return False
+
+        require_fps(info, destination.name)
+        return True
 
     except Exception:
         return False
 
 
 def main():
+    global EXPECTED_FPS
+
     for command in ("ffmpeg", "ffprobe", "fc-match"):
         if not shutil.which(command):
             raise RuntimeError(f"Required command not installed: {command}")
@@ -1079,6 +1133,7 @@ def main():
     mode = str(get_format(config)).strip().lower()
     parts = int(get_parts(config))
     scenes = int(get_scenes(config))
+    EXPECTED_FPS = int(get_fps(config))
 
     if mode not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
@@ -1124,6 +1179,17 @@ def main():
     if int(manifest.get("height", height)) != height:
         raise RuntimeError("Render manifest height mismatch")
 
+    try:
+        source_manifest_fps = float(manifest.get("fps"))
+    except (TypeError, ValueError):
+        raise RuntimeError("Render manifest FPS missing or invalid")
+
+    if abs(source_manifest_fps - EXPECTED_FPS) > FPS_TOLERANCE:
+        raise RuntimeError(
+            f"Render manifest FPS mismatch: expected {EXPECTED_FPS}, "
+            f"got {source_manifest_fps}"
+        )
+
     source_map = load_render_map(manifest, parts, scenes)
     story_seed = digest_data({
         "captions": captions,
@@ -1150,6 +1216,7 @@ def main():
     log("FORMAT:", mode)
     log("SCENES:", expected_count)
     log("RESOLUTION:", f"{width}x{height}")
+    log("EXPECTED FPS:", EXPECTED_FPS)
     log("FONT:", family, "| SIZE:", size)
     log("TIMING: TTS chunk-duration mapping with optional silence refinement")
     log("LIMITATION: This is not forced word-level audio alignment")
@@ -1169,6 +1236,8 @@ def main():
 
         if (source_info["width"], source_info["height"]) != (width, height):
             raise RuntimeError(f"Rendered source dimensions mismatch: {key}")
+
+        require_fps(source_info, f"rendered scene {key}")
 
         narration = audio[key]
         video_duration = source_info["duration"]
@@ -1211,6 +1280,7 @@ def main():
             "font": family,
             "font_sha256": font_hash,
             "font_size": size,
+            "expected_fps": EXPECTED_FPS,
             "video_duration": round(video_duration, 4),
             "audio_duration": round(audio_duration, 4),
             "chunks": [
@@ -1238,6 +1308,7 @@ def main():
 
         if reused:
             result_info = media_info(destination)
+            require_fps(result_info, destination.name)
             reused_count += 1
             log(f"REUSED {index}/{expected_count}: {destination.name}")
 
@@ -1262,6 +1333,8 @@ def main():
                 f"{style['palette']}/{style['mode']}; {timing_method}"
             )
 
+        require_fps(result_info, destination.name)
+
         timing_methods[timing_method] = (
             timing_methods.get(timing_method, 0) + 1
         )
@@ -1281,6 +1354,7 @@ def main():
             "duration": round(result_info["duration"], 4),
             "width": width,
             "height": height,
+            "fps": round(result_info["fps"], 4),
             "captions_burned": True,
             "caption_style": style,
             "caption_timing": timing_method,
@@ -1297,6 +1371,7 @@ def main():
             "signature": signature,
             "sha256": output_hash,
             "path": relative(destination),
+            "fps": round(result_info["fps"], 4),
             "caption_style": style,
             "caption_timing": timing_method,
             "caption_chunk_count": len(chunks),
@@ -1312,11 +1387,11 @@ def main():
 
         global_cursor += result_info["duration"]
 
-        # Save a durable checkpoint after every successful scene.
         write_json(PROGRESS_FILE, {
             "status": "in_progress",
             "version": VERSION,
             "format": mode,
+            "fps": EXPECTED_FPS,
             "completed_count": index,
             "total_scenes": expected_count,
             "scenes": cached,
@@ -1361,6 +1436,8 @@ def main():
         height,
     )
 
+    require_fps(final_info, final_path.name)
+
     alias_name = (
         "katha_lok_ai_short.mp4"
         if mode == "short"
@@ -1369,6 +1446,9 @@ def main():
 
     alias_path = VIDEO_DIR / alias_name
     shutil.copy2(final_path, alias_path)
+
+    alias_info = media_info(alias_path)
+    require_fps(alias_info, alias_path.name)
 
     opposite = VIDEO_DIR / (
         "katha_lok_ai_full.mp4"
@@ -1389,7 +1469,7 @@ def main():
         "status": "completed",
         "version": VERSION,
         "format": mode,
-        "fps": manifest.get("fps"),
+        "fps": EXPECTED_FPS,
         "width": width,
         "height": height,
         "captions_burned": True,
@@ -1417,13 +1497,16 @@ def main():
                 "output": relative(path),
                 "sha256": sha256_file(path),
                 "duration": round(media_info(path)["duration"], 4),
+                "fps": round(media_info(path)["fps"], 4),
             }
             for index, path in enumerate(part_paths, 1)
         ],
         "final_video": relative(final_path),
         "final_video_sha256": sha256_file(final_path),
+        "final_video_fps": round(final_info["fps"], 4),
         "alias": relative(alias_path),
         "alias_sha256": sha256_file(alias_path),
+        "alias_fps": round(alias_info["fps"], 4),
         "duration": round(final_info["duration"], 4),
         "resolution": [width, height],
         "caption_manifest": relative(CAPTION_MANIFEST),
@@ -1439,6 +1522,7 @@ def main():
         "status": "completed",
         "version": VERSION,
         "format": mode,
+        "fps": EXPECTED_FPS,
         "completed_count": expected_count,
         "total_scenes": expected_count,
         "final_video": relative(final_path),
@@ -1449,6 +1533,7 @@ def main():
     log("CAPTION BURN COMPLETE")
     log("FORMAT:", mode)
     log("SCENES:", expected_count)
+    log("FPS:", EXPECTED_FPS)
     log("NEW:", burned_count, "| REUSED:", reused_count)
     log("TIMING METHODS:", timing_methods)
     log("FINAL VIDEO:", relative(final_path))
