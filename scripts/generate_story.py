@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Katha Lok AI — whole-story title generation, schema-safe story builder."""
+"""Katha Lok AI — story generation with hook and suspense validation."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ OUTPUT_FILE = STORY_DIR / "story.json"
 TITLE_FILE = STORY_DIR / "final_title.txt"
 FINGERPRINT_FILE = STORY_DIR / "story.fingerprint"
 
-VERSION = "story-builder-v13-whole-story-no-silent-truncation"
+VERSION = "story-builder-v14-hook-suspense-validation"
 SHORT_MIN_WORDS = 120
 SHORT_MAX_WORDS = 150
 SHORT_TARGET_WORDS = 135
@@ -97,27 +97,15 @@ def sentences(text):
 
 
 def derive_title_from_story(text):
-    """
-    Offline fallback only. Examine sentences throughout the supplied story.
-    This is a heuristic, not a substitute for semantic story understanding.
-    """
-    story = clean(text)
-    units = sentences(story)
-
-    if not story:
+    """Offline fallback examines the complete story, not only its first line."""
+    units = sentences(text)
+    if not units:
         return "हिंदी कहानी"
 
-    if not units:
-        return " ".join(story.split()[:8])[:80].strip() or "हिंदी कहानी"
-
-    conflict_terms = (
-        "लेकिन", "मगर", "रहस्य", "सच", "खुलासा", "खतरा", "डर",
-        "गायब", "लापता", "राज", "बदला", "धोखा", "विश्वासघात",
-        "मौत", "मृत्यु", "खून", "चोरी", "साजिश", "अचानक",
-        "आखिर", "आखिरकार", "क्योंकि", "फिर भी", "सामना",
-        "बचाया", "बचाने", "फैसला", "वापस", "पहचान", "चौंक",
-        "टूट", "जीत", "हार", "मुक्त", "सजा", "पता चला",
-        "समझ आया", "खुल गया", "आखिरी", "आखिर में",
+    terms = (
+        "रहस्य", "सच", "खुलासा", "खतरा", "गायब", "लापता",
+        "राज", "बदला", "धोखा", "विश्वासघात", "मौत", "साजिश",
+        "अचानक", "आखिर", "सामना", "पहचान", "चौंक", "आखिरी",
     )
 
     scored = []
@@ -128,8 +116,8 @@ def derive_title_from_story(text):
         if size < 3:
             continue
 
-        score = min(size, 18) * 0.25
         position = index / max(total - 1, 1)
+        score = min(size, 18) * 0.25
 
         if 0.25 <= position <= 0.85:
             score += 1.5
@@ -137,48 +125,38 @@ def derive_title_from_story(text):
             score += 1.0
         if index == 0 and total > 2:
             score -= 0.8
-        if size > 24:
-            score -= (size - 24) * 0.15
 
-        for term in conflict_terms:
-            if term in sentence.lower():
-                score += 1.4
-
+        score += sum(
+            1.4 for term in terms if term in sentence.lower()
+        )
         scored.append((score, index, sentence))
 
     if not scored:
-        candidate = " ".join(story.split()[:9])
+        candidate = " ".join(" ".join(units).split()[:9])
     else:
         scored.sort(key=lambda item: (-item[0], item[1]))
         candidate = scored[0][2]
 
-    candidate = candidate.strip(" ।.!?！？—-:;,'\"“”‘’")
-    words = candidate.split()
-
-    if len(words) > 9:
-        candidate = " ".join(words[:9]).rstrip(" ,;:-")
+    words = candidate.strip(" ।.!?！？—-:;,'\"“”‘’").split()
+    candidate = " ".join(words[:9]).strip(" ,;:-")
 
     if len(candidate) > 80:
-        candidate = candidate[:77].rsplit(" ", 1)[0].strip(" ,;:-") + "..."
+        candidate = candidate[:77].rsplit(" ", 1)[0] + "..."
 
     return clean(candidate) or "हिंदी कहानी"
 
 
 def split_balanced(text, count):
-    """Split narration in order, preferring sentence boundaries."""
     units = sentences(text)
     if not units:
         raise RuntimeError("Story has no usable sentences.")
-
     if count < 1:
         raise RuntimeError("Scene count must be positive.")
 
     if len(units) < count:
         tokens = re.findall(r"\S+", text)
         if len(tokens) < count:
-            raise RuntimeError(
-                f"Not enough words to create {count} scenes."
-            )
+            raise RuntimeError("Not enough words to create requested scenes.")
         return [
             " ".join(
                 tokens[
@@ -194,13 +172,12 @@ def split_balanced(text, count):
 
     for index in range(count):
         left = count - index
-
         if left == 1:
             result.append(" ".join(units[cursor:]))
             break
 
-        remaining_words = sum(word_count(x) for x in units[cursor:])
-        target = remaining_words / left
+        remaining = sum(word_count(x) for x in units[cursor:])
+        target = remaining / left
         group = []
         amount = 0
         max_take = len(units) - cursor - (left - 1)
@@ -232,27 +209,24 @@ def split_balanced(text, count):
 
 
 def split_short_parts(text, count):
-    """Split at sentence boundaries, enforcing 120–150 words per part."""
+    from functools import lru_cache
+
     units = sentences(text)
     if not units:
         raise RuntimeError("Short story has no usable sentences.")
 
     sizes = [word_count(x) for x in units]
     prefix = [0]
-
     for size in sizes:
         prefix.append(prefix[-1] + size)
 
     total = prefix[-1]
-
     if not count * SHORT_MIN_WORDS <= total <= count * SHORT_MAX_WORDS:
         raise RuntimeError(
             f"Short story has {total} words for {count} parts. "
             f"Required total: {count * SHORT_MIN_WORDS}-"
-            f"{count * SHORT_MAX_WORDS}. Regenerate or adjust PARTS."
+            f"{count * SHORT_MAX_WORDS}."
         )
-
-    from functools import lru_cache
 
     @lru_cache(maxsize=None)
     def solve(start, left):
@@ -267,7 +241,6 @@ def split_short_parts(text, count):
 
         for end in range(start + 1, last_end + 1):
             amount = prefix[end] - prefix[start]
-
             if amount < SHORT_MIN_WORDS:
                 continue
             if amount > SHORT_MAX_WORDS:
@@ -281,18 +254,16 @@ def split_short_parts(text, count):
                 abs(amount - SHORT_TARGET_WORDS) + rest[0],
                 (end,) + rest[1],
             )
-
             if best is None or candidate[0] < best[0]:
                 best = candidate
 
         return best
 
     solution = solve(0, count)
-
     if solution is None:
         raise RuntimeError(
-            "Cannot split the story at sentence boundaries into "
-            "120-150 words per part. No filler will be added."
+            "Cannot split at sentence boundaries into 120-150 words "
+            "per part. No filler will be added."
         )
 
     boundaries = list(solution[1]) + [len(units)]
@@ -335,7 +306,6 @@ def validate_plan(plan, mode, topic, parts_count, scenes_per_part):
             actual = int(plan.get(key, -1))
         except (TypeError, ValueError):
             actual = -1
-
         if actual != expected:
             raise RuntimeError(f"Story plan {key} mismatch.")
 
@@ -344,7 +314,6 @@ def validate_plan(plan, mode, topic, parts_count, scenes_per_part):
         raise RuntimeError("Story plan has the wrong number of parts.")
 
     global_no = 0
-
     for p, part in enumerate(parts, 1):
         if not isinstance(part, dict) or part.get("part") != p:
             raise RuntimeError(f"Invalid plan part number: {p}.")
@@ -359,18 +328,12 @@ def validate_plan(plan, mode, topic, parts_count, scenes_per_part):
 
             if not isinstance(scene, dict):
                 raise RuntimeError(f"Invalid planned scene: {expected_id}.")
-
             if scene.get("scene_id") != expected_id:
                 raise RuntimeError(f"Plan scene ID mismatch: {expected_id}.")
-
             if scene.get("scene") != s:
                 raise RuntimeError(f"Plan scene number mismatch: {expected_id}.")
-
             if scene.get("global_scene_number") != global_no:
-                raise RuntimeError(
-                    f"Plan global number mismatch: {expected_id}."
-                )
-
+                raise RuntimeError(f"Plan global number mismatch: {expected_id}.")
             if not clean(scene.get("purpose")):
                 raise RuntimeError(f"Plan purpose missing: {expected_id}.")
 
@@ -387,7 +350,6 @@ def selected_model():
             "No valid selected Gemini text model found. "
             "Check the Select Gemini model workflow step."
         )
-
     return model
 
 
@@ -399,39 +361,35 @@ def generate_narrative(config, mode, topic, source_text, parts_count):
 
     if not api_key:
         if source_text:
-            log(
-                "No Gemini key: mapping supplied story without rewriting. "
-                "Offline title selection is heuristic, not semantic."
-            )
+            log("No Gemini key: mapping supplied story without rewriting.")
             return {
                 "title": topic or derive_title_from_story(source_text),
                 "parts": [source_text],
                 "method": "user_story_offline_mapping",
             }
-
         raise RuntimeError(
             "TOPIC-only story generation needs GEMINI_API_KEY or "
             "GOOGLE_API_KEY. No generic template story will be substituted."
         )
 
     model = selected_model()
-
-    # IMPORTANT: Never silently truncate a supplied story.
-    # The complete source is included in the prompt below.
     source = source_text if source_text else "(No source story supplied.)"
 
     if mode == "short":
         mode_rules = (
-            f"Return exactly {parts_count} story parts. Each part must contain "
-            "120-150 Hindi words, targeting 135 words. Preserve sentence "
-            "continuity. Each non-final part should end on a story-grounded "
-            "suspense beat. The final part must resolve the central conflict."
+            f"Return exactly {parts_count} parts. Each part must contain "
+            "120-150 Hindi words, targeting 135 words. Build a strong hook "
+            "in the first part. Each non-final part must end with a genuine "
+            "unresolved story question or danger. The final part must "
+            "resolve the central conflict and provide a meaningful ending."
         )
     else:
         mode_rules = (
-            f"Return exactly {parts_count} story parts. Each part must advance "
-            "the plot with coherent events. Use a strong opening hook, "
-            "escalating stakes, credible reveals, and a satisfying final ending."
+            f"Return exactly {parts_count} parts. Start with a powerful "
+            "story-specific hook. Escalate stakes through the middle. Use "
+            "credible reveals and cause-and-effect. Build suspense before "
+            "the climax. The final part must resolve the central conflict "
+            "without an abrupt or unexplained ending."
         )
 
     prompt = f"""
@@ -447,45 +405,40 @@ COMPLETE SUPPLIED STORY:
 {source}
 </source_story>
 
-WHOLE-STORY TITLE REQUIREMENT — HIGHEST PRIORITY:
-1. Read the complete supplied story, including its middle and ending, before
-   deciding the title. Do not choose a title from the opening sentence alone.
-2. Identify the central character, central conflict, important turning point,
-   outcome, and deeper meaning of the complete narrative.
-3. Choose a concise, memorable Hindi title that represents the complete story.
-4. Make sure the title still fits after considering the ending and reveals.
-5. Do not use a generic title such as "कहानी" or "एक दिलचस्प कहानी".
-6. If the user has supplied a topic/title, preserve its central idea while
-   ensuring the final title fits the whole supplied story.
-7. If no title/topic is supplied, create a title from the story's overall
-   meaning, not merely the first event.
-8. Do not reveal a major twist in the title unless essential.
+WHOLE-STORY TITLE:
+Read the complete supplied story, including its middle and ending.
+Identify the central character, conflict, turning point, outcome and
+meaning before choosing the title. Do not derive the title from only
+the first sentence. If no title is supplied, create a concise memorable
+Hindi title representing the complete story. Avoid generic titles.
 
-STORY RULES:
+STORY REQUIREMENTS:
 - Write natural, engaging Hindi narration, not an outline.
-- If source text is supplied, faithfully rewrite and improve it without
-  changing its core events, character relationships, or intended meaning.
-- If only a topic is supplied, create a complete original fictional story.
-- Keep names, motivations, locations, and chronology consistent.
-- Build a compelling hook, meaningful suspense, cause-and-effect, and stakes.
-- Avoid generic filler and repeated sentences.
-- Use Hindi Devanagari unless the supplied story clearly requires another
-  language.
-- Follow the requested format only. Do not create a second format.
-- Do not include visual prompts or scene directions in narration.
-- Do not invent facts presented as true about real people.
+- If source text is supplied, preserve its core events and relationships.
+- If only a topic is supplied, create a complete original story.
+- Keep character identity, motivation, locations and chronology consistent.
+- Opening hook must create immediate curiosity using story-specific facts.
+- Do not use a generic hook such as "एक दिन की बात है".
+- Build suspense through meaningful clues, risks and consequences.
+- Do not repeat the same suspense phrase in every part.
+- Every non-final part must end at a genuine unresolved turning point.
+- The final part must resolve the central conflict clearly and emotionally.
+- Do not end the final story with an artificial cliffhanger.
+- Do not add visual prompts or scene directions to narration.
+- Do not create a second format.
+- Use Hindi Devanagari unless the source clearly requires another language.
 
 FORMAT RULES:
 {mode_rules}
 
-Return valid JSON only in this exact structure:
+Return valid JSON only:
 {{
-  "title": "title representing the complete story",
+  "title": "complete-story title",
   "parts": [
-    {{"part": 1, "text": "complete narration for this part"}}
+    {{"part": 1, "text": "complete narration"}}
   ]
 }}
-Do not include markdown fences or extra keys.
+No markdown fences and no extra keys.
 """
 
     url = (
@@ -516,24 +469,18 @@ Do not include markdown fences or extra keys.
     )
 
     try:
-        # One request only. No automatic retry of a potentially billable call.
-        with urllib.request.urlopen(
-            request, timeout=REQUEST_TIMEOUT
-        ) as response:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
             result = json.loads(response.read().decode("utf-8"))
-
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
             detail = exc.read().decode("utf-8", errors="replace")[:1200]
         except Exception:
             pass
-
         raise RuntimeError(
             f"Gemini story generation failed with HTTP {exc.code}. "
             f"No automatic retry was attempted. {detail}"
         ) from exc
-
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise RuntimeError(
             f"Gemini story generation failed ({type(exc).__name__}). "
@@ -542,11 +489,7 @@ Do not include markdown fences or extra keys.
 
     candidates = result.get("candidates", [])
     if not candidates:
-        feedback = result.get("promptFeedback", {})
-        raise RuntimeError(
-            "Gemini returned no story candidate. "
-            f"Prompt feedback: {json.dumps(feedback, ensure_ascii=False)[:1000]}"
-        )
+        raise RuntimeError("Gemini returned no story candidate.")
 
     response_parts = candidates[0].get("content", {}).get("parts", [])
     response_text = "".join(
@@ -556,19 +499,12 @@ Do not include markdown fences or extra keys.
     ).strip()
 
     if not response_text:
-        finish_reason = candidates[0].get("finishReason", "unknown")
-        raise RuntimeError(
-            "Gemini returned an empty story response. "
-            f"Finish reason: {finish_reason}"
-        )
+        raise RuntimeError("Gemini returned an empty story response.")
 
     try:
         data = json.loads(response_text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "Gemini story response was not valid JSON; "
-            "the response was rejected rather than guessed."
-        ) from exc
+        raise RuntimeError("Gemini response was not valid JSON.") from exc
 
     if not isinstance(data, dict):
         raise RuntimeError("Gemini story response must be a JSON object.")
@@ -577,30 +513,22 @@ Do not include markdown fences or extra keys.
     rows = data.get("parts")
 
     if not title or not isinstance(rows, list) or len(rows) != parts_count:
-        raise RuntimeError(
-            "Gemini response title or requested part count failed validation."
-        )
+        raise RuntimeError("Gemini title or requested part count failed validation.")
 
     narratives = []
-
     for number, row in enumerate(rows, 1):
         if not isinstance(row, dict):
             raise RuntimeError(f"Gemini returned invalid part {number}.")
-
         try:
             returned_number = int(row.get("part", -1))
         except (TypeError, ValueError):
             returned_number = -1
-
         if returned_number != number:
             raise RuntimeError(f"Gemini returned invalid part {number}.")
 
         text = clean(row.get("text"))
         if not text:
-            raise RuntimeError(
-                f"Gemini returned empty narration for part {number}."
-            )
-
+            raise RuntimeError(f"Gemini returned empty part {number}.")
         narratives.append(text)
 
     return {
@@ -608,8 +536,6 @@ Do not include markdown fences or extra keys.
         "parts": narratives,
         "method": "gemini",
     }
-
-
 def make_story(
     plan,
     mode,
@@ -651,8 +577,7 @@ def make_story(
             amount = word_count(text)
             if not SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS:
                 raise RuntimeError(
-                    f"Short part {number} has {amount} words; expected 120-150. "
-                    "The generated story was rejected rather than padded."
+                    f"Short part {number} has {amount} words; expected 120-150."
                 )
 
     result_parts = []
@@ -674,7 +599,6 @@ def make_story(
             visual = clean(
                 plan_scene.get("visual") or plan_scene.get("visual_prompt")
             )
-
             if not visual:
                 visual = (
                     "Photorealistic live-action cinematic scene depicting: "
@@ -689,9 +613,7 @@ def make_story(
 
             if is_part_end and p < parts_count:
                 final_sentences = sentences(narration)
-                suspense = (
-                    final_sentences[-1] if final_sentences else narration
-                )
+                suspense = final_sentences[-1] if final_sentences else narration
             elif is_part_end and p == parts_count:
                 suspense = (
                     "Resolve the central story conflict using established events."
@@ -801,7 +723,9 @@ def validate_story(data, mode, title, topic, parts_count, scenes_per_part):
             ):
                 raise RuntimeError(f"Incorrect scene numbering: {expected_id}.")
 
-            for key in ("purpose", "narration", "visual", "dialogue", "suspense"):
+            for key in (
+                "purpose", "narration", "visual", "dialogue", "suspense"
+            ):
                 if not isinstance(scene.get(key, ""), str):
                     raise RuntimeError(f"{expected_id}: {key} must be text.")
 
@@ -826,9 +750,39 @@ def validate_story(data, mode, title, topic, parts_count, scenes_per_part):
                     "expected 120-150."
                 )
 
+    first_scene = parts[0]["scenes"][0]
+    hook = clean(data.get("hook"))
+    if not hook:
+        raise RuntimeError("Opening hook is missing.")
+
+    if hook not in clean(first_scene.get("narration")):
+        raise RuntimeError("Opening hook does not match first-scene narration.")
+
+    for p, part in enumerate(parts, 1):
+        last_scene = part["scenes"][-1]
+        suspense = clean(last_scene.get("suspense"))
+
+        if p < parts_count and not suspense:
+            raise RuntimeError(
+                f"Part {p} is missing its ending suspense marker."
+            )
+
+    final_scene = parts[-1]["scenes"][-1]
+    if not clean(final_scene.get("narration")):
+        raise RuntimeError("Final story ending narration is empty.")
+
     data["title"] = clean(data.get("title")) or title
     data["topic"] = topic or data["title"]
     data["part_word_counts"] = counts
+    data["validation"] = {
+        "exact_part_count": True,
+        "exact_scene_count": True,
+        "unique_scene_ids": True,
+        "opening_hook_present": True,
+        "part_end_suspense_markers_present": True,
+        "final_narration_present": True,
+        "short_word_limits_verified": mode == "short",
+    }
     return data
 
 
@@ -880,7 +834,6 @@ def main():
 
     if saved_fingerprint == fingerprint:
         saved = read_json(OUTPUT_FILE)
-
         if saved:
             try:
                 validate_story(
@@ -937,6 +890,7 @@ def main():
     log("Scenes per part:", scenes_per_part)
     log("Narration words per part:", data["part_word_counts"])
     log("Generation method:", data["generation_method"])
+    log("Validation:", data["validation"])
     log("External story-generation requests:", data["_generation"]["api_calls"])
 
 
