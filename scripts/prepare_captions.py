@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare validated, resumable captions with strict language and cache checks."""
+"""Prepare validated, resumable captions for Katha Lok AI."""
 
 from __future__ import annotations
 
@@ -27,14 +27,7 @@ NARRATION_FILE = ROOT / "output" / "narration" / "narration.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v10-strict-language-integrity"
-
-SUPPORTED_FONTS = {
-    "Noto Sans Devanagari",
-    "Mukta",
-    "Hind",
-    "Tiro Devanagari Hindi",
-}
+VERSION = "prepare-captions-v11-config-font-size-compatible"
 
 LANGUAGE_ALIASES = {
     "hi": "hindi",
@@ -257,16 +250,15 @@ def resolve_font_size(config, video_format):
         size = int(configured)
     except (TypeError, ValueError) as exc:
         raise RuntimeError(
-            "CAPTION_FONT_SIZE must be auto or an integer from 16 to 32."
+            "CAPTION_FONT_SIZE must be auto or an integer from 16 to 64."
         ) from exc
 
-    if not 16 <= size <= 32:
+    if not 16 <= size <= 64:
         raise RuntimeError(
-            "CAPTION_FONT_SIZE must be between 16 and 32."
+            "CAPTION_FONT_SIZE must be between 16 and 64."
         )
 
-    maximum = 28 if video_format == "short" else 32
-    return min(size, maximum)
+    return size
 
 
 def checkpoint_reusable(path, fingerprint, caption_hash):
@@ -297,16 +289,16 @@ def checkpoint_reusable(path, fingerprint, caption_hash):
     return cached
 
 
-def validate_scene_mapping(rows, parts, scenes_per_part):
-    expected = {
+def validate_scene_mapping(scene_rows, parts, scenes_per_part):
+    expected = [
         (part, scene)
         for part in range(1, parts + 1)
         for scene in range(1, scenes_per_part + 1)
-    }
+    ]
 
     seen = set()
 
-    for index, row in enumerate(rows, start=1):
+    for index, row in enumerate(scene_rows, start=1):
         if not isinstance(row, dict):
             raise RuntimeError(f"Invalid narration row {index}.")
 
@@ -323,22 +315,25 @@ def validate_scene_mapping(rows, parts, scenes_per_part):
         if key in seen:
             raise RuntimeError(f"Duplicate narration scene: {key}.")
 
-        if key not in expected:
+        if key not in set(expected):
             raise RuntimeError(f"Out-of-range narration scene: {key}.")
 
         seen.add(key)
 
-    missing = sorted(expected - seen)
+    missing = sorted(set(expected) - seen)
 
     if missing:
         raise RuntimeError(
             f"Narration manifest is missing scenes: {missing}"
         )
 
-    if len(rows) != len(expected):
+    if len(scene_rows) != len(expected):
         raise RuntimeError(
-            f"Expected {len(expected)} narration scenes; found {len(rows)}."
+            f"Expected {len(expected)} narration scenes; "
+            f"found {len(scene_rows)}."
         )
+
+    return expected
 
 
 def main():
@@ -366,14 +361,8 @@ def main():
             "choose hindi, english, or hinglish."
         )
 
+    # input_config.py is the single source of truth for supported fonts.
     font = get_caption_font(config)
-
-    if font not in SUPPORTED_FONTS:
-        raise RuntimeError(
-            f"Unsupported CAPTION_FONT={font!r}. Choose: "
-            + ", ".join(sorted(SUPPORTED_FONTS))
-        )
-
     font_size = resolve_font_size(config, video_format)
 
     if not NARRATION_FILE.is_file():
@@ -385,8 +374,7 @@ def main():
     narration_rows = normalize_rows(narration_data)
 
     expected_count = parts * scenes_per_part
-
-    validate_scene_mapping(
+    expected_order = validate_scene_mapping(
         narration_rows,
         parts,
         scenes_per_part,
@@ -514,19 +502,12 @@ def main():
             "when the narration itself is Hindi."
         )
 
-    expected_keys = {
-        (part, scene)
-        for part in range(1, parts + 1)
-        for scene in range(1, scenes_per_part + 1)
-    }
-
-    if set(mapping) != expected_keys:
+    if set(mapping) != set(expected_order):
         raise RuntimeError("Final caption scene mapping is incomplete.")
 
     ordered = [
-        mapping[(part, scene)]
-        for part in range(1, parts + 1)
-        for scene in range(1, scenes_per_part + 1)
+        mapping[key]
+        for key in expected_order
     ]
 
     result = {
