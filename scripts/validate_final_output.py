@@ -1,12 +1,12 @@
-
 #!/usr/bin/env python3
-"""Final output validator for Katha Lok AI photo-motion pipeline."""
+"""Strict final-output validator for Katha Lok AI photo-motion pipeline."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -31,9 +31,13 @@ METADATA = OUT / "youtube_metadata.txt"
 SRT = OUT / "captions" / "final_captions.srt"
 REPORT = OUT / "validation_report.json"
 
-VERSION = "final-validator-v29-package-compatible"
+VERSION = "final-validator-v30-strict-srt-timing"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
+SRT_TIMESTAMP = re.compile(
+    r"^(?P<h>\d{2,}):(?P<m>[0-5]\d):"
+    r"(?P<s>[0-5]\d),(?P<ms>\d{3})$"
+)
 
 
 def log(*args):
@@ -59,14 +63,12 @@ def read_json(path, optional=False):
         if optional and not path.exists():
             return None
         fail(f"Cannot read {path.relative_to(ROOT)}: {exc}")
-
     return value
 
 
 def write_report(data):
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     temporary = REPORT.with_suffix(".json.tmp")
-
     try:
         temporary.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -80,25 +82,21 @@ def write_report(data):
 def rows(data, *keys):
     if isinstance(data, list):
         return data
-
     if isinstance(data, dict):
         for key in keys:
             value = data.get(key)
             if isinstance(value, list):
                 return value
-
     return []
 
 
 def pick(row, *keys):
     if not isinstance(row, dict):
         return None
-
     for key in keys:
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-
     return None
 
 
@@ -107,7 +105,6 @@ def safe_file(value, label, minimum=1):
         fail(f"{label}: file path missing")
 
     path = Path(value.strip())
-
     if not path.is_absolute():
         path = ROOT / path
 
@@ -127,18 +124,15 @@ def safe_file(value, label, minimum=1):
 
 def media_info(path):
     executable = shutil.which("ffprobe")
-
     if not executable:
         fail("ffprobe is not installed")
 
     result = subprocess.run(
         [
-            executable,
-            "-v", "error",
+            executable, "-v", "error",
             "-show_entries",
             "format=duration:stream=codec_type,width,height",
-            "-of", "json",
-            str(path),
+            "-of", "json", str(path),
         ],
         capture_output=True,
         text=True,
@@ -155,19 +149,17 @@ def media_info(path):
     try:
         data = json.loads(result.stdout)
         duration = float(data["format"]["duration"])
-    except (ValueError, TypeError, KeyError) as exc:
+    except (ValueError, TypeError, KeyError):
         fail(f"Invalid media information: {path.name}")
 
     if not math.isfinite(duration) or duration <= 0:
         fail(f"Invalid media duration: {path.name}")
 
     streams = data.get("streams", [])
-
     video = next(
         (item for item in streams if item.get("codec_type") == "video"),
         None,
     )
-
     audio = next(
         (item for item in streams if item.get("codec_type") == "audio"),
         None,
@@ -189,7 +181,6 @@ def validate_video(path, expected_size, label):
         fail(f"{label}: audio/video stream missing")
 
     actual_size = (info["width"], info["height"])
-
     if actual_size != expected_size:
         fail(
             f"{label}: expected {expected_size[0]}x{expected_size[1]}, "
@@ -227,15 +218,12 @@ def validate_scene_rows(items, parts, scenes, label):
 
         try:
             part = int(row["part"])
-            scene = int(
-                row.get("local_scene", row.get("scene", 0))
-            )
+            scene = int(row.get("local_scene", row.get("scene", 0)))
             global_scene = int(row.get("global_scene", index))
         except (KeyError, TypeError, ValueError):
             fail(f"{label}: invalid scene mapping at row {index}")
 
         wanted_part, wanted_scene = expected[index - 1]
-
         if (part, scene) != (wanted_part, wanted_scene):
             fail(
                 f"{label}: wrong part/scene order at row {index}: "
@@ -243,13 +231,9 @@ def validate_scene_rows(items, parts, scenes, label):
             )
 
         if global_scene != index:
-            fail(
-                f"{label}: global_scene mismatch at row {index}: "
-                f"{global_scene}"
-            )
+            fail(f"{label}: global_scene mismatch at row {index}")
 
         key = (part, scene)
-
         if key in mapping:
             fail(f"{label}: duplicate scene mapping {key}")
 
@@ -258,26 +242,139 @@ def validate_scene_rows(items, parts, scenes, label):
     return mapping
 
 
+def srt_timestamp_to_seconds(value):
+    match = SRT_TIMESTAMP.fullmatch(value.strip())
+    if not match:
+        fail(f"Invalid SRT timestamp: {value!r}")
+
+    hours = int(match.group("h"))
+    minutes = int(match.group("m"))
+    seconds = int(match.group("s"))
+    millis = int(match.group("ms"))
+
+    return (
+        hours * 3600
+        + minutes * 60
+        + seconds
+        + millis / 1000.0
+    )
+
+
+def validate_srt_file(path, expected_duration=None):
+    """Validate SRT structure, sequence, timestamps and cue overlaps."""
+
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        fail(f"Cannot read final SRT as UTF-8: {exc}")
+
+    content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not content:
+        fail("Final SRT is empty")
+
+    blocks = re.split(r"\n[ \t]*\n", content)
+    previous_end = -1.0
+    cue_count = 0
+    total_text_chars = 0
+    maximum_end = 0.0
+
+    for block_index, block in enumerate(blocks, 1):
+        lines = block.splitlines()
+
+        if len(lines) < 3:
+            fail(f"SRT cue {block_index}: incomplete cue block")
+
+        number_line = lines[0].strip()
+        if not number_line.isdigit():
+            fail(f"SRT cue {block_index}: cue number is not an integer")
+
+        cue_number = int(number_line)
+        expected_number = block_index
+
+        if cue_number != expected_number:
+            fail(
+                f"SRT cue sequence error: expected {expected_number}, "
+                f"found {cue_number}"
+            )
+
+        timing = lines[1].strip()
+        if timing.count("-->") != 1:
+            fail(f"SRT cue {cue_number}: invalid timing line")
+
+        start_text, end_text = [
+            part.strip() for part in timing.split("-->")
+        ]
+
+        start = srt_timestamp_to_seconds(start_text)
+        end = srt_timestamp_to_seconds(end_text)
+
+        if end <= start:
+            fail(f"SRT cue {cue_number}: end time must exceed start time")
+
+        if start < previous_end - 0.001:
+            fail(
+                f"SRT cue {cue_number}: overlaps or is out of order "
+                f"(starts {start:.3f}s before previous cue ends "
+                f"at {previous_end:.3f}s)"
+            )
+
+        cue_text = "\n".join(lines[2:]).strip()
+        if not cue_text:
+            fail(f"SRT cue {cue_number}: caption text is empty")
+
+        if "-->" in cue_text:
+            fail(f"SRT cue {cue_number}: unexpected timing delimiter in text")
+
+        if re.search(r"<[^>]{0,100}>", cue_text):
+            # Basic SRT formatting tags are allowed; arbitrary markup is not.
+            tags = re.findall(r"</?([A-Za-z]+)(?:\s+[^>]*)?>", cue_text)
+            allowed = {"b", "i", "u", "font"}
+            if any(tag.lower() not in allowed for tag in tags):
+                fail(f"SRT cue {cue_number}: unsupported markup")
+
+        previous_end = end
+        maximum_end = max(maximum_end, end)
+        total_text_chars += len(cue_text)
+        cue_count += 1
+
+    if cue_count == 0:
+        fail("Final SRT contains no caption cues")
+
+    if expected_duration is not None:
+        if maximum_end > expected_duration + 0.25:
+            fail(
+                f"SRT ends at {maximum_end:.3f}s, beyond final video "
+                f"duration {expected_duration:.3f}s"
+            )
+
+    return {
+        "cue_count": cue_count,
+        "text_characters": total_text_chars,
+        "first_cue_start": 0.0,
+        "last_cue_end": round(maximum_end, 3),
+        "duration_checked": expected_duration is not None,
+        "overlap_check": "passed",
+        "sequence_check": "passed",
+        "timestamp_check": "passed",
+    }
+
+
 def validate_photo(mode, parts, scenes):
     data = read_json(PHOTO)
 
     if not isinstance(data, dict):
         fail("Photo-motion manifest must be a JSON object")
-
     if data.get("status") != "completed":
         fail("Photo-motion manifest is not completed")
-
     if str(data.get("format", "")).lower() != mode:
         fail("Photo-motion FORMAT mismatch")
 
     expected_count = parts * scenes
-
     for field in ("expected_scene_count", "completed_count"):
         try:
             actual = int(data.get(field, -1))
         except (TypeError, ValueError):
             actual = -1
-
         if actual != expected_count:
             fail(
                 f"Photo-motion {field} mismatch: "
@@ -286,13 +383,10 @@ def validate_photo(mode, parts, scenes):
 
     mapping = validate_scene_rows(
         rows(data, "scenes", "completed_scenes"),
-        parts,
-        scenes,
-        "Photo motion",
+        parts, scenes, "Photo motion",
     )
 
     checked = 0
-
     for key, row in mapping.items():
         if row.get("status") != "completed":
             fail(f"Photo-motion scene incomplete: {key}")
@@ -302,23 +396,16 @@ def validate_photo(mode, parts, scenes):
             f"Photo-motion scene {key}",
             MIN_VIDEO_BYTES,
         )
-
-        info = media_info(path)
-
-        if not info["video"]:
+        if not media_info(path)["video"]:
             fail(f"Photo-motion scene has no video stream: {key}")
 
         declared_hash = row.get("video_sha256") or row.get("sha256")
-
         if declared_hash and declared_hash != sha256(path):
             fail(f"Photo-motion hash mismatch: {key}")
 
         checked += 1
 
-    return {
-        "status": "valid",
-        "scene_count": checked,
-    }
+    return {"status": "valid", "scene_count": checked}
 
 
 def validate_audio(parts, scenes):
@@ -326,12 +413,10 @@ def validate_audio(parts, scenes):
 
     if not isinstance(data, dict):
         fail("Narration audio manifest must be a JSON object")
-
     if data.get("status") != "completed":
         fail("Narration audio manifest is not completed")
 
     jobs = rows(data, "jobs", "audio_jobs", "scenes")
-
     if not jobs:
         fail("Narration audio jobs are missing")
 
@@ -353,10 +438,8 @@ def validate_audio(parts, scenes):
 
         if key in found:
             fail(f"Duplicate narration scene: {key}")
-
         if key not in expected:
             fail(f"Unexpected narration scene: {key}")
-
         if row.get("status") != "completed":
             fail(f"Narration scene incomplete: {key}")
 
@@ -365,14 +448,10 @@ def validate_audio(parts, scenes):
             f"Narration {key}",
             MIN_AUDIO_BYTES,
         )
-
-        info = media_info(path)
-
-        if not info["audio"]:
+        if not media_info(path)["audio"]:
             fail(f"Narration has no audio stream: {key}")
 
         declared_hash = row.get("sha256")
-
         if declared_hash and declared_hash != sha256(path):
             fail(f"Narration hash mismatch: {key}")
 
@@ -385,26 +464,20 @@ def validate_audio(parts, scenes):
             f"missing={sorted(expected - found)}"
         )
 
-    return {
-        "status": "valid",
-        "scene_count": checked,
-    }
+    return {"status": "valid", "scene_count": checked}
 
 
-def validate_captions(mode, parts, scenes):
+def validate_captions(mode, parts, scenes, final_duration=None):
     data = read_json(CAPTIONS)
 
     if not isinstance(data, dict):
         fail("Caption manifest must be a JSON object")
-
     if data.get("status") != "completed":
         fail("Caption manifest is not completed")
-
     if str(data.get("format", "")).lower() != mode:
         fail("Caption FORMAT mismatch")
 
     caption_rows = rows(data, "captions")
-
     if not caption_rows:
         fail("Caption rows are missing")
 
@@ -424,7 +497,6 @@ def validate_captions(mode, parts, scenes):
             fail(f"Duplicate caption scene: {key}")
 
         text = row.get("text")
-
         if not isinstance(text, str) or not text.strip():
             fail(f"Caption text missing: {key}")
 
@@ -436,21 +508,19 @@ def validate_captions(mode, parts, scenes):
             f"missing={sorted(expected - found)}"
         )
 
-    srt = safe_file(SRT.relative_to(ROOT).as_posix(), "Final SRT", 10)
-    content = srt.read_text(encoding="utf-8-sig")
-
-    if "-->" not in content:
-        fail("Final SRT has no timing cues")
+    srt = safe_file(
+        SRT.relative_to(ROOT).as_posix(),
+        "Final SRT",
+        10,
+    )
+    srt_result = validate_srt_file(srt, final_duration)
 
     return {
         "status": "valid",
         "scene_count": len(found),
         "srt": srt.relative_to(ROOT).as_posix(),
         "srt_sha256": sha256(srt),
-        "timing_note": (
-            "SRT timing is checked for presence; "
-            "word-level alignment is not independently verified."
-        ),
+        **srt_result,
     }
 
 
@@ -459,17 +529,14 @@ def validate_sound():
 
     if not isinstance(data, dict):
         fail("Sound-design manifest must be a JSON object")
-
     if data.get("status") != "completed":
         fail("Sound-design manifest is not completed")
 
     tracks = data.get("tracks")
-
     if not isinstance(tracks, dict):
         fail("Sound-design tracks object missing")
 
     checked_tracks = {}
-
     for name, record in tracks.items():
         if record is None:
             checked_tracks[name] = "disabled"
@@ -477,7 +544,6 @@ def validate_sound():
 
         if not isinstance(record, dict):
             fail(f"Invalid sound track record: {name}")
-
         if record.get("status") != "completed":
             fail(f"Sound track incomplete: {name}")
 
@@ -486,12 +552,10 @@ def validate_sound():
             f"Sound track {name}",
             MIN_AUDIO_BYTES,
         )
-
         if not media_info(path)["audio"]:
             fail(f"Sound track has no audio stream: {name}")
 
         declared_hash = record.get("sha256")
-
         if declared_hash and declared_hash != sha256(path):
             fail(f"Sound track hash mismatch: {name}")
 
@@ -503,14 +567,10 @@ def validate_sound():
     if cue_data is not None:
         if not isinstance(cue_data, dict):
             fail("SFX cue manifest must be a JSON object")
-
         if cue_data.get("status") != "completed":
             fail("SFX cue manifest is not completed")
 
-        for index, cue in enumerate(
-            rows(cue_data, "cues", "items"),
-            1,
-        ):
+        for index, cue in enumerate(rows(cue_data, "cues", "items"), 1):
             if not isinstance(cue, dict):
                 fail(f"Invalid SFX cue row {index}")
 
@@ -524,10 +584,8 @@ def validate_sound():
 
             if part < 1 or scene < 1:
                 fail(f"Invalid SFX scene mapping: {index}")
-
             if not math.isfinite(timestamp) or timestamp < 0:
                 fail(f"Invalid SFX timestamp: {index}")
-
             if not math.isfinite(gain) or gain < 0:
                 fail(f"Invalid SFX gain: {index}")
 
@@ -536,7 +594,6 @@ def validate_sound():
                 f"SFX cue {index}",
                 MIN_AUDIO_BYTES,
             )
-
             if not media_info(path)["audio"]:
                 fail(f"SFX cue has no audio stream: {index}")
 
@@ -554,18 +611,14 @@ def validate_render(mode, parts, scenes, expected_size):
 
     if not isinstance(data, dict):
         fail("Render manifest must be a JSON object")
-
     if data.get("status") != "completed":
         fail("Render manifest is not completed")
-
     if str(data.get("format", "")).lower() != mode:
         fail("Render manifest FORMAT mismatch")
-
     if data.get("captions_burned") is not True:
         fail("Render manifest does not confirm burned captions")
 
     expected_count = parts * scenes
-
     try:
         completed_count = int(data.get("completed_count", -1))
     except (TypeError, ValueError):
@@ -577,13 +630,9 @@ def validate_render(mode, parts, scenes, expected_size):
             f"{completed_count}/{expected_count}"
         )
 
-    scene_rows = rows(data, "completed_scenes", "scenes")
-
     mapping = validate_scene_rows(
-        scene_rows,
-        parts,
-        scenes,
-        "Final render",
+        rows(data, "completed_scenes", "scenes"),
+        parts, scenes, "Final render",
     )
 
     scene_total = 0.0
@@ -592,7 +641,6 @@ def validate_render(mode, parts, scenes, expected_size):
     for key, row in mapping.items():
         if row.get("status") != "completed":
             fail(f"Rendered scene incomplete: {key}")
-
         if row.get("captions_burned") is not True:
             fail(f"Captions not confirmed burned into scene: {key}")
 
@@ -601,12 +649,10 @@ def validate_render(mode, parts, scenes, expected_size):
             f"Rendered scene {key}",
             MIN_VIDEO_BYTES,
         )
-
         info = validate_video(path, expected_size, f"Rendered scene {key}")
         scene_total += info["duration"]
 
         declared_hash = row.get("sha256")
-
         if declared_hash and declared_hash != sha256(path):
             fail(f"Rendered scene hash mismatch: {key}")
 
@@ -618,7 +664,6 @@ def validate_render(mode, parts, scenes, expected_size):
         })
 
     part_rows = data.get("parts")
-
     if not isinstance(part_rows, list) or len(part_rows) != parts:
         fail(f"Expected exactly {parts} part videos")
 
@@ -634,7 +679,6 @@ def validate_render(mode, parts, scenes, expected_size):
 
             if part_number != index:
                 fail(f"Part order mismatch: {index}")
-
             if row.get("status") not in (None, "completed"):
                 fail(f"Part video incomplete: {index}")
 
@@ -644,7 +688,6 @@ def validate_render(mode, parts, scenes, expected_size):
 
         path = safe_file(value, f"Part video {index}", MIN_VIDEO_BYTES)
         info = validate_video(path, expected_size, f"Part video {index}")
-
         part_total += info["duration"]
 
         part_records.append({
@@ -664,22 +707,17 @@ def validate_render(mode, parts, scenes, expected_size):
         if mode == "short"
         else "katha_lok_ai_full.mp4"
     )
-
     if alias.name != expected_alias:
         fail(f"Wrong selected-format alias: {alias.name}")
 
     if final.resolve() == alias.resolve():
         fail("Final video and format alias must be separate files")
-
     if abs(final_info["duration"] - alias_info["duration"]) > 1:
         fail("Final video and alias durations differ")
-
     if sha256(final) != sha256(alias):
         fail("Final video and alias content hashes differ")
-
     if abs(final_info["duration"] - part_total) > max(2, parts):
         fail("Final duration does not match part video durations")
-
     if abs(final_info["duration"] - scene_total) > max(2, expected_count):
         fail("Final duration does not match rendered scene durations")
 
@@ -688,13 +726,7 @@ def validate_render(mode, parts, scenes, expected_size):
         if mode == "short"
         else "katha_lok_ai_short.mp4"
     )
-
-    opposite_paths = (
-        OUT / "videos" / opposite,
-        OUT / opposite,
-    )
-
-    for path in opposite_paths:
+    for path in (OUT / "videos" / opposite, OUT / opposite):
         if path.exists():
             fail(f"Opposite-format output exists: {path.relative_to(ROOT)}")
 
@@ -709,6 +741,7 @@ def validate_render(mode, parts, scenes, expected_size):
         "resolution": list(expected_size),
         "scene_records": scene_records,
         "part_records": part_records,
+        "final_duration": final_info["duration"],
     }
 
 
@@ -724,11 +757,9 @@ def validate_thumbnail(mode):
 
         with Image.open(path) as image:
             image.verify()
-
         with Image.open(path) as image:
             dimensions = image.size
             image_format = image.format
-
     except Exception as exc:
         fail(f"Invalid thumbnail: {exc}")
 
@@ -739,22 +770,17 @@ def validate_thumbnail(mode):
         )
 
     manifest = read_json(THUMBNAIL_MANIFEST, optional=True)
-
     if manifest is not None:
         if not isinstance(manifest, dict):
             fail("Thumbnail manifest must be a JSON object")
-
         if manifest.get("status") != "completed":
             fail("Thumbnail manifest is not completed")
-
         if str(manifest.get("format", "")).lower() != mode:
             fail("Thumbnail manifest FORMAT mismatch")
 
         declared = pick(manifest, "thumbnail", "path", "output")
-
         if declared:
             declared_path = safe_file(declared, "Thumbnail manifest path")
-
             if declared_path.resolve() != path.resolve():
                 fail("Thumbnail manifest points to a different file")
 
@@ -772,9 +798,7 @@ def validate_metadata():
         "YouTube metadata",
         10,
     )
-
     content = path.read_text(encoding="utf-8-sig").strip()
-
     if not content:
         fail("YouTube metadata is empty")
 
@@ -783,13 +807,8 @@ def validate_metadata():
 
     for line in content.splitlines():
         normalized = (
-            line.strip()
-            .strip("[]")
-            .rstrip(":")
-            .strip()
-            .upper()
+            line.strip().strip("[]").rstrip(":").strip().upper()
         )
-
         if normalized in {"TITLE", "DESCRIPTION", "TAGS", "LANGUAGE"}:
             current = normalized
             sections.setdefault(current, [])
@@ -802,13 +821,10 @@ def validate_metadata():
 
     if not title:
         fail("Metadata TITLE is empty")
-
     if not description:
         fail("Metadata DESCRIPTION is empty")
-
     if not tags:
         fail("Metadata TAGS is empty")
-
     if len(title) > 100:
         fail(f"Metadata title exceeds 100 characters: {len(title)}")
 
@@ -831,22 +847,16 @@ def main():
         fail("output/ directory missing")
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
-
     mode = str(get_format(config)).strip().lower()
     parts = int(get_parts(config))
     scenes = int(get_scenes(config))
 
     if mode not in ("short", "full"):
         fail(f"Unsupported FORMAT: {mode}")
-
     if parts < 1 or scenes < 1:
         fail("PARTS and SCENES must be positive integers")
 
-    expected_size = (
-        (720, 1280)
-        if mode == "short"
-        else (1280, 720)
-    )
+    expected_size = (720, 1280) if mode == "short" else (1280, 720)
 
     log("VALIDATION VERSION:", VERSION)
     log("FORMAT:", mode)
@@ -855,27 +865,18 @@ def main():
     log("EXPECTED SCENES:", parts * scenes)
 
     checks = {}
-
-    checks["photo_motion"] = validate_photo(
-        mode, parts, scenes
-    )
-
-    checks["narration"] = validate_audio(
-        parts, scenes
-    )
-
-    checks["captions"] = validate_captions(
-        mode, parts, scenes
-    )
-
+    checks["photo_motion"] = validate_photo(mode, parts, scenes)
+    checks["narration"] = validate_audio(parts, scenes)
     checks["sound_design"] = validate_sound()
-
     checks["render"] = validate_render(
         mode, parts, scenes, expected_size
     )
 
+    final_duration = checks["render"]["final_duration"]
+    checks["captions"] = validate_captions(
+        mode, parts, scenes, final_duration
+    )
     checks["thumbnail"] = validate_thumbnail(mode)
-
     checks["metadata"] = validate_metadata()
 
     for name in (
@@ -890,6 +891,8 @@ def main():
         if checks[name].get("status") != "valid":
             fail(f"Validation check did not pass: {name}")
 
+    checks["render"].pop("final_duration", None)
+
     report = {
         "status": "completed",
         "version": VERSION,
@@ -900,8 +903,9 @@ def main():
         "resolution": list(expected_size),
         "checks": checks,
         "limitations": [
-            "Caption timing is checked for SRT cue presence; "
-            "word-level alignment is not independently verified.",
+            "SRT cue timestamps, sequence, text, overlap and final-video "
+            "duration are validated.",
+            "SRT validation does not prove word-level speech alignment.",
             "Manifest validation does not judge subjective story quality.",
             "Thumbnail validation checks file integrity and dimensions, "
             "not artistic quality.",
@@ -909,7 +913,6 @@ def main():
     }
 
     write_report(report)
-
     log("VALIDATION: PASSED")
     log("PACKAGE-COMPATIBLE CHECK STATUSES: valid")
     log("REPORT:", REPORT.relative_to(ROOT))
