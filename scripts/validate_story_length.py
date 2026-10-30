@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate story word counts against the shared Katha Lok AI length policy."""
+"""Validate story word counts and structure against Input/topic.txt."""
 
 from __future__ import annotations
 
@@ -9,10 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS_DIR = ROOT / "scripts"
-sys.path.insert(0, str(SCRIPTS_DIR))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from input_config import load_and_validate, get_format, get_parts, get_scenes
 from story_length_policy import (
@@ -28,11 +26,11 @@ AI_STORY = STORY_DIR / "ai_story.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 REPORT_FILE = STORY_DIR / "story_length_validation.json"
 
-REPORT_VERSION = "story-length-validation-v1"
+REPORT_VERSION = "story-length-validation-v2-strict-structure"
 
 
-def log(message: str) -> None:
-    print(message, flush=True)
+def log(*values: Any) -> None:
+    print(*values, flush=True)
 
 
 def read_json(path: Path) -> Any:
@@ -40,19 +38,23 @@ def read_json(path: Path) -> Any:
         return None
 
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Cannot read valid JSON from {path}: {exc}") from exc
+        raise RuntimeError(f"Cannot read JSON {path}: {exc}") from exc
 
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+
+    try:
+        temporary.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -62,162 +64,203 @@ def parse_int(value: Any, default: int) -> int:
         return default
 
 
-def get_source_config() -> dict:
-    config = load_and_validate()
-    if not isinstance(config, dict):
-        raise RuntimeError("Input/topic.txt did not produce a valid configuration.")
-    return config
-
-
 def get_story_parts(data: Any, label: str) -> list[dict]:
     if not isinstance(data, dict):
         return []
 
     parts = data.get("parts")
     if not isinstance(parts, list):
-        log(f"WARNING: {label} does not contain a parts list.")
+        log(f"WARNING: {label} has no parts list.")
         return []
 
     return [part for part in parts if isinstance(part, dict)]
 
 
 def extract_part_text(part: dict) -> str:
-    """Collect narration and dialogue while avoiding duplicate scene text."""
-    chunks: list[str] = []
+    """Prefer detailed scene narration; avoid counting summaries twice."""
+    scenes = part.get("scenes")
 
-    for key in ("narration", "story", "text", "summary"):
-        value = part.get(key)
-        if isinstance(value, str) and value.strip():
-            chunks.append(value.strip())
-            break
-
-    scenes = part.get("scenes", [])
     if isinstance(scenes, list):
-        scene_chunks: list[str] = []
+        scene_text = []
 
         for scene in scenes:
             if not isinstance(scene, dict):
                 continue
 
-            narration = clean_text(scene.get("narration", ""))
-            dialogue = clean_text(scene.get("dialogue", ""))
+            narration = clean_text(
+                scene.get("narration")
+                or scene.get("narration_text")
+                or scene.get("text")
+                or ""
+            )
+            dialogue = clean_text(scene.get("dialogue") or "")
 
             combined = " ".join(
-                item for item in (narration, dialogue) if item
+                value for value in (narration, dialogue) if value
             )
+
             if combined:
-                scene_chunks.append(combined)
+                scene_text.append(combined)
 
-        # Prefer scene narration when present, avoiding double-counting
-        # a part-level synopsis and the detailed scene narration.
-        if scene_chunks:
-            return "\n".join(scene_chunks)
+        if scene_text:
+            return "\n".join(scene_text)
 
-    return "\n".join(chunks)
+    for key in ("narration", "story", "text", "content"):
+        value = part.get(key)
 
+        if isinstance(value, str) and value.strip():
+            return value.strip()
 
-def scene_count(parts: list[dict]) -> int:
-    total = 0
-
-    for part in parts:
-        scenes = part.get("scenes", [])
-        if isinstance(scenes, list):
-            total += len(scenes)
-
-    return total
+    return ""
 
 
-def validate_parts(
+def validate_part_structure(
+    parts: list[dict],
+    expected_parts: int,
+    expected_scenes: int,
+    label: str,
+) -> tuple[list[dict], list[str]]:
+    results = []
+    errors = []
+    seen_parts = set()
+
+    if len(parts) != expected_parts:
+        errors.append(
+            f"{label}: expected {expected_parts} parts; found {len(parts)}."
+        )
+
+    for index, part in enumerate(parts, 1):
+        number = parse_int(part.get("part"), index)
+
+        if number in seen_parts:
+            errors.append(f"{label}: duplicate part number {number}.")
+        seen_parts.add(number)
+
+        scenes = part.get("scenes")
+        valid_scenes = (
+            [item for item in scenes if isinstance(item, dict)]
+            if isinstance(scenes, list)
+            else []
+        )
+
+        if not isinstance(scenes, list):
+            errors.append(f"{label}: part {number} has no scenes list.")
+        elif len(valid_scenes) != expected_scenes:
+            errors.append(
+                f"{label}: part {number} expected {expected_scenes} "
+                f"scenes; found {len(valid_scenes)}."
+            )
+
+        scene_numbers = []
+        for scene_index, scene in enumerate(valid_scenes, 1):
+            scene_number = parse_int(
+                scene.get("scene", scene.get("local_scene")),
+                scene_index,
+            )
+            scene_numbers.append(scene_number)
+
+        if scene_numbers:
+            expected_numbers = list(range(1, expected_scenes + 1))
+            if sorted(scene_numbers) != expected_numbers:
+                errors.append(
+                    f"{label}: part {number} scene numbering is invalid."
+                )
+
+        results.append({
+            "part_number": number,
+            "scene_count": len(valid_scenes),
+            "expected_scene_count": expected_scenes,
+            "structure_valid": (
+                isinstance(scenes, list)
+                and len(valid_scenes) == expected_scenes
+                and sorted(scene_numbers)
+                == list(range(1, expected_scenes + 1))
+            ),
+        })
+
+    if seen_parts != set(range(1, expected_parts + 1)):
+        errors.append(
+            f"{label}: part numbers must be exactly "
+            f"1 through {expected_parts}; found {sorted(seen_parts)}."
+        )
+
+    return results, errors
+
+
+def validate_word_counts(
     parts: list[dict],
     policy: dict,
     label: str,
 ) -> list[dict]:
-    expected_parts = parse_int(policy.get("parts_count"), 1)
-    target_words = max(
-        1,
-        parse_int(policy.get("target_words_per_part"), 135),
-    )
+    results = []
 
-    minimum_rate = max(
-        1,
-        parse_int(policy.get("words_per_minute_minimum"), 120),
-    )
-    maximum_rate = max(
-        minimum_rate,
-        parse_int(policy.get("words_per_minute_maximum"), 150),
-    )
+    minimum = int(policy.get("minimum_words_per_part") or 0)
+    maximum = int(policy.get("maximum_words_per_part") or 0)
+    target = int(policy.get("target_words_per_part") or 0)
 
-    baseline = 135 if policy.get("format") == "short" else 125
-
-    minimum_words = max(
-        1,
-        round(target_words * minimum_rate / baseline),
-    )
-    maximum_words = max(
-        minimum_words,
-        round(target_words * maximum_rate / baseline),
-    )
-
-    results: list[dict] = []
-
-    for index, part in enumerate(parts, start=1):
-        text = extract_part_text(part)
-        count = word_count(text)
+    for index, part in enumerate(parts, 1):
+        number = parse_int(part.get("part"), index)
+        narration = extract_part_text(part)
+        count = word_count(narration)
 
         if count == 0:
             status = "missing_narration"
-        elif count < minimum_words:
+        elif count < minimum:
             status = "too_short"
-        elif count > maximum_words:
+        elif count > maximum:
             status = "too_long"
         else:
             status = "within_target"
 
-        scenes = part.get("scenes", [])
-        valid_scenes = [
-            scene for scene in scenes if isinstance(scene, dict)
-        ] if isinstance(scenes, list) else []
-
-        results.append(
-            {
-                "source": label,
-                "part_number": parse_int(part.get("part"), index),
-                "word_count": count,
-                "target_words": target_words,
-                "minimum_words": minimum_words,
-                "maximum_words": maximum_words,
-                "scene_count": len(valid_scenes),
-                "status": status,
-                "needs_revision": status != "within_target",
-            }
-        )
-
-    if len(parts) != expected_parts:
-        log(
-            f"WARNING: {label} has {len(parts)} parts; "
-            f"the input requests {expected_parts}."
-        )
+        results.append({
+            "source": label,
+            "part_number": number,
+            "word_count": count,
+            "target_words": target,
+            "minimum_words": minimum,
+            "maximum_words": maximum,
+            "status": status,
+            "needs_revision": status != "within_target",
+        })
 
     return results
 
 
 def main() -> int:
-    config = get_source_config()
+    input_file = ROOT / "Input" / "topic.txt"
 
-    format_type = get_format(config)
-    parts_requested = get_parts(config)
-    scenes_requested = get_scenes(config)
+    if not input_file.is_file():
+        raise RuntimeError("Input/topic.txt is missing.")
 
-    story = read_json(INPUT_STORY)
+    config = load_and_validate(input_file)
+
+    format_type = str(get_format(config)).strip().lower()
+    parts_requested = int(get_parts(config))
+    scenes_requested = int(get_scenes(config))
+
+    if format_type not in {"short", "full"}:
+        raise RuntimeError(f"Unsupported FORMAT: {format_type}")
+
+    if parts_requested < 1 or scenes_requested < 1:
+        raise RuntimeError("PARTS and SCENES must be positive.")
+
     ai_story = read_json(AI_STORY)
+    source_story = read_json(INPUT_STORY)
 
-    source_parts = get_story_parts(story, "story.json")
     ai_parts = get_story_parts(ai_story, "ai_story.json")
+    source_parts = get_story_parts(source_story, "story.json")
 
-    # Prefer the more detailed AI story for primary validation, but also
-    # report source-story results when available.
-    selected_parts = ai_parts if ai_parts else source_parts
-    selected_source = "ai_story.json" if ai_parts else "story.json"
+    if ai_parts:
+        selected_parts = ai_parts
+        selected_source = "ai_story.json"
+    else:
+        selected_parts = source_parts
+        selected_source = "story.json"
+
+    if not selected_parts:
+        raise RuntimeError(
+            "No story parts found in ai_story.json or story.json."
+        )
 
     total_words = sum(
         word_count(extract_part_text(part))
@@ -233,48 +276,27 @@ def main() -> int:
         source_word_count=total_words,
     )
 
-    # If a policy file already exists, replace it atomically with the
-    # policy calculated from the current input and story.
-    write_json(POLICY_FILE, policy)
+    structure_results, structure_errors = validate_part_structure(
+        selected_parts,
+        parts_requested,
+        scenes_requested,
+        selected_source,
+    )
 
-    selected_results = validate_parts(
+    word_results = validate_word_counts(
         selected_parts,
         policy,
         selected_source,
     )
 
-    source_results = (
-        validate_parts(source_parts, policy, "story.json")
-        if source_parts and selected_source != "story.json"
-        else []
-    )
-
     failed_parts = [
-        result for result in selected_results
-        if result["needs_revision"]
+        row for row in word_results
+        if row["needs_revision"]
     ]
 
-    actual_parts = len(selected_parts)
-    actual_scenes = scene_count(selected_parts)
-
-    expected_parts = parse_int(policy.get("parts_count"), 1)
-    expected_scenes_per_part = parse_int(
-        policy.get("scenes_per_part"), 1
+    actual_scenes = sum(
+        row["scene_count"] for row in structure_results
     )
-    expected_total_scenes = expected_parts * expected_scenes_per_part
-
-    structure_errors: list[str] = []
-
-    if actual_parts != expected_parts:
-        structure_errors.append(
-            f"Expected {expected_parts} parts but found {actual_parts}."
-        )
-
-    if actual_scenes and actual_scenes != expected_total_scenes:
-        structure_errors.append(
-            f"Expected {expected_total_scenes} total scenes based on "
-            f"Input/topic.txt but found {actual_scenes}."
-        )
 
     report = {
         "report_version": REPORT_VERSION,
@@ -284,10 +306,11 @@ def main() -> int:
         "selected_story_source": selected_source,
         "policy": policy,
         "summary": {
-            "parts_requested": expected_parts,
-            "parts_found": actual_parts,
-            "scenes_expected": expected_total_scenes,
+            "parts_requested": parts_requested,
+            "parts_found": len(selected_parts),
+            "scenes_per_part_requested": scenes_requested,
             "scenes_found": actual_scenes,
+            "scenes_expected": parts_requested * scenes_requested,
             "total_words": total_words,
             "parts_needing_revision": len(failed_parts),
             "structure_errors": structure_errors,
@@ -295,39 +318,53 @@ def main() -> int:
             "api_calls_made": 0,
             "story_text_modified": False,
         },
-        "part_results": selected_results,
-        "source_story_results": source_results,
+        "structure_results": structure_results,
+        "part_results": word_results,
+        "source_story_results": (
+            validate_word_counts(
+                source_parts,
+                policy,
+                "story.json",
+            )
+            if source_parts and selected_source != "story.json"
+            else []
+        ),
     }
 
+    write_json(POLICY_FILE, policy)
     write_json(REPORT_FILE, report)
 
-    log(f"Format: {format_type}")
-    log(f"Story source: {selected_source}")
-    log(f"Parts: {actual_parts}/{expected_parts}")
-    log(f"Scenes: {actual_scenes}/{expected_total_scenes}")
-    log(f"Words: {total_words}")
-    log(f"Parts needing revision: {len(failed_parts)}")
-    log(f"Report: {REPORT_FILE}")
+    log("STORY LENGTH VALIDATION")
+    log("FORMAT:", format_type)
+    log("SOURCE:", selected_source)
+    log("PARTS:", len(selected_parts), "/", parts_requested)
+    log("SCENES:", actual_scenes, "/", parts_requested * scenes_requested)
+    log("TOTAL WORDS:", total_words)
+    log("WORD COUNT RANGE:",
+        policy.get("minimum_words_per_part"),
+        "-",
+        policy.get("maximum_words_per_part"))
+    log("PARTS NEEDING REVISION:", len(failed_parts))
+    log("STRUCTURE ERRORS:", len(structure_errors))
+    log("REPORT:", REPORT_FILE.relative_to(ROOT))
 
-    if structure_errors:
-        for error in structure_errors:
-            log(f"STRUCTURE WARNING: {error}")
+    for error in structure_errors:
+        log("STRUCTURE ERROR:", error)
 
-    for result in failed_parts:
+    for row in failed_parts:
         log(
-            "WORD-COUNT WARNING: "
-            f"part {result['part_number']}: "
-            f"{result['word_count']} words; "
-            f"target {result['target_words']} "
-            f"(allowed {result['minimum_words']}-"
-            f"{result['maximum_words']}). "
-            f"Status={result['status']}."
+            "WORD COUNT:",
+            f"part={row['part_number']}",
+            f"words={row['word_count']}",
+            f"allowed={row['minimum_words']}-{row['maximum_words']}",
+            f"status={row['status']}",
         )
 
-    # The report is diagnostic. Do not fail the workflow merely because
-    # an AI-generated story needs revision; callers can decide whether
-    # to retry, revise, or stop.
-    log("Story length validation finished.")
+    log("VALID:", report["summary"]["valid"])
+    log("API CALLS: 0")
+    log("STORY MODIFIED: false")
+
+    # Diagnostic only: story generation/revision is handled by its own stage.
     return 0
 
 
@@ -335,5 +372,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr, flush=True)
-        raise SystemExit(1)
+        log("STORY LENGTH VALIDATION FAILED:", str(exc))
+        sys.exit(1)
