@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Format-aware, resumable image generation for Katha Lok AI."""
+"""Resumable image generation with validated provider fallback."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 
-VERSION = "photo-motion-image-generator-v17-format-aware-job-schema"
+VERSION = "photo-motion-image-generator-v18-resumable-fallback"
 MIN_IMAGE_BYTES = 1000
 TIMEOUT = 180
 BASE_SEED = 20261009
@@ -39,28 +39,25 @@ ALLOW_BILLABLE = os.getenv(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 HF_SPACES = list(dict.fromkeys(
-    item.strip()
-    for item in [
+    x.strip() for x in [
         os.getenv("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo"),
         *os.getenv("FREE_IMAGE_FALLBACK_SPACES", "").split(","),
-    ]
-    if item.strip()
+    ] if x.strip()
 ))
 
 POLLINATIONS_MODELS = list(dict.fromkeys(
-    item.strip()
-    for item in os.getenv(
+    x.strip() for x in os.getenv(
         "POLLINATIONS_FREE_IMAGE_MODELS",
         "black-forest-labs/flux.1-schnell,"
         "tongyi-mai/z-image-turbo,"
         "lykon/dreamshaper-8-lcm",
-    ).split(",")
-    if item.strip()
+    ).split(",") if x.strip()
 ))
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 REPLICATE_KEY = os.getenv("REPLICATE_API_TOKEN", "").strip()
 POLLINATIONS_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 
 GEMINI_MODEL = os.getenv(
     "GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"
@@ -79,7 +76,7 @@ QUALITY = (
 )
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "KathaLokAI-PhotoMotion/17.0"})
+SESSION.headers.update({"User-Agent": "KathaLokAI-PhotoMotion/18.0"})
 
 
 def log(*args):
@@ -104,7 +101,6 @@ def read_json(path, default=None):
     path = Path(path)
     if not path.is_file():
         return default
-
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
@@ -115,7 +111,6 @@ def save_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-
     try:
         temporary.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -135,7 +130,6 @@ def safe_path(value, label):
         path = ROOT / path
 
     path = path.resolve()
-
     if not path.is_relative_to(ROOT.resolve()):
         raise RuntimeError(f"{label}: path escapes project directory")
 
@@ -145,8 +139,7 @@ def safe_path(value, label):
 def parse_size(value):
     try:
         width, height = map(
-            int,
-            str(value).lower().strip().split("x", 1)
+            int, str(value).lower().strip().split("x", 1)
         )
     except (TypeError, ValueError) as exc:
         raise RuntimeError(
@@ -154,9 +147,7 @@ def parse_size(value):
         ) from exc
 
     if not (256 <= width <= 4096 and 256 <= height <= 4096):
-        raise RuntimeError(
-            f"Unsupported image dimensions: {width}x{height}"
-        )
+        raise RuntimeError(f"Unsupported image dimensions: {width}x{height}")
 
     return width, height
 
@@ -165,8 +156,7 @@ def get_jobs():
     document = read_json(JOBS_FILE, {})
 
     if isinstance(document, list):
-        jobs = document
-        metadata = {}
+        jobs, metadata = document, {}
     elif isinstance(document, dict):
         jobs = (
             document.get("jobs")
@@ -176,7 +166,7 @@ def get_jobs():
         )
         metadata = document
     else:
-        raise RuntimeError("visual_jobs.json must be a JSON object or list")
+        raise RuntimeError("visual_jobs.json must be an object or list")
 
     if not isinstance(jobs, list) or not jobs:
         raise RuntimeError("visual_jobs.json contains no image jobs")
@@ -191,9 +181,7 @@ def get_jobs():
 
         try:
             part = int(job.get("part", 1))
-            local_scene = int(
-                job.get("local_scene", job.get("scene", index))
-            )
+            local_scene = int(job.get("local_scene", job.get("scene", index)))
             global_scene = int(
                 job.get("global_scene", job.get("scene_index", index))
             )
@@ -203,14 +191,10 @@ def get_jobs():
             ) from exc
 
         if min(part, local_scene, global_scene) < 1:
-            raise RuntimeError(
-                f"Scene {index}: part and scene numbers must be positive"
-            )
+            raise RuntimeError("Part and scene numbers must be positive")
 
         if global_scene in seen_global:
-            raise RuntimeError(
-                f"Duplicate global scene number: {global_scene}"
-            )
+            raise RuntimeError(f"Duplicate global scene: {global_scene}")
 
         if (part, local_scene) in seen_local:
             raise RuntimeError(
@@ -220,44 +204,35 @@ def get_jobs():
         seen_global.add(global_scene)
         seen_local.add((part, local_scene))
 
-        raw_size = job.get(
+        size = parse_size(job.get(
             "image_size",
-            metadata.get("image_size", "1024x576")
-        )
-        size = parse_size(raw_size)
+            metadata.get("image_size", "1024x576"),
+        ))
 
-        prompt = next(
-            (
-                job[key].strip()
-                for key in (
-                    "prompt",
-                    "image_prompt",
-                    "visual_prompt",
-                    "scene_prompt",
-                    "description",
-                )
-                if isinstance(job.get(key), str) and job[key].strip()
-            ),
-            "",
-        )
+        prompt = next((
+            job[key].strip()
+            for key in (
+                "prompt", "image_prompt", "visual_prompt",
+                "scene_prompt", "description",
+            )
+            if isinstance(job.get(key), str) and job[key].strip()
+        ), "")
 
         if not prompt:
             raise RuntimeError(
                 f"Scene {global_scene}: image prompt is missing"
             )
 
-        raw_output = (
-            job.get("output_path")
-            or job.get("image_path")
-            or job.get("image")
-            or (
-                f"output/visuals/part_{part:02d}/"
-                f"scene_{local_scene:02d}.png"
-            )
-        )
-
         destination = safe_path(
-            str(raw_output),
+            str(
+                job.get("output_path")
+                or job.get("image_path")
+                or job.get("image")
+                or (
+                    f"output/visuals/part_{part:02d}/"
+                    f"scene_{local_scene:02d}.png"
+                )
+            ),
             f"scene {global_scene} output",
         )
 
@@ -273,10 +248,7 @@ def get_jobs():
             "size": size,
             "size_text": f"{size[0]}x{size[1]}",
             "destination": destination,
-            "duration": job.get(
-                "scene_duration",
-                job.get("duration"),
-            ),
+            "duration": job.get("scene_duration", job.get("duration")),
             "scene_id": job.get("id") or job.get("scene_id"),
             "source_job": job,
         })
@@ -294,13 +266,10 @@ def get_jobs():
 
 
 def make_prompt(item):
-    prompt = item["prompt"]
-    negative = item["negative_prompt"]
-
     return (
-        f"{prompt}\n\n"
+        f"{item['prompt']}\n\n"
         f"Quality requirements: {QUALITY}\n\n"
-        f"Avoid: {negative}"
+        f"Avoid: {item['negative_prompt']}"
     )
 
 
@@ -311,11 +280,7 @@ def prompt_hash(item):
 def valid_image(path, size):
     try:
         path = Path(path)
-
-        if (
-            not path.is_file()
-            or path.stat().st_size < MIN_IMAGE_BYTES
-        ):
+        if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
             return False
 
         with Image.open(path) as image:
@@ -326,7 +291,6 @@ def valid_image(path, size):
                 image.format in ("PNG", "JPEG", "WEBP")
                 and image.size == tuple(size)
             )
-
     except Exception:
         return False
 
@@ -334,10 +298,7 @@ def valid_image(path, size):
 def save_image(image, destination, size):
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-
-    temporary = destination.with_name(
-        destination.name + ".tmp.png"
-    )
+    temporary = destination.with_name(destination.name + ".tmp.png")
 
     try:
         image = ImageOps.exif_transpose(image).convert("RGB")
@@ -346,14 +307,12 @@ def save_image(image, destination, size):
             tuple(size),
             method=Image.Resampling.LANCZOS,
         )
-
         image.save(temporary, "PNG", optimize=True)
 
         if not valid_image(temporary, size):
             raise ValueError("Generated image failed validation")
 
         temporary.replace(destination)
-
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -361,7 +320,6 @@ def save_image(image, destination, size):
 def save_image_bytes(raw, destination, size):
     if not raw:
         raise ValueError("Provider returned empty image data")
-
     with Image.open(BytesIO(raw)) as image:
         image.load()
         save_image(image, destination, size)
@@ -376,62 +334,39 @@ def load_rows(path):
     )
 
     result = {}
-
     if isinstance(rows, list):
         for row in rows:
             if not isinstance(row, dict):
                 continue
-
             try:
-                number = int(
-                    row.get("global_scene", row.get("scene"))
-                )
+                number = int(row.get("global_scene", row.get("scene")))
             except (TypeError, ValueError):
                 continue
-
             if number > 0:
                 result[number] = row
-
     return result
 
 
 def previous_scene_rows():
     current = load_rows(GENERATION_MANIFEST)
-    if current:
-        return current
-    return load_rows(IMAGE_MANIFEST)
+    return current if current else load_rows(IMAGE_MANIFEST)
 
 
 def access_error(message):
     message = str(message).lower()
-
     return any(term in message for term in (
-        "429",
-        "401",
-        "403",
-        "402",
-        "quota",
-        "rate limit",
-        "billing",
-        "payment required",
-        "insufficient credit",
-        "unauthorized",
-        "forbidden",
-        "resource exhausted",
+        "429", "401", "403", "402", "quota", "rate limit",
+        "billing", "payment required", "insufficient credit",
+        "unauthorized", "forbidden", "resource exhausted",
     ))
 
 
 def response_image(response, destination, size, provider):
     response.raise_for_status()
-
-    content_type = response.headers.get(
-        "content-type", ""
-    ).lower()
+    content_type = response.headers.get("content-type", "").lower()
 
     if not content_type.startswith("image/"):
-        raise ValueError(
-            f"{provider} returned non-image content"
-        )
+        raise ValueError(f"{provider} returned non-image content")
 
     save_image_bytes(response.content, destination, size)
 
@@ -439,7 +374,6 @@ def response_image(response, destination, size, provider):
 def parameter_name(parameter):
     if not isinstance(parameter, dict):
         return ""
-
     return str(
         parameter.get("parameter_name")
         or parameter.get("name")
@@ -450,14 +384,12 @@ def parameter_name(parameter):
 def parameter_required(parameter):
     if not isinstance(parameter, dict):
         return False
-
     if "parameter_has_default" in parameter:
         return not bool(parameter["parameter_has_default"])
-
     return bool(parameter.get("required", False))
 
 
-def build_hf_arguments(parameters, prompt, size, seed):
+def build_hf_arguments(parameters, prompt, size, seed, negative):
     width, height = size
     arguments = {}
     prompt_found = False
@@ -467,50 +399,28 @@ def build_hf_arguments(parameters, prompt, size, seed):
         if not name:
             continue
 
-        normalized = re.sub(
-            r"[^a-z0-9]", "", name.lower()
-        )
-
+        normalized = re.sub(r"[^a-z0-9]", "", name.lower())
         required = parameter_required(parameter)
 
         if any(token in normalized for token in (
-            "prompt",
-            "description",
-            "textprompt",
-            "positiveprompt",
+            "prompt", "description", "textprompt", "positiveprompt",
         )):
             arguments[name] = prompt
             prompt_found = True
-
-        elif normalized in {
-            "width", "imagewidth", "outputwidth"
-        }:
+        elif normalized in {"width", "imagewidth", "outputwidth"}:
             arguments[name] = width
-
-        elif normalized in {
-            "height", "imageheight", "outputheight"
-        }:
+        elif normalized in {"height", "imageheight", "outputheight"}:
             arguments[name] = height
-
         elif normalized in {"seed", "randomseed"}:
             arguments[name] = seed
-
         elif normalized in {"negativeprompt", "negative"}:
-            arguments[name] = ""
-
-        elif normalized in {
-            "guidancescale", "guidance", "cfgscale"
-        }:
+            arguments[name] = negative
+        elif normalized in {"guidancescale", "guidance", "cfgscale"}:
             arguments[name] = 7
-
-        elif normalized in {
-            "steps", "numsteps", "inference_steps"
-        }:
+        elif normalized in {"steps", "numsteps", "inference_steps"}:
             arguments[name] = 9
-
         elif normalized in {"randomize", "randomizeseed"}:
             arguments[name] = False
-
         elif required:
             raise RuntimeError(
                 f"Unsupported required Hugging Face input: {name}"
@@ -524,49 +434,36 @@ def build_hf_arguments(parameters, prompt, size, seed):
     return arguments
 
 
-def generate_huggingface(
-    prompt, destination, size, seed, space
-):
+def generate_huggingface(prompt, destination, size, seed, space, negative):
     if Client is None:
         raise RuntimeError("gradio_client is not installed")
 
-    client = Client(space, verbose=False)
-    api = client.view_api(return_format="dict")
+    options = {"verbose": False}
+    if HF_TOKEN:
+        options["hf_token"] = HF_TOKEN
 
+    client = Client(space, **options)
+    api = client.view_api(return_format="dict")
     endpoints = api.get("named_endpoints", {})
 
     if not isinstance(endpoints, dict) or not endpoints:
-        raise RuntimeError(
-            f"{space}: no named Gradio endpoints found"
-        )
+        raise RuntimeError(f"{space}: no named Gradio endpoints found")
 
-    preferred = (
-        "/generate_image",
-        "/generate",
-        "/predict",
-        "/run",
-    )
-
+    preferred = ("/generate_image", "/generate", "/predict", "/run")
     endpoint = next(
         (name for name in preferred if name in endpoints),
         next(iter(endpoints)),
     )
 
     parameters = endpoints[endpoint].get("parameters", [])
-
     if not isinstance(parameters, list):
-        raise RuntimeError(
-            f"{space}: invalid endpoint parameter schema"
-        )
+        raise RuntimeError(f"{space}: invalid endpoint parameter schema")
 
     arguments = build_hf_arguments(
-        parameters, prompt, size, seed
+        parameters, prompt, size, seed, negative
     )
 
-    result = client.predict(
-        api_name=endpoint,
-        **arguments,
-    )
+    result = client.predict(api_name=endpoint, **arguments)
 
     if isinstance(result, (list, tuple)):
         result = result[0] if result else None
@@ -577,50 +474,34 @@ def generate_huggingface(
 
     if isinstance(result, dict):
         result = (
-            result.get("path")
-            or result.get("filepath")
-            or result.get("url")
-            or result.get("image")
+            result.get("path") or result.get("filepath")
+            or result.get("url") or result.get("image")
         )
 
     if isinstance(result, str):
         candidate = Path(result)
-
         if candidate.is_file():
             with Image.open(candidate) as image:
                 save_image(image, destination, size)
             return
 
         if result.startswith(("https://", "http://")):
-            response = SESSION.get(
-                result,
-                timeout=TIMEOUT,
-            )
+            response = SESSION.get(result, timeout=TIMEOUT)
             response_image(
                 response, destination, size, "Hugging Face"
             )
             return
 
-    raise ValueError(
-        f"{space}: endpoint returned no usable image"
-    )
+    raise ValueError(f"{space}: endpoint returned no usable image")
 
 
-def generate_pollinations(
-    prompt, destination, size, seed, model
-):
+def generate_pollinations(prompt, destination, size, seed, model):
     width, height = size
-
-    url = (
-        "https://gen.pollinations.ai/image/"
-        + quote(prompt, safe="")
-    )
+    url = "https://gen.pollinations.ai/image/" + quote(prompt, safe="")
 
     headers = {}
     if POLLINATIONS_KEY:
-        headers["Authorization"] = (
-            f"Bearer {POLLINATIONS_KEY}"
-        )
+        headers["Authorization"] = f"Bearer {POLLINATIONS_KEY}"
 
     response = SESSION.get(
         url,
@@ -636,25 +517,18 @@ def generate_pollinations(
     )
 
     response_image(
-        response,
-        destination,
-        size,
-        f"Pollinations ({model})",
+        response, destination, size, f"Pollinations ({model})"
     )
 
 
 def generate_gemini(prompt, destination, size):
     if not ALLOW_BILLABLE:
-        raise RuntimeError(
-            "Gemini blocked: ALLOW_BILLABLE_PROVIDERS is false"
-        )
-
+        raise RuntimeError("Gemini blocked: billable providers disabled")
     if not GEMINI_KEY:
         raise RuntimeError("GEMINI_API_KEY is missing")
 
     width, height = size
     aspect = "9:16" if height > width else "16:9"
-
     endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         + quote(GEMINI_MODEL, safe="")
@@ -687,50 +561,24 @@ def generate_gemini(prompt, destination, size):
     data = response.json()
 
     for candidate in data.get("candidates", []):
-        content = candidate.get("content", {})
+        for item in candidate.get("content", {}).get("parts", []):
+            inline = item.get("inlineData") or item.get("inline_data")
+            if isinstance(inline, dict) and inline.get("data"):
+                raw = base64.b64decode(inline["data"], validate=True)
+                save_image_bytes(raw, destination, size)
+                return
 
-        for item in content.get("parts", []):
-            inline = (
-                item.get("inlineData")
-                or item.get("inline_data")
-            )
-
-            if (
-                not isinstance(inline, dict)
-                or not inline.get("data")
-            ):
-                continue
-
-            raw = base64.b64decode(
-                inline["data"],
-                validate=True,
-            )
-
-            save_image_bytes(raw, destination, size)
-            return
-
-    raise ValueError(
-        "Gemini response contained no inline image data"
-    )
+    raise ValueError("Gemini response contained no inline image data")
 
 
-def generate_replicate(
-    prompt, destination, size, seed
-):
+def generate_replicate(prompt, destination, size, seed):
     if not ALLOW_BILLABLE:
-        raise RuntimeError(
-            "Replicate blocked: ALLOW_BILLABLE_PROVIDERS is false"
-        )
-
+        raise RuntimeError("Replicate blocked: billable providers disabled")
     if not REPLICATE_KEY:
         raise RuntimeError("REPLICATE_API_TOKEN is missing")
 
     model_parts = REPLICATE_MODEL.split("/", 1)
-
-    if (
-        len(model_parts) != 2
-        or not all(model_parts)
-    ):
+    if len(model_parts) != 2 or not all(model_parts):
         raise RuntimeError(
             "REPLICATE_IMAGE_MODEL must be owner/model-name"
         )
@@ -763,25 +611,17 @@ def generate_replicate(
     prediction = response.json()
     deadline = time.monotonic() + TIMEOUT
 
-    while prediction.get("status") in (
-        "starting", "processing"
-    ):
+    while prediction.get("status") in ("starting", "processing"):
         if time.monotonic() >= deadline:
-            raise TimeoutError(
-                "Replicate prediction timed out"
-            )
+            raise TimeoutError("Replicate prediction timed out")
 
         time.sleep(2)
-
         poll_url = prediction.get("urls", {}).get("get")
 
         if not poll_url:
             prediction_id = prediction.get("id")
             if not prediction_id:
-                raise ValueError(
-                    "Replicate returned no prediction ID"
-                )
-
+                raise ValueError("Replicate returned no prediction ID")
             poll_url = (
                 "https://api.replicate.com/v1/predictions/"
                 + str(prediction_id)
@@ -789,60 +629,40 @@ def generate_replicate(
 
         check = SESSION.get(
             poll_url,
-            headers={
-                "Authorization": f"Bearer {REPLICATE_KEY}"
-            },
+            headers={"Authorization": f"Bearer {REPLICATE_KEY}"},
             timeout=30,
         )
-
         check.raise_for_status()
         prediction = check.json()
 
     if prediction.get("status") != "succeeded":
         raise RuntimeError(
             "Replicate failed: "
-            + str(
-                prediction.get("error")
-                or prediction.get("status")
-            )
+            + str(prediction.get("error") or prediction.get("status"))
         )
 
     output = prediction.get("output")
-
     if isinstance(output, str):
         output = [output]
     elif isinstance(output, dict):
         output = list(output.values())
 
-    image_url = next(
-        (
-            item for item in (output or [])
-            if isinstance(item, str)
-            and item.startswith(("https://", "http://"))
-        ),
-        None,
-    )
+    image_url = next((
+        item for item in (output or [])
+        if isinstance(item, str)
+        and item.startswith(("https://", "http://"))
+    ), None)
 
     if not image_url:
-        raise ValueError(
-            "Replicate returned no image URL"
-        )
+        raise ValueError("Replicate returned no image URL")
 
-    image_response = SESSION.get(
-        image_url,
-        timeout=TIMEOUT,
-    )
-
-    response_image(
-        image_response,
-        destination,
-        size,
-        "Replicate",
-    )
+    image_response = SESSION.get(image_url, timeout=TIMEOUT)
+    response_image(image_response, destination, size, "Replicate")
 
 
 def make_record(item, status, provider=None):
     destination = item["destination"]
+    relative = destination.relative_to(ROOT).as_posix()
 
     return {
         "scene": item["scene"],
@@ -851,9 +671,9 @@ def make_record(item, status, provider=None):
         "part": item["part"],
         "local_scene": item["local_scene"],
         "scene_id": item["scene_id"],
-        "file": destination.relative_to(ROOT).as_posix(),
-        "image": destination.relative_to(ROOT).as_posix(),
-        "image_path": destination.relative_to(ROOT).as_posix(),
+        "file": relative,
+        "image": relative,
+        "image_path": relative,
         "width": item["size"][0],
         "height": item["size"][1],
         "image_size": item["size_text"],
@@ -871,8 +691,7 @@ def make_record(item, status, provider=None):
 
 def build_image_manifest(items, records, metadata):
     rows = []
-
-    for item, record in zip(items, records):
+    for record in records:
         rows.append({
             "scene": record["scene"],
             "global_scene": record["scene"],
@@ -892,8 +711,7 @@ def build_image_manifest(items, records, metadata):
         })
 
     ready = sum(
-        row["status"] in ("existing", "generated")
-        for row in rows
+        row["status"] in ("existing", "generated") for row in rows
     )
 
     return {
@@ -911,7 +729,6 @@ def build_image_manifest(items, records, metadata):
 
 def main():
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
-
     items, metadata = get_jobs()
     previous = previous_scene_rows()
 
@@ -919,20 +736,11 @@ def main():
     pending = []
 
     for item in items:
-        number = item["scene"]
+        old = previous.get(item["scene"], {})
         destination = item["destination"]
-        old = previous.get(number, {})
-
         digest = prompt_hash(item)
-        old_digest = str(
-            old.get("prompt_sha256", "")
-        ).strip()
 
-        image_ok = valid_image(
-            destination,
-            item["size"],
-        )
-
+        image_ok = valid_image(destination, item["size"])
         checksum_matches = (
             image_ok
             and (
@@ -943,13 +751,11 @@ def main():
 
         if (
             image_ok
-            and old_digest == digest
+            and old.get("prompt_sha256") == digest
             and checksum_matches
         ):
             record = make_record(
-                item,
-                "existing",
-                old.get("provider") or "previous run",
+                item, "existing", old.get("provider") or "previous run"
             )
         else:
             record = make_record(item, "pending")
@@ -967,10 +773,7 @@ def main():
             "potentially_billable_providers_enabled": ALLOW_BILLABLE,
             "provider_order": [
                 *[f"Hugging Face: {space}" for space in HF_SPACES],
-                *[
-                    f"Pollinations: {model}"
-                    for model in POLLINATIONS_MODELS
-                ],
+                *[f"Pollinations: {model}" for model in POLLINATIONS_MODELS],
                 "Gemini Image",
                 "Replicate",
             ],
@@ -987,16 +790,9 @@ def main():
                 row["status"] in ("existing", "generated")
                 for row in records
             ),
-            "failed": sum(
-                row["status"] == "failed"
-                for row in records
-            ),
-            "pending": sum(
-                row["status"] == "pending"
-                for row in records
-            ),
+            "failed": sum(row["status"] == "failed" for row in records),
+            "pending": sum(row["status"] == "pending" for row in records),
         }
-
         save_json(GENERATION_MANIFEST, manifest)
         save_json(
             IMAGE_MANIFEST,
@@ -1018,6 +814,7 @@ def main():
         return
 
     blocked_hf = set()
+    blocked_pollinations = set()
     blocked_paid = set()
 
     for item, record in pending:
@@ -1025,23 +822,25 @@ def main():
         destination = item["destination"]
         size = item["size"]
         seed = BASE_SEED + item["scene"]
+        negative = item["negative_prompt"]
 
         providers = []
 
         for space in HF_SPACES:
             if space in blocked_hf:
                 continue
-
             providers.append((
                 f"Hugging Face: {space}",
                 lambda space=space: generate_huggingface(
-                    prompt, destination, size, seed, space
+                    prompt, destination, size, seed, space, negative
                 ),
                 "hf:" + space,
                 False,
             ))
 
         for model in POLLINATIONS_MODELS:
+            if model in blocked_pollinations:
+                continue
             providers.append((
                 f"Pollinations: {model}",
                 lambda model=model: generate_pollinations(
@@ -1055,9 +854,7 @@ def main():
             if GEMINI_KEY and "gemini" not in blocked_paid:
                 providers.append((
                     f"Gemini Image: {GEMINI_MODEL}",
-                    lambda: generate_gemini(
-                        prompt, destination, size
-                    ),
+                    lambda: generate_gemini(prompt, destination, size),
                     "gemini",
                     True,
                 ))
@@ -1079,27 +876,17 @@ def main():
             try:
                 log(
                     f"Scene {item['scene']} "
-                    f"({item['part']}/{item['local_scene']}): "
-                    f"trying {name}"
+                    f"({item['part']}/{item['local_scene']}): trying {name}"
                 )
 
-                destination.parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-
+                destination.parent.mkdir(parents=True, exist_ok=True)
                 generate()
 
                 if not valid_image(destination, size):
                     destination.unlink(missing_ok=True)
-                    raise ValueError(
-                        "Provider output failed image validation"
-                    )
+                    raise ValueError("Provider output failed image validation")
 
-                record.update(
-                    make_record(item, "generated", name)
-                )
-
+                record.update(make_record(item, "generated", name))
                 record.setdefault("attempts", []).append({
                     "provider": name,
                     "status": "success",
@@ -1107,23 +894,14 @@ def main():
 
                 succeeded = True
                 checkpoint()
-
-                log(
-                    f"Scene {item['scene']}: image checkpoint saved"
-                )
+                log(f"Scene {item['scene']}: checkpoint saved")
                 break
 
             except Exception as exc:
-                last_error = (
-                    f"{type(exc).__name__}: {exc}"
-                )
-
+                last_error = f"{type(exc).__name__}: {exc}"
                 destination.unlink(missing_ok=True)
 
-                log(
-                    f"Provider failed: {name}: "
-                    f"{last_error[:250]}"
-                )
+                log(f"Provider failed: {name}: {last_error[:250]}")
 
                 record.setdefault("attempts", []).append({
                     "provider": name,
@@ -1134,29 +912,26 @@ def main():
                 if access_error(last_error):
                     if provider_key.startswith("hf:"):
                         blocked_hf.add(provider_key[3:])
+                    elif provider_key.startswith("pollinations:"):
+                        blocked_pollinations.add(provider_key.split(":", 1)[1])
                     elif billable:
                         blocked_paid.add(provider_key)
 
         if not succeeded:
             record["status"] = "failed"
             record["error"] = last_error[:800]
-
             log(
                 f"Scene {item['scene']} failed. "
-                "Successful scene checkpoints are preserved."
+                "Successful checkpoints preserved."
             )
 
         checkpoint()
 
     failed = [
-        row["scene"]
-        for row in records
-        if row["status"] == "failed"
+        row["scene"] for row in records if row["status"] == "failed"
     ]
-
     ready = sum(
-        row["status"] in ("existing", "generated")
-        for row in records
+        row["status"] in ("existing", "generated") for row in records
     )
 
     log("Images ready:", f"{ready}/{len(records)}")
@@ -1175,14 +950,8 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(
-            "IMAGE GENERATION CANCELLED",
-            file=sys.stderr,
-        )
+        print("IMAGE GENERATION CANCELLED", file=sys.stderr)
         sys.exit(130)
     except Exception as exc:
-        print(
-            f"IMAGE GENERATION ERROR: {exc}",
-            file=sys.stderr,
-        )
+        print(f"IMAGE GENERATION ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
