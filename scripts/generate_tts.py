@@ -749,3 +749,851 @@ def split_text(text, limit, minimum):
     if text:
         chunks.append(text)
 
+    if len(chunks) > 1 and len(chunks[-1]) < minimum:
+        combined = chunks[-2] + " " + chunks[-1]
+
+        if len(combined) <= limit:
+            chunks[-2] = combined
+            chunks.pop()
+
+    index = 0
+
+    while index < len(chunks) - 1:
+        if len(chunks[index]) < minimum:
+            combined = chunks[index] + " " + chunks[index + 1]
+
+            if len(combined) <= limit:
+                chunks[index] = combined
+                chunks.pop(index + 1)
+                continue
+
+        index += 1
+
+    return chunks
+
+
+def scene_key(row):
+    try:
+        part = int(row["part"])
+        scene = int(row.get("scene", row.get("local_scene")))
+
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Invalid narration scene mapping: {row}"
+        ) from exc
+
+    if part < 1 or scene < 1:
+        raise RuntimeError(f"Invalid narration scene mapping: {row}")
+
+    return part, scene
+
+
+def rel(path):
+    return (
+        Path(path)
+        .resolve()
+        .relative_to(ROOT.resolve())
+        .as_posix()
+    )
+
+
+def final_audio_path(part, scene):
+
+    return (
+        AUDIO_DIR
+        / f"part_{part:02d}"
+        / f"scene_{scene:02d}.mp3"
+    )
+
+
+def chunk_audio_path(part, scene, index):
+    return (
+        CHUNK_DIR
+        / f"part_{part:02d}"
+        / f"scene_{scene:02d}"
+        / f"chunk_{index:04d}.mp3"
+    )
+
+
+def load_checkpoint():
+    try:
+        data = read_json(MANIFEST_FILE)
+
+        if isinstance(data, dict) and isinstance(data.get("jobs"), list):
+            return data
+
+    except (OSError, ValueError, TypeError):
+        pass
+
+    return {"jobs": []}
+
+
+def save_checkpoint(checkpoint, old_jobs, expected, status):
+    checkpoint.update({
+        "version": VERSION,
+        "status": status,
+        "expected_scenes": len(expected),
+        "jobs": [
+            old_jobs.get(
+                key,
+                {
+                    "part": key[0],
+                    "scene": key[1],
+                    "status": "pending",
+                },
+            )
+            for key in sorted(expected)
+        ],
+        "updated_at": now(),
+    })
+
+    save_json(MANIFEST_FILE, checkpoint)
+
+
+def generate_one_chunk(
+    text,
+    destination,
+    config,
+    primary,
+    fallback,
+    allow_paid,
+    attempts,
+):
+    errors = []
+    raw = Path(destination).with_suffix(".raw")
+    raw.parent.mkdir(parents=True, exist_ok=True)
+
+    provider_groups_to_try = (
+        ("primary", primary),
+        ("fallback", fallback),
+    )
+
+    for group, providers in provider_groups_to_try:
+        for provider in providers:
+
+            if provider in BILLABLE and not allow_paid:
+                errors.append(
+                    f"{provider}: billable permission disabled"
+                )
+                continue
+
+            for attempt in range(1, attempts + 1):
+                raw.unlink(missing_ok=True)
+
+                try:
+                    GENERATORS[provider](text, raw, config)
+                    audio_info(raw, config)
+
+                    duration = normalize_audio(raw, destination, config)
+
+                    if duration <= 0:
+                        raise RuntimeError(
+                            "Normalized audio duration is invalid"
+                        )
+
+                    return provider, group, attempt, duration
+
+                except Exception as exc:
+                    errors.append(
+                        f"{provider} attempt {attempt}/{attempts}: "
+                        f"{str(exc)[:220]}"
+                    )
+                    raw.unlink(missing_ok=True)
+
+            print(
+                f"PROVIDER FAILED: {provider}; trying next configured provider",
+                flush=True,
+            )
+
+    raise RuntimeError(
+        "No TTS provider succeeded: " + " | ".join(errors[-15:])
+    )
+
+
+def validate_narration(config):
+    if not NARRATION_FILE.is_file():
+        raise RuntimeError("narration.json is missing")
+
+    narration = read_json(NARRATION_FILE)
+
+    if (
+        not isinstance(narration, dict)
+        or not isinstance(narration.get("scenes"), list)
+    ):
+        raise RuntimeError("narration.json must contain a scenes list")
+
+    narration_status = str(
+        narration.get("status", "completed")
+    ).strip().lower()
+
+    if narration_status not in {"completed", "complete", "ready"}:
+        raise RuntimeError(
+            f"Narration manifest status is invalid: {narration_status}"
+        )
+
+    mode = str(config.get("FORMAT", "full")).strip().lower()
+
+    if mode not in {"short", "full"}:
+        raise RuntimeError(f"Unsupported FORMAT: {mode}")
+
+    configured_parts = int(get_parts(config))
+    scenes_per_part = int(get_scenes(config))
+
+    if configured_parts < 1 or scenes_per_part < 1:
+        raise RuntimeError("PARTS and SCENES must be positive")
+
+    rows = {}
+
+    for index, row in enumerate(narration["scenes"], 1):
+        if not isinstance(row, dict):
+            raise RuntimeError(
+                f"Invalid narration scene row: {index}"
+            )
+
+        key = scene_key(row)
+
+        if key in rows:
+            raise RuntimeError(f"Duplicate narration scene: {key}")
+
+        value = str(
+            row.get("narration") or row.get("text") or ""
+        ).strip()
+
+        if not value:
+            raise RuntimeError(f"Empty narration text for scene {key}")
+
+        status = str(row.get("status", "completed")).strip().lower()
+
+        if status not in {"completed", "complete", "ready"}:
+            raise RuntimeError(
+                f"Narration scene is not completed: {key}"
+            )
+
+        rows[key] = value
+
+    if not rows:
+        raise RuntimeError("No narration scenes found")
+
+    actual_parts = max(part for part, _ in rows)
+    found_parts = {part for part, _ in rows}
+
+    if found_parts != set(range(1, actual_parts + 1)):
+        raise RuntimeError("Narration part numbering is not continuous")
+
+    if mode == "full":
+        if actual_parts != configured_parts:
+            raise RuntimeError(
+                "FULL part count mismatch: "
+                f"configured={configured_parts}, actual={actual_parts}"
+            )
+        parts = configured_parts
+
+    else:
+        parts = actual_parts
+
+        declared_parts = narration.get("total_parts")
+
+        if declared_parts is not None:
+            if int(declared_parts) != actual_parts:
+                raise RuntimeError(
+                    "SHORT total_parts does not match actual scene mapping"
+                )
+
+    expected = {
+        (part, scene)
+        for part in range(1, parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    }
+
+    if set(rows) != expected:
+        missing = sorted(expected - set(rows))
+        extra = sorted(set(rows) - expected)
+
+        raise RuntimeError(
+            "Narration mapping mismatch: "
+            f"missing={missing[:30]}; extra={extra[:30]}"
+        )
+
+    declared_scenes = narration.get("scenes_per_part")
+
+    if declared_scenes is not None:
+        if int(declared_scenes) != scenes_per_part:
+            raise RuntimeError(
+                "Narration scenes_per_part does not match Input SCENES"
+            )
+
+    print(
+        f"NARRATION VALIDATED: FORMAT={mode}, "
+        f"CONFIGURED_PARTS={configured_parts}, "
+        f"ACTUAL_PARTS={parts}, "
+        f"SCENES_PER_PART={scenes_per_part}",
+        flush=True,
+    )
+
+    return rows, expected, parts, configured_parts, scenes_per_part, mode
+
+
+def validate_chunk_record(record, index, text, settings_hash):
+    if not isinstance(record, dict):
+        return False
+
+    if record.get("status") != "completed":
+        return False
+
+    if record.get("index") != index:
+        return False
+
+    if record.get("text") != text:
+        return False
+
+    if record.get("text_sha256") != sha_text(text):
+        return False
+
+    expected_signature = digest({
+        "chunk_sha256": sha_text(text),
+        "text": text,
+        "settings_sha256": settings_hash,
+        "index": index,
+    })
+
+    if record.get("signature") != expected_signature:
+        return False
+
+    output = Path(str(record.get("output", "")))
+
+    if not output.is_absolute():
+        output = ROOT / output
+
+    if not output.is_file():
+        return False
+
+    try:
+        if record.get("sha256") != file_digest(output):
+            return False
+
+        if audio_info(output) <= 0:
+            return False
+
+    except Exception:
+        return False
+
+    return True
+
+
+def validate_final_job(job, part, scene, signature, destination):
+    if not isinstance(job, dict):
+        return False
+
+    if job.get("status") != "completed":
+        return False
+
+    if job.get("part") != part or job.get("scene") != scene:
+        return False
+
+    if job.get("signature") != signature:
+        return False
+
+    if not destination.is_file():
+        return False
+
+    try:
+        if job.get("sha256") != file_digest(destination):
+            return False
+
+        if audio_info(destination) <= 0:
+            return False
+
+    except Exception:
+        return False
+
+    chunks = job.get("chunks")
+
+    if not isinstance(chunks, list) or not chunks:
+        return False
+
+    for record in chunks:
+        if not isinstance(record, dict):
+            return False
+
+        output = Path(str(record.get("output", "")))
+
+        if not output.is_absolute():
+            output = ROOT / output
+
+        if not output.is_file():
+            return False
+
+        try:
+            if record.get("sha256") != file_digest(output):
+                return False
+
+            audio_info(output)
+
+        except Exception:
+            return False
+
+    return True
+
+
+def main():
+    config = load_and_validate(ROOT / "Input" / "topic.txt")
+
+    if not isinstance(config, dict):
+        raise RuntimeError("Input configuration must be a dictionary")
+
+    for command in ("ffmpeg", "ffprobe"):
+        if not shutil.which(command):
+            raise RuntimeError(
+                f"Required command not installed: {command}"
+            )
+
+    (
+        rows,
+        expected,
+        actual_parts,
+        configured_parts,
+        scenes_per_part,
+        mode,
+    ) = validate_narration(config)
+
+    primary, fallback = provider_groups(config)
+    allow_paid = paid_allowed(config)
+
+    max_chars = int(config.get("TTS_CHUNK_MAX_CHARS", 500))
+    min_chars = int(config.get("TTS_CHUNK_MIN_CHARS", 150))
+    attempts = int(config.get("TTS_MAX_PROVIDER_ATTEMPTS", 1))
+
+    checkpoint_chunks = truthy(
+        config.get("TTS_CHUNK_CHECKPOINT", True)
+    )
+
+    if not 100 <= min_chars <= max_chars:
+        raise RuntimeError(
+            "TTS_CHUNK_MIN_CHARS must be >=100 and <= TTS_CHUNK_MAX_CHARS"
+        )
+
+    if not 100 <= max_chars <= 5000:
+        raise RuntimeError(
+            "TTS_CHUNK_MAX_CHARS must be between 100 and 5000"
+        )
+
+    if not 1 <= attempts <= 3:
+        raise RuntimeError(
+            "TTS_MAX_PROVIDER_ATTEMPTS must be between 1 and 3"
+        )
+
+    settings_hash = digest({
+        "version": VERSION,
+        "format": mode,
+        "actual_parts": actual_parts,
+        "scenes_per_part": scenes_per_part,
+        "primary": primary,
+        "fallback": fallback,
+        "paid_allowed": allow_paid,
+        "voice": config.get("VOICE", ""),
+        "speed": config.get("SPEED", ""),
+        "chunk_min_chars": min_chars,
+        "chunk_max_chars": max_chars,
+        "chunk_checkpoint": checkpoint_chunks,
+        "attempts": attempts,
+        "provider_settings": provider_settings_fingerprint(config),
+    })
+
+    checkpoint = load_checkpoint()
+    old_jobs = {}
+
+    for job in checkpoint.get("jobs", []):
+        if not isinstance(job, dict):
+            continue
+
+        try:
+            key = (int(job["part"]), int(job["scene"]))
+            old_jobs[key] = job
+
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    CHUNK_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("TTS VERSION:", VERSION)
+    print("FORMAT:", mode)
+    print("CONFIGURED PARTS:", configured_parts)
+    print("ACTUAL PARTS:", actual_parts)
+    print("SCENES PER PART:", scenes_per_part)
+    print("EXPECTED SCENES:", len(expected))
+    print("PRIMARY:", " -> ".join(primary))
+    print("FALLBACK:", " -> ".join(fallback))
+    print("BILLABLE ALLOWED:", allow_paid)
+    print("CHUNK CHECKPOINT:", checkpoint_chunks)
+    print("AUDIO VALIDATION: always enabled")
+
+    for part, scene in sorted(expected):
+        narration_text = rows[(part, scene)]
+        text_hash = sha_text(narration_text)
+
+        destination = final_audio_path(part, scene)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        chunks = split_text(narration_text, max_chars, min_chars)
+
+        if not chunks:
+            raise RuntimeError(
+                f"No TTS chunks created for {part}/{scene}"
+            )
+
+        signature = digest({
+            "text_sha256": text_hash,
+            "settings_sha256": settings_hash,
+            "chunk_count": len(chunks),
+        })
+
+        previous = old_jobs.get((part, scene), {})
+
+        if validate_final_job(
+            previous, part, scene, signature, destination
+        ):
+            print(
+                f"RESUME scene {part}/{scene}: verified cached audio",
+                flush=True,
+            )
+            continue
+
+        previous_chunks = previous.get("chunks", [])
+        chunk_records = []
+        chunk_paths = []
+        provider_history = []
+
+        for index, chunk in enumerate(chunks, 1):
+            chunk_path = chunk_audio_path(part, scene, index)
+            chunk_path.parent.mkdir(parents=True, exist_ok=True)
+
+            old_chunk = (
+                previous_chunks[index - 1]
+                if isinstance(previous_chunks, list)
+                and len(previous_chunks) >= index
+                else None
+            )
+
+            if validate_chunk_record(
+                old_chunk, index, chunk, settings_hash
+            ):
+                record = dict(old_chunk)
+                record["output"] = rel(chunk_path)
+
+                chunk_records.append(record)
+                chunk_paths.append(chunk_path)
+                provider_history.append(
+                    record.get("provider", "unknown")
+                )
+
+                print(
+                    f"RESUME chunk {part}/{scene}/{index}",
+                    flush=True,
+                )
+                continue
+
+            temporary = chunk_path.with_name(
+                chunk_path.stem + ".generating.mp3"
+            )
+            temporary.unlink(missing_ok=True)
+
+            try:
+                (
+                    provider,
+                    group,
+                    used_attempt,
+                    duration,
+                ) = generate_one_chunk(
+                    chunk,
+                    temporary,
+                    config,
+                    primary,
+                    fallback,
+                    allow_paid,
+                    attempts,
+                )
+
+                audio_info(temporary)
+                os.replace(temporary, chunk_path)
+
+            finally:
+                temporary.unlink(missing_ok=True)
+
+            record = {
+                "index": index,
+                "status": "completed",
+                "text": chunk,
+                "text_sha256": sha_text(chunk),
+                "signature": digest({
+                    "chunk_sha256": sha_text(chunk),
+                    "text": chunk,
+                    "settings_sha256": settings_hash,
+                    "index": index,
+                }),
+                "sha256": file_digest(chunk_path),
+                "output": rel(chunk_path),
+                "duration": round(duration, 4),
+                "provider": provider,
+                "provider_group": group,
+                "provider_attempt": used_attempt,
+            }
+
+            chunk_records.append(record)
+            chunk_paths.append(chunk_path)
+            provider_history.append(provider)
+
+            old_jobs[(part, scene)] = {
+                "part": part,
+                "scene": scene,
+                "status": "in_progress",
+                "signature": signature,
+                "text_sha256": text_hash,
+                "settings_sha256": settings_hash,
+                "output": rel(destination),
+                "chunks": list(chunk_records),
+                "providers": list(provider_history),
+                "updated_at": now(),
+            }
+
+            if checkpoint_chunks:
+                save_checkpoint(
+                    checkpoint,
+                    old_jobs,
+                    expected,
+                    "in_progress",
+                )
+
+            print(
+                f"CHUNK COMPLETED {part}/{scene}/{index}: {provider}",
+                flush=True,
+            )
+
+        if len(chunk_paths) != len(chunks):
+            raise RuntimeError(
+                f"Chunk count mismatch for {part}/{scene}"
+            )
+
+        temporary_final = destination.with_name(
+            destination.stem + ".tmp.mp3"
+        )
+        temporary_final.unlink(missing_ok=True)
+
+        try:
+            if len(chunk_paths) == 1:
+                shutil.copyfile(chunk_paths[0], temporary_final)
+
+            else:
+                concat_file = destination.with_suffix(".concat.txt")
+
+                try:
+                    lines = []
+
+                    for path in chunk_paths:
+                        resolved = path.resolve().as_posix()
+
+                        if "\n" in resolved or "\r" in resolved:
+                            raise RuntimeError(
+                                "Invalid newline in audio path"
+                            )
+
+                        lines.append(
+                            "file '" + resolved.replace("'", "'\\''") + "'"
+                        )
+
+                    concat_file.write_text(
+                        "\n".join(lines) + "\n",
+                        encoding="utf-8",
+                    )
+
+                    run(
+                        [
+                            "ffmpeg",
+                            "-hide_banner",
+                            "-loglevel", "error",
+                            "-y",
+                            "-f", "concat",
+                            "-safe", "0",
+                            "-i", str(concat_file),
+                            "-vn",
+                            "-ac", "1",
+                            "-ar", "24000",
+                            "-codec:a", "libmp3lame",
+                            "-b:a", "96k",
+                            str(temporary_final),
+                        ],
+                        timeout=600,
+                    )
+
+                finally:
+                    concat_file.unlink(missing_ok=True)
+
+            final_duration = audio_info(temporary_final)
+
+            if final_duration <= 0:
+                raise RuntimeError(
+                    "Final narration duration is invalid"
+                )
+
+            os.replace(temporary_final, destination)
+
+        finally:
+            temporary_final.unlink(missing_ok=True)
+
+        final_duration = audio_info(destination)
+
+        final_job = {
+            "part": part,
+            "scene": scene,
+            "status": "completed",
+            "signature": signature,
+            "text_sha256": text_hash,
+            "settings_sha256": settings_hash,
+            "output": rel(destination),
+            "sha256": file_digest(destination),
+            "duration": round(final_duration, 4),
+            "providers": provider_history,
+            "chunks": chunk_records,
+            "updated_at": now(),
+        }
+
+        old_jobs[(part, scene)] = final_job
+
+        save_checkpoint(
+            checkpoint,
+            old_jobs,
+            expected,
+            "in_progress",
+        )
+
+        print(
+            f"COMPLETED scene {part}/{scene}: {final_duration:.2f}s",
+            flush=True,
+        )
+
+    final_jobs = [
+        old_jobs.get(key)
+        for key in sorted(expected)
+    ]
+
+    if (
+        len(final_jobs) != len(expected)
+        or any(
+            not isinstance(job, dict)
+            or job.get("status") != "completed"
+            for job in final_jobs
+        )
+    ):
+        raise RuntimeError(
+            "Not all expected narration scenes completed"
+        )
+
+    for job in final_jobs:
+        part = int(job["part"])
+        scene = int(job["scene"])
+        destination = final_audio_path(part, scene)
+
+        if not validate_final_job(
+            job,
+            part,
+            scene,
+            job.get("signature"),
+            destination,
+        ):
+            raise RuntimeError(
+                f"Final audio verification failed: {part}/{scene}"
+            )
+
+        chunks = job.get("chunks", [])
+
+        if not isinstance(chunks, list) or not chunks:
+            raise RuntimeError(
+                f"Missing chunk records: {part}/{scene}"
+            )
+
+        expected_text_chunks = split_text(
+            rows[(part, scene)],
+            max_chars,
+            min_chars,
+        )
+
+        if len(chunks) != len(expected_text_chunks):
+            raise RuntimeError(
+                f"Chunk count mismatch: {part}/{scene}"
+            )
+
+        for index, (record, expected_text) in enumerate(
+            zip(chunks, expected_text_chunks),
+            1,
+        ):
+            if not isinstance(record, dict):
+                raise RuntimeError("Invalid TTS chunk record")
+
+            if record.get("index") != index:
+                raise RuntimeError(
+                    "TTS chunk order is not continuous"
+                )
+
+            if record.get("text") != expected_text:
+                raise RuntimeError(
+                    "TTS chunk text does not match narration"
+                )
+
+            if record.get("text_sha256") != sha_text(expected_text):
+                raise RuntimeError(
+                    "TTS chunk text hash mismatch"
+                )
+
+    save_json(
+        MANIFEST_FILE,
+        {
+            "version": VERSION,
+            "status": "completed",
+            "format": mode,
+            "configured_parts": configured_parts,
+            "total_parts": actual_parts,
+            "scenes_per_part": scenes_per_part,
+            "dynamic_short_parts": mode == "short",
+            "total_scenes": len(final_jobs),
+            "expected_scenes": len(final_jobs),
+            "jobs": final_jobs,
+            "primary_providers": primary,
+            "fallback_providers": fallback,
+            "paid_providers_allowed": allow_paid,
+            "provider_attempt_limit": attempts,
+            "chunk_min_chars": min_chars,
+            "chunk_max_chars": max_chars,
+            "chunk_checkpoint_enabled": checkpoint_chunks,
+            "audio_validation_enabled": True,
+            "provider_settings_sha256": (
+                provider_settings_fingerprint(config)
+            ),
+            "updated_at": now(),
+        },
+    )
+
+    print("TTS COMPLETE")
+    print("Format:", mode)
+    print("Configured parts:", configured_parts)
+    print("Actual parts:", actual_parts)
+    print("Scenes:", len(final_jobs))
+    print("Primary providers:", " -> ".join(primary))
+    print("Fallback providers:", " -> ".join(fallback))
+    print("Billable provider permission:", allow_paid)
+    print("Provider attempts:", attempts)
+    print("Chunk checkpoint:", checkpoint_chunks)
+    print("Audio validation: enabled")
+    print("Manifest:", MANIFEST_FILE.relative_to(ROOT))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+
+    except KeyboardInterrupt:
+        print("TTS INTERRUPTED", file=sys.stderr, flush=True)
+        sys.exit(130)
+
+    except Exception as exc:
+        print("TTS FAILED:", str(exc), file=sys.stderr, flush=True)
+        sys.exit(1)
