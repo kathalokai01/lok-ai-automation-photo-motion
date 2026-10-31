@@ -35,7 +35,7 @@ OUTPUT_FILE = STORY_DIR / "story.json"
 CACHE_FILE = STORY_DIR / "story_cache.json"
 TITLE_FILE = STORY_DIR / "final_title.txt"
 
-VERSION = "story-builder-v18-gemini-retry-fallback"
+VERSION = "story-builder-v19-short-part-auto-repair"
 SHORT_MIN_WORDS = 120
 SHORT_MAX_WORDS = 150
 SHORT_TARGET_WORDS = 135
@@ -444,7 +444,6 @@ def list_fallback_models(api_key):
         ) if token else ""
         pages += 1
 
-    # Keep the selected model first; fallback order is stable and capability-based.
     def priority(name):
         low = name.lower()
         experimental = any(x in low for x in ("preview", "experimental", "exp-"))
@@ -513,9 +512,7 @@ def call_gemini_once(prompt, model, api_key):
             f"Gemini returned no candidate: {feedback}"
         )
 
-    response_parts = (
-        candidates[0].get("content", {}).get("parts", [])
-    )
+    response_parts = candidates[0].get("content", {}).get("parts", [])
     response_text = "".join(
         item.get("text", "")
         for item in response_parts
@@ -533,6 +530,7 @@ def call_gemini_once(prompt, model, api_key):
     if not isinstance(parsed, dict):
         raise GeminiRequestError("Gemini response must be a JSON object.")
     return parsed
+
 
 def call_gemini(prompt, model, api_key):
     """Retry transient errors, then try API-listed compatible models."""
@@ -562,7 +560,6 @@ def call_gemini(prompt, model, api_key):
                     log(f"Retrying after {delay} seconds.")
                     time.sleep(delay)
 
-    # Discover fallback models only after the selected model fails.
     discovered = list_fallback_models(api_key)
     candidates.extend(x for x in discovered if x not in candidates)
 
@@ -580,6 +577,116 @@ def call_gemini(prompt, model, api_key):
         "All available Gemini story-generation attempts failed. "
         + " | ".join(errors[-8:])
     )
+
+def repair_short_parts(
+    parts,
+    invalid_numbers,
+    source_text,
+    title,
+    model,
+    api_key,
+):
+    invalid_numbers = sorted(set(int(x) for x in invalid_numbers))
+    if not invalid_numbers:
+        return parts, model
+
+    existing = [
+        {"part": index, "text": text}
+        for index, text in enumerate(parts, 1)
+    ]
+
+    prompt = f"""
+You are repairing a Hindi short-video story.
+
+TITLE: {title}
+
+ORIGINAL STORY OR SOURCE:
+{source_text or "(Original generated story; preserve its established plot.)"}
+
+CURRENT COMPLETE PARTS:
+{json.dumps(existing, ensure_ascii=False)}
+
+PARTS THAT MUST BE REPAIRED:
+{invalid_numbers}
+
+Rules:
+- Return ONLY the part numbers listed for repair.
+- Every repaired part must contain 120–150 whitespace-separated words.
+- Target approximately 135 words per repaired part.
+- Preserve the existing story, characters, events, chronology and tone.
+- Do not change the meaning or continuity of other parts.
+- Do not add unrelated events or repetitive filler.
+- Keep Hindi narration natural and suitable for voice-over.
+- Preserve suspense and the existing story progression.
+- Each returned part must have its original part number.
+- Count words before returning the result.
+
+Return valid JSON only:
+{{
+  "parts": [
+    {{"part": 2, "text": "repaired Hindi narration"}}
+  ]
+}}
+
+Return exactly {len(invalid_numbers)} repaired part objects.
+No markdown fences and no extra keys.
+"""
+
+    repaired_data, repair_model = call_gemini(
+        prompt,
+        model,
+        api_key,
+    )
+
+    rows = repaired_data.get("parts")
+    if not isinstance(rows, list) or len(rows) != len(invalid_numbers):
+        raise RuntimeError(
+            "Short-part repair returned an incorrect number of parts."
+        )
+
+    replacements = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("Short-part repair returned an invalid part.")
+
+        try:
+            number = int(row.get("part", -1))
+        except (TypeError, ValueError):
+            number = -1
+
+        if number not in invalid_numbers or number in replacements:
+            raise RuntimeError(
+                "Short-part repair returned an unexpected or duplicate part."
+            )
+
+        text = clean(row.get("text"))
+        amount = word_count(text)
+
+        if not text or not SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS:
+            raise RuntimeError(
+                f"Repaired short part {number} has {amount} words; "
+                "expected 120–150."
+            )
+
+        replacements[number] = text
+
+    if set(replacements) != set(invalid_numbers):
+        raise RuntimeError("Short-part repair did not return every requested part.")
+
+    result = list(parts)
+    for number, text in replacements.items():
+        result[number - 1] = text
+
+    for number, text in enumerate(result, 1):
+        amount = word_count(text)
+        if not SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS:
+            raise RuntimeError(
+                f"Short part {number} still has {amount} words after repair."
+            )
+
+    log("Short-part repair succeeded:", invalid_numbers)
+    log("Repair model:", repair_model)
+    return result, repair_model
 
 
 def generate_narrative(
@@ -716,14 +823,39 @@ No markdown fences and no extra keys.
         if not text:
             raise RuntimeError(f"Gemini returned empty story part {number}.")
 
-        if mode == "short":
+        narratives.append(text)
+
+    if mode == "short":
+        invalid_parts = [
+            number
+            for number, text in enumerate(narratives, 1)
+            if not SHORT_MIN_WORDS <= word_count(text) <= SHORT_MAX_WORDS
+        ]
+
+        if invalid_parts:
+            log(
+                "Short parts outside 120–150 words:",
+                {
+                    number: word_count(narratives[number - 1])
+                    for number in invalid_parts
+                },
+            )
+            narratives, used_model = repair_short_parts(
+                parts=narratives,
+                invalid_numbers=invalid_parts,
+                source_text=source_text,
+                title=title,
+                model=used_model,
+                api_key=api_key,
+            )
+
+        for number, text in enumerate(narratives, 1):
             amount = word_count(text)
             if not SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS:
                 raise RuntimeError(
-                    f"Short part {number} has {amount} words; "
+                    f"Short part {number} has {amount} words after repair; "
                     "expected 120–150."
                 )
-        narratives.append(text)
 
     return {
         "title": title[:180],
