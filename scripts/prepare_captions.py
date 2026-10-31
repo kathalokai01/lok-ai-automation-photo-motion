@@ -27,7 +27,7 @@ NARRATION_FILE = ROOT / "output" / "narration" / "narration.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v11-config-font-size-compatible"
+VERSION = "prepare-captions-v12-dynamic-short-parts"
 
 LANGUAGE_ALIASES = {
     "hi": "hindi",
@@ -289,6 +289,64 @@ def checkpoint_reusable(path, fingerprint, caption_hash):
     return cached
 
 
+def resolve_actual_parts(narration_data, narration_rows, video_format,
+                         configured_parts, scenes_per_part):
+    """Determine part count from completed narration for SHORT."""
+    if video_format == "full":
+        return configured_parts
+
+    declared = None
+
+    if isinstance(narration_data, dict):
+        try:
+            value = narration_data.get("total_parts")
+            if value is not None:
+                declared = int(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                "narration.json contains invalid total_parts."
+            )
+
+    mapped_parts = set()
+
+    for index, row in enumerate(narration_rows, 1):
+        if not isinstance(row, dict):
+            raise RuntimeError(f"Invalid narration row {index}.")
+
+        try:
+            part = int(row["part"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid part number in narration row {index}."
+            ) from exc
+
+        if part < 1:
+            raise RuntimeError("Narration part numbers must be positive.")
+
+        mapped_parts.add(part)
+
+    if not mapped_parts:
+        raise RuntimeError("Narration contains no part records.")
+
+    actual_parts = max(mapped_parts)
+
+    if mapped_parts != set(range(1, actual_parts + 1)):
+        raise RuntimeError("Narration part numbering is not continuous.")
+
+    if declared is not None and declared != actual_parts:
+        raise RuntimeError(
+            "Narration total_parts does not match scene mappings."
+        )
+
+    if len(narration_rows) != actual_parts * scenes_per_part:
+        raise RuntimeError(
+            "Narration scene count does not match actual SHORT parts "
+            "and configured SCENES per part."
+        )
+
+    return actual_parts
+
+
 def validate_scene_mapping(scene_rows, parts, scenes_per_part):
     expected = [
         (part, scene)
@@ -296,6 +354,7 @@ def validate_scene_mapping(scene_rows, parts, scenes_per_part):
         for scene in range(1, scenes_per_part + 1)
     ]
 
+    expected_set = set(expected)
     seen = set()
 
     for index, row in enumerate(scene_rows, start=1):
@@ -315,12 +374,12 @@ def validate_scene_mapping(scene_rows, parts, scenes_per_part):
         if key in seen:
             raise RuntimeError(f"Duplicate narration scene: {key}.")
 
-        if key not in set(expected):
+        if key not in expected_set:
             raise RuntimeError(f"Out-of-range narration scene: {key}.")
 
         seen.add(key)
 
-    missing = sorted(set(expected) - seen)
+    missing = sorted(expected_set - seen)
 
     if missing:
         raise RuntimeError(
@@ -335,18 +394,17 @@ def validate_scene_mapping(scene_rows, parts, scenes_per_part):
 
     return expected
 
-
 def main():
     config = load_and_validate(CONFIG_FILE)
 
     video_format = str(get_format(config)).strip().lower()
-    parts = int(get_parts(config))
+    configured_parts = int(get_parts(config))
     scenes_per_part = int(get_scenes(config))
 
     if video_format not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {video_format}")
 
-    if parts < 1 or scenes_per_part < 1:
+    if configured_parts < 1 or scenes_per_part < 1:
         raise RuntimeError("PARTS and SCENES must be positive integers.")
 
     raw_mode = normalize_text(
@@ -361,7 +419,6 @@ def main():
             "choose hindi, english, or hinglish."
         )
 
-    # input_config.py is the single source of truth for supported fonts.
     font = get_caption_font(config)
     font_size = resolve_font_size(config, video_format)
 
@@ -372,6 +429,14 @@ def main():
 
     narration_data = read_json(NARRATION_FILE)
     narration_rows = normalize_rows(narration_data)
+
+    parts = resolve_actual_parts(
+        narration_data,
+        narration_rows,
+        video_format,
+        configured_parts,
+        scenes_per_part,
+    )
 
     expected_count = parts * scenes_per_part
     expected_order = validate_scene_mapping(
@@ -384,7 +449,8 @@ def main():
         "version": VERSION,
         "format": video_format,
         "mode": mode,
-        "parts": parts,
+        "configured_parts": configured_parts,
+        "actual_parts": parts,
         "scenes_per_part": scenes_per_part,
         "font": font,
         "font_size": font_size,
@@ -505,10 +571,7 @@ def main():
     if set(mapping) != set(expected_order):
         raise RuntimeError("Final caption scene mapping is incomplete.")
 
-    ordered = [
-        mapping[key]
-        for key in expected_order
-    ]
+    ordered = [mapping[key] for key in expected_order]
 
     result = {
         "status": "completed",
@@ -524,9 +587,11 @@ def main():
             "Selects and validates existing language-specific caption "
             "text. It does not perform translation."
         ),
-        "total_scenes": expected_count,
+        "configured_parts": configured_parts,
         "parts": parts,
+        "dynamic_short_parts": video_format == "short",
         "scenes_per_part": scenes_per_part,
+        "total_scenes": expected_count,
         "caption_font": font,
         "caption_font_size": font_size,
         "caption_font_size_setting": str(
@@ -542,6 +607,8 @@ def main():
     log("=" * 56)
     log("CAPTION PREPARATION COMPLETED")
     log("Format:", video_format)
+    log("Configured parts:", configured_parts)
+    log("Actual parts:", parts)
     log("Language:", mode)
     log("Scenes:", expected_count)
     log("Font:", font)
