@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate SFX timing against actual narration durations and dynamic parts."""
+"""Strict SFX validation against actual narration and renderer requirements."""
 
 from __future__ import annotations
 
@@ -23,19 +23,22 @@ from input_config import (
 
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
+SOUND_MANIFEST = ROOT / "output" / "sound_design" / "sound_design_manifest.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-timing-validator-v8-dynamic-short-parts"
+VERSION = "sfx-validator-v9-renderer-compatible-dynamic-parts"
 MIN_AUDIO_BYTES = 100
 EPSILON = 0.001
 MAX_GAIN = 1.0
+MAX_CUES_PER_SCENE = 12
 
 TIME_KEYS = (
-    "time", "time_seconds", "timestamp", "start_seconds", "start"
+    "time", "time_seconds", "timestamp",
+    "start_seconds", "start",
 )
 PATH_KEYS = (
-    "file", "path", "audio", "output", "audio_path"
+    "file", "path", "audio", "output", "audio_path",
 )
 SFX_KEYS = (
     "SFX_ENABLED", "SFX", "SOUND_EFFECTS",
@@ -49,28 +52,38 @@ def log(*values):
 
 def read_json(path):
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        value = json.loads(
+            path.read_text(encoding="utf-8-sig")
+        )
     except (OSError, ValueError) as exc:
-        raise RuntimeError(f"Cannot read JSON: {path}: {exc}") from exc
+        raise RuntimeError(
+            f"Cannot read JSON: {path}: {exc}"
+        ) from exc
 
     if not isinstance(value, (dict, list)):
-        raise RuntimeError(f"Invalid JSON structure: {path}")
+        raise RuntimeError(
+            f"Invalid JSON structure: {path}"
+        )
 
     return value
 
 
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_suffix(path.suffix + ".tmp")
 
     try:
-        temp.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        temporary.write_text(
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
             encoding="utf-8",
         )
-        temp.replace(path)
+        temporary.replace(path)
     finally:
-        temp.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 def rows_from(data, *keys):
@@ -79,8 +92,9 @@ def rows_from(data, *keys):
 
     if isinstance(data, dict):
         for key in keys:
-            if isinstance(data.get(key), list):
-                return data[key]
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
 
     return []
 
@@ -90,8 +104,9 @@ def first_value(row, keys):
         return None
 
     for key in keys:
-        if key in row and row[key] is not None:
-            return row[key]
+        value = row.get(key)
+        if value is not None:
+            return value
 
     return None
 
@@ -108,18 +123,46 @@ def config_bool(config, keys, default=True):
 
         value = str(value).strip().lower()
 
-        if value in {"true", "yes", "1", "on", "enabled"}:
+        if value in {
+            "true", "yes", "1", "on", "enabled",
+        }:
             return True
 
-        if value in {"false", "no", "0", "off", "disabled"}:
+        if value in {
+            "false", "no", "0", "off", "disabled",
+        }:
             return False
 
-        raise RuntimeError(f"{key} must be true or false")
+        raise RuntimeError(
+            f"{key} must be true or false"
+        )
 
     return default
 
 
-def required_number(row, keys, label, minimum=None, maximum=None):
+def positive_int(value, label):
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"{label} must be an integer"
+        ) from exc
+
+    if result < 1:
+        raise RuntimeError(
+            f"{label} must be at least 1"
+        )
+
+    return result
+
+
+def required_number(
+    row,
+    keys,
+    label,
+    minimum=None,
+    maximum=None,
+):
     value = first_value(row, keys)
 
     if value is None or (
@@ -137,20 +180,28 @@ def required_number(row, keys, label, minimum=None, maximum=None):
         ) from exc
 
     if not math.isfinite(number):
-        raise RuntimeError(f"{label}: number must be finite")
+        raise RuntimeError(
+            f"{label}: number must be finite"
+        )
 
     if minimum is not None and number < minimum:
-        raise RuntimeError(f"{label}: value must be >= {minimum}")
+        raise RuntimeError(
+            f"{label}: value must be >= {minimum}"
+        )
 
     if maximum is not None and number > maximum:
-        raise RuntimeError(f"{label}: value must be <= {maximum}")
+        raise RuntimeError(
+            f"{label}: value must be <= {maximum}"
+        )
 
     return number
 
 
 def safe_file(value, label, minimum_bytes=1):
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"{label}: file path is missing")
+        raise RuntimeError(
+            f"{label}: file path is missing"
+        )
 
     path = Path(value.strip())
 
@@ -165,18 +216,22 @@ def safe_file(value, label, minimum_bytes=1):
         )
 
     if not path.is_file():
-        raise RuntimeError(f"{label}: file not found: {path}")
+        raise RuntimeError(
+            f"{label}: file not found: {path}"
+        )
 
     if path.stat().st_size < minimum_bytes:
         raise RuntimeError(
-            f"{label}: file is too small: {path.name}"
+            f"{label}: file is too small: {path}"
         )
 
     return path
 
 
 def relative(path):
-    return path.resolve().relative_to(ROOT.resolve()).as_posix()
+    return path.resolve().relative_to(
+        ROOT.resolve()
+    ).as_posix()
 
 
 def sha256_file(path):
@@ -184,7 +239,8 @@ def sha256_file(path):
 
     with path.open("rb") as handle:
         for block in iter(
-            lambda: handle.read(1024 * 1024), b""
+            lambda: handle.read(1024 * 1024),
+            b"",
         ):
             digest.update(block)
 
@@ -230,7 +286,7 @@ def media_info(path):
 
     if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError(
-            f"Invalid duration: {path.name}"
+            f"Invalid media duration: {path.name}"
         )
 
     has_audio = any(
@@ -258,9 +314,13 @@ def expected_keys(parts, scenes):
     }
 
 
-def resolve_actual_parts(data, jobs, mode, configured_parts, scenes):
-    """SHORT follows actual narration parts; FULL follows Input PARTS."""
-
+def resolve_actual_parts(
+    data,
+    jobs,
+    mode,
+    configured_parts,
+    scenes,
+):
     if not isinstance(data, dict):
         raise RuntimeError(
             "Narration manifest must be a JSON object"
@@ -271,7 +331,9 @@ def resolve_actual_parts(data, jobs, mode, configured_parts, scenes):
             "Narration manifest is not completed"
         )
 
-    manifest_format = str(data.get("format", "")).strip().lower()
+    manifest_format = str(
+        data.get("format", "")
+    ).strip().lower()
 
     if manifest_format and manifest_format != mode:
         raise RuntimeError(
@@ -295,54 +357,37 @@ def resolve_actual_parts(data, jobs, mode, configured_parts, scenes):
                 f"Invalid narration mapping at row {index}"
             ) from exc
 
-        if part < 1 or scene < 1:
+        if part < 1 or scene < 1 or scene > scenes:
             raise RuntimeError(
-                f"Invalid narration scene mapping: {part}/{scene}"
-            )
-
-        if scene > scenes:
-            raise RuntimeError(
-                f"Narration scene exceeds SCENES setting: "
-                f"{part}/{scene}"
+                f"Invalid narration mapping: {part}/{scene}"
             )
 
         discovered.add(part)
 
     if not discovered:
         raise RuntimeError(
-            "Narration manifest contains no valid part numbers"
+            "Narration manifest contains no part numbers"
         )
 
     actual_parts = max(discovered)
 
-    expected_parts = set(range(1, actual_parts + 1))
-
-    if discovered != expected_parts:
+    if discovered != set(range(1, actual_parts + 1)):
         raise RuntimeError(
-            "Narration part numbering is not continuous: "
-            f"{sorted(discovered)}"
+            "Narration part numbering is not continuous"
         )
 
     declared = data.get("total_parts")
 
     if declared is not None:
-        try:
-            declared = int(declared)
-        except (TypeError, ValueError) as exc:
+        if positive_int(declared, "Narration total_parts") != actual_parts:
             raise RuntimeError(
-                "Narration total_parts is invalid"
-            ) from exc
-
-        if declared != actual_parts:
-            raise RuntimeError(
-                f"Narration total_parts mismatch: "
-                f"declared={declared}, actual={actual_parts}"
+                "Narration total_parts does not match actual parts"
             )
 
     if mode == "full" and actual_parts != configured_parts:
         raise RuntimeError(
-            f"FULL part count mismatch: "
-            f"configured={configured_parts}, actual={actual_parts}"
+            f"FULL part count mismatch: configured="
+            f"{configured_parts}, actual={actual_parts}"
         )
 
     expected_count = actual_parts * scenes
@@ -362,12 +407,20 @@ def resolve_actual_parts(data, jobs, mode, configured_parts, scenes):
     return actual_parts
 
 
-def load_narration(parts, scenes, mode, configured_parts):
+def load_narration(
+    configured_parts,
+    scenes,
+    mode,
+):
     data = read_json(AUDIO_FILE)
-    jobs = rows_from(data, "jobs", "audio_jobs", "scenes")
+    jobs = rows_from(
+        data, "jobs", "audio_jobs", "scenes"
+    )
 
     if not jobs:
-        raise RuntimeError("No narration jobs found")
+        raise RuntimeError(
+            "No narration jobs found"
+        )
 
     actual_parts = resolve_actual_parts(
         data,
@@ -379,12 +432,7 @@ def load_narration(parts, scenes, mode, configured_parts):
 
     mapping = {}
 
-    for index, row in enumerate(jobs, start=1):
-        if not isinstance(row, dict):
-            raise RuntimeError(
-                f"Invalid narration row {index}"
-            )
-
+    for index, row in enumerate(jobs, 1):
         try:
             key = (
                 int(row["part"]),
@@ -412,10 +460,8 @@ def load_narration(parts, scenes, mode, configured_parts):
         )
 
         info = media_info(path)
-
-        declared_hash = row.get("sha256")
-
         actual_hash = sha256_file(path)
+        declared_hash = row.get("sha256")
 
         if declared_hash and declared_hash != actual_hash:
             raise RuntimeError(
@@ -431,19 +477,136 @@ def load_narration(parts, scenes, mode, configured_parts):
         }
 
     expected = expected_keys(actual_parts, scenes)
-    actual = set(mapping)
 
-    if actual != expected:
+    if set(mapping) != expected:
         raise RuntimeError(
             "Narration mapping mismatch: "
-            f"missing={sorted(expected - actual)}; "
-            f"extra={sorted(actual - expected)}"
+            f"missing={sorted(expected - set(mapping))}; "
+            f"extra={sorted(set(mapping) - expected)}"
         )
 
     return mapping, actual_parts
 
 
-def validate_cues(parts, scenes, narration, sfx_enabled):
+def validate_sound_manifest(
+    mode,
+    parts,
+    narration,
+):
+    manifest = read_json(SOUND_MANIFEST)
+
+    if not isinstance(manifest, dict):
+        raise RuntimeError(
+            "Sound-design manifest must be an object"
+        )
+
+    if manifest.get("status") != "completed":
+        raise RuntimeError(
+            "Sound-design manifest is not completed"
+        )
+
+    manifest_format = str(
+        manifest.get("format", "")
+    ).strip().lower()
+
+    if manifest_format != mode:
+        raise RuntimeError(
+            f"Sound-design FORMAT mismatch: "
+            f"{manifest_format} != {mode}"
+        )
+
+    if positive_int(
+        manifest.get("parts"),
+        "Sound-design parts",
+    ) != parts:
+        raise RuntimeError(
+            "Sound-design actual part count mismatch"
+        )
+
+    if positive_int(
+        manifest.get("total_scenes"),
+        "Sound-design total_scenes",
+    ) != len(narration):
+        raise RuntimeError(
+            "Sound-design scene count mismatch"
+        )
+
+    enabled_tracks = manifest.get("enabled")
+
+    if not isinstance(enabled_tracks, dict):
+        raise RuntimeError(
+            "Sound-design enabled settings are missing"
+        )
+
+    for name in ("music", "ambient", "sfx"):
+        if not isinstance(enabled_tracks.get(name), bool):
+            raise RuntimeError(
+                f"Sound-design enabled.{name} must be boolean"
+            )
+
+    tracks = manifest.get("tracks")
+
+    if not isinstance(tracks, dict):
+        raise RuntimeError(
+            "Sound-design tracks must be an object"
+        )
+
+    for category in ("music", "ambient"):
+        record = tracks.get(category)
+
+        if not enabled_tracks[category]:
+            if record is not None:
+                raise RuntimeError(
+                    f"{category} is disabled but a track is declared"
+                )
+            continue
+
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                f"{category} is enabled but its track is missing"
+            )
+
+        if record.get("status") != "completed":
+            raise RuntimeError(
+                f"{category} track is not completed"
+            )
+
+        path = safe_file(
+            record.get("path"),
+            f"{category} track",
+            MIN_AUDIO_BYTES,
+        )
+
+        actual_hash = sha256_file(path)
+
+        if record.get("sha256") != actual_hash:
+            raise RuntimeError(
+                f"{category} track checksum mismatch"
+            )
+
+        info = media_info(path)
+
+        total_duration = sum(
+            row["duration"]
+            for row in narration.values()
+        )
+
+        if info["duration"] + 0.5 < total_duration:
+            raise RuntimeError(
+                f"{category} track is shorter than narration: "
+                f"{info['duration']:.2f}s < {total_duration:.2f}s"
+            )
+
+    return manifest
+
+
+def validate_cues(
+    parts,
+    scenes,
+    narration,
+    sfx_enabled,
+    sound_manifest,
+):
     data = read_json(CUES_FILE)
 
     if not isinstance(data, dict):
@@ -451,52 +614,47 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
             "SFX cue manifest must be a JSON object"
         )
 
-    if data.get("status") not in (None, "completed"):
+    if data.get("status") != "completed":
         raise RuntimeError(
-            "SFX cue manifest is incomplete"
+            "SFX cue manifest is not completed"
         )
 
-    manifest_format = str(
+    cue_format = str(
         data.get("format", "")
     ).strip().lower()
 
-    if manifest_format and manifest_format not in (
-        "short", "full"
-    ):
+    if cue_format != sound_manifest.get("format"):
         raise RuntimeError(
-            f"Invalid SFX manifest FORMAT: {manifest_format}"
+            "SFX cue and sound-design FORMAT mismatch"
         )
 
-    declared_parts = data.get("total_parts")
+    if positive_int(
+        data.get("actual_parts"),
+        "SFX actual_parts",
+    ) != parts:
+        raise RuntimeError(
+            "SFX cue actual_parts mismatch"
+        )
 
-    if declared_parts is not None:
-        try:
-            declared_parts = int(declared_parts)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "SFX manifest total_parts is invalid"
-            ) from exc
-
-        if declared_parts != parts:
-            raise RuntimeError(
-                f"SFX manifest part count mismatch: "
-                f"{declared_parts} != {parts}"
-            )
+    if positive_int(
+        data.get("total_scenes"),
+        "SFX total_scenes",
+    ) != len(narration):
+        raise RuntimeError(
+            "SFX cue total_scenes mismatch"
+        )
 
     cues = rows_from(data, "cues", "items")
 
-    if sfx_enabled and not cues:
-        raise RuntimeError(
-            "SFX is enabled in Input/topic.txt, but the cue "
-            "manifest contains zero cues. Check scene data "
-            "and sound-design output."
-        )
-
     if not sfx_enabled and cues:
         raise RuntimeError(
-            "SFX is disabled in Input/topic.txt, but the cue "
-            f"manifest still contains {len(cues)} cues. "
-            "Regenerate sound design to remove stale effects."
+            "SFX is disabled but stale cues remain. "
+            "Regenerate sound design."
+        )
+
+    if sfx_enabled and not cues:
+        raise RuntimeError(
+            "SFX is enabled but the cue manifest contains zero cues"
         )
 
     seen = set()
@@ -504,7 +662,7 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
     warnings = []
     per_scene = {}
 
-    for index, cue in enumerate(cues, start=1):
+    for index, cue in enumerate(cues, 1):
         if not isinstance(cue, dict):
             raise RuntimeError(
                 f"Invalid SFX cue at row {index}"
@@ -548,7 +706,11 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
             or "unspecified"
         )
 
-        cue_id = (key, round(start, 6), kind)
+        cue_id = (
+            key,
+            round(start, 6),
+            kind,
+        )
 
         if cue_id in seen:
             raise RuntimeError(
@@ -557,14 +719,6 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
 
         seen.add(cue_id)
 
-        audio_duration = narration[key]["duration"]
-
-        if start >= audio_duration:
-            raise RuntimeError(
-                f"SFX begins outside narration scene {key}: "
-                f"{start:.3f}s >= {audio_duration:.3f}s"
-            )
-
         path = safe_file(
             first_value(cue, PATH_KEYS),
             f"SFX cue {index}",
@@ -572,18 +726,58 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
         )
 
         info = media_info(path)
-
-        declared_hash = cue.get("sha256")
         actual_hash = sha256_file(path)
 
-        if declared_hash and declared_hash != actual_hash:
+        if cue.get("sha256") and cue["sha256"] != actual_hash:
             raise RuntimeError(
-                f"SFX checksum mismatch at cue {index}"
+                f"SFX checksum mismatch: cue {index}"
+            )
+
+        declared_duration = cue.get(
+            "effect_duration_seconds"
+        )
+
+        if declared_duration is not None:
+            declared_duration = required_number(
+                cue,
+                ("effect_duration_seconds",),
+                f"SFX cue {index} declared duration",
+                minimum=0.01,
+            )
+
+            if abs(declared_duration - info["duration"]) > 0.15:
+                warnings.append({
+                    "part": key[0],
+                    "scene": key[1],
+                    "kind": kind,
+                    "warning": (
+                        "Declared SFX duration differs from "
+                        "the actual audio file duration"
+                    ),
+                    "declared_seconds": round(
+                        declared_duration, 3
+                    ),
+                    "actual_seconds": round(
+                        info["duration"], 3
+                    ),
+                })
+
+        scene_duration = narration[key]["duration"]
+
+        if start >= scene_duration:
+            raise RuntimeError(
+                f"SFX begins outside narration scene {key}: "
+                f"{start:.3f}s >= {scene_duration:.3f}s"
+            )
+
+        if not sfx_enabled:
+            raise RuntimeError(
+                "Unexpected SFX cue while SFX is disabled"
             )
 
         available = max(
             0.0,
-            audio_duration - start,
+            scene_duration - start,
         )
 
         effective = min(
@@ -596,25 +790,51 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
             info["duration"] - effective,
         )
 
-        end = start + effective
+        maximum_start = max(
+            0.0,
+            scene_duration - info["duration"] - 0.05,
+        )
 
-        if truncated > EPSILON:
+        renderer_start = min(
+            start,
+            maximum_start,
+        )
+
+        renderer_effective = min(
+            info["duration"],
+            max(0.0, scene_duration - renderer_start),
+        )
+
+        renderer_truncated = max(
+            0.0,
+            info["duration"] - renderer_effective,
+        )
+
+        if renderer_start + EPSILON < start:
             warnings.append({
                 "part": key[0],
                 "scene": key[1],
                 "kind": kind,
-                "start_seconds": round(start, 3),
-                "file_duration_seconds": round(
-                    info["duration"], 3
-                ),
-                "effective_duration_seconds": round(
-                    effective, 3
-                ),
-                "truncated_seconds": round(
-                    truncated, 3
+                "declared_start_seconds": round(start, 4),
+                "renderer_start_seconds": round(
+                    renderer_start, 4
                 ),
                 "warning": (
-                    "SFX extends beyond the narration scene end"
+                    "Renderer will shift this SFX earlier "
+                    "to preserve its duration"
+                ),
+            })
+
+        if renderer_truncated > 0.02:
+            warnings.append({
+                "part": key[0],
+                "scene": key[1],
+                "kind": kind,
+                "truncated_seconds": round(
+                    renderer_truncated, 4
+                ),
+                "warning": (
+                    "SFX file is longer than the full narration scene"
                 ),
             })
 
@@ -623,10 +843,16 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
             "scene": key[1],
             "kind": kind,
             "start_seconds": round(start, 4),
-            "end_seconds": round(end, 4),
+            "end_seconds": round(start + effective, 4),
+            "renderer_start_seconds": round(
+                renderer_start, 4
+            ),
+            "renderer_end_seconds": round(
+                renderer_start + renderer_effective, 4
+            ),
             "gain": gain,
             "narration_duration_seconds": round(
-                audio_duration, 4
+                scene_duration, 4
             ),
             "file_duration_seconds": round(
                 info["duration"], 4
@@ -634,20 +860,49 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
             "effective_duration_seconds": round(
                 effective, 4
             ),
-            "truncated_seconds": round(
-                truncated, 4
+            "renderer_effective_duration_seconds": round(
+                renderer_effective, 4
+            ),
+            "truncated_seconds": round(truncated, 4),
+            "renderer_truncated_seconds": round(
+                renderer_truncated, 4
             ),
             "file": relative(path),
             "sha256": actual_hash,
             "timing_status": (
-                "may_be_trimmed"
-                if truncated > EPSILON
-                else "fits_scene"
+                "fits_scene"
+                if renderer_truncated <= 0.02
+                else "may_be_trimmed"
             ),
         }
 
         reports.append(report)
         per_scene.setdefault(key, []).append(report)
+
+        if len(per_scene[key]) > MAX_CUES_PER_SCENE:
+            raise RuntimeError(
+                f"Too many SFX cues in scene {key}: "
+                f"{len(per_scene[key])}"
+            )
+
+    if sfx_enabled:
+        expected = set(narration)
+        actual = set(per_scene)
+
+        if actual != expected:
+            raise RuntimeError(
+                "SFX scene coverage mismatch: "
+                f"missing={sorted(expected - actual)}"
+            )
+
+    reports.sort(
+        key=lambda item: (
+            item["part"],
+            item["scene"],
+            item["start_seconds"],
+            item["kind"],
+        )
+    )
 
     overlap_warnings = []
     scene_reports = []
@@ -658,10 +913,9 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
 
             scene_cues = sorted(
                 per_scene.get(key, []),
-                key=lambda item: item["start_seconds"],
+                key=lambda item: item["renderer_start_seconds"],
             )
 
-            duration = narration[key]["duration"]
             overlaps = []
 
             for previous, current in zip(
@@ -669,8 +923,8 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
                 scene_cues[1:],
             ):
                 overlap = (
-                    previous["end_seconds"]
-                    - current["start_seconds"]
+                    previous["renderer_end_seconds"]
+                    - current["renderer_start_seconds"]
                 )
 
                 if overlap > EPSILON:
@@ -683,8 +937,8 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
                             overlap, 4
                         ),
                         "note": (
-                            "Overlapping SFX can be intentional; "
-                            "inspect the mix if effects mask narration."
+                            "Overlapping effects are permitted; "
+                            "check that they do not mask narration."
                         ),
                     }
 
@@ -695,7 +949,7 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
                 "part": part,
                 "scene": scene,
                 "narration_duration_seconds": round(
-                    duration, 4
+                    narration[key]["duration"], 4
                 ),
                 "sfx_cue_count": len(scene_cues),
                 "overlap_count": len(overlaps),
@@ -704,15 +958,6 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
                     "has_sfx" if scene_cues else "no_sfx"
                 ),
             })
-
-    reports.sort(
-        key=lambda item: (
-            item["part"],
-            item["scene"],
-            item["start_seconds"],
-            item["kind"],
-        )
-    )
 
     return {
         "status": "valid",
@@ -729,47 +974,43 @@ def validate_cues(parts, scenes, narration, sfx_enabled):
         "truncation_warnings": warnings,
         "overlap_warnings": overlap_warnings,
         "limitations": [
-            "Overlap is reported, not automatically treated as an error.",
-            "This checks cue declarations and file durations, not perceived loudness.",
-            "It does not prove that the final renderer mixed each cue correctly.",
-            "It does not create true word-level narration alignment.",
+            "This validates cue timing and media files, not perceived loudness.",
+            "The renderer still must mix the validated tracks correctly.",
+            "This does not create word-level narration alignment.",
         ],
     }
 
 
 def main():
     if not shutil.which("ffprobe"):
-        raise RuntimeError("ffprobe is required")
-
-    if not INPUT_FILE.is_file():
         raise RuntimeError(
-            f"Input file missing: {INPUT_FILE}"
+            "ffprobe is required"
         )
 
-    if not AUDIO_FILE.is_file():
-        raise RuntimeError(
-            f"Narration manifest missing: {AUDIO_FILE}"
-        )
-
-    if not CUES_FILE.is_file():
-        raise RuntimeError(
-            f"SFX cue manifest missing: {CUES_FILE}"
-        )
+    for path in (
+        INPUT_FILE,
+        AUDIO_FILE,
+        SOUND_MANIFEST,
+        CUES_FILE,
+    ):
+        if not path.is_file():
+            raise RuntimeError(
+                f"Required file missing: {path}"
+            )
 
     config = load_and_validate(INPUT_FILE)
 
     mode = str(get_format(config)).strip().lower()
-    configured_parts = int(get_parts(config))
-    scenes = int(get_scenes(config))
+    configured_parts = positive_int(
+        get_parts(config), "PARTS"
+    )
+    scenes = positive_int(
+        get_scenes(config), "SCENES"
+    )
 
     if mode not in {"short", "full"}:
         raise RuntimeError(
             f"Unsupported FORMAT: {mode}"
-        )
-
-    if configured_parts < 1 or scenes < 1:
-        raise RuntimeError(
-            "PARTS and SCENES must be positive"
         )
 
     sfx_enabled = config_bool(
@@ -782,14 +1023,30 @@ def main():
         configured_parts,
         scenes,
         mode,
-        configured_parts,
     )
+
+    sound_manifest = validate_sound_manifest(
+        mode,
+        actual_parts,
+        narration,
+    )
+
+    manifest_sfx_enabled = sound_manifest[
+        "enabled"
+    ]["sfx"]
+
+    if manifest_sfx_enabled != sfx_enabled:
+        raise RuntimeError(
+            "SFX_ENABLED in Input/topic.txt does not match "
+            "sound-design manifest. Regenerate sound design."
+        )
 
     sfx = validate_cues(
         actual_parts,
         scenes,
         narration,
         sfx_enabled,
+        sound_manifest,
     )
 
     report = {
@@ -815,30 +1072,46 @@ def main():
         "duration_source": (
             "ffprobe duration of actual narration files"
         ),
+        "sound_design_manifest_sha256": sha256_file(
+            SOUND_MANIFEST
+        ),
+        "sfx_cue_manifest_sha256": sha256_file(
+            CUES_FILE
+        ),
+        "narration_manifest_sha256": sha256_file(
+            AUDIO_FILE
+        ),
+        "sound_tracks": {
+            "music_enabled": sound_manifest["enabled"]["music"],
+            "ambient_enabled": sound_manifest["enabled"]["ambient"],
+            "sfx_enabled": sfx_enabled,
+        },
         "sfx": sfx,
     }
 
     write_json(OUTPUT_FILE, report)
 
+    log("=" * 60)
     log("SFX TIMING VALIDATION: PASSED")
+    log("VERSION:", VERSION)
     log("FORMAT:", mode)
     log("CONFIGURED PARTS:", configured_parts)
     log("ACTUAL PARTS:", actual_parts)
     log("NARRATION SCENES:", len(narration))
-    log("SFX enabled:", sfx_enabled)
-    log("SFX cues:", sfx["cue_count"])
-    log("Scenes without SFX:", sfx["scenes_without_sfx"])
-    log("Possible truncations:", len(sfx["truncation_warnings"]))
-    log("Overlapping cue pairs:", len(sfx["overlap_warnings"]))
-    log("Report:", relative(OUTPUT_FILE))
+    log("NARRATION DURATION:", report["narration_total_seconds"])
+    log("SFX ENABLED:", sfx_enabled)
+    log("SFX CUES:", sfx["cue_count"])
+    log("SCENES WITHOUT SFX:", sfx["scenes_without_sfx"])
+    log("TIMING WARNINGS:", len(sfx["truncation_warnings"]))
+    log("OVERLAPPING CUE PAIRS:", len(sfx["overlap_warnings"]))
+    log("REPORT:", relative(OUTPUT_FILE))
+    log("=" * 60)
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        log(
-            "SFX TIMING VALIDATION: FAILED:",
-            str(exc),
-        )
+        log("SFX TIMING VALIDATION: FAILED:", str(exc))
         sys.exit(1)
+
