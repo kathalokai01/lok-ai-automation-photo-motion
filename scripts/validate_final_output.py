@@ -31,9 +31,10 @@ METADATA = OUT / "youtube_metadata.txt"
 SRT = OUT / "captions" / "final_captions.srt"
 REPORT = OUT / "validation_report.json"
 
-VERSION = "final-validator-v31-safe-format-alias-cleanup"
+VERSION = "final-validator-v32-dynamic-short-parts"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
+
 SRT_TIMESTAMP = re.compile(
     r"^(?P<h>\d{2,}):(?P<m>[0-5]\d):"
     r"(?P<s>[0-5]\d),(?P<ms>\d{3})$"
@@ -129,7 +130,7 @@ def safe_file(value, label, minimum=1):
 
 
 def cleanup_opposite_format_alias(mode):
-    """Remove only the two known stale aliases for the unselected format."""
+    """Remove only the known stale alias for the unselected format."""
 
     if mode not in ("short", "full"):
         fail(f"Cannot clean aliases for unsupported FORMAT: {mode}")
@@ -158,7 +159,10 @@ def cleanup_opposite_format_alias(mode):
             fail(f"Opposite-format alias is not a regular file: {candidate}")
 
         resolved.unlink()
-        log("REMOVED STALE OPPOSITE-FORMAT ALIAS:", candidate.relative_to(ROOT))
+        log(
+            "REMOVED STALE OPPOSITE-FORMAT ALIAS:",
+            candidate.relative_to(ROOT),
+        )
 
 
 def media_info(path):
@@ -406,13 +410,13 @@ def validate_srt_file(path, expected_duration=None):
     return {
         "cue_count": cue_count,
         "text_characters": total_text_chars,
-        "first_cue_start": 0.0,
         "last_cue_end": round(maximum_end, 3),
         "duration_checked": expected_duration is not None,
         "overlap_check": "passed",
         "sequence_check": "passed",
         "timestamp_check": "passed",
     }
+
 
 def validate_photo(mode, parts, scenes):
     data = read_json(PHOTO)
@@ -425,11 +429,13 @@ def validate_photo(mode, parts, scenes):
         fail("Photo-motion FORMAT mismatch")
 
     expected_count = parts * scenes
+
     for field in ("expected_scene_count", "completed_count"):
         try:
             actual = int(data.get(field, -1))
         except (TypeError, ValueError):
             actual = -1
+
         if actual != expected_count:
             fail(
                 f"Photo-motion {field} mismatch: "
@@ -442,6 +448,7 @@ def validate_photo(mode, parts, scenes):
     )
 
     checked = 0
+
     for key, row in mapping.items():
         if row.get("status") != "completed":
             fail(f"Photo-motion scene incomplete: {key}")
@@ -451,10 +458,12 @@ def validate_photo(mode, parts, scenes):
             f"Photo-motion scene {key}",
             MIN_VIDEO_BYTES,
         )
+
         if not media_info(path)["video"]:
             fail(f"Photo-motion scene has no video stream: {key}")
 
         declared_hash = row.get("video_sha256") or row.get("sha256")
+
         if declared_hash and declared_hash != sha256(path):
             fail(f"Photo-motion hash mismatch: {key}")
 
@@ -472,6 +481,7 @@ def validate_audio(parts, scenes):
         fail("Narration audio manifest is not completed")
 
     jobs = rows(data, "jobs", "audio_jobs", "scenes")
+
     if not jobs:
         fail("Narration audio jobs are missing")
 
@@ -503,10 +513,12 @@ def validate_audio(parts, scenes):
             f"Narration {key}",
             MIN_AUDIO_BYTES,
         )
+
         if not media_info(path)["audio"]:
             fail(f"Narration has no audio stream: {key}")
 
         declared_hash = row.get("sha256")
+
         if declared_hash and declared_hash != sha256(path):
             fail(f"Narration hash mismatch: {key}")
 
@@ -533,6 +545,7 @@ def validate_captions(mode, parts, scenes, final_duration=None):
         fail("Caption FORMAT mismatch")
 
     caption_rows = rows(data, "captions")
+
     if not caption_rows:
         fail("Caption rows are missing")
 
@@ -552,6 +565,7 @@ def validate_captions(mode, parts, scenes, final_duration=None):
             fail(f"Duplicate caption scene: {key}")
 
         caption_text = row.get("text")
+
         if not isinstance(caption_text, str) or not caption_text.strip():
             fail(f"Caption text missing: {key}")
 
@@ -568,6 +582,7 @@ def validate_captions(mode, parts, scenes, final_duration=None):
         "Final SRT",
         10,
     )
+
     srt_result = validate_srt_file(srt, final_duration)
 
     return {
@@ -588,10 +603,12 @@ def validate_sound():
         fail("Sound-design manifest is not completed")
 
     tracks = data.get("tracks")
+
     if not isinstance(tracks, dict):
         fail("Sound-design tracks object missing")
 
     checked_tracks = {}
+
     for name, record in tracks.items():
         if record is None:
             checked_tracks[name] = "disabled"
@@ -607,10 +624,12 @@ def validate_sound():
             f"Sound track {name}",
             MIN_AUDIO_BYTES,
         )
+
         if not media_info(path)["audio"]:
             fail(f"Sound track has no audio stream: {name}")
 
         declared_hash = record.get("sha256")
+
         if declared_hash and declared_hash != sha256(path):
             fail(f"Sound track hash mismatch: {name}")
 
@@ -649,6 +668,7 @@ def validate_sound():
                 f"SFX cue {index}",
                 MIN_AUDIO_BYTES,
             )
+
             if not media_info(path)["audio"]:
                 fail(f"SFX cue has no audio stream: {index}")
 
@@ -659,7 +679,6 @@ def validate_sound():
         "tracks": checked_tracks,
         "sfx_cue_count": cue_count,
     }
-
 
 def validate_render(mode, parts, scenes, expected_size):
     data = read_json(RENDER)
@@ -674,6 +693,7 @@ def validate_render(mode, parts, scenes, expected_size):
         fail("Render manifest does not confirm burned captions")
 
     expected_count = parts * scenes
+
     try:
         completed_count = int(data.get("completed_count", -1))
     except (TypeError, ValueError):
@@ -704,10 +724,12 @@ def validate_render(mode, parts, scenes, expected_size):
             f"Rendered scene {key}",
             MIN_VIDEO_BYTES,
         )
+
         info = validate_video(path, expected_size, f"Rendered scene {key}")
         scene_total += info["duration"]
 
         declared_hash = row.get("sha256")
+
         if declared_hash and declared_hash != sha256(path):
             fail(f"Rendered scene hash mismatch: {key}")
 
@@ -719,6 +741,7 @@ def validate_render(mode, parts, scenes, expected_size):
         })
 
     part_rows = data.get("parts")
+
     if not isinstance(part_rows, list) or len(part_rows) != parts:
         fail(f"Expected exactly {parts} part videos")
 
@@ -751,8 +774,17 @@ def validate_render(mode, parts, scenes, expected_size):
             "sha256": sha256(path),
         })
 
-    final = safe_file(data.get("final_video"), "Final video", MIN_VIDEO_BYTES)
-    alias = safe_file(data.get("alias"), "Format alias", MIN_VIDEO_BYTES)
+    final = safe_file(
+        data.get("final_video"),
+        "Final video",
+        MIN_VIDEO_BYTES,
+    )
+
+    alias = safe_file(
+        data.get("alias"),
+        "Format alias",
+        MIN_VIDEO_BYTES,
+    )
 
     final_info = validate_video(final, expected_size, "Final video")
     alias_info = validate_video(alias, expected_size, "Format alias")
@@ -762,17 +794,22 @@ def validate_render(mode, parts, scenes, expected_size):
         if mode == "short"
         else "katha_lok_ai_full.mp4"
     )
+
     if alias.name != expected_alias:
         fail(f"Wrong selected-format alias: {alias.name}")
 
     if final.resolve() == alias.resolve():
         fail("Final video and format alias must be separate files")
+
     if abs(final_info["duration"] - alias_info["duration"]) > 1:
         fail("Final video and alias durations differ")
+
     if sha256(final) != sha256(alias):
         fail("Final video and alias content hashes differ")
+
     if abs(final_info["duration"] - part_total) > max(2, parts):
         fail("Final duration does not match part video durations")
+
     if abs(final_info["duration"] - scene_total) > max(2, expected_count):
         fail("Final duration does not match rendered scene durations")
 
@@ -803,9 +840,11 @@ def validate_thumbnail(mode):
 
         with Image.open(path) as image:
             image.verify()
+
         with Image.open(path) as image:
             dimensions = image.size
             image_format = image.format
+
     except Exception as exc:
         fail(f"Invalid thumbnail: {exc}")
 
@@ -816,6 +855,7 @@ def validate_thumbnail(mode):
         )
 
     manifest = read_json(THUMBNAIL_MANIFEST, optional=True)
+
     if manifest is not None:
         if not isinstance(manifest, dict):
             fail("Thumbnail manifest must be a JSON object")
@@ -825,8 +865,10 @@ def validate_thumbnail(mode):
             fail("Thumbnail manifest FORMAT mismatch")
 
         declared = pick(manifest, "thumbnail", "path", "output")
+
         if declared:
             declared_path = safe_file(declared, "Thumbnail manifest path")
+
             if declared_path.resolve() != path.resolve():
                 fail("Thumbnail manifest points to a different file")
 
@@ -844,7 +886,9 @@ def validate_metadata():
         "YouTube metadata",
         10,
     )
+
     content = path.read_text(encoding="utf-8-sig").strip()
+
     if not content:
         fail("YouTube metadata is empty")
 
@@ -855,6 +899,7 @@ def validate_metadata():
         normalized = (
             line.strip().strip("[]").rstrip(":").strip().upper()
         )
+
         if normalized in {"TITLE", "DESCRIPTION", "TAGS", "LANGUAGE"}:
             current = normalized
             sections.setdefault(current, [])
@@ -884,6 +929,134 @@ def validate_metadata():
     }
 
 
+def declared_part_count(path, label):
+    """Read a manifest's declared or scene-derived part count."""
+
+    data = read_json(path, optional=True)
+
+    if data is None:
+        return None
+
+    if not isinstance(data, dict):
+        fail(f"{label}: manifest must be a JSON object")
+
+    for field in ("total_parts", "actual_parts", "part_count", "parts_count"):
+        value = data.get(field)
+
+        if value is not None:
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                fail(f"{label}: invalid {field}: {value!r}")
+
+            if count < 1:
+                fail(f"{label}: {field} must be positive")
+
+            return count
+
+    for field in (
+        "scenes",
+        "completed_scenes",
+        "jobs",
+        "audio_jobs",
+        "captions",
+        "items",
+    ):
+        items = data.get(field)
+
+        if not isinstance(items, list) or not items:
+            continue
+
+        numbers = set()
+
+        for index, row in enumerate(items, 1):
+            if not isinstance(row, dict) or row.get("part") is None:
+                numbers = set()
+                break
+
+            try:
+                part = int(row["part"])
+            except (TypeError, ValueError):
+                fail(
+                    f"{label}: invalid part number at "
+                    f"{field}[{index - 1}]"
+                )
+
+            if part < 1:
+                fail(f"{label}: part number must be positive")
+
+            numbers.add(part)
+
+        if numbers:
+            expected = set(range(1, max(numbers) + 1))
+
+            if numbers != expected:
+                fail(
+                    f"{label}: part mapping is not contiguous: "
+                    f"{sorted(numbers)}"
+                )
+
+            return len(numbers)
+
+    part_rows = data.get("parts")
+
+    if isinstance(part_rows, list) and part_rows:
+        return len(part_rows)
+
+    return None
+
+
+def resolve_actual_parts(mode, configured_parts):
+    """SHORT follows completed pipeline manifests; FULL follows input PARTS."""
+
+    manifest_specs = (
+        (AUDIO, "Narration"),
+        (CAPTIONS, "Captions"),
+        (PHOTO, "Photo-motion"),
+        (RENDER, "Render"),
+    )
+
+    discovered = []
+
+    for path, label in manifest_specs:
+        count = declared_part_count(path, label)
+
+        if count is not None:
+            discovered.append((label, count))
+
+    if mode == "full":
+        for label, count in discovered:
+            if count != configured_parts:
+                fail(
+                    f"FULL {label} manifest has {count} parts; "
+                    f"Input/topic.txt requires {configured_parts}"
+                )
+
+        return configured_parts
+
+    if not discovered:
+        fail(
+            "SHORT dynamic part count is missing. Expected total_parts "
+            "or part/scene mappings in narration, captions, photo-motion "
+            "or render manifests."
+        )
+
+    distinct = {count for _, count in discovered}
+
+    if len(distinct) != 1:
+        detail = ", ".join(
+            f"{label}={count}" for label, count in discovered
+        )
+        fail(f"SHORT part-count mismatch across manifests: {detail}")
+
+    actual = distinct.pop()
+
+    log("SHORT CONFIGURED PARTS (ignored):", configured_parts)
+    log("SHORT ACTUAL PARTS:", actual)
+
+    return actual
+
+
 def main():
     for command in ("ffmpeg", "ffprobe"):
         if not shutil.which(command):
@@ -893,39 +1066,62 @@ def main():
         fail("output/ directory missing")
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
+
     mode = str(get_format(config)).strip().lower()
-    parts = int(get_parts(config))
+    configured_parts = int(get_parts(config))
     scenes = int(get_scenes(config))
 
     if mode not in ("short", "full"):
         fail(f"Unsupported FORMAT: {mode}")
-    if parts < 1 or scenes < 1:
+
+    if configured_parts < 1 or scenes < 1:
         fail("PARTS and SCENES must be positive integers")
 
-    expected_size = (720, 1280) if mode == "short" else (1280, 720)
+    # SHORT ignores configured PARTS and uses the actual count
+    # established by upstream pipeline manifests.
+    # FULL retains the configured PARTS count.
+    parts = resolve_actual_parts(mode, configured_parts)
+
+    expected_size = (
+        (720, 1280)
+        if mode == "short"
+        else (1280, 720)
+    )
 
     log("VALIDATION VERSION:", VERSION)
     log("FORMAT:", mode)
-    log("PARTS:", parts)
+    log("CONFIGURED PARTS:", configured_parts)
+    log("ACTUAL PARTS:", parts)
     log("SCENES PER PART:", scenes)
     log("EXPECTED SCENES:", parts * scenes)
 
-    # Remove only the two known stale aliases for the opposite format.
-    # Do not delete scene renders, part files, or the selected-format output.
     cleanup_opposite_format_alias(mode)
 
     checks = {}
-    checks["photo_motion"] = validate_photo(mode, parts, scenes)
-    checks["narration"] = validate_audio(parts, scenes)
+
+    checks["photo_motion"] = validate_photo(
+        mode, parts, scenes
+    )
+
+    checks["narration"] = validate_audio(
+        parts, scenes
+    )
+
     checks["sound_design"] = validate_sound()
+
     checks["render"] = validate_render(
         mode, parts, scenes, expected_size
     )
 
     final_duration = checks["render"]["final_duration"]
+
     checks["captions"] = validate_captions(
-        mode, parts, scenes, final_duration
+        mode,
+        parts,
+        scenes,
+        final_duration,
     )
+
     checks["thumbnail"] = validate_thumbnail(mode)
     checks["metadata"] = validate_metadata()
 
@@ -948,6 +1144,8 @@ def main():
         "version": VERSION,
         "format": mode,
         "parts": parts,
+        "configured_parts": configured_parts,
+        "dynamic_short_parts": mode == "short",
         "scenes_per_part": scenes,
         "expected_scenes": parts * scenes,
         "resolution": list(expected_size),
@@ -963,6 +1161,7 @@ def main():
     }
 
     write_report(report)
+
     log("VALIDATION: PASSED")
     log("PACKAGE-COMPATIBLE CHECK STATUSES: valid")
     log("REPORT:", REPORT.relative_to(ROOT))
