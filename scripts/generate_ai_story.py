@@ -31,10 +31,12 @@ PLAN_CANDIDATES = (
 OUTPUT_FILE = STORY_DIR / "ai_story.json"
 CHECKPOINT_FILE = STORY_DIR / "ai_story.checkpoint.json"
 
-VERSION = "offline-ai-story-mapper-v6-schema-compatible"
-MAPPING_VERSION = 6
+VERSION = "offline-ai-story-mapper-v7-dynamic-short-parts"
+MAPPING_VERSION = 7
 SHORT_MIN_WORDS = 120
-SHORT_MAX_WORDS = 150
+SHORT_TARGET_MAX_WORDS = 150
+SHORT_HARD_MAX_WORDS = 180
+SENTENCE_END_RE = re.compile(r"[.!?।॥…]$")
 
 SCENE_FIELDS = (
     "narration",
@@ -221,7 +223,7 @@ def validate_plan(plan, mode, parts_expected, scenes_expected):
     return plan
 
 
-def validate_source(story, mode, parts_expected, scenes_expected):
+def validate_source(story, mode, configured_parts, scenes_expected):
     if story.get("status") != "completed":
         raise RuntimeError("story.json is not marked completed")
 
@@ -229,10 +231,14 @@ def validate_source(story, mode, parts_expected, scenes_expected):
         raise RuntimeError("story.json FORMAT mismatch; regenerate story first")
 
     parts = story.get("parts")
-    if not isinstance(parts, list) or len(parts) != parts_expected:
-        actual = len(parts) if isinstance(parts, list) else "invalid"
+    if not isinstance(parts, list) or not parts:
+        raise RuntimeError("story.json parts must be a non-empty list")
+
+    parts_expected = len(parts)
+    if mode == "full" and parts_expected != configured_parts:
         raise RuntimeError(
-            f"story.json has {actual} parts; expected {parts_expected}"
+            f"FULL story has {parts_expected} parts; "
+            f"Input PARTS requires {configured_parts}"
         )
 
     expected_total = parts_expected * scenes_expected
@@ -288,16 +294,29 @@ def validate_source(story, mode, parts_expected, scenes_expected):
         raise RuntimeError("Source total scene count mismatch")
 
     if mode == "short":
-        for p, amount in enumerate(part_counts, 1):
-            if not SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS:
+        for p, (amount, part) in enumerate(zip(part_counts, parts), 1):
+            narration = clean(" ".join(
+                text_value(scene, "narration", "text", "dialogue")
+                for scene in part.get("scenes", [])
+            ))
+            if amount < SHORT_MIN_WORDS:
                 raise RuntimeError(
                     f"SHORT STORY INPUT ERROR: part {p} has {amount} words; "
-                    f"required {SHORT_MIN_WORDS}-{SHORT_MAX_WORDS}. "
-                    "Correct the story-generation stage; this offline mapper "
-                    "does not invent or rewrite narration."
+                    f"minimum is {SHORT_MIN_WORDS}. "
+                    "Correct the story-generation stage; this mapper does not rewrite narration."
+                )
+            if amount > SHORT_HARD_MAX_WORDS:
+                raise RuntimeError(
+                    f"SHORT STORY INPUT ERROR: part {p} has {amount} words; "
+                    f"hard maximum is {SHORT_HARD_MAX_WORDS}."
+                )
+            if amount > SHORT_TARGET_MAX_WORDS and not SENTENCE_END_RE.search(narration):
+                raise RuntimeError(
+                    f"SHORT STORY INPUT ERROR: part {p} has {amount} words; "
+                    "151-180 is accepted only at a sentence boundary."
                 )
 
-    return expected_total, part_counts
+    return expected_total, part_counts, parts_expected
 
 
 def identity_details(scene):
@@ -477,6 +496,7 @@ def make_scene(
         "api_calls": 0,
     }
 
+
 def validate_mapped_scene(item, expected, part_number, scene_number):
     if not isinstance(item, dict):
         raise RuntimeError("Invalid mapped scene record")
@@ -570,7 +590,7 @@ def make_result(
             "story_plan_matches_input": True,
             "short_part_word_counts_valid": (
                 all(
-                    SHORT_MIN_WORDS <= amount <= SHORT_MAX_WORDS
+                    SHORT_MIN_WORDS <= amount <= SHORT_HARD_MAX_WORDS
                     for amount in source_part_word_counts
                 )
                 if mode == "short"
@@ -589,17 +609,17 @@ def main():
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
     mode = clean(get_format(config)).lower()
-    parts_expected = int(get_parts(config))
+    configured_parts = int(get_parts(config))
     scenes_expected = int(get_scenes(config))
 
     if mode not in {"short", "full"}:
         raise RuntimeError("FORMAT must be short or full")
-    if parts_expected < 1 or scenes_expected < 1:
+    if configured_parts < 1 or scenes_expected < 1:
         raise RuntimeError("PARTS and SCENES must be positive")
 
     story = read_json(SOURCE_FILE, required=True)
-    total_scenes, source_part_word_counts = validate_source(
-        story, mode, parts_expected, scenes_expected
+    total_scenes, source_part_word_counts, parts_expected = validate_source(
+        story, mode, configured_parts, scenes_expected
     )
 
     plan, plan_path = load_plan()
@@ -672,7 +692,8 @@ def main():
         "plan": plan,
         "plan_path": plan_path.relative_to(ROOT).as_posix(),
         "format": mode,
-        "parts": parts_expected,
+        "configured_parts": configured_parts,
+        "actual_parts": parts_expected,
         "scenes_per_part": scenes_expected,
         "topic": topic,
         "visual_settings": visual_settings,
@@ -888,7 +909,8 @@ def main():
     log("=" * 60)
     log("STORY / VISUAL MAPPING: SUCCESS")
     log("Format:", mode)
-    log("Parts:", parts_expected)
+    log("Configured PARTS:", configured_parts)
+    log("Actual generated parts:", parts_expected)
     log("Scenes per part:", scenes_expected)
     log("Total scenes:", total_scenes)
     log("Source words per part:", source_part_word_counts)
