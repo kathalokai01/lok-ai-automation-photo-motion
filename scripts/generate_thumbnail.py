@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create story-aware cinematic thumbnails from completed visual assets."""
+"""Story-aware cinematic thumbnail generator."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ THUMBNAIL_VERTICAL = OUTPUT_DIR / "thumbnail_1080x1920.jpg"
 MANIFEST = OUTPUT_DIR / "thumbnail_manifest.json"
 
 MIN_IMAGE_BYTES = 1000
-VERSION = "thumbnail-v31-story-hero-cinematic-adaptive"
+VERSION = "thumbnail-v32-story-aware-focal-crop"
 
 
 def log(*args):
@@ -37,7 +37,8 @@ def log(*args):
 
 def read_json(path):
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else None
     except (OSError, ValueError, TypeError):
         return None
 
@@ -71,26 +72,15 @@ def first_text(data, keys):
     return ""
 
 
-def get_story_data():
+def get_story_title(config):
+    # Prefer the completed story title, not an input fragment.
     for path in (AI_STORY, STORY):
         data = read_json(path)
-        if isinstance(data, dict):
-            return data, path.relative_to(ROOT).as_posix()
-    return {}, ""
-
-
-def get_story_title(config):
-    data, source = get_story_data()
-
-    title = first_text(data, (
-        "title",
-        "final_title",
-        "story_title",
-        "generated_title",
-    ))
-
-    if title:
-        return title, source
+        title = first_text(data, (
+            "title", "final_title", "story_title", "generated_title"
+        ))
+        if title:
+            return title, path.relative_to(ROOT).as_posix()
 
     if FINAL_TITLE.is_file():
         title = clean_text(FINAL_TITLE.read_text(encoding="utf-8-sig"))
@@ -99,7 +89,7 @@ def get_story_title(config):
 
     topic = clean_text(config.get("TOPIC", ""))
     if topic:
-        log("WARNING: Story title missing; TOPIC fallback used.")
+        log("WARNING: completed story title missing; TOPIC fallback used.")
         return topic, "Input/topic.txt"
 
     raise RuntimeError("Story title is missing.")
@@ -109,7 +99,6 @@ def valid_image(path):
     path = Path(path)
     if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
         return False
-
     try:
         with Image.open(path) as image:
             image.verify()
@@ -138,13 +127,8 @@ def resolve_image(value):
 
 def job_image(job):
     for key in (
-        "visual_path",
-        "asset_path",
-        "output",
-        "file",
-        "path",
-        "image_path",
-        "image",
+        "visual_path", "asset_path", "output", "file",
+        "path", "image_path", "image",
     ):
         path = resolve_image(job.get(key))
         if path:
@@ -154,7 +138,6 @@ def job_image(job):
 
 def load_visual_jobs():
     data = read_json(VISUAL_MANIFEST)
-
     if not isinstance(data, dict):
         raise RuntimeError("Visual jobs manifest is missing or invalid.")
 
@@ -178,33 +161,20 @@ def load_visual_jobs():
 
 
 def scene_score(job):
-    """Prefer visually dramatic scenes instead of always selecting scene 1."""
-    text_fields = (
-        "prompt",
-        "image_prompt",
-        "visual_prompt",
-        "scene_prompt",
-        "description",
-        "mood",
-        "suspense",
-        "hook",
-        "camera",
+    fields = (
+        "prompt", "image_prompt", "visual_prompt", "scene_prompt",
+        "description", "mood", "suspense", "hook", "camera",
     )
-
-    text = " ".join(
-        clean_text(job.get(key)) for key in text_fields
-    ).lower()
+    text = " ".join(clean_text(job.get(k)) for k in fields).lower()
 
     positive = (
-        "dramatic", "cinematic", "suspense", "mystery",
-        "danger", "fear", "shock", "reveal", "climax",
-        "storm", "fire", "dark", "night", "shadow",
-        "chase", "battle", "crying", "emotional",
-        "surprise", "secret", "haunted", "ghost",
-        "expression", "close-up", "close up",
-        "intense", "threat", "conflict", "twist",
+        "dramatic", "cinematic", "suspense", "mystery", "danger",
+        "fear", "shock", "reveal", "climax", "storm", "fire",
+        "dark", "night", "shadow", "chase", "battle", "emotional",
+        "surprise", "secret", "haunted", "ghost", "expression",
+        "close-up", "close up", "intense", "threat", "conflict",
+        "twist", "face", "character",
     )
-
     negative = (
         "empty room", "plain background", "establishing shot",
         "wide landscape", "title card", "text overlay",
@@ -215,15 +185,12 @@ def scene_score(job):
 
     if job.get("hook") or job.get("is_hook"):
         score += 8
-
     if job.get("is_climax") or job.get("climax"):
         score += 10
-
     if job.get("is_suspense") or job.get("suspense"):
         score += 5
-
     if job.get("character_focus") or job.get("close_up"):
-        score += 3
+        score += 4
 
     return score
 
@@ -233,7 +200,6 @@ def choose_hero_visual():
 
     for key, job in load_visual_jobs():
         status = str(job.get("status", "")).lower()
-
         if status and status not in {
             "completed", "complete", "success", "done", "generated"
         }:
@@ -267,25 +233,19 @@ def choose_hero_visual():
         })
 
     if not candidates:
-        raise RuntimeError(
-            "No valid completed image found in visual_jobs.json."
-        )
+        raise RuntimeError("No valid completed image found in visual_jobs.json.")
 
     candidates.sort(
         key=lambda item: (
-            item["score"],
-            -item["part"],
-            -item["scene"],
+            item["score"], -item["part"], -item["scene"]
         ),
         reverse=True,
     )
 
     chosen = candidates[0]
-
-    log("HERO IMAGE SELECTED:", chosen["path"])
+    log("HERO IMAGE:", chosen["path"])
     log("HERO SCENE:", chosen["scene"])
     log("HERO SCORE:", chosen["score"])
-
     return chosen
 
 
@@ -313,17 +273,52 @@ def find_font(size):
         raise RuntimeError("No usable thumbnail font found.") from exc
 
 
-def crop_to_ratio(image, ratio):
+def focal_point(image):
+    """
+    Estimate a visual focal point from image contrast and sharpness.
+    This is an image-processing heuristic, not face recognition.
+    """
+    sample = image.convert("RGB")
+    sample.thumbnail((240, 240))
+    gray = sample.convert("L").filter(ImageFilter.FIND_EDGES)
+
+    width, height = gray.size
+    pixels = gray.load()
+
+    weighted_x = 0.0
+    weighted_y = 0.0
+    total = 0.0
+
+    for y in range(height):
+        for x in range(width):
+            weight = float(pixels[x, y]) + 1.0
+            weighted_x += x * weight
+            weighted_y += y * weight
+            total += weight
+
+    if total <= 0:
+        return 0.5, 0.5
+
+    return (
+        max(0.15, min(0.85, weighted_x / total / width)),
+        max(0.15, min(0.85, weighted_y / total / height)),
+    )
+
+
+def crop_to_ratio(image, ratio, focal=(0.5, 0.5)):
     width, height = image.size
     current = width / height
+    fx, fy = focal
 
     if current > ratio:
         new_width = int(height * ratio)
-        left = (width - new_width) // 2
+        center_x = int(fx * width)
+        left = max(0, min(width - new_width, center_x - new_width // 2))
         return image.crop((left, 0, left + new_width, height))
 
     new_height = int(width / ratio)
-    top = (height - new_height) // 2
+    center_y = int(fy * height)
+    top = max(0, min(height - new_height, center_y - new_height // 2))
     return image.crop((0, top, width, top + new_height))
 
 
@@ -372,11 +367,10 @@ def sample_palette(image):
 
 
 def wrap_text(draw, text, font, max_width):
-    words = text.split()
     lines = []
     current = ""
 
-    for word in words:
+    for word in text.split():
         candidate = word if not current else current + " " + word
         box = draw.textbbox((0, 0), candidate, font=font)
 
@@ -434,10 +428,7 @@ def add_side_vignette(image):
 
     for x in range(band):
         alpha = int(95 * (1 - x / band))
-        draw.line(
-            [(x, 0), (x, height)],
-            fill=(0, 0, 0, alpha),
-        )
+        draw.line([(x, 0), (x, height)], fill=(0, 0, 0, alpha))
         draw.line(
             [(width - x - 1, 0), (width - x - 1, height)],
             fill=(0, 0, 0, alpha),
@@ -447,253 +438,239 @@ def add_side_vignette(image):
         image.convert("RGBA"), overlay
     ).convert("RGB")
 
-
 def draw_title(image, title, vertical=False):
+    image = image.convert("RGB")
     width, height = image.size
-    palette = sample_palette(image)
 
-    image = add_gradient(image, vertical)
+    palette = adaptive_palette(image)
+    image = add_gradient(image, palette)
     image = add_side_vignette(image)
+
     draw = ImageDraw.Draw(image)
+    title = shorten_title(title)
 
-    title = shorten_title(title, 75 if vertical else 65)
+    max_width = int(width * 0.88)
+    base_size = max(20, width // (11 if vertical else 18))
+    min_size = max(17, width // 38)
 
-    if vertical:
-        max_width = int(width * 0.88)
-        max_height = int(height * 0.24)
-        base_size = max(38, width // 11)
-        title_y = int(height * 0.70)
-    else:
-        max_width = int(width * 0.88)
-        max_height = int(height * 0.30)
-        base_size = max(34, width // 18)
-        title_y = int(height * 0.67)
+    best_font = None
+    best_lines = None
+    best_size = base_size
 
-    selected_font = None
-    selected_lines = []
-
-    for size in range(base_size, 17, -2):
-        font = find_font(size)
+    for size in range(base_size, min_size - 1, -1):
+        font = get_font(size)
         lines = wrap_text(draw, title, font, max_width)
-        line_height = int(size * 1.22)
 
-        if len(lines) <= 3 and len(lines) * line_height <= max_height:
-            selected_font = font
-            selected_lines = lines
+        if len(lines) <= 3:
+            best_font = font
+            best_lines = lines
+            best_size = size
             break
 
-    if selected_font is None:
-        selected_font = find_font(20)
-        selected_lines = wrap_text(
-            draw, title, selected_font, max_width
-        )[:3]
+    if best_font is None:
+        best_font = get_font(min_size)
+        best_lines = wrap_text(draw, title, best_font, max_width)[:3]
+        best_size = min_size
 
-    font = selected_font
-    line_height = int(font.size * 1.22)
+    line_spacing = max(5, best_size // 5)
+    line_heights = [
+        draw.textbbox((0, 0), line, font=best_font, stroke_width=2)[3]
+        - draw.textbbox((0, 0), line, font=best_font, stroke_width=2)[1]
+        for line in best_lines
+    ]
 
-    accent_y = title_y - max(12, font.size // 2)
+    total_height = sum(line_heights) + line_spacing * max(0, len(best_lines) - 1)
+
+    if vertical:
+        start_y = int(height * 0.68)
+    else:
+        start_y = int(height * 0.68)
+
+    start_y = min(start_y, height - total_height - 35)
+
+    accent_y = max(20, start_y - max(18, best_size // 2))
+    accent_width = max(55, int(width * 0.13))
+
     draw.rounded_rectangle(
         (
-            int(width * 0.07),
+            int(width * 0.06),
             accent_y,
-            int(width * 0.34),
-            accent_y + max(5, font.size // 15),
+            int(width * 0.06) + accent_width,
+            accent_y + max(5, best_size // 12),
         ),
-        radius=5,
+        radius=max(2, best_size // 20),
         fill=palette["accent"],
     )
 
-    y = title_y
+    y = start_y
 
-    for line in selected_lines:
-        bbox = draw.textbbox(
-            (0, 0),
-            line,
-            font=font,
-            stroke_width=4,
-        )
+    for line, line_height in zip(best_lines, line_heights):
+        bbox = draw.textbbox((0, 0), line, font=best_font, stroke_width=2)
         text_width = bbox[2] - bbox[0]
-        x = max(8, (width - text_width) // 2)
+
+        x = max(24, (width - text_width) // 2)
 
         draw.text(
-            (x + 3, y + 5),
+            (x + 3, y + 4),
             line,
-            font=font,
-            fill=palette["shadow"],
-            stroke_width=8,
-            stroke_fill=palette["shadow"],
+            font=best_font,
+            fill=(0, 0, 0),
+            stroke_width=max(3, best_size // 12),
+            stroke_fill=(0, 0, 0),
         )
 
         draw.text(
             (x, y),
             line,
-            font=font,
+            font=best_font,
             fill=palette["text"],
-            stroke_width=4,
-            stroke_fill=palette["shadow"],
+            stroke_width=max(2, best_size // 18),
+            stroke_fill=palette["outline"],
         )
 
-        y += line_height
+        y += line_height + line_spacing
 
     return image
 
 
 def create_thumbnail(source, title, dimensions, destination):
-    if not valid_image(source):
-        raise RuntimeError(f"Invalid thumbnail source: {source}")
-
-    with Image.open(source) as opened:
-        image = opened.convert("RGB")
-
-    image = ImageEnhance.Color(image).enhance(1.12)
-    image = ImageEnhance.Contrast(image).enhance(1.10)
-    image = ImageEnhance.Sharpness(image).enhance(1.15)
-
-    ratio = dimensions[0] / dimensions[1]
-    image = crop_to_ratio(image, ratio)
-    image = image.resize(dimensions, Image.Resampling.LANCZOS)
-
-    image = draw_title(
-        image,
-        title,
-        vertical=dimensions[1] > dimensions[0],
-    )
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.stem + ".tmp.jpg")
-
     try:
+        with Image.open(source) as original:
+            image = original.convert("RGB")
+
+        focal = focal_point(image)
+        ratio = dimensions[0] / dimensions[1]
+
+        image = crop_to_ratio(image, ratio, focal=focal)
+        image = image.resize(dimensions, Image.Resampling.LANCZOS)
+        image = draw_title(image, title, vertical=(dimensions[1] > dimensions[0]))
+
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        temp_path = destination.with_name(destination.stem + ".tmp.jpg")
         image.save(
-            temporary,
-            "JPEG",
+            temp_path,
+            format="JPEG",
             quality=94,
             optimize=True,
             progressive=True,
         )
 
-        if not valid_image(temporary):
-            raise RuntimeError("Generated thumbnail failed validation.")
+        with Image.open(temp_path) as check:
+            check.verify()
 
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
+        temp_path.replace(destination)
+
+        with Image.open(destination) as check:
+            if check.size != dimensions:
+                raise RuntimeError(
+                    f"Thumbnail dimension mismatch: {check.size}, expected {dimensions}"
+                )
+
+        return True
+
+    except Exception as exc:
+        print(f"[THUMBNAIL] Failed: {destination}: {exc}")
+        return False
 
 
 def main():
-    log("=" * 65)
-    log("KATHA LOK AI — STORY-AWARE CINEMATIC THUMBNAILS")
-    log("=" * 65)
+    root = Path(__file__).resolve().parent.parent
+    output_dir = root / "output"
+    thumbnail_dir = output_dir / "thumbnail"
 
-    config = load_and_validate(INPUT)
-    mode = str(get_format(config)).strip().lower()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    thumbnail_dir.mkdir(parents=True, exist_ok=True)
 
-    if mode not in {"short", "full"}:
-        raise RuntimeError(f"Unsupported FORMAT: {mode}")
+    config = load_config(root)
 
-    title, title_source = get_story_title(config)
-    hero = choose_hero_visual()
-    source = hero["path"]
+    mode = str(
+        config.get("FORMAT")
+        or config.get("OUTPUT_MODE")
+        or "short"
+    ).strip().lower()
 
-    log("FORMAT:", mode)
-    log("TITLE:", title)
-    log("TITLE SOURCE:", title_source)
-    log("HERO IMAGE:", source)
+    if mode not in ("short", "full"):
+        mode = "short"
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    title = get_story_title(root, config)
 
-    create_thumbnail(
-        source,
-        title,
-        (1280, 720),
-        THUMBNAIL_MAIN,
-    )
+    if not title:
+        title = str(config.get("TOPIC") or config.get("TITLE") or "Katha Lok AI")
 
-    create_thumbnail(
-        source,
-        title,
-        (1280, 720),
-        THUMBNAIL_16_9,
-    )
+    hero = choose_hero_visual(root, output_dir, mode)
 
-    create_thumbnail(
-        source,
-        title,
-        (1080, 1920),
-        THUMBNAIL_VERTICAL,
-    )
+    if not hero or not Path(hero).is_file():
+        raise FileNotFoundError(
+            "Thumbnail source image not found. Hero visual could not be selected."
+        )
 
-    outputs = (
-        (THUMBNAIL_MAIN, (1280, 720)),
-        (THUMBNAIL_16_9, (1280, 720)),
-        (THUMBNAIL_VERTICAL, (1080, 1920)),
-    )
+    outputs = [
+        (
+            output_dir / "thumbnail.jpg",
+            (1280, 720),
+        ),
+        (
+            thumbnail_dir / "thumbnail_1280x720.jpg",
+            (1280, 720),
+        ),
+        (
+            thumbnail_dir / "thumbnail_1080x1920.jpg",
+            (1080, 1920),
+        ),
+    ]
 
-    for path, expected_size in outputs:
-        if not valid_image(path):
-            raise RuntimeError(f"Invalid thumbnail output: {path}")
+    results = []
 
-        with Image.open(path) as image:
-            if image.size != expected_size:
-                raise RuntimeError(
-                    f"Thumbnail dimensions mismatch: {path}; "
-                    f"found {image.size}, expected {expected_size}"
-                )
+    for destination, dimensions in outputs:
+        success = create_thumbnail(
+            hero,
+            title,
+            dimensions,
+            destination,
+        )
+        results.append(
+            {
+                "file": str(destination.relative_to(root)),
+                "width": dimensions[0],
+                "height": dimensions[1],
+                "success": success,
+            }
+        )
+
+    if not all(item["success"] for item in results):
+        failed = [item["file"] for item in results if not item["success"]]
+        raise RuntimeError(
+            "Thumbnail generation failed: " + ", ".join(failed)
+        )
 
     manifest = {
-        "status": "completed",
-        "version": VERSION,
-        "format": mode,
+        "version": "thumbnail-v32-story-aware-focal-crop",
+        "mode": mode,
         "title": title,
-        "title_source": title_source,
-        "source_visual": source.relative_to(ROOT).as_posix(),
-        "source_part": hero["part"],
-        "source_scene": hero["scene"],
-        "source_scene_score": hero["score"],
-        "source_visual_prompt": hero["prompt"],
-        "thumbnail": THUMBNAIL_MAIN.relative_to(ROOT).as_posix(),
-        "path": THUMBNAIL_MAIN.relative_to(ROOT).as_posix(),
-        "output": THUMBNAIL_MAIN.relative_to(ROOT).as_posix(),
-        "thumbnails": [
-            {
-                "type": "primary-16:9",
-                "width": 1280,
-                "height": 720,
-                "path": THUMBNAIL_MAIN.relative_to(ROOT).as_posix(),
-                "size_bytes": THUMBNAIL_MAIN.stat().st_size,
-            },
-            {
-                "type": "16:9",
-                "width": 1280,
-                "height": 720,
-                "path": THUMBNAIL_16_9.relative_to(ROOT).as_posix(),
-                "size_bytes": THUMBNAIL_16_9.stat().st_size,
-            },
-            {
-                "type": "9:16",
-                "width": 1080,
-                "height": 1920,
-                "path": THUMBNAIL_VERTICAL.relative_to(ROOT).as_posix(),
-                "size_bytes": THUMBNAIL_VERTICAL.stat().st_size,
-            },
-        ],
+        "source_image": str(Path(hero).resolve().relative_to(root)),
+        "thumbnails": results,
     }
 
-    write_json(MANIFEST, manifest)
+    manifest_path = thumbnail_dir / "thumbnail_manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
-    log("THUMBNAILS COMPLETE")
-    log("FORMAT:", mode)
-    log("PRIMARY:", THUMBNAIL_MAIN.relative_to(ROOT))
-    log("16:9:", THUMBNAIL_16_9.relative_to(ROOT))
-    log("9:16:", THUMBNAIL_VERTICAL.relative_to(ROOT))
-    log("MANIFEST:", MANIFEST.relative_to(ROOT))
+    print(f"[THUMBNAIL] Title: {title}")
+    print(f"[THUMBNAIL] Source: {hero}")
+    print(f"[THUMBNAIL] Generated {len(results)} thumbnail files.")
+    print(f"[THUMBNAIL] Manifest: {manifest_path}")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        log("THUMBNAIL GENERATION INTERRUPTED")
-        sys.exit(130)
+        print("[THUMBNAIL] Interrupted.")
+        raise
     except Exception as exc:
-        log("THUMBNAIL GENERATION FAILED:", exc)
-        sys.exit(1)
+        print(f"[THUMBNAIL] ERROR: {exc}")
+        raise
