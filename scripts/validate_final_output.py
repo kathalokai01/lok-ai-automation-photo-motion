@@ -31,7 +31,7 @@ METADATA = OUT / "youtube_metadata.txt"
 SRT = OUT / "captions" / "final_captions.srt"
 REPORT = OUT / "validation_report.json"
 
-VERSION = "final-validator-v30-strict-srt-timing"
+VERSION = "final-validator-v31-safe-format-alias-cleanup"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 SRT_TIMESTAMP = re.compile(
@@ -69,6 +69,7 @@ def read_json(path, optional=False):
 def write_report(data):
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     temporary = REPORT.with_suffix(".json.tmp")
+
     try:
         temporary.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -82,21 +83,25 @@ def write_report(data):
 def rows(data, *keys):
     if isinstance(data, list):
         return data
+
     if isinstance(data, dict):
         for key in keys:
             value = data.get(key)
             if isinstance(value, list):
                 return value
+
     return []
 
 
 def pick(row, *keys):
     if not isinstance(row, dict):
         return None
+
     for key in keys:
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+
     return None
 
 
@@ -105,6 +110,7 @@ def safe_file(value, label, minimum=1):
         fail(f"{label}: file path missing")
 
     path = Path(value.strip())
+
     if not path.is_absolute():
         path = ROOT / path
 
@@ -122,17 +128,53 @@ def safe_file(value, label, minimum=1):
     return path
 
 
+def cleanup_opposite_format_alias(mode):
+    """Remove only the two known stale aliases for the unselected format."""
+
+    if mode not in ("short", "full"):
+        fail(f"Cannot clean aliases for unsupported FORMAT: {mode}")
+
+    opposite = (
+        "katha_lok_ai_full.mp4"
+        if mode == "short"
+        else "katha_lok_ai_short.mp4"
+    )
+
+    candidates = (
+        OUT / "videos" / opposite,
+        OUT / opposite,
+    )
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+
+        resolved = candidate.resolve()
+
+        if not resolved.is_relative_to(OUT.resolve()):
+            fail(f"Unsafe opposite-format alias path: {candidate}")
+
+        if not resolved.is_file():
+            fail(f"Opposite-format alias is not a regular file: {candidate}")
+
+        resolved.unlink()
+        log("REMOVED STALE OPPOSITE-FORMAT ALIAS:", candidate.relative_to(ROOT))
+
+
 def media_info(path):
     executable = shutil.which("ffprobe")
+
     if not executable:
         fail("ffprobe is not installed")
 
     result = subprocess.run(
         [
-            executable, "-v", "error",
+            executable,
+            "-v", "error",
             "-show_entries",
             "format=duration:stream=codec_type,width,height",
-            "-of", "json", str(path),
+            "-of", "json",
+            str(path),
         ],
         capture_output=True,
         text=True,
@@ -156,10 +198,12 @@ def media_info(path):
         fail(f"Invalid media duration: {path.name}")
 
     streams = data.get("streams", [])
+
     video = next(
         (item for item in streams if item.get("codec_type") == "video"),
         None,
     )
+
     audio = next(
         (item for item in streams if item.get("codec_type") == "audio"),
         None,
@@ -181,6 +225,7 @@ def validate_video(path, expected_size, label):
         fail(f"{label}: audio/video stream missing")
 
     actual_size = (info["width"], info["height"])
+
     if actual_size != expected_size:
         fail(
             f"{label}: expected {expected_size[0]}x{expected_size[1]}, "
@@ -224,6 +269,7 @@ def validate_scene_rows(items, parts, scenes, label):
             fail(f"{label}: invalid scene mapping at row {index}")
 
         wanted_part, wanted_scene = expected[index - 1]
+
         if (part, scene) != (wanted_part, wanted_scene):
             fail(
                 f"{label}: wrong part/scene order at row {index}: "
@@ -234,6 +280,7 @@ def validate_scene_rows(items, parts, scenes, label):
             fail(f"{label}: global_scene mismatch at row {index}")
 
         key = (part, scene)
+
         if key in mapping:
             fail(f"{label}: duplicate scene mapping {key}")
 
@@ -244,6 +291,7 @@ def validate_scene_rows(items, parts, scenes, label):
 
 def srt_timestamp_to_seconds(value):
     match = SRT_TIMESTAMP.fullmatch(value.strip())
+
     if not match:
         fail(f"Invalid SRT timestamp: {value!r}")
 
@@ -269,6 +317,7 @@ def validate_srt_file(path, expected_duration=None):
         fail(f"Cannot read final SRT as UTF-8: {exc}")
 
     content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+
     if not content:
         fail("Final SRT is empty")
 
@@ -285,19 +334,20 @@ def validate_srt_file(path, expected_duration=None):
             fail(f"SRT cue {block_index}: incomplete cue block")
 
         number_line = lines[0].strip()
+
         if not number_line.isdigit():
             fail(f"SRT cue {block_index}: cue number is not an integer")
 
         cue_number = int(number_line)
-        expected_number = block_index
 
-        if cue_number != expected_number:
+        if cue_number != block_index:
             fail(
-                f"SRT cue sequence error: expected {expected_number}, "
+                f"SRT cue sequence error: expected {block_index}, "
                 f"found {cue_number}"
             )
 
         timing = lines[1].strip()
+
         if timing.count("-->") != 1:
             fail(f"SRT cue {cue_number}: invalid timing line")
 
@@ -319,16 +369,22 @@ def validate_srt_file(path, expected_duration=None):
             )
 
         cue_text = "\n".join(lines[2:]).strip()
+
         if not cue_text:
             fail(f"SRT cue {cue_number}: caption text is empty")
 
         if "-->" in cue_text:
-            fail(f"SRT cue {cue_number}: unexpected timing delimiter in text")
+            fail(
+                f"SRT cue {cue_number}: unexpected timing delimiter in text"
+            )
 
         if re.search(r"<[^>]{0,100}>", cue_text):
-            # Basic SRT formatting tags are allowed; arbitrary markup is not.
-            tags = re.findall(r"</?([A-Za-z]+)(?:\s+[^>]*)?>", cue_text)
+            tags = re.findall(
+                r"</?([A-Za-z]+)(?:\s+[^>]*)?>",
+                cue_text,
+            )
             allowed = {"b", "i", "u", "font"}
+
             if any(tag.lower() not in allowed for tag in tags):
                 fail(f"SRT cue {cue_number}: unsupported markup")
 
@@ -357,7 +413,6 @@ def validate_srt_file(path, expected_duration=None):
         "sequence_check": "passed",
         "timestamp_check": "passed",
     }
-
 
 def validate_photo(mode, parts, scenes):
     data = read_json(PHOTO)
@@ -496,8 +551,8 @@ def validate_captions(mode, parts, scenes, final_duration=None):
         if key in found:
             fail(f"Duplicate caption scene: {key}")
 
-        text = row.get("text")
-        if not isinstance(text, str) or not text.strip():
+        caption_text = row.get("text")
+        if not isinstance(caption_text, str) or not caption_text.strip():
             fail(f"Caption text missing: {key}")
 
         found.add(key)
@@ -721,15 +776,6 @@ def validate_render(mode, parts, scenes, expected_size):
     if abs(final_info["duration"] - scene_total) > max(2, expected_count):
         fail("Final duration does not match rendered scene durations")
 
-    opposite = (
-        "katha_lok_ai_full.mp4"
-        if mode == "short"
-        else "katha_lok_ai_short.mp4"
-    )
-    for path in (OUT / "videos" / opposite, OUT / opposite):
-        if path.exists():
-            fail(f"Opposite-format output exists: {path.relative_to(ROOT)}")
-
     return {
         "status": "valid",
         "scene_count": expected_count,
@@ -863,6 +909,10 @@ def main():
     log("PARTS:", parts)
     log("SCENES PER PART:", scenes)
     log("EXPECTED SCENES:", parts * scenes)
+
+    # Remove only the two known stale aliases for the opposite format.
+    # Do not delete scene renders, part files, or the selected-format output.
+    cleanup_opposite_format_alias(mode)
 
     checks = {}
     checks["photo_motion"] = validate_photo(mode, parts, scenes)
