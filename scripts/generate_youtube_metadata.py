@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate complete-story YouTube metadata with validated config and cache."""
+"""Generate story-accurate YouTube metadata with strict validation and safe cache."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import (
-    load_and_validate,
-    get_format,
-    get_topic,
-)
+from input_config import load_and_validate, get_format, get_topic
 
 INPUT_TOPIC = ROOT / "Input" / "topic.txt"
 INPUT_STORY = ROOT / "output" / "story" / "ai_story.json"
@@ -34,7 +31,7 @@ OUTPUT_DESCRIPTION = OUTPUT_DIR / "youtube_description.txt"
 OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 
-VERSION = "youtube-metadata-v4-complete-story-cache-safe"
+VERSION = "youtube-metadata-v5-validated-story-config-cache"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TAGS = 20
@@ -46,11 +43,9 @@ def log(*values):
 
 
 def clean(value: Any) -> str:
-    if value is None:
+    if not isinstance(value, str):
         return ""
-    if isinstance(value, str):
-        return value.strip()
-    return ""
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def read_json(path: Path) -> dict:
@@ -60,10 +55,10 @@ def read_json(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
-        raise RuntimeError(f"Invalid JSON: {path}: {exc}") from exc
+        raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
 
     if not isinstance(data, dict):
-        raise RuntimeError(f"Expected JSON object: {path}")
+        raise RuntimeError(f"Expected JSON object in {path}")
 
     return data
 
@@ -92,29 +87,28 @@ def load_config():
 
     config = load_and_validate(INPUT_TOPIC)
 
-    topic = get_topic(config)
-    format_name = get_format(config)
+    if not isinstance(config, dict):
+        raise RuntimeError("Input configuration is not a valid object.")
 
-    if format_name not in {"short", "full"}:
-        raise RuntimeError(f"Unsupported normalized FORMAT: {format_name}")
+    topic = clean(get_topic(config))
+    mode = clean(get_format(config)).lower()
 
-    return config, clean(topic), format_name
+    if mode not in {"short", "full"}:
+        raise RuntimeError(f"Unsupported FORMAT: {mode!r}")
+
+    return config, topic, mode
 
 
 def load_selected_model():
     data = read_json(MODEL_FILE)
 
     if data.get("status") != "selected":
-        raise RuntimeError(
-            "selected_model.json does not contain a selected model."
-        )
+        raise RuntimeError("Gemini model has not been marked selected.")
 
     model = clean(data.get("model"))
 
     if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
-        raise RuntimeError(
-            f"Invalid selected Gemini model identifier: {model!r}"
-        )
+        raise RuntimeError(f"Invalid selected model: {model!r}")
 
     return model
 
@@ -143,17 +137,17 @@ def ordered_parts(story):
 
 
 def extract_canonical_story(story):
-    """
-    Prefer the original complete story_text.
-    Do not append scene narration to it a second time.
-    """
+    """Extract one complete story without duplicating scene narration."""
 
-    for key in ("story_text", "full_story", "original_story"):
+    for key in (
+        "story_text",
+        "full_story",
+        "original_story",
+    ):
         value = clean(story.get(key))
         if len(value) >= 30:
             return value, key
 
-    # Fallback: reconstruct story from ordered part/scene narration.
     sections = []
 
     for part_number, part in enumerate(ordered_parts(story), 1):
@@ -179,8 +173,6 @@ def extract_canonical_story(story):
 
         ordered_scenes.sort(key=lambda item: item[0])
 
-        part_text = []
-
         for scene_number, scene in ordered_scenes:
             narration = clean(
                 scene.get("narration")
@@ -189,52 +181,71 @@ def extract_canonical_story(story):
             )
 
             if narration:
-                part_text.append(
+                sections.append(
                     f"[Part {part_number}, Scene {scene_number}]\n"
                     + narration
                 )
-
-        if part_text:
-            sections.extend(part_text)
 
     reconstructed = "\n\n".join(sections).strip()
 
     if len(reconstructed) >= 30:
         return reconstructed, "ordered_parts_and_scenes"
 
-    # Last fallback: known story-bearing top-level fields.
     for key in (
         "story",
         "content",
         "narration",
         "script",
-        "description",
-        "summary",
     ):
         value = clean(story.get(key))
         if len(value) >= 30:
             return value, key
 
     raise RuntimeError(
-        "Complete story text was not found in ai_story.json. "
-        "No metadata will be generated from TOPIC alone."
+        "Complete story text not found. "
+        "Metadata generation from TOPIC alone is blocked."
     )
+
+
+def validate_story_status(story):
+    status = clean(story.get("status")).lower()
+
+    if status not in {"completed", "complete", "success"}:
+        raise RuntimeError(
+            "ai_story.json is not marked completed. "
+            f"Found status={status!r}. Refusing to generate metadata."
+        )
+
+    if story.get("error"):
+        raise RuntimeError(
+            "Story file contains an error field; metadata generation blocked."
+        )
 
 
 def prepare_story(story):
+    validate_story_status(story)
+
     story_text, source = extract_canonical_story(story)
 
     title = clean(
-        story.get("title")
-        or story.get("final_title")
+        story.get("final_title")
+        or story.get("generated_title")
         or story.get("story_title")
+        or story.get("title")
     )
+
+    if len(story_text) < 100:
+        raise RuntimeError(
+            f"Story is too short for reliable metadata: "
+            f"{len(story_text)} characters."
+        )
 
     return {
         "text": story_text,
         "source": source,
         "existing_title": title,
         "character_count": len(story_text),
+        "word_count": len(story_text.split()),
     }
 
 
@@ -278,7 +289,7 @@ def normalize_tags(raw):
     return tags
 
 
-def validate_metadata(data, topic, model, digest, format_name):
+def validate_metadata(data, topic, model, fingerprint, mode):
     title = clean(data.get("title"))
     description = clean(data.get("description"))
     tags = normalize_tags(data.get("tags"))
@@ -300,24 +311,26 @@ def validate_metadata(data, topic, model, digest, format_name):
     return {
         "status": "completed",
         "version": VERSION,
-        "format": format_name,
+        "format": mode,
         "topic": topic,
         "model": model,
         "title": title,
         "description": description,
         "tags": tags,
-        "input_fingerprint": digest,
+        "input_fingerprint": fingerprint,
     }
 
 
-def make_fingerprint(topic, story_text, existing_title, model, mode):
+def make_fingerprint(topic, story, model, mode, config):
     payload = {
         "version": VERSION,
         "topic": topic,
-        "story_text": story_text,
-        "existing_title": existing_title,
+        "story_text": story["text"],
+        "existing_title": story["existing_title"],
+        "story_source": story["source"],
         "model": model,
         "format": mode,
+        "config": config,
     }
 
     encoded = json.dumps(
@@ -325,12 +338,13 @@ def make_fingerprint(topic, story_text, existing_title, model, mode):
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        default=str,
     ).encode("utf-8")
 
     return hashlib.sha256(encoded).hexdigest()
 
 
-def load_cache(digest, topic, model, mode):
+def load_cache(fingerprint, topic, model, mode):
     if not OUTPUT_JSON.is_file():
         return None
 
@@ -343,7 +357,7 @@ def load_cache(digest, topic, model, mode):
         if data.get("version") != VERSION:
             return None
 
-        if data.get("input_fingerprint") != digest:
+        if data.get("input_fingerprint") != fingerprint:
             return None
 
         if data.get("model") != model:
@@ -353,7 +367,11 @@ def load_cache(digest, topic, model, mode):
             return None
 
         return validate_metadata(
-            data, topic, model, digest, mode
+            data,
+            topic,
+            model,
+            fingerprint,
+            mode,
         )
 
     except Exception as exc:
@@ -371,7 +389,6 @@ def extract_response_text(result):
         )
 
     candidate = candidates[0]
-
     finish_reason = clean(candidate.get("finishReason"))
 
     if finish_reason in {"SAFETY", "RECITATION", "BLOCKLIST"}:
@@ -396,14 +413,7 @@ def extract_response_text(result):
     return response
 
 
-def generate_metadata(
-    api_key,
-    model,
-    topic,
-    story,
-    mode,
-    digest,
-):
+def generate_metadata(api_key, model, topic, story, mode, fingerprint):
     schema = {
         "type": "OBJECT",
         "properties": {
@@ -419,21 +429,19 @@ def generate_metadata(
 
     if mode == "short":
         format_instruction = (
-            "The video is a YouTube Short. Create a concise, "
+            "This is a YouTube Short. Create a concise, "
             "high-impact title and a short-video description."
         )
     else:
         format_instruction = (
-            "The video is a full-length story. Create a complete-story "
-            "title and a detailed description."
+            "This is a full-length story video. Create a compelling "
+            "complete-story title and a detailed description."
         )
 
     prompt = f"""
 You are a professional Hindi YouTube metadata editor.
 
-You must read the complete story below before deciding the title.
-The story text is the primary source. TOPIC and existing title are
-only supporting context.
+Read the COMPLETE story before deciding its title or tags.
 
 TOPIC:
 {topic or "Not supplied"}
@@ -448,30 +456,28 @@ FORMAT REQUIREMENT:
 {format_instruction}
 
 COMPLETE STORY:
+<complete_story>
 {story["text"]}
+</complete_story>
 
 TASK:
-1. Understand the full plot, main character, conflict, turning point,
+1. Understand the entire plot, characters, conflict, turning point,
    important events and actual ending.
-2. Create a natural, compelling Hindi YouTube title based on the
-   complete story, not merely its opening sentences.
-3. Do not copy TOPIC as the title unless it genuinely describes
-   the complete story.
+2. Create a natural, compelling Hindi title based on the complete story.
+3. Do not simply copy the topic or the opening sentence.
 4. Do not invent characters, events, locations or twists.
-5. If the story contains mystery or suspense, create curiosity
-   without revealing the entire ending.
-6. Write a useful Hindi description that accurately explains
-   the story and its central conflict.
-7. Generate 10 to 20 relevant Hindi/English search tags.
-8. Avoid unrelated trending tags and keyword stuffing.
-9. Do not add fabricated claims, links or hashtags unrelated
-   to the actual story.
-10. Return only the requested JSON object.
+5. Use suspense only when the actual story supports it.
+6. Write an accurate Hindi description of the actual story.
+7. Generate 10-20 relevant Hindi/English search tags.
+8. Tags must relate directly to the story, characters, genre or theme.
+9. Do not use unrelated trending keywords or keyword stuffing.
+10. Do not add fabricated links, claims or unrelated hashtags.
+11. Return only the JSON object matching the response schema.
 """
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        f"models/{model}:generateContent"
+        f"models/{urllib.parse.quote(model, safe='-._')}:generateContent"
     )
 
     last_error = None
@@ -494,7 +500,10 @@ TASK:
 
         request = urllib.request.Request(
             url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps(
+                payload,
+                ensure_ascii=False,
+            ).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": api_key,
@@ -524,7 +533,11 @@ TASK:
                 )
 
             return validate_metadata(
-                parsed, topic, model, digest, mode
+                parsed,
+                topic,
+                model,
+                fingerprint,
+                mode,
             )
 
         except urllib.error.HTTPError as exc:
@@ -537,11 +550,9 @@ TASK:
                 f"Gemini HTTP {exc.code}: {body}"
             )
 
-            # Permanent errors should not consume repeated requests.
             if exc.code in (400, 401, 403, 404):
                 break
 
-            # Retry temporary quota, server and gateway errors.
             if exc.code not in (408, 409, 429, 500, 502, 503, 504):
                 break
 
@@ -566,156 +577,123 @@ TASK:
         f"{last_error}"
     )
 
+def build_combined_text(metadata: dict[str, Any]) -> str:
+    title = clean(metadata.get("title"))
+    description = clean(metadata.get("description"))
+    tags = normalize_tags(metadata.get("tags"))
 
-def build_combined_text(metadata):
+    if not title or not description or len(tags) < MIN_TAGS:
+        raise ValueError("Cannot write incomplete YouTube metadata.")
+
     return (
-        "TITLE:\n"
-        + metadata["title"]
-        + "\n\nDESCRIPTION:\n"
-        + metadata["description"]
-        + "\n\nTAGS:\n"
-        + ", ".join(metadata["tags"])
-        + "\n\nLANGUAGE:\nHindi\n"
+        f"TITLE\n{title}\n\n"
+        f"DESCRIPTION\n{description}\n\n"
+        f"TAGS\n{', '.join(tags)}\n"
     )
 
 
-def save_outputs(metadata):
+def save_outputs(metadata: dict[str, Any]) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    combined = build_combined_text(metadata)
+    validated = validate_metadata(metadata)
+    combined = build_combined_text(validated)
 
-    # Keep the JSON and all text files consistent with one result.
-    atomic_write_json(OUTPUT_JSON, metadata)
-
-    atomic_write(
-        OUTPUT_TITLE,
-        metadata["title"] + "\n",
-    )
-
-    atomic_write(
-        OUTPUT_DESCRIPTION,
-        metadata["description"] + "\n",
-    )
-
-    atomic_write(
-        OUTPUT_TAGS,
-        ", ".join(metadata["tags"]) + "\n",
-    )
-
+    atomic_write_json(OUTPUT_JSON, validated)
+    atomic_write(OUTPUT_TITLE, validated["title"] + "\n")
+    atomic_write(OUTPUT_DESCRIPTION, validated["description"] + "\n")
+    atomic_write(OUTPUT_TAGS, ", ".join(validated["tags"]) + "\n")
     atomic_write(OUTPUT_TEXT, combined)
 
-    required = (
-        OUTPUT_JSON,
-        OUTPUT_TITLE,
-        OUTPUT_DESCRIPTION,
-        OUTPUT_TAGS,
-        OUTPUT_TEXT,
+    saved_json = read_json(OUTPUT_JSON)
+    if validate_metadata(saved_json) != validated:
+        raise RuntimeError("Saved metadata JSON verification failed.")
+
+    if OUTPUT_TITLE.read_text(encoding="utf-8").strip() != validated["title"]:
+        raise RuntimeError("Saved title verification failed.")
+
+    if OUTPUT_DESCRIPTION.read_text(encoding="utf-8").strip() != validated["description"]:
+        raise RuntimeError("Saved description verification failed.")
+
+    saved_tags = normalize_tags(
+        OUTPUT_TAGS.read_text(encoding="utf-8").split(",")
     )
+    if saved_tags != validated["tags"]:
+        raise RuntimeError("Saved tags verification failed.")
 
-    for path in required:
-        if not path.is_file() or path.stat().st_size < 5:
-            raise RuntimeError(
-                f"Metadata output missing or empty: {path}"
-            )
+    saved_text = OUTPUT_TEXT.read_text(encoding="utf-8")
+    if validated["title"] not in saved_text:
+        raise RuntimeError("Combined metadata title verification failed.")
 
-    saved = read_json(OUTPUT_JSON)
+    if validated["description"] not in saved_text:
+        raise RuntimeError("Combined metadata description verification failed.")
 
-    if saved.get("title") != metadata["title"]:
-        raise RuntimeError("Saved metadata title verification failed.")
-
-    if saved.get("format") != metadata["format"]:
-        raise RuntimeError("Saved metadata FORMAT verification failed.")
-
-    if saved.get("input_fingerprint") != metadata["input_fingerprint"]:
-        raise RuntimeError("Saved metadata fingerprint verification failed.")
-
-    text = OUTPUT_TEXT.read_text(encoding="utf-8-sig")
-
-    for section in ("TITLE:", "DESCRIPTION:", "TAGS:", "LANGUAGE:"):
-        if section not in text:
-            raise RuntimeError(
-                f"Combined metadata section missing: {section}"
-            )
-
-    if metadata["title"] not in text:
-        raise RuntimeError("Combined metadata title does not match JSON.")
-
-    if metadata["description"] not in text:
-        raise RuntimeError(
-            "Combined metadata description does not match JSON."
-        )
+    log("Metadata files saved and verified.")
 
 
-def main():
-    config, topic, mode = load_config()
+def main() -> None:
+    config = load_config()
+    story_data = read_json(INPUT_STORY)
+    prepared = prepare_story(story_data)
 
-    story = read_json(INPUT_STORY)
-    prepared = prepare_story(story)
+    topic = get_topic(config)
+    mode = get_format(config)
     model = load_selected_model()
 
-    story_text = prepared["text"]
-    existing_title = prepared["existing_title"]
-
-    digest = make_fingerprint(
-        topic,
-        story_text,
-        existing_title,
-        model,
-        mode,
+    fingerprint = make_fingerprint(
+        topic=topic,
+        prepared=prepared,
+        model=model,
+        mode=mode,
+        config=config,
     )
 
-    log("=" * 65)
-    log("KATHA LOK AI — YOUTUBE METADATA")
-    log("=" * 65)
-    log("FORMAT:", mode)
-    log("MODEL:", model)
-    log("STORY SOURCE:", prepared["source"])
-    log("STORY CHARACTERS:", prepared["character_count"])
+    cached = load_cache(fingerprint)
 
-    metadata = load_cache(
-        digest,
-        topic,
-        model,
-        mode,
-    )
-
-    cache_reused = metadata is not None
-
-    if cache_reused:
-        log("Matching metadata cache found; Gemini API call skipped.")
+    if cached is not None:
+        metadata = validate_metadata(cached)
+        log("Using validated metadata cache; Gemini API call skipped.")
     else:
-        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        api_key = (
+            os.environ.get("GEMINI_API_KEY", "").strip()
+            or os.environ.get("GOOGLE_API_KEY", "").strip()
+        )
 
         if not api_key:
             raise RuntimeError(
-                "GEMINI_API_KEY is missing and no valid metadata cache exists."
+                "No Gemini API key available and no matching metadata cache."
             )
 
+        log("Generating metadata from the complete validated story.")
+        log("Selected model:", model)
+        log("Story source:", prepared.get("source", "unknown"))
+        log("Story characters:", len(prepared["story"]))
+        log("Story words:", len(prepared["story"].split()))
+
         metadata = generate_metadata(
-            api_key,
-            model,
-            topic,
-            prepared,
-            mode,
-            digest,
+            api_key=api_key,
+            model=model,
+            topic=topic,
+            story=prepared["story"],
+            existing_title=prepared.get("existing_title", ""),
+            mode=mode,
         )
+
+        metadata["fingerprint"] = fingerprint
+        metadata["model"] = model
+        metadata["format"] = mode
+        metadata["version"] = VERSION
 
     save_outputs(metadata)
 
-    log("")
-    log("YOUTUBE METADATA COMPLETED")
-    log("FORMAT:", mode)
-    log("TITLE:", metadata["title"])
-    log("TAGS:", len(metadata["tags"]))
-    log("STORY SOURCE:", prepared["source"])
-    log("CACHE REUSED:", cache_reused)
-    log("GEMINI API CALLED:", not cache_reused)
-    log("JSON:", OUTPUT_JSON.relative_to(ROOT))
-    log("TEXT:", OUTPUT_TEXT.relative_to(ROOT))
-    log("TITLE:", OUTPUT_TITLE.relative_to(ROOT))
-    log("DESCRIPTION:", OUTPUT_DESCRIPTION.relative_to(ROOT))
-    log("TAGS:", OUTPUT_TAGS.relative_to(ROOT))
-    log("=" * 65)
+    log("YOUTUBE METADATA SUCCESS")
+    log("Format:", mode)
+    log("Title:", metadata["title"])
+    log("Tags:", len(metadata["tags"]))
+    log("JSON:", OUTPUT_JSON)
+    log("Title file:", OUTPUT_TITLE)
+    log("Description file:", OUTPUT_DESCRIPTION)
+    log("Tags file:", OUTPUT_TAGS)
+    log("Combined file:", OUTPUT_TEXT)
 
 
 if __name__ == "__main__":
