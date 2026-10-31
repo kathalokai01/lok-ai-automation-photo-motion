@@ -218,7 +218,7 @@ def validate_scene_rows(
     if len(items) != len(expected):
         fail(
             f"{label}: expected {len(expected)} scenes, "
-            f""found {len(items)}"
+            f"found {len(items)}"
         )
 
     mapping = {}
