@@ -26,9 +26,11 @@ PLAN_FILE = ROOT / "output" / "story" / "story_plan.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 
 SHORT_MIN_WORDS = 120
-SHORT_MAX_WORDS = 150
+SHORT_TARGET_MAX_WORDS = 150
+SHORT_HARD_MAX_WORDS = 180
+SENTENCE_END_RE = re.compile(r"[.!?।॥…]$")
 
-VERSION = "story-verifier-v8-generator-schema-compatible"
+VERSION = "story-verifier-v9-dynamic-short-parts-180-hard-limit"
 
 
 def fail(message: str) -> None:
@@ -101,7 +103,7 @@ def verify_input():
     return mode, parts, scenes, topic, source_text
 
 
-def verify_plan(plan, mode, parts_expected, scenes_expected, topic):
+def verify_plan(plan, mode, configured_parts, scenes_expected, topic):
     if clean(plan.get("status")).lower() != "planned":
         fail("Story plan status is not planned.")
 
@@ -110,6 +112,16 @@ def verify_plan(plan, mode, parts_expected, scenes_expected, topic):
 
     if clean(plan.get("topic")) != topic:
         fail("Story plan topic does not match Input.")
+
+    parts_expected = positive_int(
+        plan.get("parts_count"), "Story plan parts_count"
+    )
+
+    if mode == "full" and parts_expected != configured_parts:
+        fail(
+            f"FULL plan must use configured PARTS={configured_parts}; "
+            f"found {parts_expected}."
+        )
 
     expected = {
         "parts_count": parts_expected,
@@ -187,7 +199,7 @@ def verify_plan(plan, mode, parts_expected, scenes_expected, topic):
             if not isinstance(scene.get("story_anchor", ""), str):
                 fail(f"Plan story anchor is invalid: {scene_id}.")
 
-    return plan_parts
+    return plan_parts, parts_expected
 
 
 def verify_story(
@@ -296,11 +308,23 @@ def verify_story(
             )
 
         if mode == "short":
-            if not SHORT_MIN_WORDS <= actual_part_words <= SHORT_MAX_WORDS:
+            if actual_part_words < SHORT_MIN_WORDS:
                 fail(
                     f"SHORT PART {p} has {actual_part_words} words; "
-                    f"required {SHORT_MIN_WORDS}-{SHORT_MAX_WORDS}."
+                    f"minimum is {SHORT_MIN_WORDS}."
                 )
+            if actual_part_words > SHORT_HARD_MAX_WORDS:
+                fail(
+                    f"SHORT PART {p} has {actual_part_words} words; "
+                    f"hard maximum is {SHORT_HARD_MAX_WORDS}."
+                )
+            if actual_part_words > SHORT_TARGET_MAX_WORDS:
+                if not SENTENCE_END_RE.search(part_narration):
+                    fail(
+                        f"SHORT PART {p} has {actual_part_words} words; "
+                        f"151-{SHORT_HARD_MAX_WORDS} is allowed only at a "
+                        "sentence boundary."
+                    )
 
         scenes = part.get("scenes")
         planned_scenes = plan_parts[p - 1].get("scenes")
@@ -438,15 +462,15 @@ def main():
     print("Version:", VERSION)
     print("=" * 62)
 
-    mode, parts, scenes, topic, source_text = verify_input()
+    mode, configured_parts, scenes, topic, source_text = verify_input()
 
     story = load_json(STORY_FILE)
     plan = load_json(PLAN_FILE)
 
-    plan_parts = verify_plan(
+    plan_parts, parts = verify_plan(
         plan,
         mode,
-        parts,
+        configured_parts,
         scenes,
         topic,
     )
@@ -465,6 +489,7 @@ def main():
         topic,
         source_text,
         plan_parts,
+        parts,
     )
 
     verify_title_file(title)
@@ -472,7 +497,8 @@ def main():
     print("STORY VALIDATION: SUCCESS")
     print("Format:", mode)
     print("Title:", title)
-    print("Parts:", parts)
+    print("Configured PARTS:", configured_parts)
+    print("Actual generated parts:", parts)
     print("Scenes per part:", scenes)
     print("Total scenes:", total)
     print("Words per part:", word_counts)
