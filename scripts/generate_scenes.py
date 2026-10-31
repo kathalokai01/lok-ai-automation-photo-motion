@@ -38,12 +38,12 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "scene-preparation-v11-plan-path-schema-strict"
+VERSION = "scene-preparation-v12-json-safe-plan-fingerprint"
 MAPPING_VERSION = 10
 
 
-def log(*values: Any) -> None:
-    print(*values, flush=True)
+def log(*values: Any, file=None) -> None:
+    print(*values, file=file or sys.stdout, flush=True)
 
 
 def clean(value: Any) -> str:
@@ -61,6 +61,27 @@ def digest(data: Any) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_json(path: Path, data: dict) -> None:
+    atomic_write(
+        path,
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def read_json(path: Path, required: bool = False) -> dict | None:
@@ -83,21 +104,6 @@ def read_json(path: Path, required: bool = False) -> dict | None:
         return None
 
     return data
-
-
-def write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def text_value(item: Any, *keys: str, default: str = "") -> str:
@@ -354,6 +360,7 @@ def load_plan(
     )
     return result
 
+
 def normalize_scene(
     source: dict,
     plan_scene: dict,
@@ -546,7 +553,6 @@ def normalize_scene(
 
     return row
 
-
 def validate_rows(rows, parts_count, scenes_per_part):
     expected_ids = [
         expected_scene_id(p, s)
@@ -575,6 +581,18 @@ def validate_rows(rows, parts_count, scenes_per_part):
 
     if actual_ids != expected_ids:
         raise RuntimeError("Scene IDs are missing, duplicated or out of order")
+
+
+def serializable_plan(plan_map):
+    """Convert tuple-keyed plan mapping into deterministic JSON-safe records."""
+    return [
+        {
+            "part": part_number,
+            "scene": scene_number,
+            "plan": plan_map[(part_number, scene_number)],
+        }
+        for part_number, scene_number in sorted(plan_map)
+    ]
 
 
 def make_result(
@@ -692,7 +710,7 @@ def main():
         "mapping_version": MAPPING_VERSION,
         "source_type": source_type,
         "story": story,
-        "story_plan": plan_map,
+        "story_plan": serializable_plan(plan_map),
         "topic": topic,
         "story_text": story_text,
         "format": format_type,
