@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,7 @@ DEPTH_MANIFEST = VISUALS / "depth_maps" / "depth_manifest.json"
 OUTPUT_DIR = OUT / "photo_motion"
 MANIFEST_FILE = OUTPUT_DIR / "photo_motion_manifest.json"
 
-VERSION = "photo-motion-v8-depth-guided-checkpoints"
+VERSION = "photo-motion-v9-randomized-faster-cinematic-movement"
 CRF = 20
 PRESET = "medium"
 MIN_IMAGE_BYTES = 1000
@@ -32,13 +33,20 @@ MIN_DEPTH_BYTES = 100
 
 EFFECTS = (
     "zoom_in",
-    "pan_left",
-    "cinematic_sweep",
     "zoom_out",
+    "pan_left",
     "pan_right",
-    "tilt_up",
+    "pan_up",
+    "pan_down",
     "diagonal_drift",
+    "diagonal_push",
+    "zoom_pan_left",
+    "zoom_pan_right",
+    "zoom_pan_up",
+    "zoom_pan_down",
+    "cinematic_sweep",
     "handheld_drift",
+    "tilt_up",
     "tilt_down",
     "dutch_angle",
 )
@@ -413,57 +421,108 @@ def write_manifest(entries, mode, width, height, fps, expected_count, status):
     )
 
 
-def choose_effect(index, depth):
+def build_effect_plan(prepared, depth_maps):
     """
-    Use real AI depth more often; do not mislabel pseudo-depth as AI.
-    Approximate depth is used more sparingly.
+    Create a story-specific random movement plan.
+
+    The same scene images produce the same plan on resume. A different story
+    or image set produces a different sequence. The previous two effects are
+    avoided when enough choices exist. Parallax is selected only when a valid
+    depth map exists for that scene.
     """
-    if depth and depth["is_ai_depth"] and index % 3 == 1:
-        return "parallax"
+    seed_material = "|".join(
+        f"{item['number']}:{item['image_sha256']}:{item['duration']:.3f}"
+        for item in prepared
+    )
+    seed_hex = hashlib.sha256(seed_material.encode("utf-8")).hexdigest()
+    rng = random.Random(int(seed_hex[:16], 16))
 
-    if depth and not depth["is_ai_depth"] and index % 7 == 4:
-        return "parallax"
+    plan = {}
+    recent = []
 
-    return EFFECTS[index % len(EFFECTS)]
+    for item in prepared:
+        choices = list(EFFECTS)
+        depth = depth_maps.get(item["number"])
+
+        if depth:
+            choices.append("parallax")
+            if depth["is_ai_depth"]:
+                choices.append("parallax")
+
+        filtered = [effect for effect in choices if effect not in recent]
+        if not filtered:
+            filtered = choices
+
+        effect = rng.choice(filtered)
+        plan[item["number"]] = effect
+        recent.append(effect)
+        recent = recent[-2:]
+
+    return plan
 
 
 def make_filter(effect, frames, width, height, fps):
+    """Create stronger but smooth 2D camera movement for a still image."""
     denominator = max(frames - 1, 1)
     source_width = width * 2
     source_height = height * 2
 
-    zoom = "1.06"
+    zoom = "1.12"
     x = "(iw-iw/zoom)/2"
     y = "(ih-ih/zoom)/2"
 
     if effect == "zoom_in":
-        zoom = f"min(1+0.10*on/{denominator},1.10)"
+        zoom = f"min(1+0.16*on/{denominator},1.16)"
     elif effect == "zoom_out":
-        zoom = f"max(1.10-0.10*on/{denominator},1.0)"
+        zoom = f"max(1.16-0.16*on/{denominator},1.0)"
     elif effect == "pan_left":
+        zoom = "1.16"
         x = f"(iw-iw/zoom)*(1-on/{denominator})"
     elif effect == "pan_right":
+        zoom = "1.16"
         x = f"(iw-iw/zoom)*on/{denominator}"
+    elif effect == "pan_up":
+        zoom = "1.16"
+        y = f"(ih-ih/zoom)*(1-on/{denominator})"
+    elif effect == "pan_down":
+        zoom = "1.16"
+        y = f"(ih-ih/zoom)*on/{denominator}"
     elif effect == "tilt_up":
-        zoom = "1.07"
+        zoom = "1.13"
         y = f"(ih-ih/zoom)*(1-on/{denominator})"
     elif effect == "tilt_down":
-        zoom = "1.07"
+        zoom = "1.13"
         y = f"(ih-ih/zoom)*on/{denominator}"
     elif effect == "diagonal_drift":
-        zoom = "1.09"
+        zoom = "1.16"
         x = f"(iw-iw/zoom)*on/{denominator}"
         y = f"(ih-ih/zoom)*(1-on/{denominator})"
+    elif effect == "diagonal_push":
+        zoom = f"min(1+0.13*on/{denominator},1.13)"
+        x = f"(iw-iw/zoom)*(0.18+0.64*on/{denominator})"
+        y = f"(ih-ih/zoom)*(0.82-0.64*on/{denominator})"
+    elif effect == "zoom_pan_left":
+        zoom = f"min(1+0.14*on/{denominator},1.14)"
+        x = f"(iw-iw/zoom)*(1-on/{denominator})"
+    elif effect == "zoom_pan_right":
+        zoom = f"min(1+0.14*on/{denominator},1.14)"
+        x = f"(iw-iw/zoom)*on/{denominator}"
+    elif effect == "zoom_pan_up":
+        zoom = f"min(1+0.14*on/{denominator},1.14)"
+        y = f"(ih-ih/zoom)*(1-on/{denominator})"
+    elif effect == "zoom_pan_down":
+        zoom = f"min(1+0.14*on/{denominator},1.14)"
+        y = f"(ih-ih/zoom)*on/{denominator}"
     elif effect == "handheld_drift":
-        zoom = "1.055"
-        x = "(iw-iw/zoom)/2+2*sin(on*0.16)"
-        y = "(ih-ih/zoom)/2+2*sin(on*0.11)"
+        zoom = "1.12"
+        x = "(iw-iw/zoom)/2+4*sin(on*0.11)"
+        y = "(ih-ih/zoom)/2+3*sin(on*0.08)"
     elif effect == "cinematic_sweep":
-        zoom = f"1.035+0.025*sin(PI*on/{denominator})"
-        x = f"(iw-iw/zoom)*(0.5-0.35*cos(PI*on/{denominator}))"
-        y = f"(ih-ih/zoom)*(0.5+0.20*sin(PI*on/{denominator}))"
+        zoom = f"1.06+0.06*sin(PI*on/{denominator})"
+        x = f"(iw-iw/zoom)*(0.5-0.42*cos(PI*on/{denominator}))"
+        y = f"(ih-ih/zoom)*(0.5+0.28*sin(PI*on/{denominator}))"
     elif effect == "dutch_angle":
-        zoom = "1.055"
+        zoom = "1.12"
     elif effect != "parallax":
         raise RuntimeError(f"Unsupported effect: {effect}")
 
@@ -474,8 +533,8 @@ def make_filter(effect, frames, width, height, fps):
 
     if effect == "dutch_angle":
         filters.append(
-            "rotate='0.012*sin(2*PI*t/4)':"
-            "ow=rotw(0.012):oh=roth(0.012):c=black"
+            "rotate='0.014*sin(2*PI*t/5)':"
+            "ow=rotw(0.014):oh=roth(0.014):c=black"
         )
 
     filters.extend([
@@ -672,7 +731,7 @@ def render_parallax(item, depth_path, target, frames, fps, width, height):
         "--height", str(height),
         "--fps", str(fps),
         "--frames", str(frames),
-        "--strength", "0.018",
+        "--strength", "0.026",
     ])
 
 
@@ -699,6 +758,7 @@ def main():
 
     prepared = prepare_jobs(read_jobs())
     depth_maps = read_depth_maps(prepared)
+    effect_plan = build_effect_plan(prepared, depth_maps)
     previous = previous_entries()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -739,7 +799,7 @@ def main():
         duration = frames / fps
         depth = depth_maps.get(number)
 
-        effect = choose_effect(index, depth)
+        effect = effect_plan[number]
 
         if effect == "parallax" and depth is None:
             effect = EFFECTS[index % len(EFFECTS)]
