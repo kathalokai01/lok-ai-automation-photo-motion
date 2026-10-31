@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Select the visual model without surprise API calls.
-
-Cloudflare model testing is disabled by default.
-Set ALLOW_BILLABLE_PROVIDERS=true to explicitly permit a test request.
-"""
+"""Select and record configured visual providers without surprise API calls."""
 
 from __future__ import annotations
 
@@ -13,77 +9,25 @@ import sys
 import time
 from pathlib import Path
 
-import requests
-
-from input_config import load_input_config, normalize_format
-
+from input_config import (
+    load_and_validate,
+    get_image_provider_settings,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
+INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-MODEL = "alibaba/wan-2.6-image"
-API_BASE = "https://api.cloudflare.com/client/v4/accounts"
-TEST_TIMEOUT = 60
-VERSION = "safe-visual-model-selector-v2"
+VERSION = "configured-visual-provider-selector-v3"
 
 
 def log(*items):
     print(*items, flush=True)
 
 
-def env_true(name, default=False):
-    value = os.getenv(name)
-
-    if value is None:
-        return default
-
-    return value.strip().lower() in {
-        "1", "true", "yes", "y", "on"
-    }
-
-
-def cfg_int(config, key, default):
-    try:
-        value = int(config.get(key, default))
-        return max(1, min(value, 3))
-    except (TypeError, ValueError):
-        return default
-
-
-def read_existing_selection():
-    try:
-        data = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_selection(
-    *,
-    status,
-    model=MODEL,
-    provider="cloudflare",
-    reason="",
-    tested=False,
-):
+def save_selection(data):
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    data = {
-        "version": VERSION,
-        "status": status,
-        "model": model,
-        "provider": provider,
-        "selected_by": "select_visual_model.py",
-        "timestamp": int(time.time()),
-        "tested": tested,
-        "reason": reason,
-        "external_api_calls": 0,
-        "paid_services_used": False,
-    }
-
-    temporary = OUTPUT_FILE.with_suffix(
-        OUTPUT_FILE.suffix + ".tmp"
-    )
+    temporary = OUTPUT_FILE.with_suffix(".json.tmp")
 
     temporary.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -91,181 +35,142 @@ def save_selection(
     )
     temporary.replace(OUTPUT_FILE)
 
-    return data
 
+def provider_model(provider, settings):
+    if provider == "huggingface":
+        return {
+            "provider": provider,
+            "model": settings["HF_IMAGE_SPACE"],
+            "fallback_models": settings["FREE_IMAGE_FALLBACK_SPACES"],
+        }
 
-def test_cloudflare_model(account_id, api_token):
-    """Send one opt-in model test request."""
-    url = f"{API_BASE}/{account_id}/ai/run"
+    if provider == "pollinations":
+        models = settings["POLLINATIONS_FREE_IMAGE_MODELS"]
+        return {
+            "provider": provider,
+            "model": models[0],
+            "fallback_models": models[1:],
+        }
 
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
+    if provider == "gemini":
+        return {
+            "provider": provider,
+            "model": settings["GEMINI_IMAGE_MODEL"],
+            "fallback_models": [],
+        }
 
-    payload = {
-        "model": MODEL,
-        "input": {
-            "prompt": (
-                "Photorealistic cinematic Indian environment, "
-                "natural lighting, realistic live-action appearance. "
-                "This is a single provider availability test."
-            ),
-            "size": "768x1024",
-        },
-    }
+    if provider == "replicate":
+        return {
+            "provider": provider,
+            "model": settings["REPLICATE_IMAGE_MODEL"],
+            "fallback_models": [],
+        }
 
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=TEST_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        return False, f"Network request failed: {exc}"
-
-    try:
-        body = response.json()
-    except ValueError:
-        body = {"response_excerpt": response.text[:1000]}
-
-    if not 200 <= response.status_code < 300:
-        return False, (
-            f"HTTP {response.status_code}: "
-            + json.dumps(body, ensure_ascii=False)[:1500]
-        )
-
-    if not isinstance(body, dict) or body.get("success") is False:
-        return False, (
-            "Provider reported failure: "
-            + json.dumps(body, ensure_ascii=False)[:1500]
-        )
-
-    result = body.get("result")
-    if not isinstance(result, dict) or not result.get("image"):
-        return False, (
-            "No result.image returned; provider compatibility "
-            "has not been confirmed."
-        )
-
-    return True, "Cloudflare returned an image result."
+    raise ValueError(f"Unsupported visual provider: {provider}")
 
 
 def main():
-    log("=" * 58)
-    log("SAFE VISUAL MODEL SELECTION")
-    log("=" * 58)
+    log("=" * 60)
+    log("KATHA LOK AI — CONFIGURED VISUAL PROVIDER SELECTION")
+    log("=" * 60)
+
+    if not INPUT_FILE.is_file():
+        log("ERROR: Input/topic.txt is missing.")
+        return 1
 
     try:
-        config = load_input_config()
-    except Exception as exc:
-        log("ERROR: Could not load Input/topic.txt:", exc)
-        return 1
+        config = load_and_validate(INPUT_FILE)
+        settings = get_image_provider_settings(config)
 
-    log("FORMAT:", normalize_format(config))
+        order = settings["IMAGE_PROVIDER_ORDER"]
+        fallback_enabled = settings["IMAGE_FALLBACK_ENABLED"]
+        allow_billable = settings["IMAGE_ALLOW_BILLABLE"]
 
-    allow_billable = env_true(
-        "ALLOW_BILLABLE_PROVIDERS",
-        default=False,
-    )
+        if not order:
+            raise ValueError("No image provider is configured.")
 
-    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
-    api_token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+        selected = provider_model(order[0], settings)
 
-    # Safe default: never send a provider request unless explicitly allowed.
-    if not allow_billable:
-        existing = read_existing_selection()
+        fallback_records = []
+        if fallback_enabled:
+            for provider in order[1:]:
+                fallback_records.append(
+                    provider_model(provider, settings)
+                )
 
-        if (
-            existing.get("status") == "selected"
-            and existing.get("model")
-            and existing.get("provider")
-        ):
-            log(
-                "API TEST SKIPPED. Keeping the existing model selection:",
-                existing["provider"],
-                existing["model"],
-            )
-            log("No external API request was made.")
-            return 0
-
-        save_selection(
-            status="skipped",
-            model=None,
-            provider=None,
-            reason=(
-                "Model testing is disabled by default. "
-                "No provider was tested or selected. "
-                "Configure a free provider separately, or explicitly "
-                "enable a provider test after checking its pricing."
+        data = {
+            "version": VERSION,
+            "status": "selected",
+            "format": config["FORMAT"],
+            "provider": selected["provider"],
+            "model": selected["model"],
+            "fallback_models": selected["fallback_models"],
+            "provider_order": order,
+            "fallback_enabled": fallback_enabled,
+            "allow_billable_providers": allow_billable,
+            "fallback_providers": fallback_records,
+            "selected_by": "Input/topic.txt",
+            "tested": False,
+            "availability_confirmed": False,
+            "external_api_calls": 0,
+            "paid_services_used": False,
+            "timestamp": int(time.time()),
+            "note": (
+                "This file records configured provider priority only. "
+                "Actual provider success is determined by the image "
+                "generator during scene generation."
             ),
-        )
+        }
 
-        log("API TEST SKIPPED: ALLOW_BILLABLE_PROVIDERS is not true.")
-        log("No API request was made.")
-        log("No provider availability was claimed.")
-        log("Selection record:", OUTPUT_FILE)
+        save_selection(data)
+
+        log("FORMAT:", config["FORMAT"])
+        log("Primary provider:", selected["provider"])
+        log("Primary model:", selected["model"])
+        log("Fallback enabled:", fallback_enabled)
+        log("Billable providers allowed:", allow_billable)
+        log("Provider order:", " -> ".join(order))
+
+        for number, item in enumerate(fallback_records, 1):
+            log(
+                f"Fallback {number}:",
+                item["provider"],
+                item["model"],
+            )
+
+        log("External API calls: 0")
+        log("Availability tested: no")
+        log("Selection saved:", OUTPUT_FILE)
+        log("VISUAL PROVIDER SELECTION: OK")
+
         return 0
 
-    if not account_id or not api_token:
-        save_selection(
-            status="failed",
-            reason=(
-                "Opt-in was enabled, but Cloudflare credentials "
-                "are missing. No API request was made."
-            ),
-        )
-        log("ERROR: Cloudflare credentials are missing.")
+    except Exception as exc:
+        failure = {
+            "version": VERSION,
+            "status": "failed",
+            "provider": None,
+            "model": None,
+            "tested": False,
+            "availability_confirmed": False,
+            "external_api_calls": 0,
+            "timestamp": int(time.time()),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+        try:
+            save_selection(failure)
+        except OSError as save_error:
+            log("Could not save failure record:", save_error)
+
+        log("VISUAL PROVIDER SELECTION: FAILED")
+        log(f"{type(exc).__name__}: {exc}")
         return 1
-
-    attempts = cfg_int(config, "MAX_RETRIES", 1)
-    attempts = min(attempts, 3)
-
-    for attempt in range(1, attempts + 1):
-        log(f"Opt-in provider test: attempt {attempt}/{attempts}")
-        success, reason = test_cloudflare_model(
-            account_id,
-            api_token,
-        )
-
-        if success:
-            save_selection(
-                status="selected",
-                reason=reason,
-                tested=True,
-            )
-            log("Provider test succeeded.")
-            log("Selected model:", MODEL)
-            log("Selection record:", OUTPUT_FILE)
-            return 0
-
-        log("Provider test failed:", reason)
-
-        if attempt < attempts:
-            # Do not automatically retry a billable request.
-            log(
-                "Automatic retry stopped to avoid additional "
-                "potentially billable requests."
-            )
-            break
-
-    save_selection(
-        status="failed",
-        reason=(
-            "The opt-in provider test did not confirm availability. "
-            "See the workflow log for the failure reason."
-        ),
-        tested=True,
-    )
-
-    log("No successful model selection was confirmed.")
-    return 1
 
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        sys.exit(main())
     except KeyboardInterrupt:
         log("Cancelled.")
         raise SystemExit(130)
