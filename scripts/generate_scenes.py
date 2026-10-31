@@ -38,7 +38,7 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "scene-preparation-v12-json-safe-plan-fingerprint"
+VERSION = "scene-preparation-v13-dynamic-short-parts"
 MAPPING_VERSION = 10
 
 
@@ -678,14 +678,30 @@ def main():
     if format_type not in {"short", "full"}:
         raise RuntimeError("FORMAT must be short or full")
 
-    parts_count = positive_int(get_parts(config), "PARTS")
+    configured_parts = positive_int(get_parts(config), "PARTS")
     scenes_per_part = positive_int(get_scenes(config), "SCENES")
 
     story, source_type, source_path = selected_story(format_type)
+    actual_parts = len(story["parts"])
+
+    if format_type == "full" and actual_parts != configured_parts:
+        raise RuntimeError(
+            f"FULL story has {actual_parts} parts; configured PARTS is "
+            f"{configured_parts}"
+        )
+
+    if format_type == "short" and actual_parts < 1:
+        raise RuntimeError("SHORT story must contain at least one part")
+
+    parts_count = actual_parts
     validate_layout(story, parts_count, scenes_per_part, "Story")
 
     plan_map = load_plan(format_type, parts_count, scenes_per_part)
     bible = load_character_bible()
+
+    scene_settings = dict(config)
+    scene_settings["PARTS"] = parts_count
+    scene_settings["SCENES"] = scenes_per_part
 
     topic = resolve_story_title(config, story)
     story_text = clean(get_story_text(config)) or clean(
@@ -714,7 +730,8 @@ def main():
         "topic": topic,
         "story_text": story_text,
         "format": format_type,
-        "parts": parts_count,
+        "configured_parts": configured_parts,
+        "actual_parts": parts_count,
         "scenes_per_part": scenes_per_part,
         "character_bible": bible,
         "settings": settings_snapshot,
@@ -757,7 +774,7 @@ def main():
                 p,
                 s,
                 global_number,
-                config,
+                scene_settings,
                 bible,
             )
 
@@ -847,7 +864,8 @@ def main():
     })
 
     log("Format:", format_type)
-    log("Parts:", parts_count)
+    log("Configured PARTS:", configured_parts)
+    log("Actual story parts:", parts_count)
     log("Scenes per part:", scenes_per_part)
     log("Total scenes:", expected_total)
     log("Story-plan scenes integrated:", len(plan_map))
