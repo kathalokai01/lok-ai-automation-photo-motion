@@ -32,7 +32,7 @@ OUTPUT_DIR = ROOT / "output" / "narration"
 OUTPUT_FILE = OUTPUT_DIR / "narration.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "narration_progress.json"
 
-VERSION = "narration-v8-validated-scene-checkpoints"
+VERSION = "narration-v9-dynamic-short-parts"
 
 CAPTION_FIELDS = (
     "caption_hindi", "hindi_caption", "caption_hi",
@@ -152,6 +152,7 @@ def count_words(value):
 def normalize_settings(config):
     return {
         "format": clean(get_format(config)).lower(),
+        "configured_parts": int(get_parts(config)),
         "parts": int(get_parts(config)),
         "scenes_per_part": int(get_scenes(config)),
         "voice": clean(config.get("VOICE", "male")),
@@ -212,43 +213,38 @@ def load_source_scenes(format_type):
     if SCENES_FILE.is_file():
         data = read_json(SCENES_FILE, required=False)
 
-        if isinstance(data, dict):
-            if data.get("status") == "completed":
-                source_format = clean(data.get("format")).lower()
+        if isinstance(data, dict) and data.get("status") == "completed":
+            source_format = clean(data.get("format")).lower()
 
-                if source_format and source_format != format_type:
-                    raise RuntimeError(
-                        "scenes.json FORMAT does not match Input/topic.txt."
-                    )
+            if source_format and source_format != format_type:
+                raise RuntimeError(
+                    "scenes.json FORMAT does not match Input/topic.txt."
+                )
 
-                rows = data.get("scenes")
+            rows = data.get("scenes")
 
-                if not isinstance(rows, list) or not rows:
-                    raise RuntimeError(
-                        "Completed scenes.json has no scene records."
-                    )
+            if not isinstance(rows, list) or not rows:
+                raise RuntimeError(
+                    "Completed scenes.json has no scene records."
+                )
 
-                if not all(isinstance(row, dict) for row in rows):
-                    raise RuntimeError(
-                        "scenes.json contains invalid scene records."
-                    )
+            if not all(isinstance(row, dict) for row in rows):
+                raise RuntimeError(
+                    "scenes.json contains invalid scene records."
+                )
 
-                return rows, SCENES_FILE.relative_to(ROOT).as_posix()
+            return rows, SCENES_FILE.relative_to(ROOT).as_posix()
 
-            log("Ignoring scenes.json because it is not completed.")
+        log("Ignoring scenes.json because it is not completed.")
 
     for path in (AI_STORY_FILE, SOURCE_STORY_FILE):
         data = read_json(path, required=False)
 
         if not isinstance(data, dict):
             continue
-
         if data.get("status") != "completed":
             continue
-
-        story_format = clean(data.get("format")).lower()
-
-        if story_format != format_type:
+        if clean(data.get("format")).lower() != format_type:
             continue
 
         rows = extract_story_scenes(data)
@@ -259,6 +255,45 @@ def load_source_scenes(format_type):
     raise RuntimeError(
         "No completed scene/story source matches the selected FORMAT."
     )
+
+
+def resolve_actual_part_count(source, settings):
+    """Use actual story parts for SHORT; retain configured count for FULL."""
+    found = set()
+
+    for index, item in enumerate(source, 1):
+        key = scene_key(item)
+        if key is None:
+            raise RuntimeError(
+                f"Invalid part/scene mapping in source row {index}."
+            )
+        found.add(key[0])
+
+    if not found:
+        raise RuntimeError("No story parts found in narration source.")
+
+    actual_parts = max(found)
+
+    if found != set(range(1, actual_parts + 1)):
+        raise RuntimeError("Story part numbering is not continuous.")
+
+    if settings["format"] == "full":
+        if actual_parts != settings["configured_parts"]:
+            raise RuntimeError(
+                "FULL story part count does not match configured PARTS: "
+                f"expected {settings['configured_parts']}, "
+                f"found {actual_parts}."
+            )
+        return settings["configured_parts"]
+
+    log(
+        "SHORT dynamic part count:",
+        actual_parts,
+        "(configured PARTS ignored:",
+        settings["configured_parts"],
+        ")",
+    )
+    return actual_parts
 
 
 def validate_scenes(source, settings):
@@ -277,13 +312,10 @@ def validate_scenes(source, settings):
             raise RuntimeError(
                 f"Invalid part/scene mapping in source row {index}."
             )
-
         if key not in expected:
             raise RuntimeError(f"Unexpected scene mapping: {key}.")
-
         if key in mapped:
             raise RuntimeError(f"Duplicate scene mapping: {key}.")
-
         if not narration_text(item):
             raise RuntimeError(
                 f"Narration missing: Part {key[0]}, Scene {key[1]}."
@@ -311,12 +343,10 @@ def estimate_duration(text, voice, speed):
 
     if match:
         amount = float(match.group(2)) / 100.0
-
         if match.group(1) == "-":
             factor = max(0.5, 1.0 - amount)
         else:
             factor = min(1.75, 1.0 + amount)
-
         wpm *= factor
 
     return round(words * 60.0 / max(wpm, 1.0), 2)
@@ -330,10 +360,8 @@ def caption_metadata(source):
             continue
 
         value = source[field]
-
         if isinstance(value, str):
             value = clean(value)
-
         result[field] = value
 
     return result
@@ -342,7 +370,6 @@ def caption_metadata(source):
 def make_record(source, settings):
     key = scene_key(source)
     text = narration_text(source)
-
     duration = source.get("duration")
 
     if duration is None or not clean(duration):
@@ -404,26 +431,20 @@ def load_reusable(settings_hash, source_map, settings):
         return {}
 
     rows = old.get("scenes")
-
     if not isinstance(rows, list):
         return {}
 
     reusable = {}
 
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-
-        if row.get("status") != "completed":
+        if not isinstance(row, dict) or row.get("status") != "completed":
             continue
 
         key = scene_key(row)
-
         if key not in source_map:
             continue
 
         expected = make_record(source_map[key], settings)
-
         if row == expected:
             reusable[key] = expected
 
@@ -438,7 +459,6 @@ def resolve_title(config):
 
     for path in (AI_STORY_FILE, SOURCE_STORY_FILE):
         data = read_json(path, required=False)
-
         if not isinstance(data, dict):
             continue
 
@@ -450,9 +470,7 @@ def resolve_title(config):
             if title:
                 return title
 
-    # Never use the first sentence of a pasted story as its title.
     return ""
-
 
 def checkpoint(output, records, ordered_keys, last_key=None):
     output["scenes"] = [
@@ -477,6 +495,7 @@ def checkpoint(output, records, ordered_keys, last_key=None):
         "version": VERSION,
         "settings_sha256": output["settings_sha256"],
         "source_sha256": output["source_sha256"],
+        "total_parts": output["total_parts"],
         "total_scenes": output["total_scenes"],
         "completed_count": output["completed_scenes"],
         "completed_scene_ids": [
@@ -499,18 +518,24 @@ def main():
     if settings["format"] not in {"short", "full"}:
         raise RuntimeError("FORMAT must be short or full.")
 
-    if settings["parts"] < 1 or settings["scenes_per_part"] < 1:
+    if (
+        settings["configured_parts"] < 1
+        or settings["scenes_per_part"] < 1
+    ):
         raise RuntimeError("PARTS and SCENES must be positive.")
 
-    total = settings["parts"] * settings["scenes_per_part"]
-
     source, source_path = load_source_scenes(settings["format"])
+
+    # SHORT uses the actual generated part count, not Input PARTS.
+    settings["parts"] = resolve_actual_part_count(source, settings)
+
     source_map = validate_scenes(source, settings)
 
     title = resolve_title(config)
     story_text = clean(get_story_text(config))
-
     source_hash = source_fingerprint(source_map)
+
+    total = settings["parts"] * settings["scenes_per_part"]
 
     settings_hash = digest(canonical({
         "version": VERSION,
@@ -533,7 +558,9 @@ def main():
         "format": settings["format"],
         "model": "not_required",
         "api_calls": 0,
+        "configured_parts": settings["configured_parts"],
         "total_parts": settings["parts"],
+        "dynamic_short_parts": settings["format"] == "short",
         "scenes_per_part": settings["scenes_per_part"],
         "total_scenes": total,
         "settings_sha256": settings_hash,
@@ -548,7 +575,8 @@ def main():
     checkpoint(output, records, ordered_keys)
 
     log("FORMAT:", settings["format"])
-    log("PARTS:", settings["parts"])
+    log("CONFIGURED PARTS:", settings["configured_parts"])
+    log("ACTUAL PARTS:", settings["parts"])
     log("SCENES PER PART:", settings["scenes_per_part"])
     log("TOTAL SCENES:", total)
     log("SOURCE:", source_path)
@@ -617,6 +645,12 @@ def main():
             "caption_fields_preserved": True,
             "duration_is_estimate_not_audio_measurement": True,
             "generated_title_preferred_over_story_first_line": True,
+            "short_uses_actual_dynamic_part_count": (
+                settings["format"] == "short"
+            ),
+            "full_uses_configured_part_count": (
+                settings["format"] == "full"
+            ),
         },
     })
 
@@ -627,6 +661,7 @@ def main():
         "version": VERSION,
         "settings_sha256": settings_hash,
         "source_sha256": source_hash,
+        "total_parts": settings["parts"],
         "total_scenes": total,
         "completed_count": total,
         "completed_scene_ids": [
@@ -636,6 +671,7 @@ def main():
     })
 
     log("NARRATION PREPARATION: SUCCESS")
+    log("Parts:", settings["parts"])
     log("Scenes:", total)
     log("Reused:", len(reusable))
     log("API calls: 0")
