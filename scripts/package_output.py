@@ -32,7 +32,7 @@ from input_config import (
     get_fps,
 )
 
-VERSION = "output-packager-v22-format-cleanup-and-zip-manifest-validation"
+VERSION = "output-packager-v23-dynamic-short-parts"
 MIN_BYTES = 1000
 FPS_TOLERANCE = 0.02
 
@@ -275,7 +275,7 @@ def cleanup_opposite_format(mode):
         log("OPPOSITE-FORMAT OUTPUT CHECK: clean")
 
 
-def validate_validation_report(mode, parts, scenes):
+def validate_validation_report(mode, configured_parts, scenes):
     data = read_json(VALIDATION)
 
     if data.get("status") != "completed":
@@ -283,6 +283,45 @@ def validate_validation_report(mode, parts, scenes):
 
     if str(data.get("format", "")).strip().lower() != mode:
         fail("Validation report FORMAT mismatch")
+
+    try:
+        reported_parts = int(data.get("parts", -1))
+    except (TypeError, ValueError):
+        fail("Validation report parts is invalid")
+
+    if reported_parts < 1:
+        fail("Validation report parts must be positive")
+
+    if mode == "short":
+        # SHORT part count is dynamic; trust the completed final validator,
+        # not the configured PARTS value from Input/topic.txt.
+        declared_configured = data.get("configured_parts")
+
+        if declared_configured is not None:
+            try:
+                declared_configured = int(declared_configured)
+            except (TypeError, ValueError):
+                fail("Validation report configured_parts is invalid")
+
+            if declared_configured != configured_parts:
+                fail(
+                    "Validation report configured_parts mismatch: "
+                    f"{declared_configured} != {configured_parts}"
+                )
+
+        if data.get("dynamic_short_parts") is False:
+            fail("Validation report does not enable dynamic SHORT parts")
+
+        parts = reported_parts
+
+    else:
+        parts = configured_parts
+
+        if reported_parts != configured_parts:
+            fail(
+                "FULL validation report parts mismatch: "
+                f"{reported_parts} != {configured_parts}"
+            )
 
     expected = {
         "parts": parts,
@@ -317,7 +356,7 @@ def validate_validation_report(mode, parts, scenes):
         if status is not None and status != "valid":
             fail(f"Validation check failed: {name}")
 
-    return data
+    return data, parts
 
 
 def validate_render(mode, parts, scenes, expected_size, expected_fps):
@@ -487,6 +526,7 @@ def validate_render(mode, parts, scenes, expected_size, expected_fps):
         "same_content": final_hash == alias_hash,
         "fps": expected_fps,
     }
+
 
 def validate_thumbnail():
     path = safe_file("output/thumbnail.jpg", "Thumbnail", MIN_BYTES)
@@ -796,7 +836,6 @@ def create_zip(files, render):
 
     return records
 
-
 def verify_zip_video(
     archive, member, label, expected_size, expected_fps, temp_dir
 ):
@@ -970,14 +1009,14 @@ def main():
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
     mode = str(get_format(config)).strip().lower()
-    parts = int(get_parts(config))
+    configured_parts = int(get_parts(config))
     scenes = int(get_scenes(config))
     expected_fps = float(get_fps(config))
 
     if mode not in ("short", "full"):
         fail(f"Unsupported FORMAT: {mode}")
 
-    if parts < 1 or scenes < 1:
+    if configured_parts < 1 or scenes < 1:
         fail("PARTS and SCENES must be positive")
 
     if not math.isfinite(expected_fps) or expected_fps <= 0:
@@ -989,14 +1028,19 @@ def main():
 
     log("PACKAGE VERSION:", VERSION)
     log("FORMAT:", mode)
-    log("PARTS:", parts)
+    log("CONFIGURED PARTS:", configured_parts)
     log("SCENES PER PART:", scenes)
     log("EXPECTED FPS:", expected_fps)
 
     # Remove only the known opposite-format aliases before validation.
     cleanup_opposite_format(mode)
 
-    validation = validate_validation_report(mode, parts, scenes)
+    # The final validator is the source of truth for dynamic SHORT parts.
+    validation, parts = validate_validation_report(
+        mode, configured_parts, scenes
+    )
+    log("ACTUAL PARTS:", parts)
+
     render = validate_render(
         mode, parts, scenes, expected_size, expected_fps
     )
@@ -1050,6 +1094,8 @@ def main():
         "version": VERSION,
         "format": mode,
         "parts": parts,
+        "configured_parts": configured_parts,
+        "dynamic_short_parts": mode == "short",
         "scenes_per_part": scenes,
         "expected_scenes": parts * scenes,
         "video_dimensions": list(expected_size),
