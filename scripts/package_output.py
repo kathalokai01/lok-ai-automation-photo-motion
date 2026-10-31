@@ -32,7 +32,7 @@ from input_config import (
     get_fps,
 )
 
-VERSION = "output-packager-v21-fps-and-zip-video-validation"
+VERSION = "output-packager-v22-format-cleanup-and-zip-manifest-validation"
 MIN_BYTES = 1000
 FPS_TOLERANCE = 0.02
 
@@ -149,8 +149,7 @@ def zip_path(path):
 
 def parse_rate(value, label):
     try:
-        rate = Fraction(str(value))
-        result = float(rate)
+        result = float(Fraction(str(value)))
     except (ValueError, ZeroDivisionError, TypeError):
         fail(f"{label}: invalid video frame rate {value!r}")
 
@@ -183,7 +182,10 @@ def probe(path, expected_size=None, expected_fps=None):
     )
 
     if result.returncode:
-        fail(f"ffprobe failed for {Path(path).name}: {result.stderr[-500:]}")
+        fail(
+            f"ffprobe failed for {Path(path).name}: "
+            f"{result.stderr[-500:]}"
+        )
 
     try:
         data = json.loads(result.stdout)
@@ -237,6 +239,40 @@ def probe(path, expected_size=None, expected_fps=None):
         "height": dimensions[1],
         "fps": actual_fps,
     }
+
+
+def cleanup_opposite_format(mode):
+    """Remove only known stale opposite-format final-video aliases."""
+
+    opposite_name = (
+        "katha_lok_ai_full.mp4"
+        if mode == "short"
+        else "katha_lok_ai_short.mp4"
+    )
+
+    candidates = (
+        OUT / "videos" / opposite_name,
+        OUT / opposite_name,
+    )
+
+    removed = []
+
+    for path in candidates:
+        if not path.exists():
+            continue
+
+        resolved = inside_output(path)
+
+        if not resolved.is_file():
+            fail(f"Unexpected stale output is not a file: {resolved}")
+
+        resolved.unlink()
+        removed.append(relative_output(resolved))
+
+    if removed:
+        log("REMOVED STALE OPPOSITE-FORMAT OUTPUTS:", removed)
+    else:
+        log("OPPOSITE-FORMAT OUTPUT CHECK: clean")
 
 
 def validate_validation_report(mode, parts, scenes):
@@ -416,8 +452,6 @@ def validate_render(mode, parts, scenes, expected_size, expected_fps):
 
     final_info = probe(final_video, expected_size, expected_fps)
     alias_info = probe(alias, expected_size, expected_fps)
-    final_duration = final_info["duration"]
-    alias_duration = alias_info["duration"]
     final_hash = sha256(final_video)
     alias_hash = sha256(alias)
 
@@ -436,18 +470,8 @@ def validate_render(mode, parts, scenes, expected_size, expected_fps):
     if final_hash != alias_hash:
         fail("Final video and alias content hashes differ")
 
-    if abs(final_duration - alias_duration) > 1:
+    if abs(final_info["duration"] - alias_info["duration"]) > 1:
         fail("Final video and alias duration mismatch")
-
-    opposite = (
-        "katha_lok_ai_full.mp4"
-        if mode == "short"
-        else "katha_lok_ai_short.mp4"
-    )
-
-    for stale in (OUT / "videos" / opposite, OUT / opposite):
-        if stale.exists():
-            fail(f"Opposite-format output exists: {stale}")
 
     return {
         "data": data,
@@ -457,13 +481,12 @@ def validate_render(mode, parts, scenes, expected_size, expected_fps):
         "part_records": part_records,
         "final_video": final_video,
         "alias": alias,
-        "final_duration": round(final_duration, 3),
+        "final_duration": round(final_info["duration"], 3),
         "final_hash": final_hash,
         "alias_hash": alias_hash,
         "same_content": final_hash == alias_hash,
         "fps": expected_fps,
     }
-
 
 def validate_thumbnail():
     path = safe_file("output/thumbnail.jpg", "Thumbnail", MIN_BYTES)
@@ -620,9 +643,6 @@ def make_portable_render_manifest(render, packaged_names):
 
         row["video"] = mapped
         row.pop("output", None)
-
-        # Source videos are intentionally excluded from the portable ZIP.
-        # Preserve hashes and provenance fields, but remove dangling paths.
         row.pop("source_rendered_video", None)
         row.pop("source_photo_motion_video", None)
 
@@ -777,7 +797,9 @@ def create_zip(files, render):
     return records
 
 
-def verify_zip_video(archive, member, label, expected_size, expected_fps, temp_dir):
+def verify_zip_video(
+    archive, member, label, expected_size, expected_fps, temp_dir
+):
     if not isinstance(member, str) or member not in archive.namelist():
         fail(f"{label}: video path missing from ZIP: {member}")
 
@@ -958,6 +980,9 @@ def main():
     if parts < 1 or scenes < 1:
         fail("PARTS and SCENES must be positive")
 
+    if not math.isfinite(expected_fps) or expected_fps <= 0:
+        fail(f"Invalid expected FPS: {expected_fps}")
+
     expected_size = (
         (720, 1280) if mode == "short" else (1280, 720)
     )
@@ -967,6 +992,9 @@ def main():
     log("PARTS:", parts)
     log("SCENES PER PART:", scenes)
     log("EXPECTED FPS:", expected_fps)
+
+    # Remove only the known opposite-format aliases before validation.
+    cleanup_opposite_format(mode)
 
     validation = validate_validation_report(mode, parts, scenes)
     render = validate_render(
