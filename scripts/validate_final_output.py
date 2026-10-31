@@ -40,7 +40,7 @@ METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 SRT = OUT / "captions" / "final_captions.srt"
 REPORT = OUT / "validation_report.json"
 
-VERSION = "final-validator-v41-ambient-alias-and-sfx-integrity"
+VERSION = "final-validator-v42-config-alias-aware-audio-validation"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MAX_PROBE_SECONDS = 90
@@ -138,10 +138,12 @@ def media_info(path: Path) -> dict:
 
     result = subprocess.run(
         [
-            executable, "-v", "error",
+            executable,
+            "-v", "error",
             "-show_entries",
             "format=duration:stream=codec_type,width,height,avg_frame_rate",
-            "-of", "json", str(path),
+            "-of", "json",
+            str(path),
         ],
         capture_output=True,
         text=True,
@@ -183,6 +185,7 @@ def media_info(path: Path) -> dict:
 
 def validate_video(path: Path, expected_size: tuple, label: str) -> dict:
     info = media_info(path)
+
     if not info["video"] or not info["audio"]:
         fail(f"{label}: audio or video stream missing")
 
@@ -192,6 +195,7 @@ def validate_video(path: Path, expected_size: tuple, label: str) -> dict:
             f"{label}: expected {expected_size[0]}x{expected_size[1]}, "
             f"got {actual[0]}x{actual[1]}"
         )
+
     return info
 
 
@@ -207,12 +211,18 @@ def validate_scene_rows(
     items: Any, parts: int, scenes: int, label: str
 ) -> dict:
     expected = expected_scene_keys(parts, scenes)
+
     if not isinstance(items, list):
         fail(f"{label}: scene list missing")
+
     if len(items) != len(expected):
-        fail(f"{label}: expected {len(expected)} scenes, found {len(items)}")
+        fail(
+            f"{label}: expected {len(expected)} scenes, "
+            f""found {len(items)}"
+        )
 
     mapping = {}
+
     for index, row in enumerate(items, 1):
         if not isinstance(row, dict):
             fail(f"{label}: invalid scene row {index}")
@@ -230,12 +240,14 @@ def validate_scene_rows(
                 f"{label}: wrong scene order at row {index}; "
                 f"expected {wanted}, found {(part, scene)}"
             )
+
         if global_scene != index:
             fail(f"{label}: global scene number mismatch at row {index}")
 
         key = (part, scene)
         if key in mapping:
             fail(f"{label}: duplicate scene mapping {key}")
+
         mapping[key] = row
 
     return mapping
@@ -243,20 +255,25 @@ def validate_scene_rows(
 
 def declared_part_count(path: Path, label: str) -> int | None:
     data = read_json(path, optional=True)
+
     if data is None:
         return None
+
     if not isinstance(data, dict):
         fail(f"{label}: manifest must be a JSON object")
 
     for field in ("total_parts", "actual_parts", "part_count", "parts_count"):
         value = data.get(field)
+
         if value is not None:
             try:
                 count = int(value)
             except (TypeError, ValueError):
                 fail(f"{label}: invalid {field}")
+
             if count < 1:
                 fail(f"{label}: {field} must be positive")
+
             return count
 
     for field in (
@@ -264,20 +281,25 @@ def declared_part_count(path: Path, label: str) -> int | None:
         "captions", "items",
     ):
         items = data.get(field)
+
         if not isinstance(items, list) or not items:
             continue
 
         numbers = set()
+
         for index, row in enumerate(items):
             if not isinstance(row, dict) or row.get("part") is None:
                 numbers = set()
                 break
+
             try:
                 number = int(row["part"])
             except (TypeError, ValueError):
                 fail(f"{label}: invalid part number in {field}[{index}]")
+
             if number < 1:
                 fail(f"{label}: part number must be positive")
+
             numbers.add(number)
 
         if numbers:
@@ -299,6 +321,7 @@ def resolve_actual_parts(mode: str, configured_parts: int) -> int:
         (PHOTO, "Photo-motion"),
         (RENDER, "Render"),
     )
+
     discovered = [
         (label, count)
         for path, label in specs
@@ -318,8 +341,11 @@ def resolve_actual_parts(mode: str, configured_parts: int) -> int:
         fail("SHORT part count cannot be determined from upstream manifests.")
 
     counts = {count for _, count in discovered}
+
     if len(counts) != 1:
-        detail = ", ".join(f"{label}={count}" for label, count in discovered)
+        detail = ", ".join(
+            f"{label}={count}" for label, count in discovered
+        )
         fail(f"SHORT part-count mismatch: {detail}")
 
     actual = counts.pop()
@@ -330,33 +356,44 @@ def resolve_actual_parts(mode: str, configured_parts: int) -> int:
 
 def validate_photo(mode: str, parts: int, scenes: int) -> dict:
     data = read_json(PHOTO)
+
     if not isinstance(data, dict) or data.get("status") != "completed":
         fail("Photo-motion manifest is missing or incomplete")
+
     if str(data.get("format", "")).lower() != mode:
         fail("Photo-motion FORMAT mismatch")
 
     expected_count = parts * scenes
+
     for field in ("expected_scene_count", "completed_count"):
         try:
             actual = int(data.get(field, -1))
         except (TypeError, ValueError):
             actual = -1
+
         if actual != expected_count:
-            fail(f"Photo-motion {field}: expected {expected_count}, found {actual}")
+            fail(
+                f"Photo-motion {field}: expected {expected_count}, "
+                f"found {actual}"
+            )
 
     mapping = validate_scene_rows(
         rows(data, "scenes", "completed_scenes"),
-        parts, scenes, "Photo-motion",
+        parts,
+        scenes,
+        "Photo-motion",
     )
 
     for key, row in mapping.items():
         if row.get("status") != "completed":
             fail(f"Photo-motion scene incomplete: {key}")
+
         path = safe_file(
             pick(row, "video", "source_video", "output", "path"),
             f"Photo-motion scene {key}",
             MIN_VIDEO_BYTES,
         )
+
         if not media_info(path)["video"]:
             fail(f"Photo-motion scene has no video stream: {key}")
 
@@ -369,6 +406,7 @@ def validate_photo(mode: str, parts: int, scenes: int) -> dict:
 
 def validate_audio(parts: int, scenes: int) -> dict:
     data = read_json(AUDIO)
+
     if not isinstance(data, dict) or data.get("status") != "completed":
         fail("Narration audio manifest is missing or incomplete")
 
@@ -382,6 +420,7 @@ def validate_audio(parts: int, scenes: int) -> dict:
     for index, row in enumerate(jobs, 1):
         if not isinstance(row, dict):
             fail(f"Invalid narration job {index}")
+
         try:
             key = (
                 int(row["part"]),
@@ -392,6 +431,7 @@ def validate_audio(parts: int, scenes: int) -> dict:
 
         if key in found or key not in expected:
             fail(f"Duplicate or unexpected narration scene: {key}")
+
         if row.get("status") != "completed":
             fail(f"Narration scene incomplete: {key}")
 
@@ -400,24 +440,31 @@ def validate_audio(parts: int, scenes: int) -> dict:
             f"Narration {key}",
             MIN_AUDIO_BYTES,
         )
+
         if not media_info(path)["audio"]:
             fail(f"Narration file has no audio stream: {key}")
 
         declared_hash = row.get("sha256")
         if declared_hash and declared_hash != sha256(path):
             fail(f"Narration hash mismatch: {key}")
+
         found.add(key)
 
     if found != expected:
-        fail(f"Narration scene mapping mismatch; missing={sorted(expected-found)}")
+        fail(
+            "Narration scene mapping mismatch; "
+            f"missing={sorted(expected-found)}"
+        )
 
     return {"status": "valid", "scene_count": len(found)}
 
 
 def srt_seconds(value: str) -> float:
     match = SRT_TIMESTAMP.fullmatch(value.strip())
+
     if not match:
         fail(f"Invalid SRT timestamp: {value!r}")
+
     return (
         int(match.group("h")) * 3600
         + int(match.group("m")) * 60
@@ -433,6 +480,7 @@ def validate_srt(path: Path, expected_duration: float) -> dict:
         fail(f"Cannot read SRT: {exc}")
 
     content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+
     if not content:
         fail("Final SRT is empty")
 
@@ -443,12 +491,17 @@ def validate_srt(path: Path, expected_duration: float) -> dict:
 
     for index, block in enumerate(blocks, 1):
         lines = block.splitlines()
+
         if len(lines) < 3 or not lines[0].strip().isdigit():
             fail(f"SRT cue {index}: invalid cue structure")
+
         if int(lines[0].strip()) != index or lines[1].count("-->") != 1:
             fail(f"SRT cue {index}: invalid sequence or timing line")
 
-        start_text, end_text = [item.strip() for item in lines[1].split("-->")]
+        start_text, end_text = [
+            item.strip() for item in lines[1].split("-->")
+        ]
+
         start = srt_seconds(start_text)
         end = srt_seconds(end_text)
 
@@ -456,10 +509,12 @@ def validate_srt(path: Path, expected_duration: float) -> dict:
             fail(f"SRT cue {index}: invalid or overlapping timing")
 
         caption = "\n".join(lines[2:]).strip()
+
         if not caption or "-->" in caption:
             fail(f"SRT cue {index}: caption text missing or malformed")
 
         tags = re.findall(r"</?([A-Za-z]+)(?:\s+[^>]*)?>", caption)
+
         if any(tag.lower() not in {"b", "i", "u", "font"} for tag in tags):
             fail(f"SRT cue {index}: unsupported markup")
 
@@ -469,6 +524,7 @@ def validate_srt(path: Path, expected_duration: float) -> dict:
 
     if maximum_end > expected_duration + 0.25:
         fail("SRT extends beyond final video duration")
+
     if maximum_end < expected_duration * 0.50:
         fail("SRT coverage is unexpectedly short")
 
@@ -487,8 +543,10 @@ def validate_captions(
     mode: str, parts: int, scenes: int, final_duration: float
 ) -> dict:
     data = read_json(CAPTIONS)
+
     if not isinstance(data, dict) or data.get("status") != "completed":
         fail("Caption manifest is missing or incomplete")
+
     if str(data.get("format", "")).lower() != mode:
         fail("Caption FORMAT mismatch")
 
@@ -498,23 +556,36 @@ def validate_captions(
 
     expected = set(expected_scene_keys(parts, scenes))
     found = set()
+
     for index, row in enumerate(caption_rows, 1):
         if not isinstance(row, dict):
             fail(f"Invalid caption row {index}")
+
         try:
             key = (int(row["part"]), int(row["scene"]))
         except (KeyError, TypeError, ValueError):
             fail(f"Invalid caption mapping at row {index}")
+
         if key in found:
             fail(f"Duplicate caption scene: {key}")
+
         if not isinstance(row.get("text"), str) or not row["text"].strip():
             fail(f"Caption text missing: {key}")
+
         found.add(key)
 
     if found != expected:
-        fail(f"Caption scene mapping mismatch; missing={sorted(expected-found)}")
+        fail(
+            "Caption scene mapping mismatch; "
+            f"missing={sorted(expected-found)}"
+        )
 
-    srt = safe_file(SRT.relative_to(ROOT).as_posix(), "Final SRT", 10)
+    srt = safe_file(
+        SRT.relative_to(ROOT).as_posix(),
+        "Final SRT",
+        10,
+    )
+
     return {
         "status": "valid",
         "scene_count": len(found),
@@ -524,7 +595,6 @@ def validate_captions(
     }
 
 def canonical_track_name(name: str) -> str:
-    """Normalize legacy and current sound-track names."""
     value = str(name).strip().lower()
 
     if value in {
@@ -545,26 +615,37 @@ def canonical_track_name(name: str) -> str:
     return value
 
 
-def config_enabled(config: dict, key: str, default: bool = True) -> bool:
-    value = config.get(key, default)
+def config_enabled(
+    config: dict,
+    keys: tuple[str, ...],
+    default: bool = True,
+) -> bool:
+    """Read the first configured alias, matching generate_sound_design.py."""
 
-    if isinstance(value, bool):
-        return value
+    for key in keys:
+        if key not in config:
+            continue
 
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return bool(value)
+        value = config[key]
 
-    if isinstance(value, str):
-        normalized = value.strip().lower()
+        if isinstance(value, bool):
+            return value
 
-        if normalized in {"true", "yes", "1", "on", "enabled"}:
-            return True
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
 
-        if normalized in {"false", "no", "0", "off", "disabled"}:
-            return False
+        if isinstance(value, str):
+            normalized = value.strip().lower()
 
-    fail(f"Invalid boolean configuration value: {key}")
-    return False
+            if normalized in {"true", "yes", "1", "on", "enabled"}:
+                return True
+
+            if normalized in {"false", "no", "0", "off", "disabled"}:
+                return False
+
+        fail(f"Invalid boolean configuration value: {key}")
+
+    return default
 
 
 def validate_sound(config: dict) -> dict:
@@ -578,11 +659,36 @@ def validate_sound(config: dict) -> dict:
     if not isinstance(tracks, dict):
         fail("Sound-design tracks object missing")
 
-    # The generator writes "ambient"; older validator versions expected
-    # "ambience". Both names represent the same logical audio track.
+    # These aliases exactly match generate_sound_design.py.
     enabled = {
-        "music": config_enabled(config, "MUSIC", True),
-        "ambient": config_enabled(config, "AMBIENT_SOUND", True),
+        "music": config_enabled(
+            config,
+            (
+                "MUSIC_ENABLED",
+                "MUSIC",
+                "BACKGROUND_MUSIC",
+                "SOUNDTRACK_ENABLED",
+            ),
+        ),
+        "ambient": config_enabled(
+            config,
+            (
+                "AMBIENT_ENABLED",
+                "AMBIENT",
+                "AMBIENT_SOUND",
+                "ENVIRONMENT_SOUND",
+                "AMBIENCE_ENABLED",
+            ),
+        ),
+        "sfx": config_enabled(
+            config,
+            (
+                "SFX_ENABLED",
+                "SFX",
+                "SOUND_EFFECTS",
+                "SOUND_EFFECTS_ENABLED",
+            ),
+        ),
     }
 
     normalized_records = {}
@@ -594,7 +700,10 @@ def validate_sound(config: dict) -> dict:
             if logical_name.startswith("sfx_"):
                 continue
 
-            log("WARNING: Unrecognized optional sound track:", original_name)
+            log(
+                "WARNING: Unrecognized optional sound track:",
+                original_name,
+            )
             continue
 
         if logical_name in normalized_records:
@@ -602,7 +711,7 @@ def validate_sound(config: dict) -> dict:
 
             if previous is not record and previous != record:
                 fail(
-                    f"Conflicting duplicate sound track aliases: "
+                    "Conflicting duplicate sound track aliases: "
                     f"{logical_name}"
                 )
 
@@ -610,16 +719,11 @@ def validate_sound(config: dict) -> dict:
 
     checked_tracks = {}
 
-    for logical_name, is_enabled in enabled.items():
+    for logical_name in ("music", "ambient"):
+        is_enabled = enabled[logical_name]
         record = normalized_records.get(logical_name)
 
         if not is_enabled:
-            if record is not None and isinstance(record, dict):
-                log(
-                    "WARNING: Sound track exists although disabled in input:",
-                    logical_name,
-                )
-
             checked_tracks[logical_name] = "disabled"
             continue
 
@@ -685,6 +789,9 @@ def validate_sound(config: dict) -> dict:
         if not normalized.startswith("sfx_") or record is None:
             continue
 
+        if not enabled["sfx"]:
+            continue
+
         if not isinstance(record, dict):
             fail(f"Invalid SFX track record: {name}")
 
@@ -718,7 +825,10 @@ def validate_sound(config: dict) -> dict:
     cue_data = read_json(SFX, optional=True)
     cue_count = 0
 
-    if cue_data is not None:
+    if enabled["sfx"]:
+        if cue_data is None:
+            fail("SFX is enabled but sfx_cues.json is missing")
+
         if not isinstance(cue_data, dict):
             fail("SFX cue manifest must be a JSON object")
 
@@ -791,53 +901,32 @@ def validate_sound(config: dict) -> dict:
 
             cue_count += 1
 
-    elif config_enabled(config, "SFX", True):
-        fail(
-            "SFX is enabled but sound_design/sfx_cues.json is missing"
-        )
+    elif cue_data is not None:
+        log("SFX disabled in input; cue manifest is not required.")
 
-    # The timing validator writes an outer completed report and a nested
-    # SFX validation result.
+    # The timing validator writes outer status=completed and nested
+    # sfx.status=valid.
     timing_data = read_json(SFX_VALIDATION, optional=True)
     timing_status = "not_present"
 
-    if timing_data is not None:
-        if not isinstance(timing_data, dict):
+    if enabled["sfx"]:
+        if timing_data is None:
             fail(
-                "SFX timing validation report must be a JSON object"
+                "SFX is enabled but its timing validation report is missing"
             )
+
+        if not isinstance(timing_data, dict):
+            fail("SFX timing validation report must be a JSON object")
 
         if timing_data.get("status") != "completed":
             fail("SFX timing validation report is not completed")
 
         nested = timing_data.get("sfx")
 
-        if isinstance(nested, dict):
-            if nested.get("status") != "valid":
-                fail(
-                    "SFX timing validation did not confirm valid cues"
-                )
+        if not isinstance(nested, dict) or nested.get("status") != "valid":
+            fail("SFX timing validation did not confirm valid cues")
 
-            timing_status = "valid"
-
-        else:
-            root_status = str(
-                timing_data.get("validation_status", "")
-            ).lower()
-
-            if root_status == "valid":
-                timing_status = "valid"
-
-            elif (
-                cue_count == 0
-                and not config_enabled(config, "SFX", True)
-            ):
-                timing_status = "valid"
-
-            else:
-                fail(
-                    "SFX timing report has no valid SFX result"
-                )
+        timing_status = "valid"
 
         reported_count = timing_data.get("cue_count")
 
@@ -853,13 +942,9 @@ def validate_sound(config: dict) -> dict:
                     f"{reported_count} vs {cue_count}"
                 )
 
-    elif config_enabled(config, "SFX", True):
-        fail(
-            "SFX is enabled but its timing validation report is missing"
-        )
-
     return {
         "status": "valid",
+        "enabled": enabled,
         "tracks": checked_tracks,
         "sfx_source_tracks": sfx_files,
         "sfx_cue_count": cue_count,
@@ -940,12 +1025,7 @@ def validate_render(
             MIN_VIDEO_BYTES,
         )
 
-        info = validate_video(
-            path,
-            expected_size,
-            f"Rendered scene {key}",
-        )
-
+        info = validate_video(path, expected_size, f"Rendered scene {key}")
         scene_total += info["duration"]
 
         actual_hash = sha256(path)
@@ -992,12 +1072,7 @@ def validate_render(
             MIN_VIDEO_BYTES,
         )
 
-        info = validate_video(
-            path,
-            expected_size,
-            f"Part video {index}",
-        )
-
+        info = validate_video(path, expected_size, f"Part video {index}")
         part_total += info["duration"]
 
         part_records.append({
@@ -1018,17 +1093,8 @@ def validate_render(
         MIN_VIDEO_BYTES,
     )
 
-    final_info = validate_video(
-        final,
-        expected_size,
-        "Final video",
-    )
-
-    alias_info = validate_video(
-        alias,
-        expected_size,
-        "Format alias",
-    )
+    final_info = validate_video(final, expected_size, "Final video")
+    alias_info = validate_video(alias, expected_size, "Format alias")
 
     expected_alias = (
         "katha_lok_ai_short.mp4"
@@ -1051,9 +1117,7 @@ def validate_render(
     if abs(final_info["duration"] - alias_info["duration"]) > 1:
         fail("Final video and alias durations differ")
 
-    if abs(final_info["duration"] - part_total) > max(
-        2.0, parts * 1.0
-    ):
+    if abs(final_info["duration"] - part_total) > max(2.0, parts * 1.0):
         fail("Final video duration does not match part durations")
 
     if abs(final_info["duration"] - scene_total) > max(
@@ -1123,9 +1187,7 @@ def validate_thumbnail(mode: str) -> dict:
             )
 
             if declared_path.resolve() != path.resolve():
-                fail(
-                    "Thumbnail manifest points to a different file"
-                )
+                fail("Thumbnail manifest points to a different file")
 
     return {
         "status": "valid",
@@ -1153,32 +1215,21 @@ def parse_metadata_text(path: Path) -> dict:
             .upper()
         )
 
-        if normalized in {
-            "TITLE", "DESCRIPTION", "TAGS", "LANGUAGE"
-        }:
+        if normalized in {"TITLE", "DESCRIPTION", "TAGS", "LANGUAGE"}:
             current = normalized
             sections.setdefault(current, [])
-
         elif current:
             sections[current].append(line.strip())
 
     title = " ".join(sections.get("TITLE", [])).strip()
-    description = " ".join(
-        sections.get("DESCRIPTION", [])
-    ).strip()
-    tags_text = " ".join(
-        sections.get("TAGS", [])
-    ).strip()
+    description = " ".join(sections.get("DESCRIPTION", [])).strip()
+    tags_text = " ".join(sections.get("TAGS", [])).strip()
 
     if not title or not description or not tags_text:
-        fail(
-            "Metadata TITLE, DESCRIPTION and TAGS must all be present"
-        )
+        fail("Metadata TITLE, DESCRIPTION and TAGS must all be present")
 
     if len(title) > 100:
-        fail(
-            f"Metadata title exceeds 100 characters: {len(title)}"
-        )
+        fail(f"Metadata title exceeds 100 characters: {len(title)}")
 
     return {
         "title": title,
@@ -1199,9 +1250,7 @@ def validate_metadata(mode: str) -> dict:
 
     if structured is not None:
         if not isinstance(structured, dict):
-            fail(
-                "Structured YouTube metadata must be a JSON object"
-            )
+            fail("Structured YouTube metadata must be a JSON object")
 
         if structured.get("status") != "completed":
             fail("Structured YouTube metadata is not completed")
@@ -1220,69 +1269,46 @@ def validate_metadata(mode: str) -> dict:
             fail("Structured metadata description is missing")
 
         if not isinstance(tags, list) or not tags:
-            fail(
-                "Structured metadata tags must be a non-empty list"
-            )
+            fail("Structured metadata tags must be a non-empty list")
 
         if len(title) > 100 or len(tags) > 20:
-            fail(
-                "Structured metadata title or tag count exceeds limit"
-            )
+            fail("Structured metadata title or tag count exceeds limit")
 
         normalized_tags = []
         seen = set()
 
         for tag in tags:
             if not isinstance(tag, str) or not tag.strip():
-                fail(
-                    "Structured metadata contains an invalid tag"
-                )
+                fail("Structured metadata contains an invalid tag")
 
-            normalized = re.sub(
-                r"\s+", " ", tag
-            ).strip()
+            normalized = re.sub(r"\s+", " ", tag).strip()
 
             if len(normalized) > 100:
-                fail(
-                    "Structured metadata tag exceeds 100 characters"
-                )
+                fail("Structured metadata tag exceeds 100 characters")
 
             if normalized.casefold() not in seen:
                 seen.add(normalized.casefold())
                 normalized_tags.append(normalized)
 
         if len(normalized_tags) < 8:
-            fail(
-                "Structured metadata has fewer than 8 unique tags"
-            )
+            fail("Structured metadata has fewer than 8 unique tags")
 
         if title.strip() != parsed["title"]:
-            fail(
-                "Metadata text title differs from structured JSON"
-            )
+            fail("Metadata text title differs from structured JSON")
 
         if description.strip() != parsed["description"]:
-            fail(
-                "Metadata text description differs from structured JSON"
-            )
+            fail("Metadata text description differs from structured JSON")
 
         text_tags = {
             item.strip().lstrip("#").casefold()
-            for item in re.split(
-                r"[,;\n]", parsed["tags_text"]
-            )
+            for item in re.split(r"[,;\n]", parsed["tags_text"])
             if item.strip()
         }
 
-        json_tags = {
-            item.casefold()
-            for item in normalized_tags
-        }
+        json_tags = {item.casefold() for item in normalized_tags}
 
         if text_tags != json_tags:
-            fail(
-                "Metadata text tags differ from structured JSON"
-            )
+            fail("Metadata text tags differ from structured JSON")
 
     return {
         "status": "valid",
@@ -1321,25 +1347,15 @@ def cleanup_opposite_format_alias(mode: str) -> list:
         resolved = candidate.resolve()
 
         if not resolved.is_relative_to(OUT.resolve()):
-            fail(
-                f"Unsafe opposite-format alias: {candidate}"
-            )
+            fail(f"Unsafe opposite-format alias: {candidate}")
 
         if not resolved.is_file():
-            fail(
-                f"Opposite-format alias is not a regular file: {candidate}"
-            )
+            fail(f"Opposite-format alias is not a regular file: {candidate}")
 
         resolved.unlink()
+        removed.append(candidate.relative_to(ROOT).as_posix())
 
-        removed.append(
-            candidate.relative_to(ROOT).as_posix()
-        )
-
-        log(
-            "REMOVED STALE OPPOSITE-FORMAT ALIAS:",
-            candidate,
-        )
+        log("REMOVED STALE OPPOSITE-FORMAT ALIAS:", candidate)
 
     return removed
 
@@ -1352,9 +1368,7 @@ def main() -> None:
     if not OUT.is_dir():
         fail("output/ directory missing")
 
-    config = load_and_validate(
-        ROOT / "Input" / "topic.txt"
-    )
+    config = load_and_validate(ROOT / "Input" / "topic.txt")
 
     mode = str(get_format(config)).strip().lower()
     configured_parts = int(get_parts(config))
@@ -1382,10 +1396,7 @@ def main() -> None:
     log("SCENES PER PART:", scenes)
     log("EXPECTED FPS:", expected_fps)
 
-    parts = resolve_actual_parts(
-        mode,
-        configured_parts,
-    )
+    parts = resolve_actual_parts(mode, configured_parts)
 
     log("ACTUAL PARTS:", parts)
     log("EXPECTED SCENES:", parts * scenes)
@@ -1394,17 +1405,8 @@ def main() -> None:
 
     checks = {}
 
-    checks["photo_motion"] = validate_photo(
-        mode,
-        parts,
-        scenes,
-    )
-
-    checks["narration"] = validate_audio(
-        parts,
-        scenes,
-    )
-
+    checks["photo_motion"] = validate_photo(mode, parts, scenes)
+    checks["narration"] = validate_audio(parts, scenes)
     checks["sound_design"] = validate_sound(config)
 
     checks["render"] = validate_render(
@@ -1439,9 +1441,7 @@ def main() -> None:
 
     for name in required_checks:
         if checks[name].get("status") != "valid":
-            fail(
-                f"Validation check did not pass: {name}"
-            )
+            fail(f"Validation check did not pass: {name}")
 
     checks["render"].pop("final_duration", None)
 
@@ -1466,27 +1466,20 @@ def main() -> None:
     }
 
     write_report(report)
-
     saved = read_json(REPORT)
 
     if saved.get("status") != "completed":
-        fail(
-            "Validation report status verification failed"
-        )
+        fail("Validation report status verification failed")
 
     if saved.get("format") != mode:
-        fail(
-            "Validation report FORMAT verification failed"
-        )
+        fail("Validation report FORMAT verification failed")
 
     if (
         saved.get("checks", {})
         .get("sound_design", {})
         .get("status") != "valid"
     ):
-        fail(
-            "Validation report sound-design verification failed"
-        )
+        fail("Validation report sound-design verification failed")
 
     log("-" * 65)
     log("FINAL VALIDATION: completed")
@@ -1497,14 +1490,8 @@ def main() -> None:
         "AMBIENT ALIAS:",
         checks["sound_design"]["ambient_manifest_name_accepted"],
     )
-    log(
-        "SFX CUES:",
-        checks["sound_design"]["sfx_cue_count"],
-    )
-    log(
-        "REPORT:",
-        REPORT.relative_to(ROOT),
-    )
+    log("SFX CUES:", checks["sound_design"]["sfx_cue_count"])
+    log("REPORT:", REPORT.relative_to(ROOT))
     log("=" * 65)
 
 
