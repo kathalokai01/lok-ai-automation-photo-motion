@@ -783,6 +783,7 @@ def sample_luma(video, timestamp):
 
     return int(result.stdout[0])
 
+
 def contrast_style(video, duration, part, scene, story_seed, width, height):
     samples = [
         sample_luma(video, duration * fraction)
@@ -1008,7 +1009,6 @@ def concat_videos(paths, destination, width, height):
     finally:
         list_file.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)
-
 
 def load_render_map(manifest, parts, scenes):
     if not isinstance(manifest, dict):
