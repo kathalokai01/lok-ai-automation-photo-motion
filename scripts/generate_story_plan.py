@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "offline-structural-story-plan-v5-dynamic-short"
+VERSION = "offline-structural-story-plan-v6-short-rewrite-first"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_WORDS = 135
@@ -102,7 +102,7 @@ def calculate_dynamic_short_parts(total_words: int) -> int:
     if total_words < SHORT_MIN_WORDS:
         raise RuntimeError(
             f"SHORT story has only {total_words} words; "
-            f"at least {SHORT_MIN_WORDS} are required."
+            f"at least {SHORT_MIN_WORDS} are required after rewriting."
         )
 
     minimum_parts = (
@@ -115,7 +115,7 @@ def calculate_dynamic_short_parts(total_words: int) -> int:
         raise RuntimeError(
             f"{total_words} words cannot be divided into parts of "
             f"{SHORT_MIN_WORDS}–{SHORT_HARD_MAX_WORDS} words. "
-            "Story expansion or rewrite is required."
+            "Story rewrite or rebalance is required."
         )
 
     preferred = round(total_words / SHORT_TARGET_WORDS)
@@ -369,6 +369,7 @@ def build_plan(
         "parts": parts,
     }
 
+
 def validate_plan(
     plan: dict,
     format_type: str,
@@ -470,23 +471,19 @@ def main() -> None:
     if not topic and not story_text:
         raise RuntimeError("TOPIC and STORY_TEXT are both empty.")
 
-    dynamic_short = format_type == "short" and bool(story_text)
-
-    if dynamic_short:
-        parts_count = calculate_dynamic_short_parts(
-            word_count(story_text)
-        )
+    # SHORT always starts with a provisional plan. The supplied source
+    # is rewritten first; the final part count is calculated later.
+    if format_type == "short":
+        parts_count = configured_parts
+        dynamic_short = True
         log(
-            "SHORT dynamic part count from supplied story:",
+            "SHORT provisional plan:",
             parts_count,
+            "configured parts; final count waits for rewritten story.",
         )
     else:
         parts_count = configured_parts
-        if format_type == "short":
-            log(
-                "SHORT topic-only input: provisional part count:",
-                parts_count,
-            )
+        dynamic_short = False
 
     plan = build_plan(
         config=config,
@@ -533,9 +530,9 @@ def main() -> None:
     log("Version:", VERSION)
     log("Format:", format_type)
     log("Topic:", topic or "(story text only)")
-    log("Parts:", parts_count)
+    log("Provisional parts:", parts_count)
     log("Scenes per part:", scenes_per_part)
-    log("Total scenes:", parts_count * scenes_per_part)
+    log("Total provisional scenes:", parts_count * scenes_per_part)
     log("Dynamic SHORT:", dynamic_short)
     log("Story-grounded anchors:", sum(
         bool(scene.get("story_anchor"))
