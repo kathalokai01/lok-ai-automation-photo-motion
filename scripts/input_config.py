@@ -63,7 +63,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "CAPTIONS": "hindi",
     "CAPTION_FONT": "Hind",
     "CAPTION_FONT_SIZE": 28,
-
     "TTS_MAIN_1": "fish_audio",
     "TTS_MAIN_2": "gemini_tts",
     "TTS_MAIN_3": "edge_tts",
@@ -75,8 +74,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TTS_CHUNK_CHECKPOINT": True,
     "TTS_VALIDATE_AUDIO": True,
     "TTS_MAX_PROVIDER_ATTEMPTS": 1,
-
-    # Image provider selection and fallback
     "IMAGE_PROVIDER_ORDER": ",".join(ALL_IMAGE_PROVIDERS),
     "IMAGE_FALLBACK_ENABLED": True,
     "IMAGE_ALLOW_BILLABLE": True,
@@ -89,7 +86,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ),
     "GEMINI_IMAGE_MODEL": "gemini-2.5-flash-image",
     "REPLICATE_IMAGE_MODEL": "black-forest-labs/flux-schnell",
-
     "PART_HOOK": True,
     "PART_SUSPENSE": True,
     "FINAL_RESOLUTION": True,
@@ -298,6 +294,7 @@ def load_input_config(
 
     return config
 
+
 def normalize_format(config: dict[str, Any]) -> str:
     value = str(config.get("FORMAT", "full")).strip().lower()
 
@@ -454,11 +451,46 @@ def normalize_image_provider(value: Any) -> str:
 
 
 def _split_provider_list(raw: Any) -> list[str]:
-    return [
-        item.strip()
-        for item in re.split(r"[,;]", str(raw or ""))
-        if item.strip()
-    ]
+    """Accept strings, Python lists/tuples/sets and serialized list strings."""
+
+    if raw is None:
+        return []
+
+    if isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    elif isinstance(raw, str):
+        value = raw.strip()
+
+        if not value:
+            return []
+
+        # Handles strings such as "['huggingface', 'pollinations']".
+        if value.startswith(("[", "(")):
+            try:
+                parsed = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                parsed = None
+
+            if isinstance(parsed, (list, tuple, set)):
+                values = list(parsed)
+            else:
+                values = re.split(r"[,;]", value)
+        else:
+            values = re.split(r"[,;]", value)
+    else:
+        values = [raw]
+
+    result: list[str] = []
+
+    for item in values:
+        if item is None:
+            continue
+
+        text = str(item).strip().strip("'\"").strip()
+        if text:
+            result.append(text)
+
+    return result
 
 
 def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
@@ -558,7 +590,11 @@ def get_image_provider_settings(config: dict[str, Any]) -> dict[str, Any]:
     hf_spaces = _split_provider_list(
         str(config.get("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo"))
         + ","
-        + str(config.get("FREE_IMAGE_FALLBACK_SPACES", ""))
+        + ",".join(
+            _split_provider_list(
+                config.get("FREE_IMAGE_FALLBACK_SPACES", "")
+            )
+        )
     )
 
     pollinations_models = _split_provider_list(
@@ -706,6 +742,8 @@ def load_and_validate(
 
 
 def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
+    image_settings = get_image_provider_settings(config)
+
     return {
         "FORMAT": get_format(config),
         "TOPIC": get_topic(config),
@@ -747,17 +785,15 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
             config.get("IMAGE_ALLOW_BILLABLE", True),
             "IMAGE_ALLOW_BILLABLE",
         ),
-        "IMAGE_HF_SPACES": get_image_provider_settings(config)["FREE_IMAGE_FALLBACK_SPACES"]
-        + [get_image_provider_settings(config)["HF_IMAGE_SPACE"]],
-        "IMAGE_POLLINATIONS_MODELS": get_image_provider_settings(config)[
+        "IMAGE_HF_SPACES": (
+            image_settings["FREE_IMAGE_FALLBACK_SPACES"]
+            + [image_settings["HF_IMAGE_SPACE"]]
+        ),
+        "IMAGE_POLLINATIONS_MODELS": image_settings[
             "POLLINATIONS_FREE_IMAGE_MODELS"
         ],
-        "IMAGE_GEMINI_MODEL": get_image_provider_settings(config)[
-            "GEMINI_IMAGE_MODEL"
-        ],
-        "IMAGE_REPLICATE_MODEL": get_image_provider_settings(config)[
-            "REPLICATE_IMAGE_MODEL"
-        ],
+        "IMAGE_GEMINI_MODEL": image_settings["GEMINI_IMAGE_MODEL"],
+        "IMAGE_REPLICATE_MODEL": image_settings["REPLICATE_IMAGE_MODEL"],
         "TTS_CHUNK_MAX_CHARS": int(
             config.get("TTS_CHUNK_MAX_CHARS", 500)
         ),
