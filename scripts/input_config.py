@@ -151,8 +151,6 @@ INT_KEYS = {
 _TRUE_VALUES = {"true", "yes", "on", "1", "enabled"}
 _FALSE_VALUES = {"false", "no", "off", "0", "disabled"}
 
-FORBIDDEN_CONFIG_KEY_PARTS = ("i2v", "wan2gp")
-
 
 def parse_bool(value: Any, key: str = "value") -> bool:
     if isinstance(value, bool):
@@ -314,12 +312,6 @@ def load_input_config(
 
         key, raw_value = assignment
 
-        if any(part in key.lower() for part in FORBIDDEN_CONFIG_KEY_PARTS):
-            raise ValueError(
-                f"Obsolete configuration key {key!r} is not supported "
-                "by the Photo Motion pipeline."
-            )
-
         if key == "STORY_TEXT":
             value = raw_value.strip()
 
@@ -339,7 +331,6 @@ def load_input_config(
         index += 1
 
     return config
-
 
 def normalize_format(config: dict[str, Any]) -> str:
     value = str(config.get("FORMAT", "")).strip().lower()
@@ -581,6 +572,7 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
 
     return result
 
+
 def get_image_provider_order(config: dict[str, Any]) -> list[str]:
     raw = config.get(
         "IMAGE_PROVIDER_ORDER",
@@ -608,7 +600,6 @@ def get_image_provider_order(config: dict[str, Any]) -> list[str]:
             result.append(provider)
 
     return result
-
 
 def fallback_enabled_value(config: dict[str, Any]) -> bool:
     return parse_bool(
@@ -933,7 +924,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     config.update(image_settings)
 
     return config
-
 
 def load_and_validate(
     path: str | Path = "Input/topic.txt",
