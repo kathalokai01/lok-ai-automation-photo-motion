@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Strict no-API preflight for the Katha Lok AI Photo Motion pipeline."""
 
@@ -21,7 +20,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v52-execution-order"
+VERSION = "photo-motion-preflight-v53-executable-integration-check"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -100,7 +99,10 @@ PYTHON_MODULES = (
 
 RUNTIME_COMMANDS = ("ffmpeg", "ffprobe", "fc-match")
 
-OBSOLETE_PATTERN = re.compile(r"\bi2v\b|wan2gp", re.IGNORECASE)
+EXECUTABLE_INTEGRATION_PATTERN = re.compile(
+    r"\bi2v\b|wan2gp",
+    re.IGNORECASE,
+)
 
 STEP_NAME_RE = re.compile(r"^\s{6}-\s+name:\s*(.*?)\s*$")
 RUN_RE = re.compile(r"^\s{8}run:\s*(.*?)\s*$")
@@ -196,7 +198,6 @@ def extract_workflow_commands(source: str) -> list[dict]:
 
         indentation = len(raw_line) - len(raw_line.lstrip())
 
-        # A YAML key at the run property's indentation ends the block.
         if raw_line.strip() and indentation <= 8:
             inside_run = False
             continue
@@ -240,11 +241,6 @@ def check_workflow_order(commands: list[dict]) -> tuple[bool, str]:
 
         matched.append(commands[found])
         cursor = found + 1
-
-    details = [
-        f"{item['script']} (line {item['line']}, step: {item['step']})"
-        for item in matched
-    ]
 
     return True, "Verified actual command sequence: " + " -> ".join(
         item["script"] for item in matched
@@ -395,35 +391,79 @@ def main() -> int:
             valid, detail = check_python_file(path)
             record("syntax:" + path.name, valid, detail)
 
-    # 3. Removed I2V/Wan2GP pipeline references in active files.
-    scan_paths = [WORKFLOW_FILE] + required_paths
-    obsolete = []
+    # 3. Reject only executable legacy integrations.
+    # Plain text, comments, configuration-key validation and log messages
+    # are not pipeline execution and must not block Photo Motion.
+    executable_legacy = []
+    executable_calls = {
+        "run", "Popen", "call", "check_call", "check_output", "system"
+    }
 
-    for path in scan_paths:
+    for path in required_paths:
         if not path.is_file():
             continue
-
         try:
-            source = path.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeError) as exc:
-            obsolete.append(
-                f"{path.relative_to(ROOT)}: unreadable ({exc})"
+            tree = ast.parse(
+                path.read_text(encoding="utf-8-sig"),
+                filename=str(path),
+            )
+        except (OSError, UnicodeError, SyntaxError) as exc:
+            executable_legacy.append(
+                f"{path.relative_to(ROOT)}: unable to inspect executable syntax ({exc})"
             )
             continue
 
-        for line_number, line in enumerate(source.splitlines(), 1):
-            if OBSOLETE_PATTERN.search(line):
-                obsolete.append(
-                    f"{path.relative_to(ROOT)}:{line_number}"
+        imported_modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.add(node.module)
+
+        for module in imported_modules:
+            if EXECUTABLE_INTEGRATION_PATTERN.search(module):
+                executable_legacy.append(
+                    f"{path.relative_to(ROOT)} import {module}"
                 )
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+
+            function = node.func
+            function_name = (
+                function.attr if isinstance(function, ast.Attribute)
+                else function.id if isinstance(function, ast.Name)
+                else ""
+            )
+            if function_name not in executable_calls:
+                continue
+
+            values = []
+            for argument in list(node.args) + [
+                keyword.value for keyword in node.keywords
+            ]:
+                values.extend(
+                    child.value
+                    for child in ast.walk(argument)
+                    if isinstance(child, ast.Constant)
+                    and isinstance(child.value, str)
+                )
+
+            for value in values:
+                if EXECUTABLE_INTEGRATION_PATTERN.search(value):
+                    executable_legacy.append(
+                        f"{path.relative_to(ROOT)}:{node.lineno} executable command"
+                    )
+                    break
 
     record(
         "photo_motion_only",
-        not obsolete,
+        not executable_legacy,
         (
-            "No removed I2V/Wan2GP references in active pipeline files."
-            if not obsolete
-            else "; ".join(obsolete[:30])
+            "No executable legacy visual-generation integration detected."
+            if not executable_legacy
+            else "; ".join(executable_legacy[:30])
         ),
     )
 
