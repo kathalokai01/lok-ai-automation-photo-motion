@@ -36,7 +36,7 @@ FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 PART_DIR = OUT / "parts"
 VIDEO_DIR = OUT / "videos"
 
-VERSION = "burn-captions-v33-json-safe-tuple-key-fix"
+VERSION = "burn-captions-v34-external-font-path-fix"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.25
@@ -160,7 +160,12 @@ def write_json(path, data):
 
 
 def relative(path):
-    return Path(path).resolve().relative_to(ROOT.resolve()).as_posix()
+    """Return repo-relative paths; preserve absolute paths for system fonts."""
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
 
 
 def safe_file(value, label, minimum=1):
@@ -886,7 +891,6 @@ def build_scene_cues(
     )
     return refine_with_silence(cues, narration["path"], duration)
 
-
 def srt_time(seconds):
     milliseconds = max(0, int(round(seconds * 1000)))
     hours, remainder = divmod(milliseconds, 3_600_000)
@@ -974,6 +978,8 @@ def contrast_style(video, duration, part, scene, story_seed, width, height):
         "alignment": 2,
         "margin_vertical": 58 if height > width else 42,
     }
+
+
 def escape_filter_path(path):
     value = str(Path(path).resolve()).replace("\\", "/")
     for old, new in (
