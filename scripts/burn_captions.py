@@ -36,7 +36,7 @@ FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 PART_DIR = OUT / "parts"
 VIDEO_DIR = OUT / "videos"
 
-VERSION = "burn-captions-v32-adaptive-readable-resumable"
+VERSION = "burn-captions-v33-json-safe-tuple-key-fix"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.25
@@ -61,10 +61,51 @@ def log(*args):
     print(*args, flush=True)
 
 
+def json_safe(value):
+    """Convert nested Python data into strictly JSON-compatible values."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if isinstance(key, tuple):
+                safe_key = ":".join(str(part) for part in key)
+            elif key is None:
+                safe_key = "null"
+            elif isinstance(key, (str, int, float, bool)):
+                safe_key = str(key)
+            else:
+                safe_key = str(key)
+
+            if safe_key in result:
+                raise RuntimeError(
+                    f"JSON key collision after normalization: {safe_key!r}"
+                )
+            result[safe_key] = json_safe(item)
+        return result
+
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+
+    if isinstance(value, set):
+        return [json_safe(item) for item in sorted(value, key=str)]
+
+    if isinstance(value, Path):
+        return value.as_posix()
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise RuntimeError("Non-finite float cannot be written as JSON")
+        return value
+
+    return str(value)
+
+
 def digest_data(data):
     raw = json.dumps(
-        data, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":"), default=str,
+        json_safe(data),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -99,9 +140,17 @@ def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
+    safe_data = json_safe(data)
+
     try:
         with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
+            json.dump(
+                safe_data,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -582,7 +631,7 @@ def align_transcript_words(caption_text, recognized_words, duration):
             return None, similarity
         start, end = timing
         start = max(0.0, min(float(start), duration))
-        end = max(start, min(float(end), duration))
+        end = max(0.0, min(float(end), duration))
         if end <= start:
             end = min(duration, start + 0.06)
         result.append({
@@ -642,6 +691,7 @@ def normalize_cues(cues, duration):
     if not clean:
         raise RuntimeError("Caption cues have no valid time ranges")
     return clean
+
 
 def allocate_phrases(phrases, weights, start, end):
     total = sum(weights)
@@ -924,8 +974,6 @@ def contrast_style(video, duration, part, scene, story_seed, width, height):
         "alignment": 2,
         "margin_vertical": 58 if height > width else 42,
     }
-
-
 def escape_filter_path(path):
     value = str(Path(path).resolve()).replace("\\", "/")
     for old, new in (
@@ -1184,7 +1232,6 @@ def main():
                 "CAPTION_FONT_SIZE must be auto or an integer"
             ) from exc
 
-    # Respect the configured size while preventing oversized overlays.
     size = max(16, min(size, 40 if mode == "short" else 44))
     font_path = resolve_font(family)
     font_hash = sha256_file(font_path)
