@@ -30,7 +30,7 @@ SHORT_TARGET_MAX_WORDS = 150
 SHORT_HARD_MAX_WORDS = 180
 SENTENCE_END_RE = re.compile(r"[.!?।॥…]$")
 
-VERSION = "story-verifier-v10-fix-argument-count"
+VERSION = "story-verifier-v11-whitespace-normalization"
 
 
 def fail(message: str) -> None:
@@ -313,11 +313,13 @@ def verify_story(
                     f"SHORT PART {p} has {actual_part_words} words; "
                     f"minimum is {SHORT_MIN_WORDS}."
                 )
+
             if actual_part_words > SHORT_HARD_MAX_WORDS:
                 fail(
                     f"SHORT PART {p} has {actual_part_words} words; "
                     f"hard maximum is {SHORT_HARD_MAX_WORDS}."
                 )
+
             if actual_part_words > SHORT_TARGET_MAX_WORDS:
                 if not SENTENCE_END_RE.search(part_narration):
                     fail(
@@ -414,11 +416,14 @@ def verify_story(
     if flattened_scenes != all_scenes:
         fail("Top-level scenes do not match the ordered part scene records.")
 
-    combined_story = "\n\n".join(
-        clean(part.get("narration")) for part in parts
+    # Normalize whitespace on BOTH sides before comparison.
+    # clean() converts newlines, tabs and repeated spaces to one space.
+    combined_story = clean(
+        " ".join(clean(part.get("narration")) for part in parts)
     )
+    saved_story_text = clean(story.get("story_text"))
 
-    if clean(story.get("story_text")) != combined_story:
+    if saved_story_text != combined_story:
         fail("story_text does not match the ordered part narrations.")
 
     if not clean(parts[0]["scenes"][0].get("narration")):
