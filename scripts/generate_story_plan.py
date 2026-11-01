@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Katha Lok AI — story-grounded scene planning and validation."""
+"""Katha Lok AI — deterministic, story-grounded scene planning."""
 
 from __future__ import annotations
 
@@ -25,25 +25,21 @@ ROOT = Path(__file__).resolve().parent.parent
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v7-complete-anchor-coverage"
-
-SHORT_MIN_WORDS = 120
-SHORT_TARGET_WORDS = 135
-SHORT_MAX_WORDS = 150
-SHORT_HARD_MAX_WORDS = 180
+VERSION = "story-plan-v8-grounded-fixed-count"
+MAPPING_VERSION = 4
 
 SHORT_BEATS = (
     ("hook", "Open with immediate story-specific tension."),
     ("setup", "Establish the relevant character, setting and stakes."),
-    ("discovery", "Introduce a clue or meaningful discovery."),
+    ("discovery", "Introduce a meaningful clue or discovery."),
     ("escalation", "Increase pressure through established consequences."),
-    ("obstacle", "Show a credible obstacle already supported by the story."),
+    ("obstacle", "Show a credible obstacle supported by the story."),
     ("reversal", "Reveal a change in the established situation."),
     ("choice", "Show a consequential decision."),
     ("confrontation", "Bring the central conflict into focus."),
     ("reveal", "Reveal an established story fact."),
     ("climax", "Show the decisive turning point."),
-    ("payoff", "Pay off an earlier clue, decision or consequence."),
+    ("payoff", "Pay off an earlier clue or consequence."),
     ("suspense", "End on a meaningful unresolved consequence."),
 )
 
@@ -84,25 +80,8 @@ def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def word_count(text: str) -> int:
-    return len(re.findall(r"\S+", clean_text(text)))
-
-
-def split_sentences(text: str) -> list[str]:
-    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    result = []
-
-    for block in re.split(r"\n+", text):
-        block = block.strip()
-        if not block:
-            continue
-
-        for item in SENTENCE_ENDINGS.split(block):
-            item = clean_text(item)
-            if item:
-                result.append(item)
-
-    return result
+def word_count(value: str) -> int:
+    return len(re.findall(r"\S+", clean_text(value)))
 
 
 def fingerprint(data: Any) -> str:
@@ -144,7 +123,6 @@ def as_bool(config: dict, key: str, default: bool = True) -> bool:
 
     if isinstance(value, bool):
         return value
-
     if isinstance(value, int) and value in (0, 1):
         return bool(value)
 
@@ -152,71 +130,41 @@ def as_bool(config: dict, key: str, default: bool = True) -> bool:
 
     if value in {"true", "yes", "on", "1", "enabled"}:
         return True
-
     if value in {"false", "no", "off", "0", "disabled", ""}:
         return False
 
     return default
 
 
-def calculate_dynamic_short_parts(total_words: int) -> int:
-    """Choose a feasible number of Shorts near 135 words each."""
-    total_words = int(total_words)
-
-    if total_words < SHORT_MIN_WORDS:
-        raise RuntimeError(
-            f"SHORT story has {total_words} words; "
-            f"minimum is {SHORT_MIN_WORDS}."
-        )
-
-    minimum_parts = (
-        total_words + SHORT_HARD_MAX_WORDS - 1
-    ) // SHORT_HARD_MAX_WORDS
-
-    maximum_parts = total_words // SHORT_MIN_WORDS
-
-    if minimum_parts > maximum_parts:
-        raise RuntimeError(
-            f"{total_words} words cannot be divided into parts "
-            f"of {SHORT_MIN_WORDS}–{SHORT_HARD_MAX_WORDS} words."
-        )
-
-    preferred = round(total_words / SHORT_TARGET_WORDS)
-
-    return max(
-        minimum_parts,
-        min(preferred, maximum_parts),
-    )
-
-
-def _split_long_sentence(sentence: str, maximum: int) -> list[str]:
-    """Split only when required; retain every original token in order."""
-    tokens = re.findall(r"\S+", sentence)
-
-    if len(tokens) <= maximum:
-        return [sentence]
-
+def split_sentences(text: str) -> list[str]:
+    """Split at paragraph and sentence boundaries without changing wording."""
+    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     result = []
 
-    for start in range(0, len(tokens), maximum):
-        chunk = " ".join(tokens[start:start + maximum]).strip()
-
-        if not chunk:
+    for block in re.split(r"\n+", text):
+        block = block.strip()
+        if not block:
             continue
 
-        # Mark continuation chunks without changing their wording.
-        result.append(chunk)
+        for sentence in SENTENCE_ENDINGS.split(block):
+            sentence = clean_text(sentence)
+            if sentence:
+                result.append(sentence)
 
     return result
 
 
-def _expand_sentence_units(sentences: list[str], maximum: int = 180):
-    expanded = []
+def _split_long_sentence(sentence: str, maximum: int = 180) -> list[str]:
+    """Split exceptionally long units while retaining every token in order."""
+    tokens = sentence.split()
 
-    for sentence in sentences:
-        expanded.extend(_split_long_sentence(sentence, maximum))
+    if len(tokens) <= maximum:
+        return [sentence]
 
-    return expanded
+    return [
+        " ".join(tokens[index:index + maximum])
+        for index in range(0, len(tokens), maximum)
+    ]
 
 
 def story_anchors(
@@ -225,79 +173,80 @@ def story_anchors(
     total_scenes: int,
 ) -> list[str]:
     """
-    Cover the complete supplied story in chronological order.
-
-    Unlike sparse sentence sampling, this does not discard intermediate
-    story sentences merely because the scene count is smaller.
+    Distribute the complete story over scenes in original chronological order.
+    No sentence is sampled out or silently discarded.
     """
     if total_scenes < 1:
-        raise RuntimeError("total_scenes must be positive.")
+        raise RuntimeError("Total scene count must be positive.")
 
-    sentences = _expand_sentence_units(
-        split_sentences(story_text),
-        maximum=180,
-    )
+    sentences = []
+
+    for sentence in split_sentences(story_text):
+        sentences.extend(_split_long_sentence(sentence))
 
     if not sentences:
         fallback = clean_text(topic)
-        return [fallback] * total_scenes if fallback else [""] * total_scenes
+        if not fallback:
+            raise RuntimeError(
+                "Cannot create story anchors: both story text and topic are empty."
+            )
+        return [fallback] * total_scenes
 
     if len(sentences) <= total_scenes:
-        anchors = list(sentences)
-        anchors.extend([""] * (total_scenes - len(anchors)))
-        return anchors
+        return sentences + [""] * (total_scenes - len(sentences))
 
-    weights = [max(1, word_count(item)) for item in sentences]
-    total_words = sum(weights)
-    anchors = []
+    weights = [max(1, word_count(sentence)) for sentence in sentences]
+    remaining_words = sum(weights)
     cursor = 0
+    anchors = []
 
     for scene_index in range(total_scenes):
         remaining_scenes = total_scenes - scene_index
-        remaining_sentences = len(sentences) - cursor
+        remaining_units = len(sentences) - cursor
 
         if remaining_scenes == 1:
             anchors.append(" ".join(sentences[cursor:]))
+            cursor = len(sentences)
             break
 
-        target_words = sum(weights[cursor:]) / remaining_scenes
-        max_take = remaining_sentences - (remaining_scenes - 1)
+        target = remaining_words / remaining_scenes
+        max_take = remaining_units - (remaining_scenes - 1)
 
         selected = []
         selected_words = 0
 
         while cursor < len(sentences) and len(selected) < max_take:
-            next_words = weights[cursor]
+            next_weight = weights[cursor]
 
-            if (
-                selected
-                and abs(selected_words - target_words)
-                <= abs(selected_words + next_words - target_words)
+            if selected and abs(selected_words - target) <= abs(
+                selected_words + next_weight - target
             ):
                 break
 
             selected.append(sentences[cursor])
-            selected_words += next_words
+            selected_words += next_weight
             cursor += 1
 
-            if selected_words >= target_words:
+            if selected_words >= target:
                 break
 
         if not selected:
             selected.append(sentences[cursor])
+            selected_words += weights[cursor]
             cursor += 1
 
         anchors.append(" ".join(selected))
+        remaining_words -= selected_words
 
-    if len(anchors) != total_scenes:
-        raise RuntimeError("Could not distribute story anchors.")
+    if len(anchors) != total_scenes or cursor != len(sentences):
+        raise RuntimeError("Story anchor distribution is incomplete.")
 
     original = clean_text(" ".join(sentences))
     reconstructed = clean_text(" ".join(anchors))
 
     if original != reconstructed:
         raise RuntimeError(
-            "Story anchor distribution lost, reordered or duplicated text."
+            "Story anchor integrity failed: text was lost, reordered or duplicated."
         )
 
     return anchors
@@ -311,7 +260,6 @@ def select_beat(format_type: str, index: int, total: int):
 
     position = round(index * (len(beats) - 1) / (total - 1))
     position = max(0, min(position, len(beats) - 1))
-
     return beats[position]
 
 
@@ -324,36 +272,31 @@ def make_scene_purpose(
     subject = clean_text(anchor) or clean_text(topic)
 
     if role == "part_opening":
-        if subject:
-            return (
-                f"{description} Start from this established story detail: "
-                f"{subject}. Do not invent events or characters."
-            )
-        return description
-
-    if role == "part_ending":
-        if subject:
-            return (
-                f"{description} Build suspense only from this established "
-                f"story detail: {subject}. Do not fabricate a plot twist."
-            )
-        return description
-
-    if role == "finale":
-        if subject:
-            return (
-                f"{description} Connect the ending to established events: "
-                f"{subject}. Do not invent an unsupported solution."
-            )
-        return description
-
-    if subject:
         return (
-            f"{description} Relevant chronological story material: "
-            f"{subject}. Preserve the source chronology and causality."
+            f"{description} Start from this established story detail: "
+            f"{subject}. Do not invent events or characters."
+            if subject else description
         )
 
-    return description
+    if role == "part_ending":
+        return (
+            f"{description} Build suspense only from this established "
+            f"story detail: {subject}. Do not fabricate a plot twist."
+            if subject else description
+        )
+
+    if role == "finale":
+        return (
+            f"{description} Connect the ending to established events: "
+            f"{subject}. Do not invent an unsupported solution."
+            if subject else description
+        )
+
+    return (
+        f"{description} Relevant chronological story material: {subject}. "
+        "Preserve source chronology and causality."
+        if subject else description
+    )
 
 
 def build_plan(
@@ -363,29 +306,42 @@ def build_plan(
     story_text: str,
     parts_count: int,
     scenes_per_part: int,
-    dynamic_short: bool,
+    dynamic_short: bool = False,
 ) -> dict:
+    """
+    Build the exact configured part/scene structure.
+
+    dynamic_short is retained for backward compatibility with existing callers.
+    It is metadata only: this planner never silently changes configured PARTS.
+    """
     format_type = clean_text(format_type).lower()
     topic = clean_text(topic)
     story_text = clean_text(story_text)
 
     if format_type not in {"short", "full"}:
-        raise RuntimeError("format_type must be short or full.")
+        raise RuntimeError("FORMAT must be short or full.")
 
-    parts_count = int(parts_count)
-    scenes_per_part = int(scenes_per_part)
+    try:
+        parts_count = int(parts_count)
+        scenes_per_part = int(scenes_per_part)
+    except (TypeError, ValueError):
+        raise RuntimeError("PARTS and SCENES must be integers.")
 
     if parts_count < 1 or scenes_per_part < 1:
-        raise RuntimeError("PARTS and SCENES must be positive.")
+        raise RuntimeError("PARTS and SCENES must be positive integers.")
 
-    total = parts_count * scenes_per_part
+    total_scenes = parts_count * scenes_per_part
 
-    anchors = story_anchors(
-        story_text=story_text,
-        topic=topic,
-        total_scenes=total,
-    )
+    if total_scenes > 1000:
+        raise RuntimeError("Requested plan exceeds the 1000-scene safety limit.")
 
+    if not topic and not story_text:
+        raise RuntimeError("A topic or complete story is required for planning.")
+
+    anchors = story_anchors(story_text, topic, total_scenes)
+
+    # Each SHORT part gets a hook and an ending. The final part gets a
+    # resolution instead of an artificial cliffhanger when enabled.
     part_hook = as_bool(config, "PART_HOOK", True)
     part_suspense = as_bool(config, "PART_SUSPENSE", True)
     final_resolution = as_bool(config, "FINAL_RESOLUTION", True)
@@ -401,7 +357,7 @@ def build_plan(
             beat, description = select_beat(
                 format_type,
                 global_number,
-                total,
+                total_scenes,
             )
 
             is_first = scene_number == 1
@@ -438,10 +394,10 @@ def build_plan(
                 role = "story_progression"
 
             purpose = make_scene_purpose(
-                role=role,
-                description=description,
-                anchor=anchor,
-                topic=topic,
+                role,
+                description,
+                anchor,
+                topic,
             )
 
             scene_id = (
@@ -478,6 +434,15 @@ def build_plan(
             "part": part_number,
             "part_id": f"part_{part_number:02d}",
             "title": f"भाग {part_number}",
+            "hook_required": bool(part_hook),
+            "suspense_required": bool(
+                part_suspense and not (
+                    part_number == parts_count and final_resolution
+                )
+            ),
+            "final_resolution": bool(
+                part_number == parts_count and final_resolution
+            ),
             "scenes": scenes,
         })
 
@@ -488,7 +453,7 @@ def build_plan(
         "story_text": story_text,
         "parts_count": parts_count,
         "scenes_per_part": scenes_per_part,
-        "total_scenes": total,
+        "total_scenes": total_scenes,
         "dynamic_short_parts": bool(dynamic_short),
         "anchors": anchors,
         "parts": parts,
@@ -502,15 +467,14 @@ def build_plan(
         "topic": topic,
         "title": topic or "",
         "title_source": (
-            "explicit_topic"
-            if topic
+            "explicit_topic" if topic
             else "deferred_to_full_story_generation"
         ),
         "parts_count": parts_count,
         "scenes_per_part": scenes_per_part,
-        "total_scenes": total,
+        "total_scenes": total_scenes,
         "scene_order": "part_then_scene",
-        "mapping_version": 4,
+        "mapping_version": MAPPING_VERSION,
         "dynamic_short_parts": bool(dynamic_short),
         "source_fingerprint": fingerprint(source_payload),
         "source": {
@@ -530,13 +494,18 @@ def validate_plan(
     parts_count: int,
     scenes_per_part: int,
 ) -> None:
+    """Strictly validate the plan schema consumed by later pipeline stages."""
     if not isinstance(plan, dict):
         raise RuntimeError("Story plan must be a JSON object.")
 
     format_type = clean_text(format_type).lower()
     topic = clean_text(topic)
-    parts_count = int(parts_count)
-    scenes_per_part = int(scenes_per_part)
+
+    try:
+        parts_count = int(parts_count)
+        scenes_per_part = int(scenes_per_part)
+    except (TypeError, ValueError):
+        raise RuntimeError("Expected part and scene counts must be integers.")
 
     if format_type not in {"short", "full"}:
         raise RuntimeError("Invalid plan format.")
@@ -554,56 +523,56 @@ def validate_plan(
         "scenes_per_part": scenes_per_part,
         "total_scenes": expected_total,
         "scene_order": "part_then_scene",
-        "mapping_version": 4,
+        "mapping_version": MAPPING_VERSION,
     }
 
     for key, expected in expected_values.items():
-        actual = plan.get(key)
-
-        if actual != expected:
+        if plan.get(key) != expected:
             raise RuntimeError(
                 f"Story plan mismatch for {key}: "
-                f"expected {expected!r}, got {actual!r}."
+                f"expected {expected!r}, got {plan.get(key)!r}."
             )
 
     if clean_text(plan.get("title")) != topic:
-        raise RuntimeError(
-            "Story plan title must be the explicit topic or empty "
-            "until the complete story is generated."
-        )
+        raise RuntimeError("Story plan title does not match the configured topic.")
+
+    if not re.fullmatch(
+        r"[a-fA-F0-9]{64}",
+        clean_text(plan.get("source_fingerprint")),
+    ):
+        raise RuntimeError("Story plan source_fingerprint is invalid.")
+
+    source = plan.get("source")
+    if not isinstance(source, dict):
+        raise RuntimeError("Story plan source metadata is missing.")
+
+    if source.get("api_calls") != 0:
+        raise RuntimeError("Story planning must not make external API calls.")
+
+    if source.get("planning_mode") != "offline_story_grounded":
+        raise RuntimeError("Unexpected story planning mode.")
 
     parts = plan.get("parts")
-
     if not isinstance(parts, list) or len(parts) != parts_count:
         raise RuntimeError(
             f"Story plan must contain exactly {parts_count} parts."
         )
 
     global_number = 0
-    all_anchors = []
 
     for part_number, part in enumerate(parts, 1):
         if not isinstance(part, dict):
             raise RuntimeError(f"Invalid plan part {part_number}.")
 
         if part.get("part") != part_number:
-            raise RuntimeError(
-                f"Incorrect part numbering at part {part_number}."
-            )
+            raise RuntimeError(f"Incorrect part numbering at part {part_number}.")
 
         expected_part_id = f"part_{part_number:02d}"
-
         if clean_text(part.get("part_id")) != expected_part_id:
-            raise RuntimeError(
-                f"Incorrect part ID: {expected_part_id}."
-            )
+            raise RuntimeError(f"Incorrect part ID: {expected_part_id}.")
 
         scenes = part.get("scenes")
-
-        if (
-            not isinstance(scenes, list)
-            or len(scenes) != scenes_per_part
-        ):
+        if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
             raise RuntimeError(
                 f"Part {part_number} must contain exactly "
                 f"{scenes_per_part} scenes."
@@ -611,7 +580,6 @@ def validate_plan(
 
         for scene_number, scene in enumerate(scenes, 1):
             global_number += 1
-
             expected_id = (
                 f"part_{part_number:02d}_scene_{scene_number:02d}"
             )
@@ -619,16 +587,17 @@ def validate_plan(
             if not isinstance(scene, dict):
                 raise RuntimeError(f"Invalid scene: {expected_id}.")
 
-            expected_scene_values = {
+            required_values = {
                 "scene": scene_number,
                 "global_scene_number": global_number,
                 "scene_id": expected_id,
             }
 
-            for field, expected in expected_scene_values.items():
+            for field, expected in required_values.items():
                 if scene.get(field) != expected:
                     raise RuntimeError(
-                        f"Incorrect {field} in {expected_id}."
+                        f"Incorrect {field} in {expected_id}: "
+                        f"expected {expected!r}, got {scene.get(field)!r}."
                     )
 
             for field in (
@@ -642,93 +611,64 @@ def validate_plan(
             ):
                 if not clean_text(scene.get(field)):
                     raise RuntimeError(
-                        f"Missing {field} in {expected_id}."
+                        f"Missing required {field} in {expected_id}."
                     )
 
             anchor = scene.get("story_anchor", "")
-
             if not isinstance(anchor, str):
                 raise RuntimeError(
-                    f"Invalid story anchor in {expected_id}."
+                    f"Invalid story_anchor in {expected_id}."
                 )
 
-            all_anchors.append(anchor)
-
-    if global_number != expected_total:
-        raise RuntimeError("Story plan global scene count is incorrect.")
-
-    if format_type == "short":
-        for part_number, part in enumerate(parts, 1):
-            first_role = clean_text(
-                part["scenes"][0].get("role")
+        # A one-scene SHORT part cannot simultaneously have separate
+        # opening and ending scenes. Reject this impossible configuration.
+        if format_type == "short" and scenes_per_part < 2:
+            raise RuntimeError(
+                "SHORT format requires at least 2 scenes per part "
+                "to provide both an opening and an ending."
             )
 
-            if as_bool({"PART_HOOK": True}, "PART_HOOK"):
-                if first_role != "part_opening":
-                    raise RuntimeError(
-                        f"SHORT part {part_number} is missing its opening hook."
-                    )
-
-            last_role = clean_text(
-                part["scenes"][-1].get("role")
-            )
-
+        if format_type == "short":
+            first_role = clean_text(scenes[0].get("role"))
+            last_role = clean_text(scenes[-1].get("role"))
             is_final_part = part_number == parts_count
-            final_resolution = as_bool(
-                {"FINAL_RESOLUTION": True},
-                "FINAL_RESOLUTION",
-            )
 
-            if is_final_part and final_resolution:
+            if first_role != "part_opening":
+                raise RuntimeError(
+                    f"SHORT part {part_number} is missing its opening hook."
+                )
+
+            if is_final_part and part.get("final_resolution", True):
                 if last_role != "finale":
                     raise RuntimeError(
                         "Final SHORT part must end with a finale."
                     )
-            elif last_role != "part_ending":
-                raise RuntimeError(
-                    f"SHORT part {part_number} is missing its ending suspense."
-                )
+            elif part.get("suspense_required", True):
+                if last_role != "part_ending":
+                    raise RuntimeError(
+                        f"SHORT part {part_number} is missing ending suspense."
+                    )
 
-    if not re.fullmatch(
-        r"[a-fA-F0-9]{64}",
-        clean_text(plan.get("source_fingerprint")),
-    ):
-        raise RuntimeError("Story plan source_fingerprint is invalid.")
-
-    source = plan.get("source")
-
-    if not isinstance(source, dict):
-        raise RuntimeError("Story plan source metadata is missing.")
-
-    if source.get("api_calls") != 0:
-        raise RuntimeError(
-            "Offline story planning must not make external API calls."
-        )
+    if global_number != expected_total:
+        raise RuntimeError("Story plan global scene count is incorrect.")
 
 
 def read_story_text_direct(path: Path) -> str:
     """
-    Independently read the complete STORY_TEXT block.
-    Supports both triple-double and triple-single quoted blocks.
+    Read the complete multiline STORY_TEXT block independently of the
+    configuration parser, supporting triple-double and triple-single quotes.
     """
     if not path.is_file():
         return ""
 
-    lines = path.read_text(
-        encoding="utf-8-sig"
-    ).splitlines()
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
 
     for index, line in enumerate(lines):
-        match = re.match(
-            r"^\s*STORY_TEXT\s*=\s*(.*?)\s*$",
-            line,
-        )
-
+        match = re.match(r"^\s*STORY_TEXT\s*=\s*(.*?)\s*$", line)
         if not match:
             continue
 
         value = match.group(1).strip()
-
         delimiter = None
 
         if value.startswith('"""'):
@@ -741,6 +681,11 @@ def read_story_text_direct(path: Path) -> str:
             closing = remainder.find(delimiter)
 
             if closing >= 0:
+                trailing = remainder[closing + len(delimiter):].strip()
+                if trailing and not trailing.startswith("#"):
+                    raise RuntimeError(
+                        "Unexpected content after STORY_TEXT closing delimiter."
+                    )
                 return remainder[:closing].strip()
 
             collected = [remainder] if remainder else []
@@ -754,10 +699,9 @@ def read_story_text_direct(path: Path) -> str:
                         collected.append(current[:closing])
 
                     trailing = current[closing + len(delimiter):].strip()
-
                     if trailing and not trailing.startswith("#"):
                         raise RuntimeError(
-                            "Unexpected text after STORY_TEXT closing delimiter."
+                            "Unexpected content after STORY_TEXT closing delimiter."
                         )
 
                     return "\n".join(collected).strip()
@@ -778,6 +722,7 @@ def read_story_text_direct(path: Path) -> str:
 
 
 def get_complete_input_story(config: dict, path: Path) -> str:
+    """Prefer the longer direct parse if the config parser truncated input."""
     parsed = clean_text(get_story_text(config))
     direct = clean_text(read_story_text_direct(path))
 
@@ -805,9 +750,7 @@ def get_complete_input_story(config: dict, path: Path) -> str:
 
 def main() -> None:
     if not INPUT_FILE.is_file():
-        raise RuntimeError(
-            f"Input file is missing: {INPUT_FILE}"
-        )
+        raise RuntimeError(f"Input file is missing: {INPUT_FILE}")
 
     config = load_and_validate(str(INPUT_FILE))
 
@@ -815,18 +758,17 @@ def main() -> None:
     topic = clean_text(get_topic(config))
     story_text = get_complete_input_story(config, INPUT_FILE)
 
-    configured_parts = int(get_parts(config))
-    scenes_per_part = int(get_scenes(config))
+    try:
+        configured_parts = int(get_parts(config))
+        scenes_per_part = int(get_scenes(config))
+    except (TypeError, ValueError):
+        raise RuntimeError("PARTS and SCENES must be valid integers.")
 
     if format_type not in {"short", "full"}:
-        raise RuntimeError(
-            f"Unsupported FORMAT: {format_type}."
-        )
+        raise RuntimeError(f"Unsupported FORMAT: {format_type!r}.")
 
     if configured_parts < 1 or scenes_per_part < 1:
-        raise RuntimeError(
-            "PARTS and SCENES must be positive integers."
-        )
+        raise RuntimeError("PARTS and SCENES must be positive integers.")
 
     if not topic and not story_text:
         raise RuntimeError(
@@ -841,17 +783,7 @@ def main() -> None:
 
     if format_type == "short":
         parts_count = configured_parts
-        dynamic_short = True
-
-        log(
-            "SHORT provisional plan:",
-            parts_count,
-            "configured parts.",
-        )
-        log(
-            "Final Shorts count will be determined after "
-            "the complete story rewrite."
-        )
+        dynamic_short = False
     else:
         parts_count = configured_parts
         dynamic_short = False
@@ -878,8 +810,7 @@ def main() -> None:
 
     if (
         isinstance(old_plan, dict)
-        and old_plan.get("source_fingerprint")
-        == plan.get("source_fingerprint")
+        and old_plan.get("source_fingerprint") == plan.get("source_fingerprint")
         and old_plan.get("script_version") == VERSION
     ):
         try:
@@ -890,11 +821,9 @@ def main() -> None:
                 parts_count,
                 scenes_per_part,
             )
-
             log("Matching valid story-plan checkpoint preserved.")
             log("External API calls: 0")
             return
-
         except (RuntimeError, TypeError, ValueError) as exc:
             log("Existing plan is invalid; rebuilding:", exc)
 
@@ -915,9 +844,8 @@ def main() -> None:
     log("Scenes per part:", scenes_per_part)
     log("Total scenes:", parts_count * scenes_per_part)
     log("Story-grounded scenes:", anchor_count)
-    log("Dynamic SHORT:", dynamic_short)
-    log("Output:", OUTPUT_FILE)
     log("External API calls: 0")
+    log("Output:", OUTPUT_FILE)
 
 
 if __name__ == "__main__":
