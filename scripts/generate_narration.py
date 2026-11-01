@@ -1,690 +1,607 @@
 #!/usr/bin/env python3
-"""Validated, resumable narration preparation for Katha Lok AI."""
-
-from __future__ import annotations
 
 import hashlib
 import json
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
 from input_config import (
-    load_and_validate,
+    load_input_config,
     get_parts,
     get_scenes,
-    get_format,
+    normalize_format,
     get_topic,
-    get_story_text,
 )
 
-CONFIG_FILE = ROOT / "Input" / "topic.txt"
-SCENES_FILE = ROOT / "output" / "scenes" / "scenes.json"
-AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
-SOURCE_STORY_FILE = ROOT / "output" / "story" / "story.json"
+AI_STORY_FILE = Path("output/story/ai_story.json")
+SCENES_FILE = Path("output/scenes/scenes.json")
+OUTPUT_FILE = Path("output/narration/narration.json")
 
-OUTPUT_DIR = ROOT / "output" / "narration"
-OUTPUT_FILE = OUTPUT_DIR / "narration.json"
-CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "narration_progress.json"
-
-VERSION = "narration-v9-dynamic-short-parts"
-
-CAPTION_FIELDS = (
-    "caption_hindi", "hindi_caption", "caption_hi",
-    "caption_english", "english_caption", "caption_en",
-    "caption_hinglish", "hinglish_caption", "caption_mixed",
-    "caption_text", "display_caption", "caption_language",
-    "caption_lang", "language", "narration_language",
-    "translations", "caption_texts",
-)
+SCRIPT_VERSION = 3
 
 
-def now():
+# ============================================================
+# CONFIG HELPERS
+# ============================================================
+
+def cfg_text(config, key, default=""):
+    value = config.get(key, default)
+    if value is None:
+        return str(default)
+    return str(value).strip()
+
+
+def cfg_bool(config, key, default=False):
+    value = config.get(key, default)
+
+    if isinstance(value, bool):
+        return value
+
+    value = str(value).strip().lower()
+
+    if value in {"true", "yes", "on", "1"}:
+        return True
+
+    if value in {"false", "no", "off", "0"}:
+        return False
+
+    return bool(default)
+
+
+def get_scene_duration(config):
+    value = cfg_text(config, "SCENE_DURATION", "auto")
+    return value if value else "auto"
+
+
+def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def log(*values):
-    print("[NARRATION]", *values, flush=True)
+# ============================================================
+# JSON HELPERS
+# ============================================================
 
-
-def canonical(value):
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":"), default=str,
-    )
-
-
-def digest(value):
-    if not isinstance(value, bytes):
-        value = str(value).encode("utf-8")
-    return hashlib.sha256(value).hexdigest()
-
-
-def save_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def read_json(path, required=True):
-    path = Path(path)
-
+def load_json(path, required=True):
     if not path.is_file():
         if required:
-            raise RuntimeError(f"Required file missing: {path}")
+            raise RuntimeError(f"Required file not found: {path}")
         return None
 
     try:
-        with path.open("r", encoding="utf-8-sig") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        if required:
-            raise RuntimeError(f"Invalid JSON: {path}: {exc}") from exc
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception as exc:
+        raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
+
+
+def save_json_atomic(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_path = path.with_name(path.name + ".tmp")
+
+    try:
+        with temp_path.open("w", encoding="utf-8") as file:
+            json.dump(
+                data,
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+
+        os.replace(temp_path, path)
+
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def stable_hash(data):
+    encoded = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# ============================================================
+# SCENE VALIDATION
+# ============================================================
+
+def scene_key(scene):
+    try:
+        part = int(scene.get("part"))
+        number = int(scene.get("scene"))
+
+        if part < 1 or number < 1:
+            return None
+
+        return part, number
+
+    except (TypeError, ValueError, AttributeError):
         return None
 
+
+def load_source_scenes(parts, scenes_per_part):
+    data = load_json(SCENES_FILE)
+
     if not isinstance(data, dict):
-        if required:
-            raise RuntimeError(f"Expected JSON object: {path}")
-        return None
+        raise RuntimeError("scenes.json must contain a JSON object.")
+
+    if data.get("status") != "completed":
+        raise RuntimeError(
+            "Scene generation is not completed. "
+            "Refusing to create narration from incomplete scenes."
+        )
+
+    scenes = data.get("scenes")
+
+    if not isinstance(scenes, list) or not scenes:
+        raise RuntimeError("scenes.json contains no scene list.")
+
+    expected = {
+        (part, scene)
+        for part in range(1, parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    }
+
+    scene_map = {}
+
+    for item in scenes:
+        if not isinstance(item, dict):
+            raise RuntimeError("Invalid scene entry in scenes.json.")
+
+        key = scene_key(item)
+
+        if key is None:
+            raise RuntimeError(
+                f"Invalid part/scene number in scene: {item}"
+            )
+
+        if key not in expected:
+            raise RuntimeError(
+                f"Unexpected scene number in scenes.json: {key}"
+            )
+
+        if key in scene_map:
+            raise RuntimeError(
+                f"Duplicate scene found: Part {key[0]} Scene {key[1]}"
+            )
+
+        narration = item.get("narration")
+
+        if not isinstance(narration, str) or not narration.strip():
+            raise RuntimeError(
+                f"Missing narration for Part {key[0]} Scene {key[1]}."
+            )
+
+        scene_map[key] = dict(item)
+
+    missing = sorted(expected - set(scene_map))
+
+    if missing:
+        raise RuntimeError(
+            f"Missing {len(missing)} configured scenes: {missing[:20]}"
+        )
+
+    return [
+        scene_map[(part, scene)]
+        for part in range(1, parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    ]
+
+
+# ============================================================
+# STORY METADATA
+# ============================================================
+
+def load_story_metadata():
+    data = load_json(AI_STORY_FILE, required=False)
+
+    if not isinstance(data, dict):
+        return {}
 
     return data
 
 
-def truthy(value, default=True):
-    if value is None or str(value).strip() == "":
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {
-        "1", "true", "yes", "on", "enabled"
-    }
+def resolve_title(config, story):
+    title = get_topic(config)
 
+    if title:
+        return title
 
-def clean(value):
-    if value is None:
-        return ""
-    return re.sub(r"\s+", " ", str(value)).strip()
+    for key in ("title", "generated_title", "topic"):
+        value = story.get(key)
 
-
-def scene_key(item):
-    try:
-        part = int(item["part"])
-        scene = int(item.get("scene", item.get("local_scene")))
-    except (KeyError, TypeError, ValueError):
-        return None
-
-    if part < 1 or scene < 1:
-        return None
-
-    return part, scene
-
-
-def narration_text(item):
-    for field in ("narration", "text", "dialogue"):
-        value = item.get(field)
         if isinstance(value, str) and value.strip():
-            return clean(value)
-    return ""
+            return value.strip()
+
+    return "Untitled Story"
 
 
-def count_words(value):
-    return len(re.findall(
-        r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*|[\u0900-\u097F]+",
-        str(value or ""),
-    ))
+# ============================================================
+# NARRATION RECORD
+# ============================================================
 
+def build_narration_record(scene, settings):
+    part = int(scene["part"])
+    number = int(scene["scene"])
+    narration_text = scene["narration"].strip()
 
-def normalize_settings(config):
-    return {
-        "format": clean(get_format(config)).lower(),
-        "configured_parts": int(get_parts(config)),
-        "parts": int(get_parts(config)),
-        "scenes_per_part": int(get_scenes(config)),
-        "voice": clean(config.get("VOICE", "male")),
-        "speed": clean(config.get("SPEED", "+0%")),
-        "captions": clean(config.get("CAPTIONS", "hindi")).lower(),
-        "audience": clean(config.get("AUDIENCE", "adult")),
-        "scene_duration": clean(config.get("SCENE_DURATION", "auto")),
-        "story_length": clean(config.get("STORY_LENGTH", "auto")),
-        "music": truthy(config.get("MUSIC"), True),
-        "sfx": truthy(config.get("SFX"), True),
-        "ambient_sound": truthy(config.get("AMBIENT_SOUND"), True),
-        "transitions": clean(config.get("TRANSITIONS", "cinematic")),
-    }
+    if not narration_text:
+        raise ValueError(
+            f"Empty narration: Part {part} Scene {number}"
+        )
 
+    duration = scene.get("duration")
 
-def extract_story_scenes(data):
-    parts = data.get("parts")
-
-    if not isinstance(parts, list):
-        raise RuntimeError("Story parts must be a list.")
-
-    rows = []
-
-    for expected_part, part_data in enumerate(parts, 1):
-        if not isinstance(part_data, dict):
-            raise RuntimeError("Invalid story part.")
-
-        try:
-            part_number = int(part_data.get("part", expected_part))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("Invalid story part number.") from exc
-
-        if part_number != expected_part:
-            raise RuntimeError(
-                f"Story part order mismatch: expected {expected_part}, "
-                f"found {part_number}."
-            )
-
-        scenes = part_data.get("scenes")
-
-        if not isinstance(scenes, list):
-            raise RuntimeError(
-                f"Scenes list missing in story part {part_number}."
-            )
-
-        for scene in scenes:
-            if not isinstance(scene, dict):
-                raise RuntimeError("Invalid story scene record.")
-
-            row = dict(scene)
-            row["part"] = part_number
-            rows.append(row)
-
-    return rows
-
-
-def load_source_scenes(format_type):
-    if SCENES_FILE.is_file():
-        data = read_json(SCENES_FILE, required=False)
-
-        if isinstance(data, dict) and data.get("status") == "completed":
-            source_format = clean(data.get("format")).lower()
-
-            if source_format and source_format != format_type:
-                raise RuntimeError(
-                    "scenes.json FORMAT does not match Input/topic.txt."
-                )
-
-            rows = data.get("scenes")
-
-            if not isinstance(rows, list) or not rows:
-                raise RuntimeError(
-                    "Completed scenes.json has no scene records."
-                )
-
-            if not all(isinstance(row, dict) for row in rows):
-                raise RuntimeError(
-                    "scenes.json contains invalid scene records."
-                )
-
-            return rows, SCENES_FILE.relative_to(ROOT).as_posix()
-
-        log("Ignoring scenes.json because it is not completed.")
-
-    for path in (AI_STORY_FILE, SOURCE_STORY_FILE):
-        data = read_json(path, required=False)
-
-        if not isinstance(data, dict):
-            continue
-        if data.get("status") != "completed":
-            continue
-        if clean(data.get("format")).lower() != format_type:
-            continue
-
-        rows = extract_story_scenes(data)
-
-        if rows:
-            return rows, path.relative_to(ROOT).as_posix()
-
-    raise RuntimeError(
-        "No completed scene/story source matches the selected FORMAT."
-    )
-
-
-def resolve_actual_part_count(source, settings):
-    """Use actual story parts for SHORT; retain configured count for FULL."""
-    found = set()
-
-    for index, item in enumerate(source, 1):
-        key = scene_key(item)
-        if key is None:
-            raise RuntimeError(
-                f"Invalid part/scene mapping in source row {index}."
-            )
-        found.add(key[0])
-
-    if not found:
-        raise RuntimeError("No story parts found in narration source.")
-
-    actual_parts = max(found)
-
-    if found != set(range(1, actual_parts + 1)):
-        raise RuntimeError("Story part numbering is not continuous.")
-
-    if settings["format"] == "full":
-        if actual_parts != settings["configured_parts"]:
-            raise RuntimeError(
-                "FULL story part count does not match configured PARTS: "
-                f"expected {settings['configured_parts']}, "
-                f"found {actual_parts}."
-            )
-        return settings["configured_parts"]
-
-    log(
-        "SHORT dynamic part count:",
-        actual_parts,
-        "(configured PARTS ignored:",
-        settings["configured_parts"],
-        ")",
-    )
-    return actual_parts
-
-
-def validate_scenes(source, settings):
-    expected = {
-        (part, scene)
-        for part in range(1, settings["parts"] + 1)
-        for scene in range(1, settings["scenes_per_part"] + 1)
-    }
-
-    mapped = {}
-
-    for index, item in enumerate(source, 1):
-        key = scene_key(item)
-
-        if key is None:
-            raise RuntimeError(
-                f"Invalid part/scene mapping in source row {index}."
-            )
-        if key not in expected:
-            raise RuntimeError(f"Unexpected scene mapping: {key}.")
-        if key in mapped:
-            raise RuntimeError(f"Duplicate scene mapping: {key}.")
-        if not narration_text(item):
-            raise RuntimeError(
-                f"Narration missing: Part {key[0]}, Scene {key[1]}."
-            )
-
-        mapped[key] = item
-
-    missing = sorted(expected - set(mapped))
-
-    if missing:
-        raise RuntimeError(f"Required scenes missing: {missing}")
-
-    return mapped
-
-
-def estimate_duration(text, voice, speed):
-    """Estimate only; actual caption timing must use rendered audio."""
-    words = count_words(text)
-    wpm = 135.0 if voice.lower() in {"female", "woman"} else 125.0
-
-    match = re.fullmatch(
-        r"([+-]?)\s*(\d+(?:\.\d+)?)\s*%",
-        speed.strip(),
-    )
-
-    if match:
-        amount = float(match.group(2)) / 100.0
-        if match.group(1) == "-":
-            factor = max(0.5, 1.0 - amount)
-        else:
-            factor = min(1.75, 1.0 + amount)
-        wpm *= factor
-
-    return round(words * 60.0 / max(wpm, 1.0), 2)
-
-
-def caption_metadata(source):
-    result = {}
-
-    for field in CAPTION_FIELDS:
-        if field not in source:
-            continue
-
-        value = source[field]
-        if isinstance(value, str):
-            value = clean(value)
-        result[field] = value
-
-    return result
-
-
-def make_record(source, settings):
-    key = scene_key(source)
-    text = narration_text(source)
-    duration = source.get("duration")
-
-    if duration is None or not clean(duration):
+    if duration is None or not str(duration).strip():
         duration = settings["scene_duration"]
 
-    metadata = caption_metadata(source)
-    estimated = estimate_duration(
-        text, settings["voice"], settings["speed"]
-    )
+    return {
+        "part": part,
+        "scene": number,
+        "text": narration_text,
 
-    record = {
-        "part": key[0],
-        "scene": key[1],
-        "scene_id": f"part_{key[0]:02d}_scene_{key[1]:02d}",
-        "text": text,
-        "narration": text,
-        "text_sha256": digest(text),
-        "word_count": count_words(text),
         "voice": settings["voice"],
         "speed": settings["speed"],
         "captions": settings["captions"],
+
         "format": settings["format"],
         "audience": settings["audience"],
+
         "duration": duration,
-        "estimated_duration": estimated,
-        "estimated_duration_seconds": estimated,
-        "duration_estimate_note": (
-            "Estimate only. Final timing must use measured audio duration."
-        ),
-        "caption_fields_sha256": digest(canonical(metadata)),
+        "estimated_duration": duration,
+
+        "title": str(scene.get("title", "")).strip(),
+        "dialogue": scene.get("dialogue", ""),
+        "character_ids": scene.get("character_ids", []),
+
         "status": "completed",
     }
 
-    record.update(metadata)
-    return record
 
+# ============================================================
+# CHECKPOINT VALIDATION
+# ============================================================
 
-def source_fingerprint(source_map):
-    ordered = []
+def load_reusable_records(source_signature, settings):
+    existing = load_json(OUTPUT_FILE, required=False)
 
-    for key in sorted(source_map):
-        ordered.append({
-            "part": key[0],
-            "scene": key[1],
-            "source": source_map[key],
-        })
-
-    return digest(canonical(ordered))
-
-
-def load_reusable(settings_hash, source_map, settings):
-    old = read_json(OUTPUT_FILE, required=False)
-
-    if not isinstance(old, dict):
+    if not isinstance(existing, dict):
         return {}
 
-    if old.get("settings_sha256") != settings_hash:
-        log("Previous narration cache does not match current input.")
+    if existing.get("status") not in {"in_progress", "completed"}:
         return {}
 
-    rows = old.get("scenes")
-    if not isinstance(rows, list):
+    if existing.get("source_signature") != source_signature:
+        print("Existing narration belongs to different source scenes; rebuilding.")
+        return {}
+
+    if existing.get("input_config") != settings:
+        print("Narration settings changed; rebuilding narration records.")
+        return {}
+
+    records = existing.get("scenes", [])
+
+    if not isinstance(records, list):
         return {}
 
     reusable = {}
 
-    for row in rows:
-        if not isinstance(row, dict) or row.get("status") != "completed":
+    for record in records:
+        if not isinstance(record, dict):
             continue
 
-        key = scene_key(row)
-        if key not in source_map:
+        key = scene_key(record)
+
+        if key is None:
             continue
 
-        expected = make_record(source_map[key], settings)
-        if row == expected:
-            reusable[key] = expected
+        text = record.get("text")
+
+        if (
+            record.get("status") == "completed"
+            and isinstance(text, str)
+            and text.strip()
+        ):
+            reusable[key] = record
 
     return reusable
 
 
-def resolve_title(config):
-    explicit_topic = clean(get_topic(config))
+def validate_final_records(records, expected_total):
+    keys = []
 
-    if explicit_topic:
-        return explicit_topic
+    for record in records:
+        key = scene_key(record)
 
-    for path in (AI_STORY_FILE, SOURCE_STORY_FILE):
-        data = read_json(path, required=False)
-        if not isinstance(data, dict):
-            continue
+        if key is None:
+            raise RuntimeError("Invalid scene number in final narration.")
 
-        for field in (
-            "final_title", "generated_title",
-            "story_title", "title", "topic",
-        ):
-            title = clean(data.get(field))
-            if title:
-                return title
+        if not isinstance(record.get("text"), str):
+            raise RuntimeError(
+                f"Invalid narration text for scene {key}."
+            )
 
-    return ""
+        if not record["text"].strip():
+            raise RuntimeError(
+                f"Empty narration text for scene {key}."
+            )
 
-def checkpoint(output, records, ordered_keys, last_key=None):
-    output["scenes"] = [
-        records[key] for key in ordered_keys if key in records
-    ]
-    output["completed_scenes"] = len(output["scenes"])
-    output["updated_at"] = now()
+        keys.append(key)
 
-    if last_key:
-        output["last_completed"] = {
-            "part": last_key[0],
-            "scene": last_key[1],
-            "scene_id": (
-                f"part_{last_key[0]:02d}_scene_{last_key[1]:02d}"
-            ),
-        }
+    if len(keys) != expected_total:
+        raise RuntimeError(
+            f"Narration count mismatch: {len(keys)}/{expected_total}"
+        )
 
-    save_json(OUTPUT_FILE, output)
+    if len(set(keys)) != len(keys):
+        raise RuntimeError("Duplicate scenes found in final narration.")
 
-    save_json(CHECKPOINT_FILE, {
-        "status": "in_progress",
-        "version": VERSION,
-        "settings_sha256": output["settings_sha256"],
-        "source_sha256": output["source_sha256"],
-        "total_parts": output["total_parts"],
-        "total_scenes": output["total_scenes"],
-        "completed_count": output["completed_scenes"],
-        "completed_scene_ids": [
-            row["scene_id"] for row in output["scenes"]
-        ],
-        "last_completed": output.get("last_completed"),
-        "updated_at": now(),
-    })
+    return True
 
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-    log("=" * 55)
-    log("KATHA LOK AI — NARRATION PREPARATION")
-    log("External API calls: 0")
-    log("=" * 55)
+    print("=" * 60)
+    print("          KATHA LOK AI NARRATION")
+    print("=" * 60)
 
-    config = load_and_validate(CONFIG_FILE)
-    settings = normalize_settings(config)
+    # --------------------------------------------------------
+    # LOAD CONFIGURATION
+    # --------------------------------------------------------
 
-    if settings["format"] not in {"short", "full"}:
-        raise RuntimeError("FORMAT must be short or full.")
+    config = load_input_config()
 
-    if (
-        settings["configured_parts"] < 1
-        or settings["scenes_per_part"] < 1
-    ):
-        raise RuntimeError("PARTS and SCENES must be positive.")
+    fmt = normalize_format(config)
+    parts = get_parts(config)
+    scenes_per_part = get_scenes(config)
+    expected_total = parts * scenes_per_part
 
-    source, source_path = load_source_scenes(settings["format"])
-
-    # SHORT uses the actual generated part count, not Input PARTS.
-    settings["parts"] = resolve_actual_part_count(source, settings)
-
-    source_map = validate_scenes(source, settings)
-
-    title = resolve_title(config)
-    story_text = clean(get_story_text(config))
-    source_hash = source_fingerprint(source_map)
-
-    total = settings["parts"] * settings["scenes_per_part"]
-
-    settings_hash = digest(canonical({
-        "version": VERSION,
-        "settings": settings,
-        "title": title,
-        "source_hash": source_hash,
-        "source_path": source_path,
-        "story_text": story_text,
-    }))
-
-    ordered_keys = sorted(source_map)
-    reusable = load_reusable(settings_hash, source_map, settings)
-    records = dict(reusable)
-
-    output = {
-        "version": VERSION,
-        "status": "in_progress",
-        "topic": title,
-        "title": title,
-        "format": settings["format"],
-        "model": "not_required",
-        "api_calls": 0,
-        "configured_parts": settings["configured_parts"],
-        "total_parts": settings["parts"],
-        "dynamic_short_parts": settings["format"] == "short",
-        "scenes_per_part": settings["scenes_per_part"],
-        "total_scenes": total,
-        "settings_sha256": settings_hash,
-        "source_sha256": source_hash,
-        "source_file": source_path,
-        "input_config": settings,
-        "scenes": [],
-        "completed_scenes": 0,
-        "updated_at": now(),
+    settings = {
+        "format": fmt,
+        "audience": cfg_text(config, "AUDIENCE", "adult"),
+        "voice": cfg_text(config, "VOICE", "male"),
+        "speed": cfg_text(config, "SPEED", "+0%"),
+        "captions": cfg_text(config, "CAPTIONS", "hindi"),
+        "scene_duration": get_scene_duration(config),
+        "parts": parts,
+        "scenes_per_part": scenes_per_part,
+        "music": cfg_bool(config, "MUSIC", True),
+        "sfx": cfg_bool(config, "SFX", True),
+        "ambient_sound": cfg_bool(config, "AMBIENT_SOUND", True),
+        "transitions": cfg_text(config, "TRANSITIONS", "cinematic"),
     }
 
-    checkpoint(output, records, ordered_keys)
+    resume_enabled = cfg_bool(config, "RESUME_ENABLED", True)
+    skip_completed = cfg_bool(config, "SKIP_COMPLETED_SCENES", True)
+    save_each_scene = cfg_bool(
+        config,
+        "SAVE_CHECKPOINT_AFTER_EACH_SCENE",
+        True,
+    )
 
-    log("FORMAT:", settings["format"])
-    log("CONFIGURED PARTS:", settings["configured_parts"])
-    log("ACTUAL PARTS:", settings["parts"])
-    log("SCENES PER PART:", settings["scenes_per_part"])
-    log("TOTAL SCENES:", total)
-    log("SOURCE:", source_path)
-    log("REUSED:", len(reusable))
+    # --------------------------------------------------------
+    # LOAD GENERATED STORY AND SCENES
+    # --------------------------------------------------------
 
-    for index, key in enumerate(ordered_keys, 1):
-        if key in records:
-            log(
-                f"[{index}/{total}] Reusing "
-                f"Part {key[0]} Scene {key[1]}"
-            )
-        else:
-            records[key] = make_record(source_map[key], settings)
-            log(
-                f"[{index}/{total}] Prepared "
-                f"Part {key[0]} Scene {key[1]}"
-            )
+    story = load_story_metadata()
+    title = resolve_title(config, story)
 
-        checkpoint(output, records, ordered_keys, key)
+    source_scenes = load_source_scenes(
+        parts,
+        scenes_per_part,
+    )
 
-    final_rows = [records[key] for key in ordered_keys]
-
-    if len(final_rows) != total:
-        raise RuntimeError("Final narration scene count mismatch.")
-
-    actual_keys = [scene_key(row) for row in final_rows]
-
-    if len(set(actual_keys)) != total or actual_keys != ordered_keys:
-        raise RuntimeError("Final narration scene mapping is invalid.")
-
-    for row in final_rows:
-        if not row["text"]:
-            raise RuntimeError(f"Empty narration: {row['scene_id']}")
-
-        if row["text_sha256"] != digest(row["text"]):
-            raise RuntimeError(f"Text hash mismatch: {row['scene_id']}")
-
-        if row["word_count"] != count_words(row["text"]):
-            raise RuntimeError(f"Word count mismatch: {row['scene_id']}")
-
-        if row["estimated_duration_seconds"] <= 0:
-            raise RuntimeError(
-                f"Invalid duration estimate: {row['scene_id']}"
-            )
-
-        metadata = caption_metadata(row)
-
-        if row["caption_fields_sha256"] != digest(canonical(metadata)):
-            raise RuntimeError(
-                f"Caption metadata mismatch: {row['scene_id']}"
-            )
-
-    output.update({
-        "status": "completed",
-        "scenes": final_rows,
-        "completed_scenes": total,
-        "api_calls": 0,
-        "completed_at": now(),
-        "updated_at": now(),
-        "validation": {
-            "exact_scene_count": True,
-            "unique_part_scene_mapping": True,
-            "sequential_scene_order": True,
-            "narration_hashes_verified": True,
-            "word_counts_verified": True,
-            "caption_fields_preserved": True,
-            "duration_is_estimate_not_audio_measurement": True,
-            "generated_title_preferred_over_story_first_line": True,
-            "short_uses_actual_dynamic_part_count": (
-                settings["format"] == "short"
-            ),
-            "full_uses_configured_part_count": (
-                settings["format"] == "full"
-            ),
-        },
-    })
-
-    save_json(OUTPUT_FILE, output)
-
-    save_json(CHECKPOINT_FILE, {
-        "status": "completed",
-        "version": VERSION,
-        "settings_sha256": settings_hash,
-        "source_sha256": source_hash,
-        "total_parts": settings["parts"],
-        "total_scenes": total,
-        "completed_count": total,
-        "completed_scene_ids": [
-            row["scene_id"] for row in final_rows
+    source_signature = stable_hash({
+        "script_version": SCRIPT_VERSION,
+        "title": title,
+        "settings": settings,
+        "scenes": [
+            {
+                "part": item["part"],
+                "scene": item["scene"],
+                "narration": item["narration"],
+                "duration": item.get("duration"),
+            }
+            for item in source_scenes
         ],
-        "completed_at": now(),
     })
 
-    log("NARRATION PREPARATION: SUCCESS")
-    log("Parts:", settings["parts"])
-    log("Scenes:", total)
-    log("Reused:", len(reusable))
-    log("API calls: 0")
-    log("Output:", OUTPUT_FILE)
-    log("Checkpoint:", CHECKPOINT_FILE)
+    print(f"FORMAT          : {fmt}")
+    print(f"TITLE           : {title}")
+    print(f"PARTS           : {parts}")
+    print(f"SCENES/PART     : {scenes_per_part}")
+    print(f"TOTAL SCENES    : {expected_total}")
+    print(f"VOICE           : {settings['voice']}")
+    print(f"SPEED           : {settings['speed']}")
+    print(f"CAPTIONS        : {settings['captions']}")
+    print(f"RESUME_ENABLED  : {resume_enabled}")
+    print(f"SKIP_COMPLETED  : {skip_completed}")
+    print("GEMINI API CALLS: 0")
+
+    # --------------------------------------------------------
+    # RESTORE VALID CHECKPOINTS
+    # --------------------------------------------------------
+
+    reusable = {}
+
+    if resume_enabled and skip_completed:
+        reusable = load_reusable_records(
+            source_signature,
+            settings,
+        )
+
+    narration_map = {}
+
+    # --------------------------------------------------------
+    # PREPARE EACH SCENE
+    # --------------------------------------------------------
+
+    for index, scene in enumerate(source_scenes, start=1):
+        part = int(scene["part"])
+        number = int(scene["scene"])
+        key = (part, number)
+
+        cached = reusable.get(key)
+
+        if cached:
+            # Preserve existing record only when its text
+            # still exactly matches the current source scene.
+            if cached.get("text", "").strip() == scene["narration"].strip():
+                narration_map[key] = dict(cached)
+
+                print(
+                    f"[{index}/{expected_total}] "
+                    f"Reusing Part {part} Scene {number}"
+                )
+                continue
+
+        record = build_narration_record(
+            scene,
+            settings,
+        )
+
+        narration_map[key] = record
+
+        print(
+            f"[{index}/{expected_total}] "
+            f"Prepared Part {part} Scene {number}"
+        )
+
+        # ----------------------------------------------------
+        # CHECKPOINT AFTER EACH SCENE
+        # ----------------------------------------------------
+
+        if save_each_scene:
+            partial_records = [
+                narration_map[item]
+                for item in sorted(narration_map)
+            ]
+
+            output = {
+                "status": "in_progress",
+                "script_version": SCRIPT_VERSION,
+                "title": title,
+                "topic": title,
+                "format": fmt,
+                "model": "not_required",
+                "api_calls": 0,
+
+                "source_file": str(SCENES_FILE),
+                "source_signature": source_signature,
+
+                "total_parts": parts,
+                "scenes_per_part": scenes_per_part,
+                "total_scenes": expected_total,
+                "completed_scenes": len(partial_records),
+
+                "input_config": settings,
+                "scenes": partial_records,
+
+                "updated_at": utc_now(),
+            }
+
+            save_json_atomic(
+                OUTPUT_FILE,
+                output,
+            )
+
+    # --------------------------------------------------------
+    # FINAL ORDER AND VALIDATION
+    # --------------------------------------------------------
+
+    final_records = [
+        narration_map[(part, number)]
+        for part in range(1, parts + 1)
+        for number in range(1, scenes_per_part + 1)
+    ]
+
+    validate_final_records(
+        final_records,
+        expected_total,
+    )
+
+    # Ensure every record carries the current settings.
+    for record in final_records:
+        record["voice"] = settings["voice"]
+        record["speed"] = settings["speed"]
+        record["captions"] = settings["captions"]
+        record["format"] = fmt
+        record["audience"] = settings["audience"]
+
+    # --------------------------------------------------------
+    # FINAL OUTPUT
+    # --------------------------------------------------------
+
+    output = {
+        "status": "completed",
+        "script_version": SCRIPT_VERSION,
+
+        "title": title,
+        "topic": title,
+        "format": fmt,
+
+        "model": "not_required",
+        "api_calls": 0,
+
+        "source_file": str(SCENES_FILE),
+        "source_signature": source_signature,
+
+        "total_parts": parts,
+        "scenes_per_part": scenes_per_part,
+        "total_scenes": len(final_records),
+        "completed_scenes": len(final_records),
+
+        "input_config": settings,
+        "scenes": final_records,
+
+        "generated_at": utc_now(),
+        "completed_at": utc_now(),
+    }
+
+    save_json_atomic(
+        OUTPUT_FILE,
+        output,
+    )
+
+    # --------------------------------------------------------
+    # FINAL REPORT
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 60)
+    print("       NARRATION PREPARATION COMPLETE")
+    print("=" * 60)
+    print(f"Format          : {fmt}")
+    print(f"Parts           : {parts}")
+    print(f"Scenes          : {len(final_records)}")
+    print(f"Voice           : {settings['voice']}")
+    print(f"Captions        : {settings['captions']}")
+    print("Gemini API calls: 0")
+    print(f"Output          : {OUTPUT_FILE}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        log("Cancelled.")
-        raise SystemExit(130)
+        print("Interrupted.")
+        sys.exit(130)
     except Exception as exc:
-        log("ERROR:", exc)
-        raise SystemExit(1)
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
