@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validated, smooth and dynamic depth-guided 2.5D parallax renderer."""
+"""Render cinematic depth-guided 2.5D Photo Motion clips."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-VERSION = "depth-parallax-v4-dynamic-cinematic-motion"
+VERSION = "depth-parallax-v5-stable-cinematic"
 
 MIN_BYTES = 1000
-MAX_FPS = 60
-MAX_SECONDS = 600
 MIN_DIMENSION = 64
 MAX_DIMENSION = 4096
+MAX_FPS = 60
+MAX_SECONDS = 600
 
 DEFAULT_STRENGTH = 0.026
 MAX_STRENGTH = 0.04
@@ -37,12 +37,12 @@ def positive_int(value):
         number = int(value)
     except (TypeError, ValueError) as exc:
         raise argparse.ArgumentTypeError(
-            "Must be a positive integer."
+            "Value must be a positive integer."
         ) from exc
 
     if number <= 0:
         raise argparse.ArgumentTypeError(
-            "Must be greater than zero."
+            "Value must be greater than zero."
         )
 
     return number
@@ -53,15 +53,12 @@ def bounded_float(value):
         number = float(value)
     except (TypeError, ValueError) as exc:
         raise argparse.ArgumentTypeError(
-            "Must be a number."
+            "Value must be numeric."
         ) from exc
 
-    if (
-        not math.isfinite(number)
-        or not 0.0 <= number <= MAX_STRENGTH
-    ):
+    if not math.isfinite(number) or not 0 <= number <= MAX_STRENGTH:
         raise argparse.ArgumentTypeError(
-            f"Must be between 0 and {MAX_STRENGTH}."
+            f"Value must be between 0 and {MAX_STRENGTH}."
         )
 
     return number
@@ -79,78 +76,12 @@ def validate_dimensions(width, height):
         )
 
 
-def validate_video(path, width, height, expected_frames, fps):
-    path = Path(path)
-
-    if not path.is_file() or path.stat().st_size < MIN_BYTES:
-        raise RuntimeError(
-            "Output video is missing or too small."
-        )
-
-    cap = cv2.VideoCapture(str(path))
-
-    try:
-        if not cap.isOpened():
-            raise RuntimeError(
-                "Cannot reopen generated video."
-            )
-
-        actual_width = int(
-            cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-        )
-        actual_height = int(
-            cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        )
-        frame_count = int(
-            cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        )
-        actual_fps = float(
-            cap.get(cv2.CAP_PROP_FPS)
-        )
-
-        if (actual_width, actual_height) != (width, height):
-            raise RuntimeError(
-                f"Wrong dimensions: {actual_width}x{actual_height}; "
-                f"expected {width}x{height}."
-            )
-
-        if frame_count != expected_frames:
-            raise RuntimeError(
-                f"Frame count is {frame_count}; "
-                f"expected {expected_frames}."
-            )
-
-        if not math.isfinite(actual_fps) or actual_fps <= 0:
-            raise RuntimeError(
-                "Video FPS could not be validated."
-            )
-
-        if abs(actual_fps - fps) > 1.0:
-            raise RuntimeError(
-                f"Unexpected FPS: {actual_fps}; expected {fps}."
-            )
-
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        ok_first, first = cap.read()
-
-        cap.set(
-            cv2.CAP_PROP_POS_FRAMES,
-            frame_count - 1,
-        )
-        ok_last, last = cap.read()
-
-        if not ok_first or first is None:
-            raise RuntimeError(
-                "Could not decode first output frame."
-            )
-
-        if not ok_last or last is None:
-            raise RuntimeError(
-                "Could not decode last output frame."
-            )
-
-    finally:
-        cap.release()
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def center_crop_parameters(
@@ -159,8 +90,6 @@ def center_crop_parameters(
     target_width,
     target_height,
 ):
-    """Return one crop transform shared by RGB and depth images."""
-
     source_ratio = source_width / source_height
     target_ratio = target_width / target_height
 
@@ -190,7 +119,7 @@ def apply_shared_crop(
     target_width,
     target_height,
 ):
-    """Align depth to the original image before applying the same crop."""
+    """Apply exactly the same crop and resize to RGB and depth."""
 
     source_height, source_width = image.shape[:2]
 
@@ -212,23 +141,19 @@ def apply_shared_crop(
         top:top + crop_height,
         left:left + crop_width,
     ]
-
     depth_crop = depth[
         top:top + crop_height,
         left:left + crop_width,
     ]
 
     if image_crop.size == 0 or depth_crop.size == 0:
-        raise RuntimeError(
-            "Shared image/depth crop produced empty output."
-        )
+        raise RuntimeError("Image/depth crop produced an empty frame.")
 
     image_out = cv2.resize(
         image_crop,
         (target_width, target_height),
         interpolation=cv2.INTER_LANCZOS4,
     )
-
     depth_out = cv2.resize(
         depth_crop,
         (target_width, target_height),
@@ -236,63 +161,48 @@ def apply_shared_crop(
     )
 
     if image_out.shape[:2] != depth_out.shape[:2]:
-        raise RuntimeError(
-            "Image/depth alignment failed."
-        )
+        raise RuntimeError("Image and depth alignment failed.")
 
     return image_out, depth_out
 
 
 def normalize_depth(depth):
-    """Normalize depth robustly while reducing extreme-value noise."""
+    """Normalize depth while suppressing outlier pixels and noise."""
 
-    depth_float = depth.astype(np.float32)
+    values = np.asarray(depth, dtype=np.float32)
 
-    low = float(np.percentile(depth_float, 2))
-    high = float(np.percentile(depth_float, 98))
+    if values.ndim != 2 or not np.isfinite(values).all():
+        raise RuntimeError("Depth map contains invalid pixel values.")
 
-    if not math.isfinite(low) or not math.isfinite(high):
-        raise RuntimeError(
-            "Depth map contains invalid values."
-        )
+    low = float(np.percentile(values, 2))
+    high = float(np.percentile(values, 98))
 
     if high - low < 1.0:
-        normalized = np.full(
-            depth_float.shape,
-            0.5,
-            dtype=np.float32,
-        )
+        normalized = np.full(values.shape, 0.5, dtype=np.float32)
     else:
-        normalized = (
-            (depth_float - low) / (high - low)
-        )
         normalized = np.clip(
-            normalized,
+            (values - low) / (high - low),
             0.0,
             1.0,
-        )
+        ).astype(np.float32)
 
     normalized = cv2.GaussianBlur(
         normalized,
         (0, 0),
-        2.2,
+        sigmaX=2.0,
+        sigmaY=2.0,
     )
 
-    return normalized
+    return np.clip(normalized, 0.0, 1.0)
 
 
 def get_scene_motion_seed(image_path, depth_path):
-    """Generate a repeatable movement direction for this scene."""
+    """Stable scene-specific movement based on actual source assets."""
 
     digest = hashlib.sha256()
 
     for path in (image_path, depth_path):
-        with Path(path).open("rb") as stream:
-            for block in iter(
-                lambda: stream.read(1024 * 1024),
-                b"",
-            ):
-                digest.update(block)
+        digest.update(sha256_file(path).encode("ascii"))
 
     return int.from_bytes(
         digest.digest()[:8],
@@ -302,56 +212,54 @@ def get_scene_motion_seed(image_path, depth_path):
 
 
 def make_motion_profile(seed):
-    """Select a deterministic but scene-specific camera movement path."""
-
     profiles = [
         {
-            "name": "horizontal_left",
+            "name": "cinematic_left",
             "direction": (-1.0, 0.0),
-            "cross": 0.22,
-            "zoom_phase": 0.0,
+            "cross": 0.16,
+            "phase": 0.0,
         },
         {
-            "name": "horizontal_right",
+            "name": "cinematic_right",
             "direction": (1.0, 0.0),
-            "cross": -0.22,
-            "zoom_phase": 0.7,
+            "cross": -0.16,
+            "phase": 0.7,
         },
         {
-            "name": "vertical_up",
+            "name": "vertical_reveal",
             "direction": (0.0, -1.0),
-            "cross": 0.18,
-            "zoom_phase": 1.2,
+            "cross": 0.14,
+            "phase": 1.2,
         },
         {
-            "name": "vertical_down",
+            "name": "vertical_rise",
             "direction": (0.0, 1.0),
-            "cross": -0.18,
-            "zoom_phase": 1.8,
+            "cross": -0.14,
+            "phase": 1.8,
         },
         {
-            "name": "diagonal_up_left",
+            "name": "diagonal_left",
             "direction": (-0.707, -0.707),
-            "cross": 0.20,
-            "zoom_phase": 2.4,
+            "cross": 0.16,
+            "phase": 2.4,
         },
         {
-            "name": "diagonal_up_right",
+            "name": "diagonal_right",
             "direction": (0.707, -0.707),
-            "cross": -0.20,
-            "zoom_phase": 3.0,
+            "cross": -0.16,
+            "phase": 3.0,
         },
         {
-            "name": "diagonal_down_left",
-            "direction": (-0.707, 0.707),
-            "cross": -0.20,
-            "zoom_phase": 3.6,
-        },
-        {
-            "name": "diagonal_down_right",
+            "name": "depth_push",
             "direction": (0.707, 0.707),
-            "cross": 0.20,
-            "zoom_phase": 4.2,
+            "cross": 0.12,
+            "phase": 3.6,
+        },
+        {
+            "name": "depth_pull",
+            "direction": (-0.707, 0.707),
+            "cross": -0.12,
+            "phase": 4.2,
         },
     ]
 
@@ -359,8 +267,6 @@ def make_motion_profile(seed):
 
 
 def smoothstep(value):
-    """Smooth easing with zero velocity at both ends."""
-
     value = max(0.0, min(1.0, value))
     return value * value * (3.0 - 2.0 * value)
 
@@ -372,76 +278,50 @@ def calculate_camera_transform(
     strength,
     profile,
 ):
-    """
-    Calculate a smooth camera path with zoom, pan and depth displacement.
+    """Smooth camera movement with restrained zoom and depth drift."""
 
-    Camera motion is deliberately stronger than the earlier renderer,
-    while the crop reserve prevents exposed borders.
-    """
-
-    direction_x, direction_y = profile["direction"]
-
+    progress = max(0.0, min(1.0, float(progress)))
     phase = 2.0 * math.pi * progress
     eased = smoothstep(progress)
 
-    zoom_phase = profile["zoom_phase"]
+    direction_x, direction_y = profile["direction"]
+    phase_offset = profile["phase"]
 
-    zoom_wave = (
-        0.5
-        + 0.5 * math.sin(
-            phase + zoom_phase - math.pi / 2.0
-        )
+    zoom_wave = 0.5 + 0.5 * math.sin(
+        phase + phase_offset - math.pi / 2.0
     )
 
-    zoom = (
-        MIN_ZOOM
-        + ZOOM_VARIATION * zoom_wave
-    )
+    zoom = MIN_ZOOM + ZOOM_VARIATION * zoom_wave
+    zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
 
-    zoom = min(
-        MAX_ZOOM,
-        max(MIN_ZOOM, zoom),
-    )
+    pan_x_limit = width * strength * 1.10
+    pan_y_limit = height * strength * 1.10
 
-    max_pan_x = width * strength * 1.15
-    max_pan_y = height * strength * 1.15
+    primary_x = math.sin(phase) * pan_x_limit * 0.48
+    primary_y = math.sin(phase + 0.75) * pan_y_limit * 0.48
 
-    primary_x = (
-        math.sin(phase) * max_pan_x
+    directional_x = (
+        direction_x * pan_x_limit * 0.62
+        * math.sin(math.pi * eased)
     )
-    primary_y = (
-        math.sin(phase + 0.75) * max_pan_y
-    )
-
-    diagonal_x = (
-        direction_x * max_pan_x * 0.75
-    )
-    diagonal_y = (
-        direction_y * max_pan_y * 0.75
-    )
-
-    drift_x = (
-        primary_x * 0.55
-        + diagonal_x * math.sin(math.pi * eased)
-    )
-
-    drift_y = (
-        primary_y * 0.55
-        + diagonal_y * math.sin(math.pi * eased)
+    directional_y = (
+        direction_y * pan_y_limit * 0.62
+        * math.sin(math.pi * eased)
     )
 
     cross = float(profile["cross"])
 
-    drift_x += (
-        math.sin(phase * 0.5 + zoom_phase)
-        * max_pan_x
-        * cross
+    drift_x = (
+        primary_x
+        + directional_x
+        + math.sin(phase * 0.5 + phase_offset)
+        * pan_x_limit * cross
     )
-
-    drift_y += (
-        math.cos(phase * 0.5 + zoom_phase)
-        * max_pan_y
-        * cross
+    drift_y = (
+        primary_y
+        + directional_y
+        + math.cos(phase * 0.5 + phase_offset)
+        * pan_y_limit * cross
     )
 
     return {
@@ -453,27 +333,62 @@ def calculate_camera_transform(
     }
 
 
+def build_remap(
+    base_x,
+    base_y,
+    displacement,
+    camera,
+    width,
+    height,
+    strength,
+):
+    """Build a single aligned RGB remap for the current camera frame."""
+
+    zoom = camera["zoom"]
+
+    zoom_x = (width - width / zoom) / 2.0
+    zoom_y = (height - height / zoom) / 2.0
+
+    map_x = (base_x - zoom_x) / zoom
+    map_y = (base_y - zoom_y) / zoom
+
+    depth_x = (
+        camera["depth_x"]
+        * strength
+        * width
+        * 1.25
+        * displacement
+    )
+    depth_y = (
+        camera["depth_y"]
+        * strength
+        * height
+        * 1.25
+        * displacement
+    )
+
+    map_x = map_x - camera["pan_x"] - depth_x
+    map_y = map_y - camera["pan_y"] - depth_y
+
+    return (
+        np.ascontiguousarray(map_x, dtype=np.float32),
+        np.ascontiguousarray(map_y, dtype=np.float32),
+    )
+
+
 def render_frames(image, depth, args, writer, profile):
     height, width = image.shape[:2]
 
     depth_normalized = normalize_depth(depth)
-
-    displacement = (
-        depth_normalized - 0.5
-    ) * 2.0
+    displacement = (depth_normalized - 0.5) * 2.0
 
     base_x, base_y = np.meshgrid(
         np.arange(width, dtype=np.float32),
         np.arange(height, dtype=np.float32),
     )
 
-    center_x = (width - 1) / 2.0
-    center_y = (height - 1) / 2.0
-
     for frame_index in range(args.frames):
-        progress = (
-            frame_index / max(args.frames - 1, 1)
-        )
+        progress = frame_index / max(args.frames - 1, 1)
 
         camera = calculate_camera_transform(
             progress,
@@ -483,56 +398,15 @@ def render_frames(image, depth, args, writer, profile):
             profile,
         )
 
-        zoom = camera["zoom"]
-
-        zoom_x = (
-            width - width / zoom
-        ) / 2.0
-
-        zoom_y = (
-            height - height / zoom
-        ) / 2.0
-
-        map_x_base = (
-            base_x - zoom_x
-        ) / zoom
-
-        map_y_base = (
-            base_y - zoom_y
-        ) / zoom
-
-        # Smooth camera movement across the entire scene.
-        camera_x = camera["pan_x"]
-        camera_y = camera["pan_y"]
-
-        # Depth separation creates foreground/background parallax.
-        depth_shift_x = (
-            camera["depth_x"]
-            * args.strength
-            * width
-            * 1.35
-            * displacement
+        map_x, map_y = build_remap(
+            base_x,
+            base_y,
+            displacement,
+            camera,
+            width,
+            height,
+            args.strength,
         )
-
-        depth_shift_y = (
-            camera["depth_y"]
-            * args.strength
-            * height
-            * 1.35
-            * displacement
-        )
-
-        map_x = (
-            map_x_base
-            - camera_x
-            - depth_shift_x
-        ).astype(np.float32)
-
-        map_y = (
-            map_y_base
-            - camera_y
-            - depth_shift_y
-        ).astype(np.float32)
 
         frame = cv2.remap(
             image,
@@ -544,15 +418,13 @@ def render_frames(image, depth, args, writer, profile):
 
         if frame is None or frame.shape != image.shape:
             raise RuntimeError(
-                f"Invalid frame generated at {frame_index + 1}."
+                f"Invalid rendered frame: {frame_index + 1}."
             )
 
         writer.write(frame)
 
         if not writer.isOpened():
-            raise RuntimeError(
-                "Video writer stopped unexpectedly."
-            )
+            raise RuntimeError("Video writer stopped unexpectedly.")
 
         if (frame_index + 1) % args.fps == 0:
             print(
@@ -560,15 +432,57 @@ def render_frames(image, depth, args, writer, profile):
                 flush=True,
             )
 
+def validate_video(path, width, height, expected_frames, fps):
+    path = Path(path)
 
-def encode_h264(
-    source,
-    destination,
-    fps,
-    expected_frames,
-):
+    if not path.is_file() or path.stat().st_size < MIN_BYTES:
+        raise RuntimeError("Rendered video is missing or too small.")
+
+    capture = cv2.VideoCapture(str(path))
+
+    try:
+        if not capture.isOpened():
+            raise RuntimeError("Cannot reopen rendered video.")
+
+        actual_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        actual_fps = float(capture.get(cv2.CAP_PROP_FPS))
+
+        if (actual_width, actual_height) != (width, height):
+            raise RuntimeError(
+                f"Resolution mismatch: {actual_width}x{actual_height}; "
+                f"expected {width}x{height}."
+            )
+
+        if frame_count != expected_frames:
+            raise RuntimeError(
+                f"Frame count mismatch: {frame_count}; "
+                f"expected {expected_frames}."
+            )
+
+        if not math.isfinite(actual_fps) or actual_fps <= 0:
+            raise RuntimeError("Video FPS is invalid.")
+
+        if abs(actual_fps - fps) > 1.0:
+            raise RuntimeError(
+                f"FPS mismatch: {actual_fps}; expected {fps}."
+            )
+
+        for position in (0, frame_count // 2, frame_count - 1):
+            capture.set(cv2.CAP_PROP_POS_FRAMES, position)
+            success, frame = capture.read()
+
+            if not success or frame is None or frame.size == 0:
+                raise RuntimeError(
+                    f"Cannot decode video frame {position}."
+                )
+    finally:
+        capture.release()
+
+
+def encode_h264(source, destination, fps, expected_frames):
     ffmpeg = shutil.which("ffmpeg")
-
     if not ffmpeg:
         return False
 
@@ -598,166 +512,64 @@ def encode_h264(
         check=False,
     )
 
-    if result.returncode:
+    if result.returncode != 0:
         destination.unlink(missing_ok=True)
-
         raise RuntimeError(
-            "FFmpeg H.264 conversion failed: "
-            + result.stderr[-2000:]
+            "H.264 encoding failed: " + result.stderr[-2000:]
         )
 
-    if (
-        not destination.is_file()
-        or destination.stat().st_size < MIN_BYTES
-    ):
+    if not destination.is_file() or destination.stat().st_size < MIN_BYTES:
         destination.unlink(missing_ok=True)
-
-        raise RuntimeError(
-            "Converted H.264 video is invalid."
-        )
+        raise RuntimeError("H.264 output is missing or too small.")
 
     return True
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Render smooth, dynamic depth-guided "
-            "2.5D cinematic parallax."
-        )
-    )
-
-    parser.add_argument("--image", required=True)
-    parser.add_argument("--depth", required=True)
-    parser.add_argument("--output", required=True)
-
-    parser.add_argument(
-        "--width",
-        type=positive_int,
-        default=720,
-    )
-
-    parser.add_argument(
-        "--height",
-        type=positive_int,
-        default=1280,
-    )
-
-    parser.add_argument(
-        "--fps",
-        type=positive_int,
-        default=24,
-    )
-
-    parser.add_argument(
-        "--frames",
-        type=positive_int,
-        default=144,
-    )
-
-    parser.add_argument(
-        "--strength",
-        type=bounded_float,
-        default=DEFAULT_STRENGTH,
-    )
-
-    args = parser.parse_args()
-
-    if args.fps > MAX_FPS:
-        parser.error(
-            f"--fps must not exceed {MAX_FPS}."
-        )
-
-    try:
-        validate_dimensions(
-            args.width,
-            args.height,
-        )
-    except RuntimeError as exc:
-        parser.error(str(exc))
-
-    if args.frames > args.fps * MAX_SECONDS:
-        parser.error(
-            "--frames cannot exceed ten minutes of video."
-        )
-
-    image_path = Path(args.image).resolve()
-    depth_path = Path(args.depth).resolve()
-    output_path = Path(args.output).resolve()
-
-    if not image_path.is_file():
-        raise FileNotFoundError(
-            f"Image not found: {image_path}"
-        )
-
-    if not depth_path.is_file():
-        raise FileNotFoundError(
-            f"Depth map not found: {depth_path}"
-        )
-
-    if output_path in (image_path, depth_path):
-        raise RuntimeError(
-            "Output must differ from both input files."
-        )
-
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    temporary = output_path.with_name(
-        output_path.stem + ".temporary.mp4"
-    )
-
-    converted = output_path.with_name(
-        output_path.stem + ".converted.mp4"
-    )
-
-    if temporary in (image_path, depth_path):
-        raise RuntimeError(
-            "Temporary output conflicts with an input file."
-        )
-
-    if converted in (image_path, depth_path):
-        raise RuntimeError(
-            "Converted output conflicts with an input file."
-        )
-
+def render_video(args, image_path, depth_path, output_path):
     image = cv2.imread(
         str(image_path),
         cv2.IMREAD_COLOR,
     )
-
     depth = cv2.imread(
         str(depth_path),
-        cv2.IMREAD_GRAYSCALE,
+        cv2.IMREAD_UNCHANGED,
     )
 
     if image is None:
-        raise RuntimeError(
-            "Could not decode source image."
-        )
+        raise RuntimeError("Source image could not be decoded.")
 
     if depth is None:
-        raise RuntimeError(
-            "Could not decode depth map."
-        )
+        raise RuntimeError("Depth map could not be decoded.")
+
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise RuntimeError("Source image must be a valid RGB/BGR image.")
+
+    if depth.ndim == 3:
+        if depth.shape[2] == 4:
+            depth = cv2.cvtColor(
+                depth,
+                cv2.COLOR_BGRA2GRAY,
+            )
+        else:
+            depth = cv2.cvtColor(
+                depth,
+                cv2.COLOR_BGR2GRAY,
+            )
+
+    if depth.ndim != 2:
+        raise RuntimeError("Depth map must be a single-channel image.")
 
     if (
         image.shape[0] < MIN_DIMENSION
         or image.shape[1] < MIN_DIMENSION
     ):
-        raise RuntimeError(
-            "Source image is too small."
-        )
+        raise RuntimeError("Source image dimensions are too small.")
 
     if (
         depth.shape[0] < 16
         or depth.shape[1] < 16
     ):
-        raise RuntimeError(
-            "Depth map is too small."
-        )
+        raise RuntimeError("Depth map dimensions are too small.")
 
     image, depth = apply_shared_crop(
         image,
@@ -766,12 +578,24 @@ def main():
         args.height,
     )
 
-    seed = get_scene_motion_seed(
-        image_path,
-        depth_path,
+    if not np.isfinite(depth).all():
+        raise RuntimeError("Depth map contains non-finite values.")
+
+    seed = get_scene_motion_seed(image_path, depth_path)
+    profile = make_motion_profile(seed)
+
+    temporary = output_path.with_name(
+        output_path.stem + ".temporary.mp4"
+    )
+    converted = output_path.with_name(
+        output_path.stem + ".converted.mp4"
     )
 
-    profile = make_motion_profile(seed)
+    if temporary in {image_path, depth_path, output_path}:
+        raise RuntimeError("Temporary video path conflicts with input.")
+
+    if converted in {image_path, depth_path, output_path}:
+        raise RuntimeError("Converted video path conflicts with input.")
 
     temporary.unlink(missing_ok=True)
     converted.unlink(missing_ok=True)
@@ -786,10 +610,7 @@ def main():
     if not writer.isOpened():
         writer.release()
         temporary.unlink(missing_ok=True)
-
-        raise RuntimeError(
-            "Could not initialize MP4 video writer."
-        )
+        raise RuntimeError("Could not initialize the video writer.")
 
     try:
         render_frames(
@@ -806,15 +627,9 @@ def main():
     finally:
         writer.release()
 
-    if (
-        not temporary.is_file()
-        or temporary.stat().st_size < MIN_BYTES
-    ):
+    if not temporary.is_file() or temporary.stat().st_size < MIN_BYTES:
         temporary.unlink(missing_ok=True)
-
-        raise RuntimeError(
-            "Temporary parallax video is invalid."
-        )
+        raise RuntimeError("Temporary rendered video is invalid.")
 
     try:
         validate_video(
@@ -838,10 +653,8 @@ def main():
                 args.frames,
                 args.fps,
             )
-
             converted.replace(output_path)
             temporary.unlink(missing_ok=True)
-
         else:
             temporary.replace(output_path)
 
@@ -854,10 +667,88 @@ def main():
         )
 
     except Exception:
-        converted.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)
+        converted.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
         raise
 
+    return profile
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Render smooth cinematic depth-guided 2.5D Photo Motion."
+        )
+    )
+
+    # These arguments match the existing photo_motion.py caller.
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--depth", required=True)
+    parser.add_argument("--output", required=True)
+
+    parser.add_argument(
+        "--width",
+        type=positive_int,
+        default=720,
+    )
+    parser.add_argument(
+        "--height",
+        type=positive_int,
+        default=1280,
+    )
+    parser.add_argument(
+        "--fps",
+        type=positive_int,
+        default=24,
+    )
+    parser.add_argument(
+        "--frames",
+        type=positive_int,
+        default=144,
+    )
+    parser.add_argument(
+        "--strength",
+        type=bounded_float,
+        default=DEFAULT_STRENGTH,
+    )
+
+    args = parser.parse_args()
+
+    if args.fps > MAX_FPS:
+        parser.error(f"--fps cannot exceed {MAX_FPS}.")
+
+    if args.frames > args.fps * MAX_SECONDS:
+        parser.error("Maximum supported scene duration is 600 seconds.")
+
+    try:
+        validate_dimensions(args.width, args.height)
+    except RuntimeError as exc:
+        parser.error(str(exc))
+
+    image_path = Path(args.image).resolve()
+    depth_path = Path(args.depth).resolve()
+    output_path = Path(args.output).resolve()
+
+    if not image_path.is_file():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    if not depth_path.is_file():
+        raise FileNotFoundError(f"Depth map not found: {depth_path}")
+
+    if output_path in {image_path, depth_path}:
+        raise RuntimeError("Output must differ from both input files.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    profile = render_video(
+        args,
+        image_path,
+        depth_path,
+        output_path,
+    )
+
+    print("=" * 55)
     print("DEPTH PARALLAX SUCCESS")
     print("Version:", VERSION)
     print("Movement profile:", profile["name"])
@@ -865,32 +756,19 @@ def main():
     print("Output:", output_path)
     print("Frames:", args.frames)
     print("FPS:", args.fps)
-    print(
-        "Resolution:",
-        f"{args.width}x{args.height}",
-    )
-    print(
-        "Duration:",
-        f"{args.frames / args.fps:.3f}s",
-    )
-    print(
-        "Size bytes:",
-        output_path.stat().st_size,
-    )
+    print("Resolution:", f"{args.width}x{args.height}")
+    print("Duration:", f"{args.frames / args.fps:.3f}s")
+    print("Size bytes:", output_path.stat().st_size)
+    print("SHA256:", sha256_file(output_path))
+    print("=" * 55)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(
-            "DEPTH PARALLAX CANCELLED",
-            file=sys.stderr,
-        )
+        print("DEPTH PARALLAX CANCELLED", file=sys.stderr)
         sys.exit(130)
     except Exception as exc:
-        print(
-            f"DEPTH PARALLAX FAILED: {exc}",
-            file=sys.stderr,
-        )
+        print(f"DEPTH PARALLAX FAILED: {exc}", file=sys.stderr)
         sys.exit(1)
