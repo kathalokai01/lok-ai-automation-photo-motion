@@ -1,57 +1,25 @@
 # ============================================================
-# VIDEO FORMAT & AUDIENCE
+# KATHA LOK AI — PHOTO MOTION INPUT CONFIGURATION
 # ============================================================
 
-FORMAT = "short"                  # short = vertical | full = long-form
-AUDIENCE = "adult"                # adult | kids
+# VIDEO MODE
+# short = केवल vertical short video
+# full  = केवल full-length video
+FORMAT = "short"
+AUDIENCE = "adult"                 # adult | kids
 
 # ============================================================
-# VOICE / NARRATION
+# TITLE AND STORY INPUT
 # ============================================================
 
-VOICE = "female"                    # male | female
-SPEED = "+0%"                     # -10% slow | 0% normal | +10% fast
+TITLE = ""                         # Optional; खाली होने पर कहानी से title बनेगा
+TOPIC = ""                         # Topic/title देकर नई कहानी बनवाएँ
 
-# ============================================================
-# TTS MODEL SELECTION
-# हर नई कहानी के लिए अपने 3 प्राथमिक मॉडल चुनें
-# ============================================================
+# Supplied story को source मानकर चलाएँ।
+# Story के characters, events, relationships और ending न बदलें।
+PRESERVE_STORY_TEXT = true
 
-TTS_MAIN_1 = "elevenlab"
-TTS_MAIN_2 = "gemini_tts"
-TTS_MAIN_3 = "edge_tts"
-
-# पहले ऊपर चुने गए तीनों मॉडल क्रम से आजमाए जाएँगे।
-# इनके असफल होने पर fallback सूची के बाकी मॉडल आजमाए जाएँगे।
-# ऊपर चुने मॉडल fallback में दोबारा नहीं चलने चाहिए।
-
-TTS_FALLBACK_ENABLED = true
-TTS_FALLBACK_ORDER = "fish_audio,gemini_tts,edge_tts,piper,elevenlabs,cartesia,finevoice,minimax"
-
-# उपलब्ध TTS मॉडल:
-# fish_audio, gemini_tts, edge_tts, piper,
-# elevenlabs, cartesia, finevoice, minimax
-
-# Paid या अनिश्चित लागत वाले cloud APIs की अनुमति
-TTS_ALLOW_PAID = false
-
-# लंबी narration को छोटे audio chunks में बाँटना
-TTS_CHUNK_MAX_CHARS = 500
-TTS_CHUNK_MIN_CHARS = 150
-
-# प्रत्येक सफल chunk के बाद checkpoint
-TTS_CHUNK_CHECKPOINT = true
-TTS_VALIDATE_AUDIO = true
-
-TTS_MAX_PROVIDER_ATTEMPTS = 1
-
-# ============================================================
-# STORY INPUT
-# ============================================================
-
-TOPIC = ""        # विषय भरें तो उसी विषय पर कहानी बनेगी
-
-STORY_TEXT = """  अयान के माथे पर पसीने की बूंदें चमक रही थीं। रात के दो बज चुके थे। न्यू-टेक सिटी की सबसे ऊंची और आलीशान 50-मंजिला 'सिटैडल टावर्स' के कंट्रोल रूम में सिर्फ उसकी कंप्यूटर स्क्रीन की रोशनी चमक रही थी। अयान इस मेगा-प्रोजेक्ट का चीफ आर्किटेक्ट और लीड सॉफ्टवेयर इंजीनियर था। इस बिल्डिंग का पूरा ढांचा, सिक्योरिटी, और लिफ्ट सिस्टम एक एडवांस एआई (AI) 'ओरियन-9' से नियंत्रित था, जिसे खुद अयान ने डिजाइन किया था।
+STORY_TEXT = """अयान के माथे पर पसीने की बूंदें चमक रही थीं। रात के दो बज चुके थे। न्यू-टेक सिटी की सबसे ऊंची और आलीशान 50-मंजिला 'सिटैडल टावर्स' के कंट्रोल रूम में सिर्फ उसकी कंप्यूटर स्क्रीन की रोशनी चमक रही थी। अयान इस मेगा-प्रोजेक्ट का चीफ आर्किटेक्ट और लीड सॉफ्टवेयर इंजीनियर था। इस बिल्डिंग का पूरा ढांचा, सिक्योरिटी, और लिफ्ट सिस्टम एक एडवांस एआई (AI) 'ओरियन-9' से नियंत्रित था, जिसे खुद अयान ने डिजाइन किया था।
 तभी अयान के फोन पर एक प्राइवेट नंबर से कॉल आई। यह शहर के सबसे बड़े रियल एस्टेट टाइकून और इस प्रोजेक्ट के मालिक, विक्रांत मेहरा का था।
 "अयान, क्या काम पूरा हुआ?" विक्रांत की आवाज में एक अजीब सी हड़बड़ाहट थी।
 "सर, 'ओरियन-9' के स्ट्रक्चरल लोड-बैलेंसिंग कोड में एक बड़ी खामी (Bug) है। अगर तेज हवाएं चलीं या भूकंप का हल्का झटका भी आया, तो बिल्डिंग के ऊपरी 10 फ्लोर का सेंसर फेल हो सकता है। हमें कल का इनॉग्रेशन (उद्घाटन) रोकना होगा।" अयान ने घबराते हुए कहा।
@@ -70,7 +38,7 @@ STORY_TEXT = """  अयान के माथे पर पसीने की
 धूल और धुएं के गुबार के बीच से उसकी मां और उसका बेटा रियान खांसते हुए बाहर निकले। अयान का पैच कोड आखिरी सेकंड में काम कर गया था। अयान ने दौड़कर अपने परिवार को सीने से लगा लिया। उसने अपने परिवार को तो बचा लिया था, लेकिन इस लालच के खेल को खत्म करना अभी बाकी था।
 दूसरी तरफ, इस पूरे प्रोजेक्ट का मालिक विक्रांत मेहरा अपने प्राइवेट हेलीकॉप्टर से शहर छोड़कर भागने की फिराक में था। हेलीकॉप्टर टावर्स के रूफटॉप (छत) पर बने हेलीपैड पर उसका इंतजार कर रहा था। विक्रांत अपने साथ कैश और जरूरी दस्तावेजों से भरा सूटकेस लेकर जैसे ही छत पर पहुंचा, तूफान अपने सबसे खूंखार रूप में आ गया।
 अयान ने नीचे सर्वर रूम से 'ओरियन-9' एआई का पूरा कंट्रोल वापस पा लिया था। उसने रूफटॉप के ऑटोमैटिक गेट्स और सेफ्टी नेट को पूरी तरह लॉक कर दिया।
-हवा का एक ऐसा जोरदार झोंका आया जिसने हेलीकॉप्टर के ब्लेड्स को अनइम्प्रेसिव तरीके से अनियंत्रित कर दिया। विक्रांत डर के मारे पीछे हटा, लेकिन तभी बिल्डिंग का वह हिस्सा जहां उसने अयान को कोड से छेड़छाड़ करने के लिए मजबूर किया था, तेज हवाओं के दबाव से चरमरा उठा। स्ट्रक्चरल लोड सेंसर फेल होने के कारण वहां लगा भारी-भरकम स्टील का बीम (Beam) और कंक्रीट का स्लैब टूटकर सीधे विक्रांत के दोनों पैरों पर आ गिरा।
+हवा का एक ऐसा जोरदार झोंका आया जिसने हेलीकॉप्टर के ब्लेड्स को अनइम्प्रेसिव तरीके से अनियंत्रित कर दिया। विक्रांत डर के मारे पीछे हटा, लेकिन तभी बिल्डिंग का वह हिस्सा जहां उसने अयान को कोड से छेड़छाड़ करने के लिए मजबूर किया था, तेज हवाओं के दबाव से चरमराकर उठा। स्ट्रक्चरल लोड सेंसर फेल होने के कारण वहां लगा भारी-भरकम स्टील का बीम (Beam) और कंक्रीट का स्लैब टूटकर सीधे विक्रांत के दोनों पैरों पर आ गिरा।
 "बचाओ! कोई है?" विक्रांत दर्द से चीख पड़ा। लेकिन वहां सिर्फ तूफान की आवाज थी।
 प्रकृति ने अपनी सजा दे दी थी। विक्रांत के पैर कंक्रीट के नीचे बुरी तरह कुचल चुके थे। वह हिलने की स्थिति में भी नहीं था। उसी वक्त, अयान पुलिस और रेस्क्यू टीम के साथ छत पर पहुंचा।
 अयान ने विक्रांत के सामने खड़े होकर कहा, "मेहरा जी, जिस पैसे के घमंड में आपने हजारों मासूमों की जान दांव पर लगाई, आज कुदरत ने उसी सीमेंट और कंक्रीट से आपका हिसाब कर दिया।"
@@ -78,7 +46,8 @@ STORY_TEXT = """  अयान के माथे पर पसीने की
 लेकिन कुदरत के इस न्याय के तुरंत बाद कानून का पहिया घूमा। अयान ने पुलिस को वह ऑडियो रिकॉर्डिंग और डिजिटल सबूत सौंप दिए, जिसमें विक्रांत ने उसे 5 मिलियन डॉलर की रिश्वत दी थी और कोड बदलने की धमकी दी थी। सिटैडल टावर्स के इस घोटाले का राज जैसे ही मीडिया में खुला, पूरे देश में हड़कंप मच गया।
 छह महीने बाद, अदालत ने विक्रांत मेहरा को गैर-इरादतन हत्या की साजिश और भ्रष्टाचार का दोषी पाते हुए उम्रकैद की सजा सुनाई।
 कहानी का आखिरी दृश्य जेल के अस्पताल वार्ड का है। विक्रांत मेहरा, जो कभी आलीशान महलों में रहता था, आज जेल की एक संकरी कोठरी में व्हीलचेयर पर बैठा सलाखों के बाहर देख रहा था। उसके पास अरबों रुपये थे, लेकिन उन पैसों से खरीदने के लिए न तो उसके पास अपनी सेहत बची थी और न ही आजादी।
-अयान को भी कोर्ट ने उसकी ईमानदारी और समय पर सच कबूलने के कारण कम सजा दी। जब अयान जेल की वैन में बैठ रहा था, तो उसकी आंखों में डर नहीं, बल्कि एक सुकून था। उसने अपनी भूल का प्रायश्चित कर लिया था, और विक्रांत मेहरा को उसके कर्मों की सबसे दर्दनाक 'नेचुरल' और 'लीगल' सजा मिल चुकी थी।  """
+अयान को भी कोर्ट ने उसकी ईमानदारी और समय पर सच कबूलने के कारण कम सजा दी। जब अयान जेल की वैन में बैठ रहा था, तो उसकी आंखों में डर नहीं, बल्कि एक सुकून था। उसने अपनी भूल का प्रायश्चित कर लिया था, और विक्रांत मेहरा को उसके कर्मों की सबसे दर्दनाक 'नेचुरल' और 'लीगल' सजा मिल चुकी थी।"""
+
 # ============================================================
 # STORY STRUCTURE
 # ============================================================
@@ -86,58 +55,80 @@ STORY_TEXT = """  अयान के माथे पर पसीने की
 PARTS = 4
 SCENES = 13
 
-STORY_LENGTH = "auto"             # auto | short | medium | long
-SCENE_DURATION = "auto"           # auto | fixed
+STORY_LENGTH = "auto"              # auto | short | medium | long
+SCENE_DURATION = "auto"            # auto | fixed
 
 PART_HOOK = true
 PART_SUSPENSE = true
 FINAL_RESOLUTION = true
 
 # ============================================================
+# VOICE / NARRATION
+# ============================================================
+
+VOICE = "female"                   # male | female
+SPEED = "+0%"                      # -10% slow | +0% normal | +10% fast
+
+# ============================================================
+# TTS MODEL SELECTION
+# ============================================================
+
+# पहले ये तीनों मॉडल इसी क्रम में चलेंगे।
+# इनके बाद fallback list के शेष मॉडल चलेंगे।
+# चुने हुए मॉडल fallback में दोबारा नहीं चलेंगे।
+
+TTS_MAIN_1 = "elevenlab"
+TTS_MAIN_2 = "gemini_tts"
+TTS_MAIN_3 = "edge_tts"
+
+TTS_FALLBACK_ENABLED = true
+TTS_FALLBACK_ORDER = "fish_audio,gemini_tts,edge_tts,piper,elevenlabs,cartesia,finevoice,minimax"
+
+# उपलब्ध मॉडल:
+# fish_audio, gemini_tts, edge_tts, piper,
+# elevenlabs, cartesia, finevoice, minimax
+
+TTS_ALLOW_PAID = true
+ALLOW_BILLABLE_PROVIDERS = true
+
+TTS_CHUNK_MAX_CHARS = 500
+TTS_CHUNK_MIN_CHARS = 150
+TTS_CHUNK_CHECKPOINT = true
+TTS_VALIDATE_AUDIO = true
+TTS_MAX_PROVIDER_ATTEMPTS = 1
+
+# ============================================================
+# IMAGE PROVIDER FALLBACK
+# ============================================================
+
+IMAGE_PROVIDER_ORDER = "huggingface,pollinations,gemini,replicate"
+IMAGE_FALLBACK_ENABLED = true
+IMAGE_ALLOW_BILLABLE = true
+
+HF_IMAGE_SPACE = "mrfakename/Z-Image-Turbo"
+FREE_IMAGE_FALLBACK_SPACES = ""
+
+POLLINATIONS_FREE_IMAGE_MODELS = "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"
+
+GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
+REPLICATE_IMAGE_MODEL = "black-forest-labs/flux-schnell"
+
+# ============================================================
 # CAPTIONS
 # ============================================================
 
-CAPTIONS = "hinglish"                # hindi | english | hinglish
+CAPTIONS = "hinglish"              # hindi | english | hinglish
 
-# Font family: हर कहानी के लिए इनमें से चुनें
-#
-# 1. Noto Sans Devanagari
-#    साफ और आधुनिक; सामान्य narration captions
-#
-# 2. Mukta
-#    आधुनिक और खुला रूप; cinematic कहानियाँ
-#
-# 3. Hind
-#    compact और screen-friendly; mobile videos
-#
-# 4. Tiro Devanagari Hindi
-#    पारंपरिक साहित्यिक रूप; ऐतिहासिक कहानियाँ
-#
-# जरूरी: font को workflow में install करना भी आवश्यक है।
-# केवल नाम चुनने से font अपने आप install नहीं होता।
-
+# Font options:
+# Noto Sans Devanagari | Mukta | Hind | Tiro Devanagari Hindi
 CAPTION_FONT = "mukta"
 
-# Font size: pixels नहीं, ASS subtitle style का font size
-#
-# Size 22: छोटा caption — स्क्रीन पर कम जगह
-# उदाहरण: कहानी में एक रहस्य छिपा था।
-#
-# Size 28: मध्यम caption — सामान्य उपयोग
-# उदाहरण: कहानी में एक रहस्य छिपा था।
-#
-# Size 34: बड़ा caption — ज्यादा prominent
-# उदाहरण: कहानी में एक रहस्य छिपा था।
-#
-# अलग fonts में समान size थोड़ा अलग दिख सकता है।
-# Vertical और horizontal video में परिणाम अलग हो सकता है।
-#
-# स्वीकार्य मान: auto या 16 से 64 के बीच पूर्णांक
-
+# auto या 16 से 64 के बीच integer
+# 22 = छोटा, 28 = मध्यम, 34 = बड़ा
 CAPTION_FONT_SIZE = 22
 
 # ============================================================
-# VISUAL STYLE
+# PHOTO MOTION VISUAL STYLE
 # ============================================================
 
 VISUAL_STYLE = "cinematic_realistic"
@@ -146,11 +137,7 @@ VISUAL_STYLE = "cinematic_realistic"
 # dark_fantasy | anime_cinematic | clay_animation
 # watercolor | comic_cinematic | minimalist
 
-REALISM = "high"                  # high | medium | low
-
-# ============================================================
-# CHARACTER & WORLD CONSISTENCY
-# ============================================================
+REALISM = "high"                   # high | medium | low
 
 CHARACTER_BIBLE = true
 CHARACTER_CONSISTENCY = true
@@ -158,33 +145,22 @@ WORLD_CONSISTENCY = true
 SCENE_CONTINUITY = true
 
 # ============================================================
-# CAMERA
+# CAMERA / LIGHTING / MOOD
 # ============================================================
 
 CINEMATIC_CAMERA = true
-CAMERA_STYLE = "cinematic"
-# cinematic | dynamic | slow | documentary | static
+CAMERA_STYLE = "cinematic"         # cinematic | dynamic | slow | documentary | static
+
+LIGHTING = "cinematic"             # cinematic | natural | warm | dark | dramatic | soft | night
+
+MOOD = "dramatic"                  # dramatic | emotional | mysterious | suspense
+                                   # horror | joyful | inspirational | peaceful
 
 # ============================================================
-# LIGHTING
+# VISUAL QUALITY
 # ============================================================
 
-LIGHTING = "cinematic"
-# cinematic | natural | warm | dark | dramatic | soft | night
-
-# ============================================================
-# MOOD
-# ============================================================
-
-MOOD = "dramatic"
-# dramatic | emotional | mysterious | suspense
-# horror | joyful | inspirational | peaceful
-
-# ============================================================
-# VISUAL QUALITY / CLEAN OUTPUT
-# ============================================================
-
-QUALITY = "high"                 # draft | standard | high
+QUALITY = "high"                   # draft | standard | high
 FPS = 24
 
 NEGATIVE_PROMPT = true
@@ -195,13 +171,12 @@ NATURAL_MOTION = true
 REALISTIC_LIGHTING = true
 
 # ============================================================
-# MUSIC & SOUND
+# MUSIC / SFX / AMBIENT
 # ============================================================
 
 MUSIC = true
-MUSIC_STYLE = "cinematic"
-# cinematic | emotional | suspense | devotional
-# folk | fantasy | none
+MUSIC_STYLE = "cinematic"          # cinematic | emotional | suspense | devotional
+                                   # folk | fantasy | none
 
 SFX = true
 AMBIENT_SOUND = true
@@ -210,7 +185,7 @@ AMBIENT_SOUND = true
 # EDITING
 # ============================================================
 
-TRANSITIONS = "cinematic"        # cinematic | clean | none
+TRANSITIONS = "cinematic"          # cinematic | clean | none
 
 # ============================================================
 # BRANDING
@@ -224,7 +199,6 @@ LOGO = false
 # ============================================================
 
 RESUME_ENABLED = true
-
 MAX_RETRIES = 3
 
 SAVE_CHECKPOINT_AFTER_EACH_SCENE = true
