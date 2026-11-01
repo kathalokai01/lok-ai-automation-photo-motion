@@ -107,7 +107,7 @@ jobs:
           print_config_summary(config)
           PY
 
-      - name: Calculate input and code fingerprints
+      - name: Calculate input and pipeline fingerprints
         id: fingerprints
         shell: bash
         run: |
@@ -116,27 +116,30 @@ jobs:
           INPUT_HASH="$(sha256sum Input/topic.txt | awk '{print $1}')"
 
           {
-            sha256sum Input/topic.txt
-            find scripts -type f -name '*.py' -print0 \
+            find scripts -type f -name '*.py' \
+              ! -name 'verify_story.py' \
+              -print0 \
               | sort -z \
               | xargs -0 -r sha256sum
-            sha256sum .github/workflows/generate-photo-motion-video.yml
-          } > /tmp/katha-code-files.sha256
+          } > /tmp/katha-pipeline-files.sha256
 
-          CODE_HASH="$(sha256sum /tmp/katha-code-files.sha256 | awk '{print $1}')"
+          PIPELINE_HASH="$(
+            sha256sum /tmp/katha-pipeline-files.sha256 | awk '{print $1}'
+          )"
 
           echo "input_hash=$INPUT_HASH" >> "$GITHUB_OUTPUT"
-          echo "code_hash=$CODE_HASH" >> "$GITHUB_OUTPUT"
+          echo "pipeline_hash=$PIPELINE_HASH" >> "$GITHUB_OUTPUT"
 
           echo "Input fingerprint: $INPUT_HASH"
-          echo "Code fingerprint: $CODE_HASH"
+          echo "Pipeline fingerprint: $PIPELINE_HASH"
+          echo "Story verifier and workflow file are excluded from pipeline fingerprint."
 
       - name: Restore compatible checkpoint
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
-          CURRENT_CODE_HASH: ${{ steps.fingerprints.outputs.code_hash }}
+          CURRENT_PIPELINE_HASH: ${{ steps.fingerprints.outputs.pipeline_hash }}
         run: |
           set -euo pipefail
           mkdir -p output
@@ -164,6 +167,7 @@ jobs:
             fi
 
             CHECKPOINT="$DEST/checkpoint.zip"
+
             if [ ! -s "$CHECKPOINT" ]; then
               continue
             fi
@@ -183,37 +187,55 @@ jobs:
             fi
 
             mkdir -p "$DEST/extracted"
+
             if ! unzip -q "$CHECKPOINT" -d "$DEST/extracted"; then
               continue
             fi
 
             SAVED_OUTPUT="$DEST/extracted/output"
-            INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
-            CODE_FILE="$SAVED_OUTPUT/.resume-code.sha256"
 
-            if [ ! -s "$INPUT_FILE" ] || [ ! -s "$CODE_FILE" ]; then
-              echo "Skipping checkpoint without fingerprints: $RUN_ID"
+            INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
+            PIPELINE_FILE="$SAVED_OUTPUT/.resume-pipeline.sha256"
+
+            if [ ! -s "$INPUT_FILE" ]; then
+              echo "Skipping checkpoint without input fingerprint: $RUN_ID"
               continue
             fi
 
             SAVED_INPUT_HASH="$(tr -d '\r\n' < "$INPUT_FILE")"
-            SAVED_CODE_HASH="$(tr -d '\r\n' < "$CODE_FILE")"
 
             if [ "$SAVED_INPUT_HASH" != "$CURRENT_INPUT_HASH" ]; then
+              echo "Skipping checkpoint: input has changed ($RUN_ID)."
               continue
             fi
 
-            if [ "$SAVED_CODE_HASH" != "$CURRENT_CODE_HASH" ]; then
-              echo "Skipping checkpoint from a different code version: $RUN_ID"
+            if [ ! -s "$PIPELINE_FILE" ]; then
+              echo "Skipping legacy checkpoint without pipeline fingerprint: $RUN_ID"
+              continue
+            fi
+
+            SAVED_PIPELINE_HASH="$(tr -d '\r\n' < "$PIPELINE_FILE")"
+
+            if [ "$SAVED_PIPELINE_HASH" != "$CURRENT_PIPELINE_HASH" ]; then
+              echo "Skipping checkpoint: generation pipeline has changed ($RUN_ID)."
+              continue
+            fi
+
+            if [ -z "$(find "$SAVED_OUTPUT" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+              echo "Skipping empty checkpoint from run $RUN_ID."
               continue
             fi
 
             cp -a "$SAVED_OUTPUT/." output/
+
             echo "Compatible checkpoint restored from run $RUN_ID."
+            echo "Input fingerprint matched."
+            echo "Pipeline fingerprint matched."
             exit 0
           done
 
-          echo "No compatible checkpoint found; starting without a restored checkpoint."
+          echo "No compatible checkpoint found."
+          echo "Generation will start without restored output."
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -232,11 +254,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install -y \
             ffmpeg zip unzip fontconfig \
             fonts-noto-core fonts-noto-extra
+
           fc-cache -f
+
           ffmpeg -version
           ffprobe -version
           fc-match "Noto Sans Devanagari"
@@ -245,19 +270,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python -m pip install --upgrade pip
+
           python -m pip install \
             requests pillow edge-tts gradio_client \
             huggingface_hub opencv-python-headless
+
           python -m pip install torch \
             --index-url https://download.pytorch.org/whl/cpu
+
           python -m pip install transformers
 
       - name: Install free Hindi caption fonts
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/install_caption_fonts.py
+
           fc-cache -f
           fc-match "Noto Sans Devanagari"
           fc-match "Mukta"
@@ -268,7 +299,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/preview_caption_fonts.py
+
           test -s output/captions/caption_font_preview.png
           test -s output/captions/caption_font_preview.json
 
@@ -333,9 +366,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/generate_youtube_metadata.py
+
           test -s output/youtube_metadata.txt
           test -s output/publish/youtube_metadata.json
+
           echo "Story-specific YouTube metadata generated."
 
       - name: Validate final deliverables
@@ -345,21 +381,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/package_output.py
+
           test -s katha-lok-ai-photo-motion-output.zip
           test -s output/package_manifest.json
+
           unzip -t katha-lok-ai-photo-motion-output.zip
           ls -lh katha-lok-ai-photo-motion-output.zip
+
           python - <<'PY'
           import json
           from pathlib import Path
 
           path = Path("output/package_manifest.json")
           data = json.loads(path.read_text(encoding="utf-8"))
+
           assert data.get("status") == "completed", "Package manifest status failed"
           assert data.get("format") in {"short", "full"}, "Package format is invalid"
           assert data.get("file_count", 0) > 0, "Package contains no files"
           assert data.get("zip_integrity") == "valid", "ZIP integrity not confirmed"
+
           print("Package manifest verified.")
           PY
 
@@ -379,18 +421,27 @@ jobs:
         shell: bash
         env:
           INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
-          CODE_HASH: ${{ steps.fingerprints.outputs.code_hash }}
+          PIPELINE_HASH: ${{ steps.fingerprints.outputs.pipeline_hash }}
         run: |
           set -euo pipefail
+
           mkdir -p output
 
-          printf '%s\n' "$INPUT_HASH" > output/.resume-input.sha256
-          printf '%s\n' "$CODE_HASH" > output/.resume-code.sha256
+          printf '%s\n' "$INPUT_HASH" \
+            > output/.resume-input.sha256
+
+          printf '%s\n' "$PIPELINE_HASH" \
+            > output/.resume-pipeline.sha256
 
           rm -f checkpoint.zip
+
           zip -qr checkpoint.zip output
+
           test -s checkpoint.zip
           unzip -tq checkpoint.zip
+
+          echo "Checkpoint saved."
+          echo "Input and pipeline fingerprints stored."
 
       - name: Upload checkpoint
         if: always()
