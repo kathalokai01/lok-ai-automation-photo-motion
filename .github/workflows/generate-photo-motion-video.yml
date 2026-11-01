@@ -73,11 +73,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -s Input/topic.txt || {
-            echo "::error::Input/topic.txt is missing or empty."
-            exit 1
-          }
-
+          test -s Input/topic.txt
           test -s .github/workflows/generate-photo-motion-video.yml
 
           required_files=(
@@ -85,6 +81,7 @@ jobs:
             scripts/select_gemini_model.py
             scripts/generate_story_plan.py
             scripts/generate_story.py
+            scripts/validate_story_length.py
             scripts/verify_story.py
             scripts/generate_ai_story.py
             scripts/generate_character_bible.py
@@ -108,6 +105,7 @@ jobs:
             scripts/generate_youtube_metadata.py
             scripts/validate_final_output.py
             scripts/package_output.py
+            scripts/pipeline_preflight.py
           )
 
           for file in "${required_files[@]}"; do
@@ -156,6 +154,9 @@ jobs:
           if not images or len(set(images)) != len(images):
               raise SystemExit("Image provider order is invalid.")
 
+          if not get_global_billable_permission(config):
+              raise SystemExit("Billable providers are disabled.")
+
           print("INPUT CONFIGURATION VALID")
           print("FORMAT:", mode)
           print("PARTS:", parts)
@@ -164,10 +165,7 @@ jobs:
           print("FPS:", fps)
           print("TTS FALLBACK ORDER:", " -> ".join(tts))
           print("IMAGE FALLBACK ORDER:", " -> ".join(images))
-          print(
-              "BILLABLE PROVIDERS ALLOWED:",
-              get_global_billable_permission(config),
-          )
+          print("BILLABLE PROVIDERS ALLOWED: true")
           PY
 
       - name: Calculate input and pipeline fingerprints
@@ -206,6 +204,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
+          CURRENT_PIPELINE_HASH: ${{ steps.fingerprints.outputs.pipeline_hash }}
         run: |
           set -euo pipefail
 
@@ -284,15 +283,10 @@ jobs:
                   seen.add(name)
 
                   mode = info.external_attr >> 16
-
                   if stat.S_ISLNK(mode):
                       raise SystemExit(f"Symlink in checkpoint: {name}")
 
-                  if info.file_size < 0:
-                      raise SystemExit(f"Invalid file size: {name}")
-
                   total_size += info.file_size
-
                   if total_size > 8 * 1024 * 1024 * 1024:
                       raise SystemExit("Checkpoint exceeds 8 GiB.")
 
@@ -311,15 +305,23 @@ jobs:
             fi
 
             INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
+            PIPELINE_FILE="$SAVED_OUTPUT/.resume-pipeline.sha256"
 
-            if [ ! -s "$INPUT_FILE" ]; then
+            if [ ! -s "$INPUT_FILE" ] || [ ! -s "$PIPELINE_FILE" ]; then
+              echo "Checkpoint fingerprints missing: $RUN_ID"
               continue
             fi
 
             SAVED_INPUT_HASH="$(tr -d '\r\n' < "$INPUT_FILE")"
+            SAVED_PIPELINE_HASH="$(tr -d '\r\n' < "$PIPELINE_FILE")"
 
             if [ "$SAVED_INPUT_HASH" != "$CURRENT_INPUT_HASH" ]; then
               echo "Input changed; checkpoint rejected: $RUN_ID"
+              continue
+            fi
+
+            if [ "$SAVED_PIPELINE_HASH" != "$CURRENT_PIPELINE_HASH" ]; then
+              echo "Pipeline changed; checkpoint rejected: $RUN_ID"
               continue
             fi
 
@@ -333,8 +335,8 @@ jobs:
 
             cp -a "$SAVED_OUTPUT/." output/
 
-            echo "Matching checkpoint restored from run $RUN_ID"
-            echo "Individual pipeline stages must still validate reused assets."
+            echo "Matching input and pipeline checkpoint restored."
+            echo "Run ID: $RUN_ID"
             exit 0
           done
 
@@ -358,7 +360,6 @@ jobs:
           ffmpeg -version
           ffprobe -version
           fc-cache -f
-
           fc-match "Noto Sans Devanagari"
 
       - name: Install Python dependencies
@@ -421,6 +422,36 @@ jobs:
           fc-match "Hind"
           fc-match "Tiro Devanagari Hindi"
 
+      - name: Run strict Photo Motion preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/pipeline_preflight.py
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/preflight_report.json")
+          if not path.is_file():
+              raise SystemExit("Preflight report was not created.")
+
+          report = json.loads(path.read_text(encoding="utf-8"))
+
+          if report.get("ready_to_run") is not True:
+              failures = report.get("failures", [])
+              for item in failures:
+                  print("PREFLIGHT FAILURE:", item)
+              raise SystemExit("Preflight did not approve generation.")
+
+          if report.get("api_calls_made") != 0:
+              raise SystemExit("Preflight must not make API calls.")
+
+          print("Preflight report verified.")
+          print("Checks passed:", report.get("checks_passed"))
+          PY
+
       - name: Generate caption font preview
         shell: bash
         run: |
@@ -440,7 +471,67 @@ jobs:
       - name: Generate story
         run: python scripts/generate_story.py
 
-      - name: Verify story
+      - name: Validate exact story length and structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/validate_story_length.py
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report_path = Path(
+              "output/story/story_length_validation.json"
+          )
+
+          if not report_path.is_file():
+              raise SystemExit("Story length validation report is missing.")
+
+          report = json.loads(
+              report_path.read_text(encoding="utf-8")
+          )
+
+          summary = report.get("summary")
+          if not isinstance(summary, dict):
+              raise SystemExit("Story length summary is missing.")
+
+          if summary.get("valid") is not True:
+              for error in summary.get("structure_errors", []):
+                  print("STORY STRUCTURE ERROR:", error)
+
+              for warning in summary.get("warnings", []):
+                  print("STORY WARNING:", warning)
+
+              raise SystemExit(
+                  "Story length validation failed; generation stopped."
+              )
+
+          expected_parts = summary.get("parts_expected")
+          found_parts = summary.get("parts_found")
+          expected_scenes = summary.get("scenes_expected")
+          found_scenes = summary.get("scenes_found")
+
+          if expected_parts != found_parts:
+              raise SystemExit(
+                  f"PARTS mismatch: expected={expected_parts}, "
+                  f"found={found_parts}"
+              )
+
+          if expected_scenes != found_scenes:
+              raise SystemExit(
+                  f"SCENES mismatch: expected={expected_scenes}, "
+                  f"found={found_scenes}"
+              )
+
+          print("STORY LENGTH VALIDATION PASSED")
+          print("Parts:", found_parts)
+          print("Scenes:", found_scenes)
+          print("Words:", summary.get("total_words"))
+          PY
+
+      - name: Verify story preservation and consistency
         run: python scripts/verify_story.py
 
       - name: Generate AI story artifacts
@@ -517,29 +608,166 @@ jobs:
       - name: Validate final video and deliverables
         run: python scripts/validate_final_output.py
 
-      - name: Package final output ZIP
+      - name: Package and name output using story title
         shell: bash
         run: |
           set -euo pipefail
 
           python scripts/package_output.py
 
-          ARCHIVE="katha-lok-ai-photo-motion-output.zip"
-          MANIFEST="output/package_manifest.json"
-
-          test -s "$ARCHIVE"
-          test -s "$MANIFEST"
-
-          unzip -tq "$ARCHIVE"
-
           python - <<'PY'
           import hashlib
           import json
+          import re
           import zipfile
           from pathlib import Path
 
-          archive = Path("katha-lok-ai-photo-motion-output.zip")
           manifest_path = Path("output/package_manifest.json")
+          story_path = Path("output/story/story.json")
+
+          if not manifest_path.is_file():
+              raise SystemExit("Package manifest is missing.")
+
+          if not story_path.is_file():
+              raise SystemExit("Completed story file is missing.")
+
+          manifest = json.loads(
+              manifest_path.read_text(encoding="utf-8")
+          )
+          story = json.loads(
+              story_path.read_text(encoding="utf-8")
+          )
+
+          if manifest.get("status") != "completed":
+              raise SystemExit("Package status is not completed.")
+
+          mode = manifest.get("format")
+          if mode not in {"short", "full"}:
+              raise SystemExit("Package format is invalid.")
+
+          title = str(
+              story.get("title")
+              or story.get("final_title")
+              or ""
+          ).strip()
+
+          if not title:
+              title_file = Path("output/story/final_title.txt")
+              if title_file.is_file():
+                  title = title_file.read_text(
+                      encoding="utf-8"
+                  ).strip()
+
+          if not title:
+              raise SystemExit(
+                  "Story title is missing; refusing generic ZIP name."
+              )
+
+          slug = re.sub(
+              r"[^\w]+",
+              "-",
+              title,
+              flags=re.UNICODE,
+          ).strip("-_")
+
+          slug = slug[:80].strip("-_")
+
+          if not slug:
+              raise SystemExit("Story title cannot form a safe filename.")
+
+          original_name = str(manifest.get("archive", "")).strip()
+          source = Path(original_name) if original_name else Path(
+              "katha-lok-ai-photo-motion-output.zip"
+          )
+
+          if not source.is_file():
+              source = Path("katha-lok-ai-photo-motion-output.zip")
+
+          if not source.is_file():
+              raise SystemExit("Packaged ZIP file is missing.")
+
+          target = Path(f"katha-lok-{slug}-{mode}-output.zip")
+
+          if target.exists() and target.resolve() != source.resolve():
+              target.unlink()
+
+          if target.resolve() != source.resolve():
+              source.replace(target)
+
+          digest = hashlib.sha256()
+          with target.open("rb") as handle:
+              for chunk in iter(
+                  lambda: handle.read(1024 * 1024),
+                  b"",
+              ):
+                  digest.update(chunk)
+
+          with zipfile.ZipFile(target) as archive:
+              bad = archive.testzip()
+              if bad:
+                  raise SystemExit(f"Corrupt ZIP member: {bad}")
+
+              names = archive.namelist()
+              if len(names) != len(set(names)):
+                  raise SystemExit("Duplicate ZIP members found.")
+
+              if not names:
+                  raise SystemExit("ZIP is empty.")
+
+          manifest["archive"] = target.name
+          manifest["archive_sha256"] = digest.hexdigest()
+          manifest["archive_bytes"] = target.stat().st_size
+          manifest["archive_title"] = title
+
+          temporary = manifest_path.with_name(
+              manifest_path.name + ".tmp"
+          )
+          temporary.write_text(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=False,
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+          temporary.replace(manifest_path)
+
+          Path("output/package_archive_name.txt").write_text(
+              target.name + "\n",
+              encoding="utf-8",
+          )
+
+          print("Story title:", title)
+          print("Output mode:", mode)
+          print("Final ZIP:", target.name)
+          print("ZIP SHA256:", digest.hexdigest())
+          print("ZIP integrity: valid")
+          PY
+
+          ARCHIVE="$(cat output/package_archive_name.txt)"
+          test -s "$ARCHIVE"
+          test -s output/package_manifest.json
+          ls -lh "$ARCHIVE"
+
+      - name: Verify final package manifest and archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="$(cat output/package_archive_name.txt)"
+
+          python - "$ARCHIVE" <<'PY'
+          import hashlib
+          import json
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          manifest_path = Path("output/package_manifest.json")
+
+          if not archive.is_file() or archive.stat().st_size == 0:
+              raise SystemExit("Final story ZIP is missing or empty.")
 
           manifest = json.loads(
               manifest_path.read_text(encoding="utf-8")
@@ -548,8 +776,8 @@ jobs:
           if manifest.get("status") != "completed":
               raise SystemExit("Package status is not completed.")
 
-          if manifest.get("format") not in {"short", "full"}:
-              raise SystemExit("Package format is invalid.")
+          if manifest.get("archive") != archive.name:
+              raise SystemExit("Manifest archive name mismatch.")
 
           if manifest.get("file_count", 0) <= 0:
               raise SystemExit("Package contains no files.")
@@ -560,23 +788,30 @@ jobs:
           if manifest.get("manifest_zip_consistency") != "valid":
               raise SystemExit("ZIP and manifest consistency failed.")
 
-          actual_hash = hashlib.sha256(
-              archive.read_bytes()
-          ).hexdigest()
+          digest = hashlib.sha256()
+          with archive.open("rb") as handle:
+              for chunk in iter(
+                  lambda: handle.read(1024 * 1024),
+                  b"",
+              ):
+                  digest.update(chunk)
+
+          actual_hash = digest.hexdigest()
 
           if actual_hash != manifest.get("archive_sha256"):
               raise SystemExit("Final ZIP SHA256 does not match manifest.")
 
+          if archive.stat().st_size != manifest.get("archive_bytes"):
+              raise SystemExit("Final ZIP byte count mismatch.")
+
           with zipfile.ZipFile(archive) as zf:
               bad_member = zf.testzip()
-
               if bad_member:
                   raise SystemExit(
                       f"Corrupt ZIP member: {bad_member}"
                   )
 
               names = zf.namelist()
-
               if len(names) != len(set(names)):
                   raise SystemExit("ZIP contains duplicate file names.")
 
@@ -587,9 +822,8 @@ jobs:
           print("Final ZIP SHA256:", actual_hash)
           print("Package format:", manifest["format"])
           print("Packaged files:", manifest["file_count"])
+          print("Story ZIP:", archive.name)
           PY
-
-          ls -lh "$ARCHIVE"
 
       - name: Upload final Photo Motion deliverable
         if: success()
@@ -597,9 +831,12 @@ jobs:
         with:
           name: katha-lok-ai-photo-motion-output
           path: |
-            katha-lok-ai-photo-motion-output.zip
+            katha-lok-*-short-output.zip
+            katha-lok-*-full-output.zip
             output/package_manifest.json
             output/validation_report.json
+            output/preflight_report.json
+            output/story/story_length_validation.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -672,11 +909,15 @@ jobs:
                   ) << 16
 
                   with path.open("rb") as source:
-                      zf.writestr(info, source.read())
+                      with zf.open(info, "w") as destination:
+                          while True:
+                              chunk = source.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              destination.write(chunk)
 
           with zipfile.ZipFile(temporary) as zf:
               bad_member = zf.testzip()
-
               if bad_member:
                   raise SystemExit(
                       f"Checkpoint ZIP verification failed: {bad_member}"
