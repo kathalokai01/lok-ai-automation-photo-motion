@@ -1,3 +1,4 @@
+
 name: Generate Katha Lok AI Photo Motion Video
 
 on:
@@ -78,6 +79,7 @@ jobs:
             scripts/generate_narration.py \
             scripts/prepare_captions.py \
             scripts/generate_tts.py \
+            scripts/generate_flow_music.py \
             scripts/generate_visuals.py \
             scripts/free_image_generator.py \
             scripts/generate_depth_maps.py \
@@ -335,6 +337,19 @@ jobs:
       - name: Generate narration audio
         run: python scripts/generate_tts.py
 
+      - name: Generate Google Lyria background music
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/generate_flow_music.py
+
+          if [ -s output/music/flow_music_manifest.json ]; then
+            echo "Google Lyria music manifest created."
+          else
+            echo "Lyria music manifest not created; sound design will use local fallback."
+          fi
+
       - name: Prepare visual jobs
         run: python scripts/generate_visuals.py
 
@@ -347,7 +362,7 @@ jobs:
       - name: Render photo-motion clips
         run: python scripts/photo_motion.py
 
-      - name: Generate free background audio and timed SFX cues
+      - name: Generate background music, ambience and timed SFX
         run: python scripts/generate_sound_design.py
 
       - name: Validate SFX timing against actual narration
