@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""No-API validation for the Katha Lok AI Photo Motion pipeline."""
+"""No-API preflight validation for Katha Lok AI Photo Motion."""
 
 from __future__ import annotations
 
@@ -7,12 +7,13 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -24,9 +25,8 @@ WORKFLOW_FILE = (
 OUTPUT_DIR = ROOT / "output"
 REPORT_FILE = OUTPUT_DIR / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v2"
+VERSION = "photo-motion-preflight-v50"
 
-# Scripts required by the current Photo Motion workflow.
 REQUIRED_SCRIPTS = [
     "input_config.py",
     "select_gemini_model.py",
@@ -57,7 +57,6 @@ REQUIRED_SCRIPTS = [
     "package_output.py",
 ]
 
-# These are the actual pipeline entry points expected in workflow order.
 EXPECTED_WORKFLOW_STEPS = [
     "select_gemini_model.py",
     "generate_story_plan.py",
@@ -106,8 +105,32 @@ OPTIONAL_PYTHON_MODULES = (
     "google.generativeai",
 )
 
+REQUIRED_RUNTIME_COMMANDS = (
+    "ffmpeg",
+    "ffprobe",
+    "fc-match",
+)
+
 TRUE_VALUES = {"true", "yes", "on", "1", "enabled"}
 FALSE_VALUES = {"false", "no", "off", "0", "disabled"}
+
+PROVIDER_TTS = {
+    "fish_audio",
+    "gemini_tts",
+    "edge_tts",
+    "piper",
+    "elevenlabs",
+    "cartesia",
+    "finevoice",
+    "minimax",
+}
+
+PROVIDER_IMAGE = {
+    "huggingface",
+    "pollinations",
+    "gemini",
+    "replicate",
+}
 
 
 def log(*values: Any) -> None:
@@ -118,10 +141,24 @@ def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
 
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        for chunk in iter(
+            lambda: handle.read(1024 * 1024),
+            b"",
+        ):
             digest.update(chunk)
 
     return digest.hexdigest()
+
+
+def relative(path: Path) -> str:
+    resolved = path.resolve()
+
+    if not resolved.is_relative_to(ROOT.resolve()):
+        raise ValueError(
+            f"Path escapes repository root: {resolved}"
+        )
+
+    return resolved.relative_to(ROOT.resolve()).as_posix()
 
 
 def parse_bool(value: Any, key: str) -> bool:
@@ -136,13 +173,17 @@ def parse_bool(value: Any, key: str) -> bool:
     if text in FALSE_VALUES:
         return False
 
-    raise ValueError(f"{key} must be true or false.")
+    raise ValueError(
+        f"{key} must be true or false; found {value!r}"
+    )
 
 
 def read_input_values(path: Path) -> dict[str, Any]:
-    """Read the configuration while preserving multiline STORY_TEXT."""
+    """Read Input/topic.txt, including quoted multiline STORY_TEXT."""
     if not path.is_file():
-        raise FileNotFoundError(f"Input file is missing: {path}")
+        raise FileNotFoundError(
+            f"Input file is missing: {relative(path)}"
+        )
 
     lines = path.read_text(
         encoding="utf-8-sig"
@@ -184,6 +225,15 @@ def read_input_values(path: Path) -> dict[str, Any]:
                 end = remainder.find(delimiter)
 
                 if end >= 0:
+                    trailing = remainder[
+                        end + len(delimiter):
+                    ].strip()
+
+                    if trailing and not trailing.startswith("#"):
+                        raise ValueError(
+                            "Unexpected text after STORY_TEXT delimiter."
+                        )
+
                     values[key] = remainder[:end]
                     index += 1
                     continue
@@ -233,15 +283,22 @@ def read_input_values(path: Path) -> dict[str, Any]:
 def write_report(report: dict[str, Any]) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    temporary = REPORT_FILE.with_suffix(".json.tmp")
-    content = json.dumps(
-        report,
-        ensure_ascii=False,
-        indent=2,
-    ) + "\n"
+    temporary = REPORT_FILE.with_name(
+        REPORT_FILE.name + ".tmp"
+    )
 
-    temporary.write_text(content, encoding="utf-8")
-    temporary.replace(REPORT_FILE)
+    try:
+        temporary.write_text(
+            json.dumps(
+                report,
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(REPORT_FILE)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def check_python_syntax(path: Path) -> tuple[bool, str]:
@@ -255,8 +312,15 @@ def check_python_syntax(path: Path) -> tuple[bool, str]:
 
 def check_module(module_name: str) -> tuple[bool, str]:
     try:
-        available = importlib.util.find_spec(module_name) is not None
-    except (ImportError, ModuleNotFoundError, ValueError):
+        available = (
+            importlib.util.find_spec(module_name) is not None
+        )
+    except (
+        ImportError,
+        ModuleNotFoundError,
+        ValueError,
+        AttributeError,
+    ):
         available = False
 
     if available:
@@ -266,7 +330,7 @@ def check_module(module_name: str) -> tuple[bool, str]:
 
 
 def extract_workflow_commands(source: str) -> list[str]:
-    """Find scripts invoked through python in the workflow."""
+    """Extract direct Python script calls from workflow YAML."""
     pattern = re.compile(
         r"(?<![\w./-])python(?:3)?\s+"
         r"(scripts/[A-Za-z0-9_.-]+\.py)",
@@ -287,7 +351,7 @@ def check_workflow_order(
         for name in EXPECTED_WORKFLOW_STEPS
     ]
 
-    errors: list[str] = []
+    errors = []
     cursor = 0
 
     for expected_path in expected:
@@ -304,14 +368,13 @@ def check_workflow_order(
 
         cursor = position + 1
 
-    duplicates = sorted({
-        command for command in actual_commands
+    for duplicate in sorted({
+        command
+        for command in actual_commands
         if actual_commands.count(command) > 1
-    })
-
-    for duplicate in duplicates:
+    }):
         errors.append(
-            f"Workflow invokes the same script more than once: {duplicate}"
+            f"Workflow invokes a script more than once: {duplicate}"
         )
 
     return not errors, errors
@@ -321,42 +384,547 @@ def inspect_obsolete_references(
     workflow_source: str,
     script_paths: list[Path],
 ) -> list[str]:
-    """Check active workflow and pipeline scripts for obsolete I2V references."""
-    problems: list[str] = []
-
-    sources = [
+    problems = [
         (WORKFLOW_FILE, workflow_source),
     ]
 
     for path in script_paths:
+        if not path.is_file():
+            continue
+
         try:
-            sources.append((
+            problems.append((
                 path,
                 path.read_text(encoding="utf-8"),
             ))
         except (OSError, UnicodeError):
             continue
 
-    for path, source in sources:
+    errors = []
+
+    for path, source in problems:
         for line_number, line in enumerate(
             source.splitlines(),
             start=1,
         ):
             normalized = line.lower()
 
-            if any(term in normalized for term in FORBIDDEN_TERMS):
-                problems.append(
-                    f"{path.relative_to(ROOT)}:{line_number}: "
+            if any(
+                term in normalized
+                for term in FORBIDDEN_TERMS
+            ):
+                errors.append(
+                    f"{relative(path)}:{line_number}: "
                     "obsolete Wan2GP reference"
                 )
 
             if re.search(r"\bi2v\b", normalized):
-                problems.append(
-                    f"{path.relative_to(ROOT)}:{line_number}: "
+                errors.append(
+                    f"{relative(path)}:{line_number}: "
                     "obsolete I2V reference"
                 )
 
-    return problems
+    return errors
+
+
+def extract_workflow_env(
+    source: str,
+) -> dict[str, str]:
+    """Read literal job-level env values without evaluating expressions."""
+    result = {}
+    in_env = False
+    env_indent = None
+
+    for line in source.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+
+        indent = len(line) - len(line.lstrip())
+        stripped = line.strip()
+
+        if stripped == "env:":
+            in_env = True
+            env_indent = indent
+            continue
+
+        if in_env:
+            if indent <= env_indent:
+                in_env = False
+                env_indent = None
+                continue
+
+            match = re.match(
+                r"^([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$",
+                stripped,
+            )
+
+            if match:
+                key, value = match.groups()
+                result[key] = value.strip().strip("'\"")
+
+    return result
+
+
+def check_workflow_structure(
+    source: str,
+) -> tuple[bool, list[str], dict[str, str]]:
+    errors = []
+
+    if not source.strip():
+        return False, ["Workflow file is empty."], {}
+
+    if not re.search(
+        r"(?m)^on:\s*(?:\n|$)",
+        source,
+    ):
+        # GitHub YAML parsers may treat "on" as a boolean key;
+        # this text-level check only verifies the authored trigger.
+        if not re.search(
+            r"(?m)^on\s*:\s*$",
+            source,
+        ):
+            errors.append("Workflow trigger block 'on:' is missing.")
+
+    if not re.search(
+        r"(?m)^\s{2}workflow_dispatch\s*:\s*$",
+        source,
+    ):
+        errors.append(
+            "workflow_dispatch trigger is missing."
+        )
+
+    if not re.search(
+        r"(?m)^\s*permissions\s*:",
+        source,
+    ):
+        errors.append(
+            "Explicit workflow permissions block is missing."
+        )
+
+    if not re.search(
+        r"(?m)^\s*runs-on:\s*ubuntu-latest\s*$",
+        source,
+    ):
+        errors.append(
+            "Expected ubuntu-latest runner is not configured."
+        )
+
+    if not re.search(
+        r"(?m)^\s*python-version:\s*[\"']?3\.11",
+        source,
+    ):
+        errors.append(
+            "Python 3.11 setup is not detected."
+        )
+
+    if not re.search(
+        r"(?m)^\s*uses:\s*actions/checkout@v4\s*$",
+        source,
+    ):
+        errors.append(
+            "actions/checkout@v4 is missing."
+        )
+
+    if not re.search(
+        r"(?m)^\s*uses:\s*actions/setup-python@v5\s*$",
+        source,
+    ):
+        errors.append(
+            "actions/setup-python@v5 is missing."
+        )
+
+    env = extract_workflow_env(source)
+
+    return not errors, errors, env
+
+
+def validate_provider_order(
+    config: dict[str, Any],
+    key: str,
+    allowed: set[str],
+) -> tuple[bool, list[str], str]:
+    value = config.get(key, [])
+
+    if not isinstance(value, (list, tuple)):
+        return False, [], f"{key} is not a normalized provider list."
+
+    order = [str(item).strip().lower() for item in value]
+
+    if not order:
+        return False, [], f"{key} is empty."
+
+    if any(not item for item in order):
+        return False, [], f"{key} contains an empty provider."
+
+    if len(order) != len(set(order)):
+        return False, order, f"{key} contains duplicate providers."
+
+    invalid = [item for item in order if item not in allowed]
+
+    if invalid:
+        return (
+            False,
+            order,
+            f"{key} contains unsupported providers: {invalid}",
+        )
+
+    return True, order, " -> ".join(order)
+
+
+def validate_three_primary_tts(
+    config: dict[str, Any],
+) -> tuple[bool, str]:
+    main = [
+        str(config.get(f"TTS_MAIN_{index}", "")).strip().lower()
+        for index in (1, 2, 3)
+    ]
+
+    if any(not value for value in main):
+        return False, "All three primary TTS providers must be set."
+
+    from input_config import normalize_provider
+
+    normalized = [
+        normalize_provider(value)
+        for value in main
+    ]
+
+    if len(set(normalized)) != 3:
+        return False, "The three primary TTS providers must be unique."
+
+    invalid = [
+        value for value in normalized
+        if value not in PROVIDER_TTS
+    ]
+
+    if invalid:
+        return False, f"Unsupported primary TTS providers: {invalid}"
+
+    actual_order = config.get("TTS_PROVIDER_ORDER", [])
+
+    if actual_order[:3] != normalized:
+        return (
+            False,
+            "Normalized TTS fallback order does not preserve "
+            "the three selected primary providers.",
+        )
+
+    return True, "Three primary TTS providers and their order are valid."
+
+
+def validate_image_primary_order(
+    config: dict[str, Any],
+) -> tuple[bool, list[str], str]:
+    return validate_provider_order(
+        config,
+        "IMAGE_PROVIDER_ORDER",
+        PROVIDER_IMAGE,
+    )
+
+def validate_story_length_policy(
+    values: dict[str, Any],
+    format_value: str,
+    record,
+) -> dict | None:
+    try:
+        from story_length_policy import build_length_policy
+
+        source_text = str(values.get("STORY_TEXT", "")).strip()
+        source_words = len(source_text.split())
+
+        policy = build_length_policy(
+            format_type=format_value,
+            story_length=values.get("STORY_LENGTH", "auto"),
+            parts=values.get("PARTS", 1),
+            scenes_per_part=values.get("SCENES", 10),
+            scene_duration=values.get(
+                "SCENE_DURATION",
+                "auto",
+            ),
+            source_word_count=source_words,
+        )
+
+        record(
+            "story_length_policy",
+            True,
+            (
+                f"FORMAT={policy['format']}; "
+                f"parts={policy['parts_count']}; "
+                f"configured_parts={policy['configured_parts_count']}; "
+                f"scenes={policy['total_scenes']}; "
+                f"target_words={policy['target_total_words']}."
+            ),
+        )
+
+        for index, warning in enumerate(
+            policy.get("warnings", []),
+            start=1,
+        ):
+            record(
+                f"story_length_warning_{index}",
+                False,
+                str(warning),
+                severity="warning",
+            )
+
+        return policy
+
+    except Exception as exc:
+        record(
+            "story_length_policy",
+            False,
+            str(exc),
+        )
+        return None
+
+
+def validate_saved_model(record) -> dict | None:
+    path = OUTPUT_DIR / "config" / "selected_model.json"
+
+    if not path.is_file():
+        record(
+            "saved_gemini_model",
+            False,
+            "No saved Gemini model selection exists yet.",
+            severity="warning",
+        )
+        return None
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+
+        if not isinstance(data, dict):
+            raise ValueError("Selected model JSON must be an object.")
+
+        model = data.get("model")
+
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("Selected model ID is missing.")
+
+        status = data.get("status")
+
+        if status is not None and status not in {
+            "selected",
+            "completed",
+            "success",
+            "ready",
+        }:
+            raise ValueError(
+                f"Unexpected selected-model status: {status!r}"
+            )
+
+        record(
+            "saved_gemini_model",
+            True,
+            (
+                f"Saved model ID exists: {model.strip()}. "
+                "Provider availability is not tested."
+            ),
+            severity="warning",
+        )
+
+        return {
+            "model": model.strip(),
+            "status": status,
+            "sha256": sha256_file(path),
+        }
+
+    except Exception as exc:
+        record(
+            "saved_gemini_model",
+            False,
+            str(exc),
+            severity="warning",
+        )
+        return None
+
+
+def validate_existing_output_paths(record) -> dict:
+    """Detect unsafe symlinks and malformed output directory entries."""
+    if not OUTPUT_DIR.exists():
+        record(
+            "output_directory",
+            True,
+            "Output directory does not exist yet; fresh run is possible.",
+            severity="warning",
+        )
+        return {
+            "exists": False,
+            "files": 0,
+            "bytes": 0,
+        }
+
+    if not OUTPUT_DIR.is_dir():
+        record(
+            "output_directory",
+            False,
+            "output exists but is not a directory.",
+        )
+        return {
+            "exists": True,
+            "files": 0,
+            "bytes": 0,
+        }
+
+    file_count = 0
+    total_bytes = 0
+    errors = []
+
+    for path in OUTPUT_DIR.rglob("*"):
+        try:
+            if path.is_symlink():
+                target = path.resolve()
+
+                if not target.is_relative_to(OUTPUT_DIR.resolve()):
+                    errors.append(
+                        f"Output symlink escapes output/: {relative(path)}"
+                    )
+                    continue
+
+            if path.is_file():
+                file_count += 1
+                total_bytes += path.stat().st_size
+
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+
+    record(
+        "output_directory",
+        not errors,
+        (
+            f"Existing output inspected: {file_count} files, "
+            f"{total_bytes} bytes."
+            if not errors
+            else " | ".join(errors[:10])
+        ),
+    )
+
+    return {
+        "exists": True,
+        "files": file_count,
+        "bytes": total_bytes,
+        "errors": errors,
+    }
+
+
+def inspect_workflow_secrets(
+    workflow_source: str,
+    record,
+) -> dict:
+    """Inspect referenced secret names, never print secret values."""
+    names = sorted(set(re.findall(
+        r"\bsecrets\.([A-Z][A-Z0-9_]*)",
+        workflow_source,
+    )))
+
+    expected = {
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "FISH_API_KEY",
+        "FISH_AUDIO_API_KEY",
+        "ELEVENLABS_API_KEY",
+        "CARTESIA_API_KEY",
+        "FINEVOICE_API_KEY",
+        "MINIMAX_API_KEY",
+        "HF_TOKEN",
+        "POLLINATIONS_API_KEY",
+        "REPLICATE_API_TOKEN",
+    }
+
+    found = sorted(expected.intersection(names))
+
+    record(
+        "provider_secret_references",
+        True,
+        (
+            f"Workflow references {len(names)} secret names. "
+            "Secret values and actual GitHub secret availability "
+            "cannot be inspected by this local preflight."
+        ),
+        severity="warning",
+    )
+
+    return {
+        "referenced_secret_names": names,
+        "recognized_provider_secret_names": found,
+        "secret_values_read": False,
+    }
+
+
+def inspect_workflow_python_calls(
+    actual_commands: list[str],
+    record,
+) -> None:
+    unknown = []
+
+    for command in actual_commands:
+        relative_path = command.removeprefix("scripts/")
+        path = SCRIPTS / relative_path
+
+        if not path.is_file():
+            unknown.append(command)
+
+    record(
+        "workflow_python_targets",
+        not unknown,
+        (
+            "All directly invoked Python scripts exist."
+            if not unknown
+            else f"Missing workflow Python targets: {unknown}"
+        ),
+    )
+
+
+def validate_runtime_commands(record) -> dict:
+    result = {}
+
+    for command in REQUIRED_RUNTIME_COMMANDS:
+        location = shutil.which(command)
+        passed = bool(location)
+
+        result[command] = location
+
+        record(
+            f"runtime_command:{command}",
+            passed,
+            (
+                f"Available at {location}."
+                if passed
+                else f"{command} is not installed or not on PATH."
+            ),
+            severity="warning",
+        )
+
+    return result
+
+
+def validate_dependencies(record) -> dict:
+    results = {}
+
+    for module in REQUIRED_PYTHON_MODULES:
+        passed, message = check_module(module)
+        results[module] = passed
+
+        record(
+            f"python_dependency:{module}",
+            passed,
+            message,
+            severity="warning",
+        )
+
+    for module in OPTIONAL_PYTHON_MODULES:
+        passed, message = check_module(module)
+        results[module] = passed
+
+        record(
+            f"optional_dependency:{module}",
+            passed,
+            message,
+            severity="warning",
+        )
+
+    return results
+
 
 def main() -> int:
     checks: list[dict[str, Any]] = []
@@ -391,174 +959,322 @@ def main() -> int:
             message,
         )
 
-    log("=" * 58)
+    log("=" * 65)
     log("KATHA LOK AI — PHOTO MOTION PREFLIGHT")
-    log("No story, image, audio or video generation API calls.")
-    log("=" * 58)
+    log("NO GENERATION API CALLS")
+    log("VERSION:", VERSION)
+    log("=" * 65)
+
+    values: dict[str, Any] = {}
+    validated_config: dict[str, Any] = {}
+    input_hash = None
+    workflow_source = ""
+    actual_commands: list[str] = []
+    policy = None
+    model_info = None
 
     # --------------------------------------------------------
-    # INPUT FILE
+    # 1. INPUT FILE
     # --------------------------------------------------------
 
     try:
         values = read_input_values(INPUT_FILE)
+
+        input_hash = sha256_file(INPUT_FILE)
+
         record(
             "input_file",
             True,
-            "Input/topic.txt exists and was read.",
+            (
+                f"{relative(INPUT_FILE)} exists and is readable; "
+                f"SHA256={input_hash}."
+            ),
         )
+
     except Exception as exc:
-        values = {}
-        record("input_file", False, str(exc))
-
-    input_hash = None
-
-    if INPUT_FILE.is_file():
-        try:
-            input_hash = sha256_file(INPUT_FILE)
-        except OSError as exc:
-            record("input_hash", False, str(exc))
-
-    # --------------------------------------------------------
-    # CONFIGURATION VALIDATION
-    # --------------------------------------------------------
-
-    format_value = str(
-        values.get("FORMAT", "")
-    ).strip().lower()
-
-    format_valid = format_value in {"short", "full"}
-
-    record(
-        "format",
-        format_valid,
-        (
-            f"FORMAT={format_value!r}; only short or full is accepted."
-        ),
-    )
-
-    story_text = str(values.get("STORY_TEXT", "")).strip()
-    topic = str(values.get("TOPIC", "")).strip()
-    title = str(values.get("TITLE", "")).strip()
-
-    source_present = bool(story_text or topic or title)
-
-    record(
-        "story_source",
-        source_present,
-        (
-            "TOPIC, TITLE or STORY_TEXT is available."
-            if source_present
-            else "Provide TOPIC, TITLE or STORY_TEXT."
-        ),
-    )
-
-    if story_text:
         record(
-            "story_text_multiline",
-            True,
-            f"Complete supplied story read: {len(story_text.split())} words.",
+            "input_file",
+            False,
+            str(exc),
         )
 
-    for key in ("PARTS", "SCENES"):
-        raw = values.get(key, "")
-
-        try:
-            number = int(str(raw).strip())
-            valid = 1 <= number <= 500
-        except (TypeError, ValueError):
-            number = None
-            valid = False
-
-        record(
-            f"input_{key.lower()}",
-            valid,
-            f"{key}={number!r}; expected an integer from 1 to 500.",
-        )
+    # --------------------------------------------------------
+    # 2. CANONICAL CONFIGURATION VALIDATION
+    # --------------------------------------------------------
 
     try:
-        from input_config import load_and_validate
+        from input_config import (
+            load_and_validate,
+            get_format,
+            get_parts,
+            get_scenes,
+            get_fps,
+            get_tts_provider_order,
+            get_image_provider_order,
+            get_global_billable_permission,
+        )
 
         validated_config = load_and_validate(INPUT_FILE)
 
+        format_value = get_format(validated_config)
+        configured_parts = get_parts(validated_config)
+        scenes = get_scenes(validated_config)
+        fps = get_fps(validated_config)
+
         record(
             "input_config_validation",
             True,
-            "scripts/input_config.py accepted Input/topic.txt.",
-        )
-
-        format_value = validated_config["FORMAT"]
-
-        for key in (
-            "TTS_FALLBACK_ENABLED",
-            "TTS_ALLOW_PAID",
-            "ALLOW_BILLABLE_PROVIDERS",
-            "IMAGE_FALLBACK_ENABLED",
-            "IMAGE_ALLOW_BILLABLE",
-        ):
-            value = parse_bool(
-                validated_config.get(key, False),
-                key,
-            )
-
-            record(
-                f"config_{key.lower()}",
-                True,
-                f"{key}={value}.",
-                severity="warning" if not value else "error",
-            )
-
-        tts_order = validated_config.get(
-            "TTS_PROVIDER_ORDER",
-            [],
+            (
+                "input_config.load_and_validate accepted "
+                "Input/topic.txt."
+            ),
         )
 
         record(
-            "tts_provider_order",
-            bool(tts_order),
+            "format",
+            format_value in {"short", "full"},
+            f"FORMAT={format_value}.",
+        )
+
+        record(
+            "part_scene_settings",
+            configured_parts >= 1 and scenes >= 1,
             (
-                "Configured TTS fallback order: "
+                f"PARTS={configured_parts}; "
+                f"SCENES={scenes}; "
+                f"configured scene count="
+                f"{configured_parts * scenes}."
+            ),
+        )
+
+        record(
+            "fps",
+            1 <= fps <= 60,
+            f"FPS={fps}; supported range is 1–60.",
+        )
+
+        story_text = str(
+            validated_config.get("STORY_TEXT", "")
+        ).strip()
+
+        topic = str(
+            validated_config.get("TOPIC", "")
+        ).strip()
+
+        title = str(
+            validated_config.get("TITLE", "")
+        ).strip()
+
+        source_present = bool(story_text or topic or title)
+
+        record(
+            "story_source",
+            source_present,
+            (
+                "TOPIC, TITLE or STORY_TEXT is available."
+                if source_present
+                else "Provide TOPIC or STORY_TEXT."
+            ),
+        )
+
+        record(
+            "story_text_integrity",
+            (
+                not story_text
+                or validated_config.get(
+                    "PRESERVE_STORY_TEXT",
+                    True,
+                )
+            ),
+            (
+                f"Supplied story contains {len(story_text.split())} words; "
+                "PRESERVE_STORY_TEXT is enabled."
+                if story_text
+                else "No pasted story; topic/title generation is allowed."
+            ),
+        )
+
+        record(
+            "caption_settings",
+            (
+                validated_config.get("CAPTIONS")
+                in {"hindi", "english", "hinglish"}
+                and validated_config.get("CAPTION_FONT_SIZE") is not None
+            ),
+            (
+                f"CAPTIONS={validated_config.get('CAPTIONS')}; "
+                f"FONT={validated_config.get('CAPTION_FONT')}; "
+                f"SIZE={validated_config.get('CAPTION_FONT_SIZE')}."
+            ),
+        )
+
+        record(
+            "resume_settings",
+            (
+                validated_config.get("RESUME_ENABLED") is True
+                and validated_config.get(
+                    "SAVE_CHECKPOINT_AFTER_EACH_SCENE"
+                ) is True
+                and validated_config.get(
+                    "SKIP_COMPLETED_SCENES"
+                ) is True
+            ),
+            (
+                "Resume, per-scene checkpoints and completed-scene "
+                "reuse are enabled."
+                if (
+                    validated_config.get("RESUME_ENABLED") is True
+                    and validated_config.get(
+                        "SAVE_CHECKPOINT_AFTER_EACH_SCENE"
+                    ) is True
+                    and validated_config.get(
+                        "SKIP_COMPLETED_SCENES"
+                    ) is True
+                )
+                else "One or more resume/checkpoint protections are disabled."
+            ),
+            severity="warning",
+        )
+
+        # ----------------------------------------------------
+        # 3. EXACT CONFIGURED PROVIDER ORDER
+        # ----------------------------------------------------
+
+        tts_order = get_tts_provider_order(validated_config)
+
+        tts_valid, tts_message = validate_three_primary_tts(
+            validated_config
+        )
+
+        record(
+            "tts_primary_provider_order",
+            tts_valid,
+            tts_message,
+        )
+
+        record(
+            "tts_fallback_order",
+            bool(tts_order)
+            and len(tts_order) == len(set(tts_order))
+            and all(item in PROVIDER_TTS for item in tts_order),
+            (
+                "Configured TTS order: "
                 + " -> ".join(tts_order)
-                if tts_order
-                else "No TTS provider is configured."
             ),
         )
 
-        image_order = validated_config.get(
-            "IMAGE_PROVIDER_ORDER",
-            [],
+        image_order = get_image_provider_order(
+            validated_config
+        )
+
+        image_valid, image_order, image_message = (
+            validate_image_primary_order(validated_config)
         )
 
         record(
-            "image_provider_order",
-            bool(image_order),
+            "image_fallback_order",
+            image_valid,
             (
-                "Configured image fallback order: "
+                image_message
+                + "; order="
                 + " -> ".join(image_order)
-                if image_order
-                else "No image provider is configured."
             ),
+        )
+
+        fallback_tts = parse_bool(
+            validated_config.get(
+                "TTS_FALLBACK_ENABLED",
+                True,
+            ),
+            "TTS_FALLBACK_ENABLED",
+        )
+
+        fallback_image = parse_bool(
+            validated_config.get(
+                "IMAGE_FALLBACK_ENABLED",
+                True,
+            ),
+            "IMAGE_FALLBACK_ENABLED",
+        )
+
+        record(
+            "fallback_configuration",
+            fallback_tts and fallback_image,
+            (
+                f"TTS_FALLBACK_ENABLED={fallback_tts}; "
+                f"IMAGE_FALLBACK_ENABLED={fallback_image}."
+            ),
+            severity="warning",
+        )
+
+        global_billable = get_global_billable_permission(
+            validated_config
+        )
+
+        tts_billable = bool(
+            validated_config.get("TTS_BILLABLE_ALLOWED", False)
+        )
+
+        image_billable = bool(
+            validated_config.get("IMAGE_ALLOW_BILLABLE", False)
+        )
+
+        record(
+            "billable_provider_permission",
+            global_billable and tts_billable and image_billable,
+            (
+                f"GLOBAL={global_billable}; "
+                f"TTS={tts_billable}; "
+                f"IMAGE={image_billable}."
+            ),
+            severity="warning",
+        )
+
+        policy = validate_story_length_policy(
+            values,
+            format_value,
+            record,
         )
 
     except Exception as exc:
-        validated_config = {}
+        format_value = str(
+            values.get("FORMAT", "")
+        ).strip().lower()
+
+        configured_parts = None
+        scenes = None
+        fps = None
+
         record(
             "input_config_validation",
             False,
-            f"Input configuration validation failed: {exc}",
+            f"Canonical configuration validation failed: {exc}",
         )
 
     # --------------------------------------------------------
-    # REQUIRED FILES AND PYTHON SYNTAX
+    # 4. REQUIRED SCRIPTS AND PYTHON SYNTAX
     # --------------------------------------------------------
+
+    all_required = list(REQUIRED_SCRIPTS)
+
+    if "pipeline_preflight.py" not in all_required:
+        all_required.append("pipeline_preflight.py")
 
     required_paths = [
         SCRIPTS / name
-        for name in REQUIRED_SCRIPTS
+        for name in all_required
     ]
 
+    missing_scripts = []
+
     for path in required_paths:
-        exists = path.is_file() and path.stat().st_size > 0
+        exists = (
+            path.is_file()
+            and path.stat().st_size > 0
+        )
+
+        if not exists:
+            missing_scripts.append(relative(path))
 
         record(
             f"required_script:{path.name}",
@@ -566,7 +1282,7 @@ def main() -> int:
             (
                 "Script exists and is non-empty."
                 if exists
-                else f"Missing or empty script: {path.relative_to(ROOT)}"
+                else f"Missing or empty script: {relative(path)}"
             ),
         )
 
@@ -587,65 +1303,156 @@ def main() -> int:
         syntax_count += 1
 
     # --------------------------------------------------------
-    # WORKFLOW FILE AND SCRIPT ALIGNMENT
+    # 5. WORKFLOW STRUCTURE AND ORDER
     # --------------------------------------------------------
 
     if not WORKFLOW_FILE.is_file():
-        workflow_source = ""
         record(
             "workflow_file",
             False,
-            "Photo Motion workflow file is missing.",
+            "Photo Motion GitHub Actions workflow is missing.",
         )
+
     else:
         try:
             workflow_source = WORKFLOW_FILE.read_text(
-                encoding="utf-8"
+                encoding="utf-8-sig"
             )
 
             record(
                 "workflow_file",
                 bool(workflow_source.strip()),
-                "Photo Motion workflow file exists and is readable.",
+                "Workflow file exists and is readable.",
             )
+
         except (OSError, UnicodeError) as exc:
-            workflow_source = ""
-            record("workflow_file", False, str(exc))
+            record(
+                "workflow_file",
+                False,
+                str(exc),
+            )
+
+    structure_valid, structure_errors, workflow_env = (
+        check_workflow_structure(workflow_source)
+    )
+
+    record(
+        "workflow_structure",
+        structure_valid,
+        (
+            "workflow_dispatch, permissions, Ubuntu runner "
+            "and Python setup are present."
+            if structure_valid
+            else " | ".join(structure_errors)
+        ),
+    )
 
     actual_commands = extract_workflow_commands(
         workflow_source
     )
 
-    workflow_order_valid, workflow_errors = (
-        check_workflow_order(actual_commands)
+    order_valid, order_errors = check_workflow_order(
+        actual_commands
     )
 
     record(
         "workflow_script_order",
-        workflow_order_valid,
+        order_valid,
         (
-            "All required pipeline scripts are invoked in the expected order."
-            if workflow_order_valid
-            else " | ".join(workflow_errors)
+            "All generation, validation and packaging entry points "
+            "are invoked in the required order."
+            if order_valid
+            else " | ".join(order_errors)
         ),
     )
 
-    for name in REQUIRED_SCRIPTS:
-        if name == "input_config.py":
-            continue
+    inspect_workflow_python_calls(
+        actual_commands,
+        record,
+    )
 
-        relative = f"scripts/{name}"
+    # Helper scripts may be imported or executed inside another
+    # script. They are not required to appear as direct workflow calls.
+    helper_scripts = {
+        "input_config.py",
+        "depth_parallax.py",
+        "install_caption_fonts.py",
+        "preview_caption_fonts.py",
+        "pipeline_preflight.py",
+    }
 
-        if relative not in actual_commands:
-            record(
-                f"workflow_script:{name}",
-                False,
-                f"{relative} is not invoked by the workflow.",
-                severity="warning",
-            )
+    missing_workflow_calls = [
+        name
+        for name in EXPECTED_WORKFLOW_STEPS
+        if f"scripts/{name}" not in actual_commands
+    ]
+
+    record(
+        "workflow_entrypoints",
+        not missing_workflow_calls,
+        (
+            "Every required pipeline entry point is called."
+            if not missing_workflow_calls
+            else "Missing direct workflow calls: "
+            + ", ".join(missing_workflow_calls)
+        ),
+    )
+
+    preflight_invoked = (
+        "scripts/pipeline_preflight.py" in actual_commands
+    )
+
+    record(
+        "preflight_workflow_integration",
+        preflight_invoked,
+        (
+            "Workflow invokes this no-API preflight."
+            if preflight_invoked
+            else "Workflow does not yet invoke pipeline_preflight.py."
+        ),
+        severity="warning",
+    )
 
     # --------------------------------------------------------
-    # OBSOLETE PIPELINE REFERENCES
+    # 6. BILLABLE WORKFLOW SWITCH
+    # --------------------------------------------------------
+
+    workflow_billable = workflow_env.get(
+        "ALLOW_BILLABLE_PROVIDERS"
+    )
+
+    try:
+        workflow_billable_value = (
+            parse_bool(
+                workflow_billable,
+                "Workflow ALLOW_BILLABLE_PROVIDERS",
+            )
+            if workflow_billable is not None
+            else False
+        )
+
+        workflow_billable_valid = workflow_billable_value
+
+    except ValueError:
+        workflow_billable_value = False
+        workflow_billable_valid = False
+
+    record(
+        "workflow_billable_permission",
+        workflow_billable_valid,
+        (
+            "Workflow ALLOW_BILLABLE_PROVIDERS=true."
+            if workflow_billable_valid
+            else (
+                "Workflow ALLOW_BILLABLE_PROVIDERS is missing, "
+                "false or invalid."
+            )
+        ),
+        severity="warning",
+    )
+
+    # --------------------------------------------------------
+    # 7. PHOTO MOTION ONLY
     # --------------------------------------------------------
 
     obsolete = inspect_obsolete_references(
@@ -657,175 +1464,57 @@ def main() -> int:
         "photo_motion_only",
         not obsolete,
         (
-            "No obsolete I2V/Wan2GP references found in active pipeline files."
+            "No obsolete I2V/Wan2GP references found in "
+            "the active workflow and required scripts."
             if not obsolete
             else " | ".join(obsolete[:20])
         ),
     )
 
     # --------------------------------------------------------
-    # REQUIRED PYTHON DEPENDENCIES
+    # 8. DEPENDENCIES AND RUNTIME
     # --------------------------------------------------------
 
-    for module in REQUIRED_PYTHON_MODULES:
-        passed, message = check_module(module)
-
-        record(
-            f"python_dependency:{module}",
-            passed,
-            message,
-            severity="warning",
-        )
-
-    for module in OPTIONAL_PYTHON_MODULES:
-        passed, message = check_module(module)
-
-        record(
-            f"optional_dependency:{module}",
-            passed,
-            message,
-            severity="warning",
-        )
+    dependency_results = validate_dependencies(record)
+    runtime_results = validate_runtime_commands(record)
 
     # --------------------------------------------------------
-    # PHOTO MOTION RUNTIME DEPENDENCIES
+    # 9. WORKFLOW SECRET REFERENCES
     # --------------------------------------------------------
 
-    import shutil
-
-    ffmpeg_path = shutil.which("ffmpeg")
-    ffprobe_path = shutil.which("ffprobe")
-
-    record(
-        "ffmpeg",
-        bool(ffmpeg_path),
-        (
-            f"FFmpeg available at {ffmpeg_path}."
-            if ffmpeg_path
-            else "FFmpeg is not installed or not on PATH."
-        ),
-        severity="warning",
-    )
-
-    record(
-        "ffprobe",
-        bool(ffprobe_path),
-        (
-            f"FFprobe available at {ffprobe_path}."
-            if ffprobe_path
-            else "FFprobe is not installed or not on PATH."
-        ),
-        severity="warning",
+    secret_report = inspect_workflow_secrets(
+        workflow_source,
+        record,
     )
 
     # --------------------------------------------------------
-    # STORY LENGTH POLICY
+    # 10. SAVED MODEL AND EXISTING OUTPUT
     # --------------------------------------------------------
 
-    policy = None
+    model_info = validate_saved_model(record)
 
-    try:
-        from story_length_policy import build_length_policy
-
-        source_words = len(story_text.split())
-
-        policy = build_length_policy(
-            format_type=format_value,
-            story_length=values.get("STORY_LENGTH", "auto"),
-            parts=values.get("PARTS", 1),
-            scenes_per_part=values.get("SCENES", 13),
-            scene_duration=values.get(
-                "SCENE_DURATION",
-                "auto",
-            ),
-            source_word_count=source_words,
-        )
-
-        record(
-            "story_length_policy",
-            True,
-            (
-                f"Format={policy['format']}; "
-                f"parts={policy['parts_count']}; "
-                f"scenes={policy['total_scenes']}; "
-                f"target_words={policy['target_total_words']}."
-            ),
-        )
-
-        for index, warning in enumerate(
-            policy.get("warnings", []),
-            start=1,
-        ):
-            record(
-                f"story_length_warning_{index}",
-                False,
-                warning,
-                severity="warning",
-            )
-
-    except Exception as exc:
-        record(
-            "story_length_policy",
-            False,
-            str(exc),
-        )
+    output_info = validate_existing_output_paths(record)
 
     # --------------------------------------------------------
-    # SAVED MODEL CONFIGURATION
-    # --------------------------------------------------------
-
-    selected_model_file = (
-        OUTPUT_DIR / "config" / "selected_model.json"
-    )
-
-    if selected_model_file.is_file():
-        try:
-            model_data = json.loads(
-                selected_model_file.read_text(
-                    encoding="utf-8"
-                )
-            )
-
-            valid_model = (
-                isinstance(model_data, dict)
-                and isinstance(model_data.get("model"), str)
-                and bool(model_data["model"].strip())
-            )
-
-            record(
-                "saved_gemini_model",
-                valid_model,
-                (
-                    "Saved Gemini model ID is present; "
-                    "provider availability is not tested."
-                    if valid_model
-                    else "Saved Gemini model JSON is invalid."
-                ),
-                severity="warning",
-            )
-
-        except (OSError, json.JSONDecodeError) as exc:
-            record(
-                "saved_gemini_model",
-                False,
-                str(exc),
-                severity="warning",
-            )
-    else:
-        record(
-            "saved_gemini_model",
-            False,
-            "No previously selected Gemini model file exists.",
-            severity="warning",
-        )
-
-    # --------------------------------------------------------
-    # REPORT
+    # 11. FINAL REPORT
     # --------------------------------------------------------
 
     failed_checks = [
-        item for item in checks
+        item
+        for item in checks
         if not item["passed"]
+    ]
+
+    error_checks = [
+        item
+        for item in failed_checks
+        if item["severity"] == "error"
+    ]
+
+    warning_checks = [
+        item
+        for item in failed_checks
+        if item["severity"] != "error"
     ]
 
     report = {
@@ -834,16 +1523,61 @@ def main() -> int:
             timezone.utc
         ).isoformat(),
         "repository_root": str(ROOT),
-        "input_file": str(INPUT_FILE.relative_to(ROOT)),
+        "input_file": relative(INPUT_FILE),
         "input_sha256": input_hash,
-        "workflow_file": str(
-            WORKFLOW_FILE.relative_to(ROOT)
-        ),
+        "workflow_file": relative(WORKFLOW_FILE),
         "format": format_value or None,
+        "configured_parts": configured_parts,
+        "scenes_per_part": scenes,
+        "fps": fps,
         "api_calls_made": 0,
         "generation_performed": False,
+        "preflight_only": True,
         "python_files_syntax_checked": syntax_count,
+        "required_scripts": all_required,
+        "missing_scripts": missing_scripts,
         "workflow_python_commands": actual_commands,
+        "workflow_preflight_invoked": preflight_invoked,
+        "workflow_billable_permission": workflow_billable_value,
+        "provider_configuration": {
+            "tts_order": (
+                validated_config.get(
+                    "TTS_PROVIDER_ORDER",
+                    [],
+                )
+                if validated_config
+                else []
+            ),
+            "image_order": (
+                validated_config.get(
+                    "IMAGE_PROVIDER_ORDER",
+                    [],
+                )
+                if validated_config
+                else []
+            ),
+            "tts_billable_allowed": (
+                validated_config.get(
+                    "TTS_BILLABLE_ALLOWED",
+                    False,
+                )
+                if validated_config
+                else False
+            ),
+            "image_billable_allowed": (
+                validated_config.get(
+                    "IMAGE_ALLOW_BILLABLE",
+                    False,
+                )
+                if validated_config
+                else False
+            ),
+        },
+        "workflow_secrets": secret_report,
+        "dependencies": dependency_results,
+        "runtime_commands": runtime_results,
+        "saved_model": model_info,
+        "existing_output": output_info,
         "calculated_story_length_policy": policy,
         "summary": {
             "checks_total": len(checks),
@@ -851,36 +1585,97 @@ def main() -> int:
                 item["passed"] for item in checks
             ),
             "checks_failed": len(failed_checks),
-            "errors": errors,
-            "warnings": warnings,
-            "ready_to_run": not errors,
+            "errors": [
+                item["message"]
+                for item in error_checks
+            ],
+            "warnings": [
+                item["message"]
+                for item in warning_checks
+            ],
+            "ready_to_run": not error_checks,
+            "ready_with_warnings": (
+                not error_checks and bool(warning_checks)
+            ),
         },
         "checks": checks,
     }
 
     try:
         write_report(report)
-        log("Report:", REPORT_FILE)
-    except Exception as exc:
-        log("REPORT WRITE FAILED:", exc)
-        errors.append(f"report_write: {exc}")
 
-    log("=" * 58)
+        # Confirm the persisted report can be read and is complete.
+        saved = json.loads(
+            REPORT_FILE.read_text(encoding="utf-8")
+        )
+
+        if saved.get("report_version") != VERSION:
+            raise ValueError(
+                "Persisted report version mismatch."
+            )
+
+        if saved.get("api_calls_made") != 0:
+            raise ValueError(
+                "Preflight report incorrectly records API calls."
+            )
+
+        if len(saved.get("checks", [])) != len(checks):
+            raise ValueError(
+                "Persisted report check count mismatch."
+            )
+
+        if (
+            saved.get("summary", {}).get("ready_to_run")
+            is not report["summary"]["ready_to_run"]
+        ):
+            raise ValueError(
+                "Persisted report readiness mismatch."
+            )
+
+        log("REPORT:", relative(REPORT_FILE))
+
+    except Exception as exc:
+        log("REPORT WRITE/VERIFY FAILED:", exc)
+        return 1
+
+    # --------------------------------------------------------
+    # 12. SUMMARY
+    # --------------------------------------------------------
+
+    log("=" * 65)
     log("PREFLIGHT SUMMARY")
     log("Checks:", len(checks))
-    log("Passed:", sum(item["passed"] for item in checks))
+    log("Passed:", len(checks) - len(failed_checks))
     log("Failed:", len(failed_checks))
-    log("Errors:", len(errors))
-    log("Warnings:", len(warnings))
+    log("Errors:", len(error_checks))
+    log("Warnings:", len(warning_checks))
+    log("API calls:", 0)
+    log("Generation performed:", False)
 
-    if errors:
-        log("PREFLIGHT FAILED — workflow generation must not start.")
+    if error_checks:
+        log(
+            "PREFLIGHT FAILED — generation must not start."
+        )
+        log("=" * 65)
         return 1
 
     log(
-        "PREFLIGHT PASSED — this does not prove that external "
-        "providers or the complete video render will succeed."
+        "PREFLIGHT PASSED — this checks local configuration, "
+        "workflow structure and available files only."
     )
+
+    if warning_checks:
+        log(
+            "PREFLIGHT PASSED WITH WARNINGS — review "
+            "output/preflight_report.json."
+        )
+
+    log(
+        "External API access, secret validity, provider quotas "
+        "and complete video rendering are not verified."
+    )
+    log("=" * 65)
+
     return 0
 
 
@@ -888,5 +1683,8 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        log("Preflight cancelled.", file=sys.stderr)
+        log("PREFLIGHT CANCELLED", file=sys.stderr)
         raise SystemExit(130)
+    except Exception as exc:
+        log("PREFLIGHT INTERNAL ERROR:", str(exc))
+        raise SystemExit(1)
