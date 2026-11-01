@@ -327,6 +327,7 @@ def flatten_scenes(document, expected_parts, expected_scenes):
 
     return sorted(prepared, key=lambda item: (item[0], item[1]))
 
+
 def build_jobs(config, scenes, bible, format_name):
     width, height = image_dimensions(format_name)
     jobs = []
@@ -381,7 +382,6 @@ def build_jobs(config, scenes, bible, format_name):
         jobs.append(job)
 
     return jobs
-
 
 def main():
     config = load_and_validate(ROOT / "Input" / "topic.txt")
@@ -487,7 +487,6 @@ def main():
     log("Character Bible:", bible.get("status", "unknown"))
     log("Jobs file:", JOBS_FILE.relative_to(ROOT))
     log("Checkpoint:", CHECKPOINT_FILE.relative_to(ROOT))
-    log("Worker/I2V queue: not used")
     log("=" * 55)
 
     return 0
