@@ -1,4 +1,3 @@
-
 name: Generate Katha Lok AI Photo Motion Video
 
 on:
@@ -134,16 +133,15 @@ jobs:
 
           echo "Input fingerprint: $INPUT_HASH"
           echo "Pipeline fingerprint: $PIPELINE_HASH"
-          echo "Story verifier and workflow file are excluded from pipeline fingerprint."
 
-      - name: Restore compatible checkpoint
+      - name: Restore previous checkpoint with stage-level validation
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
-          CURRENT_PIPELINE_HASH: ${{ steps.fingerprints.outputs.pipeline_hash }}
         run: |
           set -euo pipefail
+
           mkdir -p output
 
           TEMP_DIR="$(mktemp -d)"
@@ -161,21 +159,25 @@ jobs:
             DEST="$TEMP_DIR/$RUN_ID"
             mkdir -p "$DEST"
 
+            echo "Checking checkpoint from run $RUN_ID"
+
             if ! gh run download "$RUN_ID" \
               --repo "$GITHUB_REPOSITORY" \
               --name "katha-photo-motion-checkpoint-$RUN_ID" \
               --dir "$DEST" 2>/dev/null; then
+              echo "Checkpoint artifact unavailable: $RUN_ID"
               continue
             fi
 
             CHECKPOINT="$DEST/checkpoint.zip"
 
             if [ ! -s "$CHECKPOINT" ]; then
+              echo "Checkpoint ZIP missing: $RUN_ID"
               continue
             fi
 
             if ! unzip -tq "$CHECKPOINT" >/dev/null 2>&1; then
-              echo "Skipping corrupt checkpoint from run $RUN_ID."
+              echo "Skipping corrupt checkpoint: $RUN_ID"
               continue
             fi
 
@@ -184,20 +186,25 @@ jobs:
             fi
 
             if grep -Eq '(^/|(^|/)\.\.(/|$)|^[A-Za-z]:)' "$DEST/entries.txt"; then
-              echo "Skipping checkpoint with unsafe archive paths: $RUN_ID"
+              echo "Skipping unsafe checkpoint: $RUN_ID"
               continue
             fi
 
             mkdir -p "$DEST/extracted"
 
             if ! unzip -q "$CHECKPOINT" -d "$DEST/extracted"; then
+              echo "Could not extract checkpoint: $RUN_ID"
               continue
             fi
 
             SAVED_OUTPUT="$DEST/extracted/output"
 
+            if [ ! -d "$SAVED_OUTPUT" ]; then
+              echo "Checkpoint output directory missing: $RUN_ID"
+              continue
+            fi
+
             INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
-            PIPELINE_FILE="$SAVED_OUTPUT/.resume-pipeline.sha256"
 
             if [ ! -s "$INPUT_FILE" ]; then
               echo "Skipping checkpoint without input fingerprint: $RUN_ID"
@@ -207,36 +214,29 @@ jobs:
             SAVED_INPUT_HASH="$(tr -d '\r\n' < "$INPUT_FILE")"
 
             if [ "$SAVED_INPUT_HASH" != "$CURRENT_INPUT_HASH" ]; then
-              echo "Skipping checkpoint: input has changed ($RUN_ID)."
+              echo "Skipping checkpoint: input has changed ($RUN_ID)"
               continue
             fi
 
-            if [ ! -s "$PIPELINE_FILE" ]; then
-              echo "Skipping legacy checkpoint without pipeline fingerprint: $RUN_ID"
-              continue
-            fi
-
-            SAVED_PIPELINE_HASH="$(tr -d '\r\n' < "$PIPELINE_FILE")"
-
-            if [ "$SAVED_PIPELINE_HASH" != "$CURRENT_PIPELINE_HASH" ]; then
-              echo "Skipping checkpoint: generation pipeline has changed ($RUN_ID)."
-              continue
-            fi
-
-            if [ -z "$(find "$SAVED_OUTPUT" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-              echo "Skipping empty checkpoint from run $RUN_ID."
+            if [ -z "$(find "$SAVED_OUTPUT" -type f ! -name '.resume-*' -print -quit)" ]; then
+              echo "Skipping empty checkpoint: $RUN_ID"
               continue
             fi
 
             cp -a "$SAVED_OUTPUT/." output/
 
-            echo "Compatible checkpoint restored from run $RUN_ID."
+            echo "=========================================="
+            echo "CHECKPOINT RESTORED"
+            echo "Source run: $RUN_ID"
             echo "Input fingerprint matched."
-            echo "Pipeline fingerprint matched."
+            echo "Global pipeline fingerprint restriction removed."
+            echo "Stage scripts will validate individual assets."
+            echo "=========================================="
+
             exit 0
           done
 
-          echo "No compatible checkpoint found."
+          echo "No matching checkpoint found."
           echo "Generation will start without restored output."
 
       - name: Set up Python
