@@ -1,30 +1,44 @@
 #!/usr/bin/env python3
-"""Validated central configuration for Input/topic.txt."""
+"""Validated configuration loader for the Photo Motion video pipeline."""
 
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 from typing import Any
 
-ALL_TTS_PROVIDERS = [
-    "fish_audio", "gemini_tts", "edge_tts", "piper",
-    "elevenlabs", "cartesia", "finevoice", "minimax",
-]
+ALL_TTS_PROVIDERS = (
+    "fish_audio",
+    "gemini_tts",
+    "edge_tts",
+    "piper",
+    "elevenlabs",
+    "cartesia",
+    "finevoice",
+    "minimax",
+)
 
-ALL_IMAGE_PROVIDERS = [
-    "huggingface", "pollinations", "gemini", "replicate",
-]
+ALL_IMAGE_PROVIDERS = (
+    "huggingface",
+    "pollinations",
+    "gemini",
+    "replicate",
+)
 
 PROVIDER_ALIASES = {
     "fish": "fish_audio",
     "fish audio": "fish_audio",
+    "fishaudio": "fish_audio",
     "gemini": "gemini_tts",
     "gemini tts": "gemini_tts",
     "edge": "edge_tts",
     "edge tts": "edge_tts",
+    "eleven lab": "elevenlabs",
     "eleven labs": "elevenlabs",
+    "elevenlab": "elevenlabs",
+    "elevenlabs": "elevenlabs",
     "mini max": "minimax",
 }
 
@@ -55,7 +69,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "VOICE": "male",
     "SPEED": "+0%",
     "TOPIC": "",
+    "TITLE": "",
     "STORY_TEXT": "",
+    "PRESERVE_STORY_TEXT": True,
     "PARTS": 1,
     "SCENES": 1,
     "STORY_LENGTH": "auto",
@@ -68,7 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TTS_MAIN_3": "edge_tts",
     "TTS_FALLBACK_ENABLED": True,
     "TTS_FALLBACK_ORDER": ",".join(ALL_TTS_PROVIDERS),
-    "TTS_ALLOW_PAID": False,
+    "TTS_ALLOW_PAID": True,
     "TTS_CHUNK_MAX_CHARS": 500,
     "TTS_CHUNK_MIN_CHARS": 150,
     "TTS_CHUNK_CHECKPOINT": True,
@@ -77,6 +93,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "IMAGE_PROVIDER_ORDER": ",".join(ALL_IMAGE_PROVIDERS),
     "IMAGE_FALLBACK_ENABLED": True,
     "IMAGE_ALLOW_BILLABLE": True,
+    "ALLOW_BILLABLE_PROVIDERS": True,
     "HF_IMAGE_SPACE": "mrfakename/Z-Image-Turbo",
     "FREE_IMAGE_FALLBACK_SPACES": "",
     "POLLINATIONS_FREE_IMAGE_MODELS": (
@@ -134,18 +151,23 @@ INT_KEYS = {
 _TRUE_VALUES = {"true", "yes", "on", "1", "enabled"}
 _FALSE_VALUES = {"false", "no", "off", "0", "disabled"}
 
+FORBIDDEN_CONFIG_KEY_PARTS = ("i2v", "wan2gp")
+
 
 def parse_bool(value: Any, key: str = "value") -> bool:
     if isinstance(value, bool):
         return value
+
     if isinstance(value, int) and value in (0, 1):
         return value == 1
+
     if isinstance(value, str):
-        value = value.strip().lower()
-        if value in _TRUE_VALUES:
+        normalized = value.strip().lower()
+        if normalized in _TRUE_VALUES:
             return True
-        if value in _FALSE_VALUES:
+        if normalized in _FALSE_VALUES:
             return False
+
     raise ValueError(f"{key} must be a valid true/false value.")
 
 
@@ -157,13 +179,16 @@ def _strip_inline_comment(value: str) -> str:
         if escaped:
             escaped = False
             continue
+
         if char == "\\":
             escaped = True
             continue
+
         if quote:
             if char == quote:
                 quote = None
             continue
+
         if char in ("'", '"'):
             quote = char
         elif char == "#":
@@ -174,6 +199,7 @@ def _strip_inline_comment(value: str) -> str:
 
 def _unquote(value: str) -> str:
     value = value.strip()
+
     if len(value) >= 2 and value[0] == value[-1]:
         if value[0] in ("'", '"'):
             try:
@@ -182,18 +208,22 @@ def _unquote(value: str) -> str:
                     return result
             except (ValueError, SyntaxError):
                 return value[1:-1]
+
     return value
 
 
 def _parse_scalar(key: str, raw_value: str) -> Any:
     value = _unquote(_strip_inline_comment(raw_value).strip())
+
     if key in BOOL_KEYS:
         return parse_bool(value, key)
+
     if key in INT_KEYS:
         try:
             return int(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{key} must be an integer.") from exc
+
     return value
 
 
@@ -202,9 +232,11 @@ def _find_assignment(line: str) -> tuple[str, str] | None:
         r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$",
         line,
     )
+
     if not match:
         return None
-    return match.group(1), match.group(2)
+
+    return match.group(1).upper(), match.group(2)
 
 
 def _read_multiline(
@@ -219,11 +251,13 @@ def _read_multiline(
 
     if closing >= 0:
         trailing = remainder[closing + len(delimiter):].strip()
+
         if trailing and not trailing.startswith("#"):
             raise ValueError(
                 f"Unexpected text after closing multiline block for {key}."
             )
-        return remainder[:closing].strip(), start + 1
+
+        return remainder[:closing], start + 1
 
     collected = [remainder] if remainder else []
 
@@ -235,12 +269,15 @@ def _read_multiline(
             before = current[:position]
             if before:
                 collected.append(before)
+
             trailing = current[position + len(delimiter):].strip()
+
             if trailing and not trailing.startswith("#"):
                 raise ValueError(
                     f"Unexpected text after closing multiline block for {key}."
                 )
-            return "\n".join(collected).strip(), index + 1
+
+            return "\n".join(collected), index + 1
 
         collected.append(current)
 
@@ -270,19 +307,28 @@ def load_input_config(
             continue
 
         assignment = _find_assignment(raw)
+
         if assignment is None:
             index += 1
             continue
 
         key, raw_value = assignment
 
+        if any(part in key.lower() for part in FORBIDDEN_CONFIG_KEY_PARTS):
+            raise ValueError(
+                f"Obsolete configuration key {key!r} is not supported "
+                "by the Photo Motion pipeline."
+            )
+
         if key == "STORY_TEXT":
             value = raw_value.strip()
+
             if value.startswith('"""'):
                 config[key], index = _read_multiline(
                     lines, index, key, '"""', value
                 )
                 continue
+
             if value.startswith("'''"):
                 config[key], index = _read_multiline(
                     lines, index, key, "'''", value
@@ -296,29 +342,16 @@ def load_input_config(
 
 
 def normalize_format(config: dict[str, Any]) -> str:
-    value = str(config.get("FORMAT", "full")).strip().lower()
+    value = str(config.get("FORMAT", "")).strip().lower()
 
-    aliases = {
-        "short": "short",
-        "shorts": "short",
-        "vertical": "short",
-        "reels": "short",
-        "reel": "short",
-        "youtube_short": "short",
-        "youtube-shorts": "short",
-        "full": "full",
-        "long": "full",
-        "landscape": "full",
-        "youtube": "full",
-        "youtube_full": "full",
-        "youtube-long": "full",
-    }
+    if value not in {"short", "full"}:
+        raise ValueError(
+            "FORMAT must be exactly 'short' or 'full'. "
+            "Aliases such as shorts, reels, long or landscape are not accepted."
+        )
 
-    if value not in aliases:
-        raise ValueError("FORMAT must be 'short' or 'full'.")
-
-    config["FORMAT"] = aliases[value]
-    return aliases[value]
+    config["FORMAT"] = value
+    return value
 
 
 def get_format(config: dict[str, Any]) -> str:
@@ -330,8 +363,10 @@ def _positive_int(
     key: str,
     default: int,
 ) -> int:
+    raw = config.get(key, default)
+
     try:
-        value = int(config.get(key, default))
+        value = int(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be an integer.") from exc
 
@@ -351,8 +386,10 @@ def get_scenes(config: dict[str, Any]) -> int:
 
 def get_fps(config: dict[str, Any]) -> int:
     fps = _positive_int(config, "FPS", 24)
+
     if fps > 60:
         raise ValueError("FPS cannot exceed 60.")
+
     return fps
 
 
@@ -372,12 +409,7 @@ def get_caption_font(config: dict[str, Any]) -> str:
     raw = str(config.get("CAPTION_FONT", "Hind")).strip().lower()
 
     if raw not in CAPTION_FONTS:
-        allowed = ", ".join([
-            "Noto Sans Devanagari",
-            "Mukta",
-            "Hind",
-            "Tiro Devanagari Hindi",
-        ])
+        allowed = ", ".join(sorted(set(CAPTION_FONTS.values())))
         raise ValueError(
             f"Unsupported CAPTION_FONT: {raw!r}. Allowed fonts: {allowed}"
         )
@@ -415,24 +447,22 @@ def get_topic(config: dict[str, Any]) -> str:
 
 
 def get_story_text(config: dict[str, Any]) -> str:
-    return str(config.get("STORY_TEXT", "")).strip()
+    value = config.get("STORY_TEXT", "")
+    return value if isinstance(value, str) else str(value)
 
 
 def get_title_source(config: dict[str, Any]) -> str:
-    topic = get_topic(config)
-    if topic:
-        return topic
+    """Return an explicit topic/title only; never mistake story's first line for title."""
+    title = str(config.get("TITLE", "")).strip()
 
-    for line in get_story_text(config).splitlines():
-        cleaned = line.strip().strip("#").strip()
-        if cleaned:
-            return cleaned[:180]
+    if title:
+        return title
 
-    return ""
+    return get_topic(config)
 
 
 def has_story_input(config: dict[str, Any]) -> bool:
-    return bool(get_topic(config) or get_story_text(config))
+    return bool(get_topic(config) or get_story_text(config).strip())
 
 
 def normalize_provider(value: Any) -> str:
@@ -451,20 +481,19 @@ def normalize_image_provider(value: Any) -> str:
 
 
 def _split_provider_list(raw: Any) -> list[str]:
-    """Accept strings, Python lists/tuples/sets and serialized list strings."""
-
+    """Parse comma/semicolon strings and serialized Python provider lists."""
     if raw is None:
         return []
 
     if isinstance(raw, (list, tuple, set)):
         values = list(raw)
+
     elif isinstance(raw, str):
         value = raw.strip()
 
         if not value:
             return []
 
-        # Handles strings such as "['huggingface', 'pollinations']".
         if value.startswith(("[", "(")):
             try:
                 parsed = ast.literal_eval(value)
@@ -477,6 +506,7 @@ def _split_provider_list(raw: Any) -> list[str]:
                 values = re.split(r"[,;]", value)
         else:
             values = re.split(r"[,;]", value)
+
     else:
         values = [raw]
 
@@ -487,6 +517,7 @@ def _split_provider_list(raw: Any) -> list[str]:
             continue
 
         text = str(item).strip().strip("'\"").strip()
+
         if text:
             result.append(text)
 
@@ -494,6 +525,7 @@ def _split_provider_list(raw: Any) -> list[str]:
 
 
 def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
+    """Keep the three explicitly selected providers first, then configured fallback."""
     main = [
         normalize_provider(config.get("TTS_MAIN_1", "")),
         normalize_provider(config.get("TTS_MAIN_2", "")),
@@ -526,14 +558,17 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
     fallback: list[str] = []
 
     if fallback_enabled:
-        for item in _split_provider_list(
-            config.get("TTS_FALLBACK_ORDER", ",".join(ALL_TTS_PROVIDERS))
-        ):
+        raw_order = config.get(
+            "TTS_FALLBACK_ORDER",
+            ",".join(ALL_TTS_PROVIDERS),
+        )
+
+        for item in _split_provider_list(raw_order):
             provider = normalize_provider(item)
 
             if provider not in allowed:
                 raise ValueError(
-                    f"Unsupported TTS fallback provider: {provider}"
+                    f"Unsupported TTS fallback provider: {item!r}"
                 )
 
             fallback.append(provider)
@@ -546,16 +581,10 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
 
     return result
 
-
 def get_image_provider_order(config: dict[str, Any]) -> list[str]:
     raw = config.get(
         "IMAGE_PROVIDER_ORDER",
         ",".join(ALL_IMAGE_PROVIDERS),
-    )
-
-    fallback_enabled = parse_bool(
-        config.get("IMAGE_FALLBACK_ENABLED", True),
-        "IMAGE_FALLBACK_ENABLED",
     )
 
     requested = _split_provider_list(raw)
@@ -563,8 +592,8 @@ def get_image_provider_order(config: dict[str, Any]) -> list[str]:
     if not requested:
         raise ValueError("IMAGE_PROVIDER_ORDER cannot be empty.")
 
-    result: list[str] = []
     allowed = set(ALL_IMAGE_PROVIDERS)
+    result: list[str] = []
 
     for item in requested:
         provider = normalize_image_provider(item)
@@ -578,69 +607,7 @@ def get_image_provider_order(config: dict[str, Any]) -> list[str]:
         if provider not in result:
             result.append(provider)
 
-    if not fallback_enabled:
-        return result
-
     return result
-
-
-def get_image_provider_settings(config: dict[str, Any]) -> dict[str, Any]:
-    order = get_image_provider_order(config)
-
-    hf_spaces = _split_provider_list(
-        str(config.get("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo"))
-        + ","
-        + ",".join(
-            _split_provider_list(
-                config.get("FREE_IMAGE_FALLBACK_SPACES", "")
-            )
-        )
-    )
-
-    pollinations_models = _split_provider_list(
-        config.get(
-            "POLLINATIONS_FREE_IMAGE_MODELS",
-            DEFAULT_CONFIG["POLLINATIONS_FREE_IMAGE_MODELS"],
-        )
-    )
-
-    gemini_model = str(
-        config.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
-    ).strip()
-
-    replicate_model = str(
-        config.get("REPLICATE_IMAGE_MODEL", "black-forest-labs/flux-schnell")
-    ).strip()
-
-    if not hf_spaces:
-        raise ValueError("HF_IMAGE_SPACE must contain a Hugging Face Space.")
-
-    if not pollinations_models:
-        raise ValueError(
-            "POLLINATIONS_FREE_IMAGE_MODELS cannot be empty."
-        )
-
-    if not gemini_model:
-        raise ValueError("GEMINI_IMAGE_MODEL cannot be empty.")
-
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", replicate_model):
-        raise ValueError(
-            "REPLICATE_IMAGE_MODEL must use owner/model-name format."
-        )
-
-    return {
-        "IMAGE_PROVIDER_ORDER": order,
-        "IMAGE_FALLBACK_ENABLED": fallback_enabled_value(config),
-        "IMAGE_ALLOW_BILLABLE": parse_bool(
-            config.get("IMAGE_ALLOW_BILLABLE", True),
-            "IMAGE_ALLOW_BILLABLE",
-        ),
-        "HF_IMAGE_SPACE": hf_spaces[0],
-        "FREE_IMAGE_FALLBACK_SPACES": hf_spaces[1:],
-        "POLLINATIONS_FREE_IMAGE_MODELS": pollinations_models,
-        "GEMINI_IMAGE_MODEL": gemini_model,
-        "REPLICATE_IMAGE_MODEL": replicate_model,
-    }
 
 
 def fallback_enabled_value(config: dict[str, Any]) -> bool:
@@ -650,7 +617,288 @@ def fallback_enabled_value(config: dict[str, Any]) -> bool:
     )
 
 
+def get_global_billable_permission(
+    config: dict[str, Any],
+) -> bool:
+    """Workflow environment is the upper-level billable permission switch."""
+    configured = parse_bool(
+        config.get("ALLOW_BILLABLE_PROVIDERS", True),
+        "ALLOW_BILLABLE_PROVIDERS",
+    )
+
+    environment_value = os.environ.get("ALLOW_BILLABLE_PROVIDERS")
+
+    if environment_value is None:
+        return configured
+
+    return configured and parse_bool(
+        environment_value,
+        "ALLOW_BILLABLE_PROVIDERS environment variable",
+    )
+
+
+def get_image_provider_settings(
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    order = get_image_provider_order(config)
+
+    raw_hf_spaces = (
+        str(config.get("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo"))
+        + ","
+        + ",".join(
+            _split_provider_list(
+                config.get("FREE_IMAGE_FALLBACK_SPACES", "")
+            )
+        )
+    )
+
+    hf_spaces = _split_provider_list(raw_hf_spaces)
+
+    pollinations_models = _split_provider_list(
+        config.get(
+            "POLLINATIONS_FREE_IMAGE_MODELS",
+            DEFAULT_CONFIG["POLLINATIONS_FREE_IMAGE_MODELS"],
+        )
+    )
+
+    gemini_model = str(
+        config.get(
+            "GEMINI_IMAGE_MODEL",
+            DEFAULT_CONFIG["GEMINI_IMAGE_MODEL"],
+        )
+    ).strip()
+
+    replicate_model = str(
+        config.get(
+            "REPLICATE_IMAGE_MODEL",
+            DEFAULT_CONFIG["REPLICATE_IMAGE_MODEL"],
+        )
+    ).strip()
+
+    if not hf_spaces:
+        raise ValueError(
+            "HF_IMAGE_SPACE must contain a Hugging Face Space."
+        )
+
+    if not pollinations_models:
+        raise ValueError(
+            "POLLINATIONS_FREE_IMAGE_MODELS cannot be empty."
+        )
+
+    if not gemini_model:
+        raise ValueError("GEMINI_IMAGE_MODEL cannot be empty.")
+
+    if not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        replicate_model,
+    ):
+        raise ValueError(
+            "REPLICATE_IMAGE_MODEL must use owner/model-name format."
+        )
+
+    global_billable = get_global_billable_permission(config)
+
+    input_image_billable = parse_bool(
+        config.get("IMAGE_ALLOW_BILLABLE", True),
+        "IMAGE_ALLOW_BILLABLE",
+    )
+
+    return {
+        "IMAGE_PROVIDER_ORDER": order,
+        "IMAGE_FALLBACK_ENABLED": fallback_enabled_value(config),
+        "ALLOW_BILLABLE_PROVIDERS": global_billable,
+        "IMAGE_ALLOW_BILLABLE": (
+            global_billable and input_image_billable
+        ),
+        "HF_IMAGE_SPACE": hf_spaces[0],
+        "FREE_IMAGE_FALLBACK_SPACES": hf_spaces[1:],
+        "POLLINATIONS_FREE_IMAGE_MODELS": pollinations_models,
+        "GEMINI_IMAGE_MODEL": gemini_model,
+        "REPLICATE_IMAGE_MODEL": replicate_model,
+    }
+
+
+def _validate_story_settings(config: dict[str, Any]) -> None:
+    story_length = str(
+        config.get("STORY_LENGTH", "auto")
+    ).strip().lower()
+
+    if story_length not in {"auto", "short", "medium", "long"}:
+        raise ValueError(
+            "STORY_LENGTH must be auto, short, medium or long."
+        )
+
+    config["STORY_LENGTH"] = story_length
+
+    scene_duration = str(
+        config.get("SCENE_DURATION", "auto")
+    ).strip().lower()
+
+    if scene_duration not in {"auto", "fixed"}:
+        raise ValueError(
+            "SCENE_DURATION must be auto or fixed."
+        )
+
+    config["SCENE_DURATION"] = scene_duration
+
+    preserve = parse_bool(
+        config.get("PRESERVE_STORY_TEXT", True),
+        "PRESERVE_STORY_TEXT",
+    )
+
+    config["PRESERVE_STORY_TEXT"] = preserve
+
+    if get_story_text(config).strip() and not preserve:
+        raise ValueError(
+            "STORY_TEXT is supplied but PRESERVE_STORY_TEXT is false. "
+            "Set it to true to protect the supplied story from rewriting."
+        )
+
+
+def _validate_voice_and_audience(config: dict[str, Any]) -> None:
+    voice = str(config.get("VOICE", "male")).strip().lower()
+
+    if voice not in {"male", "female"}:
+        raise ValueError("VOICE must be 'male' or 'female'.")
+
+    config["VOICE"] = voice
+
+    audience = str(
+        config.get("AUDIENCE", "adult")
+    ).strip().lower()
+
+    if audience not in {"adult", "kids"}:
+        raise ValueError("AUDIENCE must be 'adult' or 'kids'.")
+
+    config["AUDIENCE"] = audience
+
+    speed = str(config.get("SPEED", "+0%")).strip()
+
+    if not re.fullmatch(r"[+-]?\d{1,2}%", speed):
+        raise ValueError(
+            "SPEED must use a percentage such as -10%, +0% or +10%."
+        )
+
+    speed_number = int(speed.replace("%", ""))
+
+    if not -50 <= speed_number <= 50:
+        raise ValueError("SPEED must be between -50% and +50%.")
+
+    config["SPEED"] = speed
+
+
+def _validate_tts_settings(config: dict[str, Any]) -> None:
+    for key in (
+        "TTS_CHUNK_MAX_CHARS",
+        "TTS_CHUNK_MIN_CHARS",
+        "TTS_MAX_PROVIDER_ATTEMPTS",
+    ):
+        config[key] = _positive_int(
+            config,
+            key,
+            DEFAULT_CONFIG[key],
+        )
+
+    if config["TTS_CHUNK_MIN_CHARS"] > config["TTS_CHUNK_MAX_CHARS"]:
+        raise ValueError(
+            "TTS_CHUNK_MIN_CHARS cannot exceed TTS_CHUNK_MAX_CHARS."
+        )
+
+    if config["TTS_MAX_PROVIDER_ATTEMPTS"] > 3:
+        raise ValueError(
+            "TTS_MAX_PROVIDER_ATTEMPTS cannot exceed 3."
+        )
+
+    config["TTS_FALLBACK_ENABLED"] = parse_bool(
+        config.get("TTS_FALLBACK_ENABLED", True),
+        "TTS_FALLBACK_ENABLED",
+    )
+
+    config["TTS_ALLOW_PAID"] = parse_bool(
+        config.get("TTS_ALLOW_PAID", True),
+        "TTS_ALLOW_PAID",
+    )
+
+    config["TTS_PROVIDER_ORDER"] = get_tts_provider_order(config)
+
+    # Global permission is retained separately. The TTS-specific switch
+    # can still disable paid TTS providers without changing provider order.
+    config["TTS_BILLABLE_ALLOWED"] = (
+        get_global_billable_permission(config)
+        and config["TTS_ALLOW_PAID"]
+    )
+
+
+def _validate_caption_settings(config: dict[str, Any]) -> None:
+    captions = str(
+        config.get("CAPTIONS", "hindi")
+    ).strip().lower()
+
+    if captions not in {"hindi", "english", "hinglish"}:
+        raise ValueError(
+            "CAPTIONS must be hindi, english or hinglish."
+        )
+
+    config["CAPTIONS"] = captions
+
+    get_caption_font(config)
+    get_caption_font_size(config)
+
+
+def _validate_general_settings(config: dict[str, Any]) -> None:
+    quality = str(
+        config.get("QUALITY", "high")
+    ).strip().lower()
+
+    if quality not in {"draft", "standard", "high"}:
+        raise ValueError(
+            "QUALITY must be draft, standard or high."
+        )
+
+    config["QUALITY"] = quality
+
+    failure_policy = str(
+        config.get("FAILURE_POLICY", "retry_then_checkpoint")
+    ).strip().lower()
+
+    if failure_policy not in {
+        "retry_then_checkpoint",
+        "skip",
+        "stop",
+    }:
+        raise ValueError(
+            "FAILURE_POLICY must be retry_then_checkpoint, skip or stop."
+        )
+
+    config["FAILURE_POLICY"] = failure_policy
+
+    for key in (
+        "VISUAL_STYLE",
+        "REALISM",
+        "CAMERA_STYLE",
+        "LIGHTING",
+        "MOOD",
+        "MUSIC_STYLE",
+        "TRANSITIONS",
+    ):
+        value = str(
+            config.get(key, DEFAULT_CONFIG.get(key, ""))
+        ).strip()
+
+        if not value:
+            raise ValueError(f"{key} cannot be empty.")
+
+        config[key] = value
+
+    config["ALLOW_BILLABLE_PROVIDERS"] = (
+        get_global_billable_permission(config)
+    )
+
+
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        raise TypeError("Configuration must be a dictionary.")
+
     normalize_format(config)
 
     for key in BOOL_KEYS:
@@ -664,73 +912,25 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     config["FPS"] = get_fps(config)
     config["MAX_RETRIES"] = get_max_retries(config)
 
-    get_caption_font(config)
-    get_caption_font_size(config)
+    if config["PARTS"] > 100:
+        raise ValueError("PARTS cannot exceed 100.")
+
+    if config["SCENES"] > 500:
+        raise ValueError("SCENES cannot exceed 500.")
 
     if not has_story_input(config):
-        raise ValueError("Either TOPIC or STORY_TEXT must be provided.")
-
-    voice = str(config.get("VOICE", "male")).strip().lower()
-    if voice not in {"male", "female"}:
-        raise ValueError("VOICE must be 'male' or 'female'.")
-    config["VOICE"] = voice
-
-    for key in (
-        "TTS_CHUNK_MAX_CHARS",
-        "TTS_CHUNK_MIN_CHARS",
-        "TTS_MAX_PROVIDER_ATTEMPTS",
-    ):
-        config[key] = _positive_int(config, key, DEFAULT_CONFIG[key])
-
-    if config["TTS_CHUNK_MIN_CHARS"] > config["TTS_CHUNK_MAX_CHARS"]:
         raise ValueError(
-            "TTS_CHUNK_MIN_CHARS cannot exceed TTS_CHUNK_MAX_CHARS."
+            "Either TOPIC or STORY_TEXT must be provided."
         )
 
-    if config["TTS_MAX_PROVIDER_ATTEMPTS"] > 3:
-        raise ValueError("TTS_MAX_PROVIDER_ATTEMPTS cannot exceed 3.")
-
-    config["TTS_ALLOW_PAID"] = parse_bool(
-        config.get("TTS_ALLOW_PAID", False),
-        "TTS_ALLOW_PAID",
-    )
-    config["TTS_FALLBACK_ENABLED"] = parse_bool(
-        config.get("TTS_FALLBACK_ENABLED", True),
-        "TTS_FALLBACK_ENABLED",
-    )
-    config["TTS_PROVIDER_ORDER"] = get_tts_provider_order(config)
+    _validate_story_settings(config)
+    _validate_voice_and_audience(config)
+    _validate_caption_settings(config)
+    _validate_tts_settings(config)
+    _validate_general_settings(config)
 
     image_settings = get_image_provider_settings(config)
     config.update(image_settings)
-
-    policy = str(
-        config.get("FAILURE_POLICY", "retry_then_checkpoint")
-    ).strip().lower()
-
-    if policy not in {"retry_then_checkpoint", "skip", "stop"}:
-        raise ValueError(
-            "FAILURE_POLICY must be retry_then_checkpoint, skip, or stop."
-        )
-
-    config["FAILURE_POLICY"] = policy
-
-    captions = str(config.get("CAPTIONS", "hindi")).strip().lower()
-    if captions not in {"hindi", "english", "hinglish"}:
-        raise ValueError("CAPTIONS must be hindi, english, or hinglish.")
-    config["CAPTIONS"] = captions
-
-    config["QUALITY"] = str(
-        config.get("QUALITY", "high")
-    ).strip().lower()
-    config["VISUAL_STYLE"] = str(
-        config.get("VISUAL_STYLE", "cinematic_realistic")
-    ).strip()
-    config["STORY_LENGTH"] = str(
-        config.get("STORY_LENGTH", "auto")
-    ).strip().lower()
-    config["SCENE_DURATION"] = str(
-        config.get("SCENE_DURATION", "auto")
-    ).strip().lower()
 
     return config
 
@@ -747,13 +947,19 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "FORMAT": get_format(config),
         "TOPIC": get_topic(config),
-        "HAS_STORY_TEXT": bool(get_story_text(config)),
+        "TITLE": str(config.get("TITLE", "")).strip(),
+        "HAS_STORY_TEXT": bool(get_story_text(config).strip()),
+        "PRESERVE_STORY_TEXT": parse_bool(
+            config.get("PRESERVE_STORY_TEXT", True),
+            "PRESERVE_STORY_TEXT",
+        ),
         "TITLE_SOURCE_AVAILABLE": bool(get_title_source(config)),
         "PARTS": get_parts(config),
         "SCENES": get_scenes(config),
         "FPS": get_fps(config),
         "VOICE": str(config.get("VOICE", "")),
         "AUDIENCE": str(config.get("AUDIENCE", "")),
+        "SPEED": str(config.get("SPEED", "+0%")),
         "CAPTIONS": str(config.get("CAPTIONS", "")),
         "CAPTION_FONT": get_caption_font(config),
         "CAPTION_FONT_SIZE": get_caption_font_size(config),
@@ -761,7 +967,8 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "SCENE_DURATION": str(config.get("SCENE_DURATION", "")),
         "FAILURE_POLICY": str(config.get("FAILURE_POLICY", "")),
         "RESUME_ENABLED": parse_bool(
-            config.get("RESUME_ENABLED", True), "RESUME_ENABLED"
+            config.get("RESUME_ENABLED", True),
+            "RESUME_ENABLED",
         ),
         "SAVE_CHECKPOINT_AFTER_EACH_SCENE": parse_bool(
             config.get("SAVE_CHECKPOINT_AFTER_EACH_SCENE", True),
@@ -773,18 +980,36 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         ),
         "TTS_PROVIDER_ORDER": get_tts_provider_order(config),
         "TTS_ALLOW_PAID": parse_bool(
-            config.get("TTS_ALLOW_PAID", False), "TTS_ALLOW_PAID"
+            config.get("TTS_ALLOW_PAID", True),
+            "TTS_ALLOW_PAID",
+        ),
+        "TTS_BILLABLE_ALLOWED": bool(
+            config.get("TTS_BILLABLE_ALLOWED", False)
         ),
         "TTS_FALLBACK_ENABLED": parse_bool(
             config.get("TTS_FALLBACK_ENABLED", True),
             "TTS_FALLBACK_ENABLED",
         ),
-        "IMAGE_PROVIDER_ORDER": get_image_provider_order(config),
-        "IMAGE_FALLBACK_ENABLED": fallback_enabled_value(config),
-        "IMAGE_ALLOW_BILLABLE": parse_bool(
-            config.get("IMAGE_ALLOW_BILLABLE", True),
-            "IMAGE_ALLOW_BILLABLE",
+        "TTS_CHUNK_MAX_CHARS": int(
+            config.get("TTS_CHUNK_MAX_CHARS", 500)
         ),
+        "TTS_CHUNK_MIN_CHARS": int(
+            config.get("TTS_CHUNK_MIN_CHARS", 150)
+        ),
+        "TTS_CHUNK_CHECKPOINT": parse_bool(
+            config.get("TTS_CHUNK_CHECKPOINT", True),
+            "TTS_CHUNK_CHECKPOINT",
+        ),
+        "IMAGE_PROVIDER_ORDER": image_settings["IMAGE_PROVIDER_ORDER"],
+        "IMAGE_FALLBACK_ENABLED": image_settings[
+            "IMAGE_FALLBACK_ENABLED"
+        ],
+        "ALLOW_BILLABLE_PROVIDERS": image_settings[
+            "ALLOW_BILLABLE_PROVIDERS"
+        ],
+        "IMAGE_ALLOW_BILLABLE": image_settings[
+            "IMAGE_ALLOW_BILLABLE"
+        ],
         "IMAGE_HF_SPACES": (
             image_settings["FREE_IMAGE_FALLBACK_SPACES"]
             + [image_settings["HF_IMAGE_SPACE"]]
@@ -794,19 +1019,12 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         ],
         "IMAGE_GEMINI_MODEL": image_settings["GEMINI_IMAGE_MODEL"],
         "IMAGE_REPLICATE_MODEL": image_settings["REPLICATE_IMAGE_MODEL"],
-        "TTS_CHUNK_MAX_CHARS": int(
-            config.get("TTS_CHUNK_MAX_CHARS", 500)
-        ),
-        "TTS_CHUNK_CHECKPOINT": parse_bool(
-            config.get("TTS_CHUNK_CHECKPOINT", True),
-            "TTS_CHUNK_CHECKPOINT",
-        ),
     }
 
 
 def print_config_summary(config: dict[str, Any]) -> None:
     print("==============================================")
-    print("INPUT CONFIG")
+    print("PHOTO MOTION INPUT CONFIG")
     print("==============================================")
 
     for key, value in get_config_summary(config).items():
@@ -826,6 +1044,7 @@ if __name__ == "__main__":
         parsed = load_and_validate(config_path)
         print_config_summary(parsed)
         print("INPUT CONFIG VALIDATION: OK")
+
     except Exception as exc:
         print(f"INPUT CONFIG VALIDATION: FAILED: {exc}")
         raise
