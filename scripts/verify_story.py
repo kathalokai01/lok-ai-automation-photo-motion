@@ -30,7 +30,7 @@ SHORT_TARGET_MAX_WORDS = 150
 SHORT_HARD_MAX_WORDS = 180
 SENTENCE_END_RE = re.compile(r"[.!?।॥…]$")
 
-VERSION = "story-verifier-v9-dynamic-short-parts-180-hard-limit"
+VERSION = "story-verifier-v10-fix-argument-count"
 
 
 def fail(message: str) -> None:
@@ -489,7 +489,6 @@ def main():
         topic,
         source_text,
         plan_parts,
-        parts,
     )
 
     verify_title_file(title)
