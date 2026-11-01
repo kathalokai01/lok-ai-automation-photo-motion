@@ -1,5 +1,6 @@
+
 #!/usr/bin/env python3
-"""Story-aware local sound design with louder, longer audio and resumable assets."""
+"""Story-aware sound design with Google Lyria music and local fallback."""
 
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT = ROOT / "output"
 
 MUSIC_PATH = OUTPUT / "music" / "background_music.wav"
+FLOW_MUSIC_MANIFEST = OUTPUT / "music" / "flow_music_manifest.json"
 AMBIENT_PATH = OUTPUT / "sound" / "ambient_environment.wav"
 SFX_DIR = OUTPUT / "sfx"
 DESIGN_DIR = OUTPUT / "sound_design"
@@ -27,13 +29,12 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SCENES_PATH = OUTPUT / "scenes" / "scenes.json"
 AUDIO_MANIFEST = OUTPUT / "narration" / "audio_jobs.json"
 
-VERSION = "free-sound-design-v16-louder-longer-story-aware"
+VERSION = "google-lyria-music-local-fallback-sound-design-v17"
 RATE = 22050
 SFX_SECONDS = 3.6
 SFX_TYPES = ("whoosh", "impact", "mystery", "heartbeat", "chime")
 PATH_KEYS = ("output", "audio_path", "path", "file", "audio")
 
-# Gains are cue-level values. The renderer applies its own SFX multiplier.
 SFX_GAINS = {
     "whoosh": 0.72,
     "impact": 0.82,
@@ -130,6 +131,67 @@ def enabled(config, keys, default=True):
         raise RuntimeError(f"{key} must be true or false.")
 
     return default
+
+
+def ffprobe_audio(path):
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("ffprobe is required to inspect audio.")
+
+    process = subprocess.run(
+        [
+            ffprobe,
+            "-v", "error",
+            "-show_entries", "format=duration:stream=codec_type",
+            "-of", "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    if process.returncode:
+        raise RuntimeError(
+            f"ffprobe failed: {process.stderr[-500:]}"
+        )
+
+    try:
+        info = json.loads(process.stdout)
+        duration = float(info["format"]["duration"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("Invalid audio duration.") from exc
+
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError("Audio duration is invalid.")
+
+    if not any(
+        stream.get("codec_type") == "audio"
+        for stream in info.get("streams", [])
+    ):
+        raise RuntimeError("File contains no audio stream.")
+
+    return duration
+
+
+def safe_project_path(value):
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("Audio manifest path is missing.")
+
+    path = Path(value.strip())
+    if not path.is_absolute():
+        path = ROOT / path
+
+    path = path.resolve()
+
+    if not path.is_relative_to(ROOT.resolve()):
+        raise RuntimeError("Audio path points outside the project.")
+
+    if not path.is_file():
+        raise RuntimeError(f"Audio file does not exist: {value}")
+
+    return path
 
 
 def validate_wav(path, minimum_seconds=0.1):
@@ -365,6 +427,82 @@ def make_track(path, category, factory, duration, old_tracks):
         "generation": "deterministic_local_synthesis_no_external_api",
     }
 
+
+def load_flow_music(background_duration):
+    """Validate the Lyria-generated track before passing it to the renderer."""
+    data = read_json(FLOW_MUSIC_MANIFEST)
+
+    if not isinstance(data, dict):
+        log("FLOW MUSIC: manifest missing; using local music.")
+        return None
+
+    if str(data.get("status", "")).lower() != "completed":
+        log(
+            "FLOW MUSIC: not completed:",
+            data.get("status", "unknown"),
+            "- using local music.",
+        )
+        return None
+
+    try:
+        path = safe_project_path(data.get("path"))
+        duration = ffprobe_audio(path)
+        checksum = sha256_file(path)
+
+        expected_hash = data.get("sha256")
+        if expected_hash and str(expected_hash).lower() != checksum.lower():
+            raise RuntimeError("Lyria music checksum mismatch.")
+
+        if duration + 0.5 < background_duration:
+            raise RuntimeError(
+                f"Lyria music is too short ({duration:.2f}s); "
+                f"need {background_duration:.2f}s."
+            )
+
+        declared_duration = data.get("duration_seconds")
+        if declared_duration is not None:
+            try:
+                declared_duration = float(declared_duration)
+            except (TypeError, ValueError):
+                raise RuntimeError("Invalid duration in Lyria manifest.")
+
+            if (
+                not math.isfinite(declared_duration)
+                or declared_duration <= 0
+                or abs(declared_duration - duration) > 2.0
+            ):
+                raise RuntimeError("Lyria manifest duration does not match audio.")
+
+        record = {
+            "status": "completed",
+            "path": path.relative_to(ROOT).as_posix(),
+            "sha256": checksum,
+            "duration_seconds": round(duration, 6),
+            "generation": "google_lyria",
+            "provider": data.get("provider", "Google Gemini API"),
+            "model": data.get("model", "lyria-3.5"),
+            "source_manifest": FLOW_MUSIC_MANIFEST.relative_to(ROOT).as_posix(),
+            "source_fingerprint": data.get("source_fingerprint"),
+            "paid_services_used": bool(data.get("paid_services_used", True)),
+        }
+
+        log(
+            "FLOW MUSIC READY:",
+            record["provider"],
+            record["model"],
+            f"{duration:.2f}s",
+        )
+        return record
+
+    except (
+        OSError, ValueError, TypeError, RuntimeError,
+        subprocess.SubprocessError,
+    ) as exc:
+        log("FLOW MUSIC INVALID:", str(exc))
+        log("Using existing local music fallback.")
+        return None
+
+
 def narration_durations():
     data = read_json(AUDIO_MANIFEST)
 
@@ -382,10 +520,6 @@ def narration_durations():
 
     if not isinstance(jobs, list) or not jobs:
         raise RuntimeError("No narration jobs found; generate narration first.")
-
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        raise RuntimeError("ffprobe is required to inspect narration.")
 
     result = {}
 
@@ -413,48 +547,8 @@ def narration_durations():
         if not value:
             raise RuntimeError(f"Narration path missing for {part}/{scene}.")
 
-        path = Path(value)
-        if not path.is_absolute():
-            path = ROOT / path
-        path = path.resolve()
-
-        if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
-            raise RuntimeError(f"Narration file missing or unsafe: {part}/{scene}.")
-
-        process = subprocess.run(
-            [
-                ffprobe, "-v", "error",
-                "-show_entries", "format=duration:stream=codec_type",
-                "-of", "json", str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-
-        if process.returncode:
-            raise RuntimeError(
-                f"ffprobe failed for narration {part}/{scene}: "
-                f"{process.stderr[-500:]}"
-            )
-
-        try:
-            info = json.loads(process.stdout)
-            duration = float(info["format"]["duration"])
-        except (ValueError, KeyError, TypeError) as exc:
-            raise RuntimeError(
-                f"Invalid narration duration for {part}/{scene}."
-            ) from exc
-
-        if not math.isfinite(duration) or duration <= 0:
-            raise RuntimeError(f"Invalid narration duration for {part}/{scene}.")
-
-        if not any(
-            stream.get("codec_type") == "audio"
-            for stream in info.get("streams", [])
-        ):
-            raise RuntimeError(f"No audio stream for narration {part}/{scene}.")
+        path = safe_project_path(value)
+        duration = ffprobe_audio(path)
 
         key = (part, scene)
         if key in result:
@@ -625,7 +719,7 @@ def main():
     if not isinstance(old_tracks, dict):
         old_tracks = {}
 
-    # Actual narration duration drives all soundtrack and effect timing.
+    # Use exact narration durations, not estimated scene lengths.
     durations = narration_durations()
     mapping = validate_scene_mapping(durations)
     ordered_keys = sorted(durations)
@@ -634,7 +728,6 @@ def main():
         durations[key]["duration"] for key in ordered_keys
     )
 
-    # Leave a tail after the final narration scene for music/ambience fades.
     background_duration = max(30.0, total_duration + 8.0)
 
     actual_parts = sorted({part for part, _ in ordered_keys})
@@ -644,21 +737,38 @@ def main():
     }
 
     tracks = {}
-    definitions = {
-        "music": (MUSIC_PATH, music_samples),
-        "ambient": (AMBIENT_PATH, ambient_samples),
-    }
 
-    for category, (path, factory) in definitions.items():
-        if not enabled_tracks[category]:
-            path.unlink(missing_ok=True)
-            tracks[category] = None
-            continue
+    if not enabled_tracks["music"]:
+        MUSIC_PATH.unlink(missing_ok=True)
+        tracks["music"] = None
+        log("Music disabled in Input/topic.txt.")
 
-        tracks[category] = make_track(
-            path,
-            category,
-            factory,
+    else:
+        flow_record = load_flow_music(background_duration)
+
+        if flow_record:
+            # Do not overwrite or convert the validated Lyria MP3.
+            MUSIC_PATH.unlink(missing_ok=True)
+            tracks["music"] = flow_record
+        else:
+            tracks["music"] = make_track(
+                MUSIC_PATH,
+                "music",
+                music_samples,
+                background_duration,
+                old_tracks,
+            )
+            tracks["music"]["generation"] = "local_fallback"
+            tracks["music"]["provider"] = "local_synthesis"
+
+    if not enabled_tracks["ambient"]:
+        AMBIENT_PATH.unlink(missing_ok=True)
+        tracks["ambient"] = None
+    else:
+        tracks["ambient"] = make_track(
+            AMBIENT_PATH,
+            "ambient",
+            ambient_samples,
             background_duration,
             old_tracks,
         )
@@ -694,7 +804,6 @@ def main():
             duration = narration["duration"]
             kind = choose_sfx(mapping[(part, scene)])
 
-            # Start early enough to preserve more of the longer effect.
             cue_time = min(
                 duration * SFX_TIME_FRACTIONS[kind],
                 max(0.0, duration - 0.35),
@@ -717,6 +826,30 @@ def main():
                 "narration_sha256": narration["sha256"],
                 "effect_duration_seconds": SFX_SECONDS,
             })
+
+    flow_data = read_json(FLOW_MUSIC_MANIFEST, {})
+    if not isinstance(flow_data, dict):
+        flow_data = {}
+
+    music_record = tracks.get("music")
+    using_lyria = (
+        isinstance(music_record, dict)
+        and music_record.get("generation") == "google_lyria"
+    )
+
+    external_api_calls = 0
+    if using_lyria:
+        try:
+            external_api_calls = int(
+                flow_data.get("external_api_calls", 1)
+            )
+        except (TypeError, ValueError):
+            external_api_calls = 1
+
+    paid_services_used = bool(
+        using_lyria
+        and music_record.get("paid_services_used", True)
+    )
 
     cue_manifest = {
         "status": "completed",
@@ -743,9 +876,13 @@ def main():
     manifest = {
         "status": "completed",
         "version": VERSION,
-        "generation": "local_synthesis_no_external_api",
-        "external_api_calls": 0,
-        "paid_services_used": False,
+        "generation": (
+            "google_lyria_music_with_local_ambient_and_sfx"
+            if using_lyria
+            else "local_synthesis_with_lyria_fallback"
+        ),
+        "external_api_calls": external_api_calls,
+        "paid_services_used": paid_services_used,
         "sample_rate": RATE,
         "background_duration_seconds": round(background_duration, 3),
         "sfx_duration_seconds": SFX_SECONDS,
@@ -758,15 +895,25 @@ def main():
         "total_scenes": len(ordered_keys),
         "enabled": enabled_tracks,
         "tracks": tracks,
+        "flow_music_manifest": (
+            FLOW_MUSIC_MANIFEST.relative_to(ROOT).as_posix()
+        ),
+        "music_provider": (
+            "Google Lyria 3.5" if using_lyria
+            else "local_synthesis_fallback" if enabled_tracks["music"]
+            else "disabled"
+        ),
         "sfx_cue_manifest": CUES_PATH.relative_to(ROOT).as_posix(),
         "sfx_cue_count": len(cues),
         "narration_manifest": AUDIO_MANIFEST.relative_to(ROOT).as_posix(),
         "scene_manifest": SCENES_PATH.relative_to(ROOT).as_posix(),
         "mixing_note": (
-            "Music and ambience are generated beyond the narration end. "
-            "SFX are longer, louder, scene-aware and timed from actual "
-            "narration duration. Final mixing and narration protection "
-            "are handled by render_video.py. No external APIs are used."
+            "Music uses the validated Google Lyria track when available; "
+            "otherwise deterministic local music is generated. Ambient "
+            "audio and story-aware SFX remain locally generated. Music and "
+            "ambience cover the narration timeline plus an eight-second tail. "
+            "Final mixing and narration protection are handled by "
+            "render_video.py."
         ),
     }
 
@@ -774,6 +921,9 @@ def main():
 
     log("SOUND DESIGN READY")
     log("Format:", manifest["format"])
+    log("Music provider:", manifest["music_provider"])
+    log("External API calls:", external_api_calls)
+    log("Paid services used:", paid_services_used)
     log("Actual parts:", len(actual_parts))
     log("Part scene counts:", part_scene_counts)
     log("Total scenes:", len(ordered_keys))
