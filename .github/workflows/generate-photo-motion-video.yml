@@ -14,12 +14,14 @@ concurrency:
 jobs:
   generate-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
 
     env:
       PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
       TOKENIZERS_PARALLELISM: "false"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
 
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
@@ -50,13 +52,23 @@ jobs:
       REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
 
       POLLINATIONS_FREE_IMAGE_MODELS: "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"
+
       ALLOW_BILLABLE_PROVIDERS: "true"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
 
-      - name: Check input and required scripts
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Validate input and required pipeline files
         shell: bash
         run: |
           set -euo pipefail
@@ -66,46 +78,96 @@ jobs:
             exit 1
           }
 
-          for file in \
-            scripts/input_config.py \
-            scripts/select_gemini_model.py \
-            scripts/generate_story_plan.py \
-            scripts/generate_story.py \
-            scripts/verify_story.py \
-            scripts/generate_ai_story.py \
-            scripts/generate_character_bible.py \
-            scripts/generate_scenes.py \
-            scripts/generate_narration.py \
-            scripts/prepare_captions.py \
-            scripts/generate_tts.py \
-            scripts/generate_flow_music.py \
-            scripts/generate_visuals.py \
-            scripts/free_image_generator.py \
-            scripts/generate_depth_maps.py \
-            scripts/depth_parallax.py \
-            scripts/photo_motion.py \
-            scripts/generate_sound_design.py \
-            scripts/validate_sfx_timing.py \
-            scripts/render_video.py \
-            scripts/install_caption_fonts.py \
-            scripts/preview_caption_fonts.py \
-            scripts/burn_captions.py \
-            scripts/generate_thumbnail.py \
-            scripts/generate_youtube_metadata.py \
-            scripts/validate_final_output.py \
+          test -s .github/workflows/generate-photo-motion-video.yml
+
+          required_files=(
+            scripts/input_config.py
+            scripts/select_gemini_model.py
+            scripts/generate_story_plan.py
+            scripts/generate_story.py
+            scripts/verify_story.py
+            scripts/generate_ai_story.py
+            scripts/generate_character_bible.py
+            scripts/generate_scenes.py
+            scripts/generate_narration.py
+            scripts/prepare_captions.py
+            scripts/generate_tts.py
+            scripts/generate_flow_music.py
+            scripts/generate_visuals.py
+            scripts/free_image_generator.py
+            scripts/generate_depth_maps.py
+            scripts/depth_parallax.py
+            scripts/photo_motion.py
+            scripts/generate_sound_design.py
+            scripts/validate_sfx_timing.py
+            scripts/render_video.py
+            scripts/install_caption_fonts.py
+            scripts/preview_caption_fonts.py
+            scripts/burn_captions.py
+            scripts/generate_thumbnail.py
+            scripts/generate_youtube_metadata.py
+            scripts/validate_final_output.py
             scripts/package_output.py
-          do
+          )
+
+          for file in "${required_files[@]}"; do
             if [ ! -s "$file" ]; then
-              echo "::error::Required script is missing or empty: $file"
+              echo "::error::Required file missing or empty: $file"
               exit 1
             fi
           done
 
-          python - <<'PY'
-          from scripts.input_config import load_and_validate, print_config_summary
+          python -m py_compile "${required_files[@]}"
 
-          config = load_and_validate("Input/topic.txt")
-          print_config_summary(config)
+          python - <<'PY'
+          from pathlib import Path
+          from scripts.input_config import (
+              load_and_validate,
+              get_format,
+              get_parts,
+              get_scenes,
+              get_fps,
+              get_tts_provider_order,
+              get_image_provider_order,
+              get_global_billable_permission,
+          )
+
+          config = load_and_validate(Path("Input/topic.txt"))
+
+          mode = get_format(config)
+          parts = get_parts(config)
+          scenes = get_scenes(config)
+          fps = get_fps(config)
+          tts = get_tts_provider_order(config)
+          images = get_image_provider_order(config)
+
+          if mode not in {"short", "full"}:
+              raise SystemExit(f"Invalid FORMAT: {mode}")
+
+          if parts < 1 or scenes < 1:
+              raise SystemExit("PARTS and SCENES must be positive.")
+
+          if not 1 <= fps <= 60:
+              raise SystemExit(f"Invalid FPS: {fps}")
+
+          if len(tts) < 3 or len(set(tts)) != len(tts):
+              raise SystemExit("TTS provider order is invalid.")
+
+          if not images or len(set(images)) != len(images):
+              raise SystemExit("Image provider order is invalid.")
+
+          print("INPUT CONFIGURATION VALID")
+          print("FORMAT:", mode)
+          print("PARTS:", parts)
+          print("SCENES PER PART:", scenes)
+          print("CONFIGURED SCENES:", parts * scenes)
+          print("FPS:", fps)
+          print("TTS FALLBACK ORDER:", " -> ".join(tts))
+          print("IMAGE FALLBACK ORDER:", " -> ".join(images))
+          print(
+              "BILLABLE PROVIDERS ALLOWED:",
+              get_global_billable_permission(config),
+          )
           PY
 
       - name: Calculate input and pipeline fingerprints
@@ -116,25 +178,30 @@ jobs:
 
           INPUT_HASH="$(sha256sum Input/topic.txt | awk '{print $1}')"
 
+          find scripts -type f -name '*.py' -print0 \
+            | sort -z \
+            | xargs -0 -r sha256sum \
+            > /tmp/katha-photo-motion-files.sha256
+
           {
-            find scripts -type f -name '*.py' \
-              ! -name 'verify_story.py' \
-              -print0 \
-              | sort -z \
-              | xargs -0 -r sha256sum
-          } > /tmp/katha-pipeline-files.sha256
+            sha256sum .github/workflows/generate-photo-motion-video.yml
+            cat /tmp/katha-photo-motion-files.sha256
+          } > /tmp/katha-photo-motion-pipeline.sha256
 
           PIPELINE_HASH="$(
-            sha256sum /tmp/katha-pipeline-files.sha256 | awk '{print $1}'
+            sha256sum /tmp/katha-photo-motion-pipeline.sha256 \
+              | awk '{print $1}'
           )"
 
-          echo "input_hash=$INPUT_HASH" >> "$GITHUB_OUTPUT"
-          echo "pipeline_hash=$PIPELINE_HASH" >> "$GITHUB_OUTPUT"
+          {
+            echo "input_hash=$INPUT_HASH"
+            echo "pipeline_hash=$PIPELINE_HASH"
+          } >> "$GITHUB_OUTPUT"
 
           echo "Input fingerprint: $INPUT_HASH"
           echo "Pipeline fingerprint: $PIPELINE_HASH"
 
-      - name: Restore previous checkpoint with stage-level validation
+      - name: Restore matching resumable checkpoint
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -147,13 +214,15 @@ jobs:
           TEMP_DIR="$(mktemp -d)"
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
-          RUN_IDS="$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow generate-photo-motion-video.yml \
-            --limit 20 \
-            --json databaseId,status \
-            --jq '.[] | select(.status == "completed") | .databaseId' \
-            2>/dev/null || true)"
+          RUN_IDS="$(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow generate-photo-motion-video.yml \
+              --limit 20 \
+              --json databaseId,status \
+              --jq '.[] | select(.status == "completed") | .databaseId' \
+              2>/dev/null || true
+          )"
 
           for RUN_ID in $RUN_IDS; do
             DEST="$TEMP_DIR/$RUN_ID"
@@ -165,14 +234,12 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --name "katha-photo-motion-checkpoint-$RUN_ID" \
               --dir "$DEST" 2>/dev/null; then
-              echo "Checkpoint artifact unavailable: $RUN_ID"
               continue
             fi
 
             CHECKPOINT="$DEST/checkpoint.zip"
 
             if [ ! -s "$CHECKPOINT" ]; then
-              echo "Checkpoint ZIP missing: $RUN_ID"
               continue
             fi
 
@@ -181,91 +248,117 @@ jobs:
               continue
             fi
 
-            if ! unzip -Z1 "$CHECKPOINT" > "$DEST/entries.txt"; then
-              continue
-            fi
+            if ! python - "$CHECKPOINT" "$DEST/extracted" <<'PY'
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
 
-            if grep -Eq '(^/|(^|/)\.\.(/|$)|^[A-Za-z]:)' "$DEST/entries.txt"; then
+          archive = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+
+          with zipfile.ZipFile(archive) as zf:
+              infos = zf.infolist()
+
+              if not infos:
+                  raise SystemExit("Empty checkpoint ZIP.")
+
+              total_size = 0
+              seen = set()
+
+              for info in infos:
+                  name = info.filename.replace("\\", "/")
+                  path = PurePosixPath(name)
+
+                  if (
+                      path.is_absolute()
+                      or not path.parts
+                      or any(part in {"", ".", ".."} for part in path.parts)
+                      or ":" in path.parts[0]
+                  ):
+                      raise SystemExit(f"Unsafe ZIP path: {name}")
+
+                  if name in seen:
+                      raise SystemExit(f"Duplicate ZIP path: {name}")
+
+                  seen.add(name)
+
+                  mode = info.external_attr >> 16
+
+                  if stat.S_ISLNK(mode):
+                      raise SystemExit(f"Symlink in checkpoint: {name}")
+
+                  if info.file_size < 0:
+                      raise SystemExit(f"Invalid file size: {name}")
+
+                  total_size += info.file_size
+
+                  if total_size > 8 * 1024 * 1024 * 1024:
+                      raise SystemExit("Checkpoint exceeds 8 GiB.")
+
+              destination.mkdir(parents=True, exist_ok=True)
+              zf.extractall(destination)
+          PY
+            then
               echo "Skipping unsafe checkpoint: $RUN_ID"
-              continue
-            fi
-
-            mkdir -p "$DEST/extracted"
-
-            if ! unzip -q "$CHECKPOINT" -d "$DEST/extracted"; then
-              echo "Could not extract checkpoint: $RUN_ID"
               continue
             fi
 
             SAVED_OUTPUT="$DEST/extracted/output"
 
             if [ ! -d "$SAVED_OUTPUT" ]; then
-              echo "Checkpoint output directory missing: $RUN_ID"
               continue
             fi
 
             INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
 
             if [ ! -s "$INPUT_FILE" ]; then
-              echo "Skipping checkpoint without input fingerprint: $RUN_ID"
               continue
             fi
 
             SAVED_INPUT_HASH="$(tr -d '\r\n' < "$INPUT_FILE")"
 
             if [ "$SAVED_INPUT_HASH" != "$CURRENT_INPUT_HASH" ]; then
-              echo "Skipping checkpoint: input has changed ($RUN_ID)"
+              echo "Input changed; checkpoint rejected: $RUN_ID"
               continue
             fi
 
-            if [ -z "$(find "$SAVED_OUTPUT" -type f ! -name '.resume-*' -print -quit)" ]; then
-              echo "Skipping empty checkpoint: $RUN_ID"
+            if [ -z "$(
+              find "$SAVED_OUTPUT" -type f \
+                ! -name '.resume-*' -print -quit
+            )" ]; then
+              echo "Empty checkpoint rejected: $RUN_ID"
               continue
             fi
 
             cp -a "$SAVED_OUTPUT/." output/
 
-            echo "=========================================="
-            echo "CHECKPOINT RESTORED"
-            echo "Source run: $RUN_ID"
-            echo "Input fingerprint matched."
-            echo "Global pipeline fingerprint restriction removed."
-            echo "Stage scripts will validate individual assets."
-            echo "=========================================="
-
+            echo "Matching checkpoint restored from run $RUN_ID"
+            echo "Individual pipeline stages must still validate reused assets."
             exit 0
           done
 
-          echo "No matching checkpoint found."
-          echo "Generation will start without restored output."
+          echo "No matching checkpoint found; starting fresh."
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip downloads
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-photo-motion-py311-${{ hashFiles('.github/workflows/generate-photo-motion-video.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-photo-motion-py311-
-
-      - name: Install FFmpeg and font tools
+      - name: Install FFmpeg and system font tools
         shell: bash
         run: |
           set -euo pipefail
 
           sudo apt-get update
-          sudo apt-get install -y \
-            ffmpeg zip unzip fontconfig \
-            fonts-noto-core fonts-noto-extra
 
-          fc-cache -f
+          sudo apt-get install -y \
+            ffmpeg \
+            zip \
+            unzip \
+            fontconfig \
+            fonts-noto-core \
+            fonts-noto-extra
 
           ffmpeg -version
           ffprobe -version
+          fc-cache -f
+
           fc-match "Noto Sans Devanagari"
 
       - name: Install Python dependencies
@@ -273,18 +366,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
 
           python -m pip install \
-            requests pillow edge-tts gradio_client \
-            huggingface_hub opencv-python-headless
+            requests \
+            pillow \
+            edge-tts \
+            gradio_client \
+            huggingface_hub \
+            opencv-python-headless \
+            numpy \
+            imageio \
+            imageio-ffmpeg
 
-          python -m pip install torch \
+          python -m pip install \
+            torch \
             --index-url https://download.pytorch.org/whl/cpu
 
-          python -m pip install transformers
+          python -m pip install \
+            transformers \
+            safetensors \
+            accelerate
 
-      - name: Install free Hindi caption fonts
+          python - <<'PY'
+          import cv2
+          import edge_tts
+          import gradio_client
+          import huggingface_hub
+          import numpy
+          import PIL
+          import requests
+          import torch
+          import transformers
+
+          print("Python dependencies imported successfully.")
+          print("OpenCV:", cv2.__version__)
+          print("NumPy:", numpy.__version__)
+          print("Pillow:", PIL.__version__)
+          print("PyTorch:", torch.__version__)
+          print("Transformers:", transformers.__version__)
+          PY
+
+      - name: Install Hindi caption fonts
         shell: bash
         run: |
           set -euo pipefail
@@ -292,12 +415,13 @@ jobs:
           python scripts/install_caption_fonts.py
 
           fc-cache -f
+
           fc-match "Noto Sans Devanagari"
           fc-match "Mukta"
           fc-match "Hind"
           fc-match "Tiro Devanagari Hindi"
 
-      - name: Create Hindi font and size preview
+      - name: Generate caption font preview
         shell: bash
         run: |
           set -euo pipefail
@@ -316,10 +440,10 @@ jobs:
       - name: Generate story
         run: python scripts/generate_story.py
 
-      - name: Verify completed story exists
+      - name: Verify story
         run: python scripts/verify_story.py
 
-      - name: Generate AI story
+      - name: Generate AI story artifacts
         run: python scripts/generate_ai_story.py
 
       - name: Generate character bible
@@ -331,13 +455,13 @@ jobs:
       - name: Prepare narration jobs
         run: python scripts/generate_narration.py
 
-      - name: Prepare captions
+      - name: Prepare caption source
         run: python scripts/prepare_captions.py
 
       - name: Generate narration audio
         run: python scripts/generate_tts.py
 
-      - name: Generate Google Lyria background music
+      - name: Generate background music
         shell: bash
         run: |
           set -euo pipefail
@@ -345,12 +469,13 @@ jobs:
           python scripts/generate_flow_music.py
 
           if [ -s output/music/flow_music_manifest.json ]; then
-            echo "Google Lyria music manifest created."
+            echo "Background music manifest created."
           else
-            echo "Lyria music manifest not created; sound design will use local fallback."
+            echo "::warning::Music provider did not create a manifest."
+            echo "Sound design will apply its configured fallback."
           fi
 
-      - name: Prepare visual jobs
+      - name: Prepare visual generation jobs
         run: python scripts/generate_visuals.py
 
       - name: Generate scene images
@@ -359,25 +484,25 @@ jobs:
       - name: Generate depth maps
         run: python scripts/generate_depth_maps.py
 
-      - name: Render photo-motion clips
+      - name: Render Photo Motion scene clips
         run: python scripts/photo_motion.py
 
-      - name: Generate background music, ambience and timed SFX
+      - name: Generate music, ambience and sound effects
         run: python scripts/generate_sound_design.py
 
-      - name: Validate SFX timing against actual narration
+      - name: Validate sound effect timing
         run: python scripts/validate_sfx_timing.py
 
-      - name: Render scene audio, parts and final video
+      - name: Render scene audio and video parts
         run: python scripts/render_video.py
 
-      - name: Burn captions into video
+      - name: Burn captions into final video
         run: python scripts/burn_captions.py
 
-      - name: Generate requested-format thumbnail
+      - name: Generate story-specific thumbnail
         run: python scripts/generate_thumbnail.py
 
-      - name: Generate story-specific YouTube metadata
+      - name: Generate YouTube metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -387,40 +512,86 @@ jobs:
           test -s output/youtube_metadata.txt
           test -s output/publish/youtube_metadata.json
 
-          echo "Story-specific YouTube metadata generated."
+          echo "YouTube metadata files verified."
 
-      - name: Validate final deliverables
+      - name: Validate final video and deliverables
         run: python scripts/validate_final_output.py
 
-      - name: Package and verify final output ZIP
+      - name: Package final output ZIP
         shell: bash
         run: |
           set -euo pipefail
 
           python scripts/package_output.py
 
-          test -s katha-lok-ai-photo-motion-output.zip
-          test -s output/package_manifest.json
+          ARCHIVE="katha-lok-ai-photo-motion-output.zip"
+          MANIFEST="output/package_manifest.json"
 
-          unzip -t katha-lok-ai-photo-motion-output.zip
-          ls -lh katha-lok-ai-photo-motion-output.zip
+          test -s "$ARCHIVE"
+          test -s "$MANIFEST"
+
+          unzip -tq "$ARCHIVE"
 
           python - <<'PY'
+          import hashlib
           import json
+          import zipfile
           from pathlib import Path
 
-          path = Path("output/package_manifest.json")
-          data = json.loads(path.read_text(encoding="utf-8"))
+          archive = Path("katha-lok-ai-photo-motion-output.zip")
+          manifest_path = Path("output/package_manifest.json")
 
-          assert data.get("status") == "completed", "Package manifest status failed"
-          assert data.get("format") in {"short", "full"}, "Package format is invalid"
-          assert data.get("file_count", 0) > 0, "Package contains no files"
-          assert data.get("zip_integrity") == "valid", "ZIP integrity not confirmed"
+          manifest = json.loads(
+              manifest_path.read_text(encoding="utf-8")
+          )
 
-          print("Package manifest verified.")
+          if manifest.get("status") != "completed":
+              raise SystemExit("Package status is not completed.")
+
+          if manifest.get("format") not in {"short", "full"}:
+              raise SystemExit("Package format is invalid.")
+
+          if manifest.get("file_count", 0) <= 0:
+              raise SystemExit("Package contains no files.")
+
+          if manifest.get("zip_integrity") != "valid":
+              raise SystemExit("ZIP integrity is not valid.")
+
+          if manifest.get("manifest_zip_consistency") != "valid":
+              raise SystemExit("ZIP and manifest consistency failed.")
+
+          actual_hash = hashlib.sha256(
+              archive.read_bytes()
+          ).hexdigest()
+
+          if actual_hash != manifest.get("archive_sha256"):
+              raise SystemExit("Final ZIP SHA256 does not match manifest.")
+
+          with zipfile.ZipFile(archive) as zf:
+              bad_member = zf.testzip()
+
+              if bad_member:
+                  raise SystemExit(
+                      f"Corrupt ZIP member: {bad_member}"
+                  )
+
+              names = zf.namelist()
+
+              if len(names) != len(set(names)):
+                  raise SystemExit("ZIP contains duplicate file names.")
+
+              if not names:
+                  raise SystemExit("ZIP is empty.")
+
+          print("Final ZIP integrity: valid")
+          print("Final ZIP SHA256:", actual_hash)
+          print("Package format:", manifest["format"])
+          print("Packaged files:", manifest["file_count"])
           PY
 
-      - name: Upload final output artifact
+          ls -lh "$ARCHIVE"
+
+      - name: Upload final Photo Motion deliverable
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -428,11 +599,13 @@ jobs:
           path: |
             katha-lok-ai-photo-motion-output.zip
             output/package_manifest.json
+            output/validation_report.json
           if-no-files-found: error
+          compression-level: 0
           retention-days: 7
 
       - name: Save resumable checkpoint
-        if: always()
+        if: always() && steps.fingerprints.outputs.input_hash != ''
         shell: bash
         env:
           INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
@@ -448,21 +621,82 @@ jobs:
           printf '%s\n' "$PIPELINE_HASH" \
             > output/.resume-pipeline.sha256
 
-          rm -f checkpoint.zip
+          python - <<'PY'
+          import os
+          import stat
+          import zipfile
+          from pathlib import Path
 
-          zip -qr checkpoint.zip output
+          root = Path("output")
+          archive = Path("checkpoint.zip")
+          temporary = Path("checkpoint.zip.tmp")
 
-          test -s checkpoint.zip
-          unzip -tq checkpoint.zip
+          temporary.unlink(missing_ok=True)
 
-          echo "Checkpoint saved."
-          echo "Input and pipeline fingerprints stored."
+          if not root.is_dir():
+              raise SystemExit("Output directory is unavailable.")
 
-      - name: Upload checkpoint
-        if: always()
+          files = []
+
+          for path in sorted(root.rglob("*")):
+              if path.is_symlink():
+                  raise SystemExit(
+                      f"Refusing to checkpoint symlink: {path}"
+                  )
+
+              if path.is_file():
+                  files.append(path)
+
+          if not files:
+              raise SystemExit("No output files available for checkpoint.")
+
+          with zipfile.ZipFile(
+              temporary,
+              "w",
+              compression=zipfile.ZIP_DEFLATED,
+              compresslevel=3,
+              allowZip64=True,
+          ) as zf:
+              for path in files:
+                  relative = path.as_posix()
+
+                  if relative.startswith("/") or ".." in Path(relative).parts:
+                      raise SystemExit(
+                          f"Unsafe checkpoint path: {relative}"
+                      )
+
+                  info = zipfile.ZipInfo(relative)
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = (
+                      stat.S_IFREG | 0o600
+                  ) << 16
+
+                  with path.open("rb") as source:
+                      zf.writestr(info, source.read())
+
+          with zipfile.ZipFile(temporary) as zf:
+              bad_member = zf.testzip()
+
+              if bad_member:
+                  raise SystemExit(
+                      f"Checkpoint ZIP verification failed: {bad_member}"
+                  )
+
+          os.replace(temporary, archive)
+
+          if not archive.is_file() or archive.stat().st_size == 0:
+              raise SystemExit("Checkpoint ZIP was not created.")
+
+          print("Checkpoint saved:", archive.stat().st_size, "bytes")
+          print("Checkpoint files:", len(files))
+          PY
+
+      - name: Upload resumable checkpoint
+        if: always() && steps.fingerprints.outputs.input_hash != ''
         uses: actions/upload-artifact@v4
         with:
           name: katha-photo-motion-checkpoint-${{ github.run_id }}
           path: checkpoint.zip
           if-no-files-found: warn
+          compression-level: 0
           retention-days: 7
