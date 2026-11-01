@@ -1,0 +1,12 @@
+requests
+Pillow
+edge-tts
+gradio_client
+huggingface_hub
+opencv-python-headless
+numpy
+imageio
+imageio-ffmpeg
+transformers
+safetensors
+accelerate
