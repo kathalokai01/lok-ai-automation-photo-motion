@@ -1,367 +1,417 @@
+
 #!/usr/bin/env python3
-"""Select an available Gemini text model and preserve only valid checkpoints."""
 
-from __future__ import annotations
+"""
+Katha Lok AI - Gemini Model Selector
 
-import json
+Goals:
+- Reuse an already selected compatible model.
+- Preserve explicitly configured fallback order.
+- Never test every model with paid generation requests.
+- Use model-list API only when selection cannot be reused.
+- Do not silently invent additional fallback providers.
+- Save selection atomically.
+"""
+
 import os
-import re
-import urllib.error
-import urllib.parse
+import json
+import hashlib
 import urllib.request
-from datetime import datetime, timezone
+import urllib.error
+
 from pathlib import Path
-from typing import Any
+from datetime import datetime, timezone
 
-ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+BASE_URL = (
+    "https://generativelanguage.googleapis.com/v1beta"
+)
+
+OUTPUT_FILE = Path(
+    "output/config/selected_model.json"
+)
+
 PREFERRED_MODEL = "gemini-3.5-flash-lite"
-TIMEOUT_SECONDS = 30
-MAX_MODEL_PAGES = 5
-VERSION = "safe-gemini-selector-v6-checkpoint-safe"
-MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
-SUCCESS_TEST = "GEMINI_OK"
+
+API_KEY = os.environ.get(
+    "GEMINI_API_KEY", ""
+).strip()
 
 
-def log(*items: object) -> None:
-    print(*items, flush=True)
+def log(message):
+    print(f"[GEMINI SELECTOR] {message}", flush=True)
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def normalize_model(value):
+    value = str(value or "").strip()
+
+    if value.startswith("models/"):
+        value = value.split("/", 1)[1]
+
+    if not value:
+        return ""
+
+    if any(char in value for char in "\r\n\t "):
+        return ""
+
+    if "/" in value or ":" in value:
+        return ""
+
+    if not value.lower().startswith("gemini-"):
+        return ""
+
+    return value
 
 
-def valid_model_name(value: str) -> bool:
-    return bool(MODEL_PATTERN.fullmatch(value or ""))
+def read_existing_selection():
+    if not OUTPUT_FILE.is_file():
+        return {}
 
-
-def read_json(path: Path) -> dict[str, Any] | None:
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
+        with OUTPUT_FILE.open(
+            "r", encoding="utf-8"
+        ) as file:
+            data = json.load(file)
+
+        if not isinstance(data, dict):
+            return {}
+
+        return data
+
+    except (OSError, ValueError) as exc:
+        log(f"Existing selection unreadable: {exc}")
+        return {}
 
 
-def get_api_key() -> str:
-    return (
-        os.getenv("GEMINI_API_KEY", "").strip()
-        or os.getenv("GOOGLE_API_KEY", "").strip()
+def configured_fallbacks():
+    """
+    Explicit fallback order:
+    GEMINI_MODEL_FALLBACKS
+    GEMINI_MODEL
+    existing selected model
+    preferred model
+
+    Comma or semicolon separated.
+    """
+
+    values = []
+
+    raw = os.environ.get(
+        "GEMINI_MODEL_FALLBACKS", ""
     )
 
+    for item in raw.replace(";", ",").split(","):
+        model = normalize_model(item)
 
-def atomic_save(data: dict[str, Any]) -> None:
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temporary = OUTPUT_FILE.with_name(OUTPUT_FILE.name + ".tmp")
+        if model and model not in values:
+            values.append(model)
 
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+    primary = normalize_model(
+        os.environ.get("GEMINI_MODEL", "")
+    )
 
-        os.replace(temporary, OUTPUT_FILE)
-    finally:
-        temporary.unlink(missing_ok=True)
+    if primary and primary not in values:
+        values.insert(0, primary)
 
-    saved = read_json(OUTPUT_FILE)
-    if not saved or saved.get("model") != data.get("model"):
-        raise RuntimeError("Model selection read-back validation failed.")
+    existing = read_existing_selection()
 
+    previous = normalize_model(
+        existing.get("model")
+    )
 
-def copy_valid_test_checkpoint(
-    previous: dict[str, Any] | None,
-    new_model: str,
-    destination: dict[str, Any],
-) -> None:
-    """Preserve a success marker only when its recorded model matches."""
+    if previous and previous not in values:
+        values.append(previous)
 
-    if not previous:
-        return
+    preferred = normalize_model(
+        PREFERRED_MODEL
+    )
 
-    previous_model = str(previous.get("model", "")).strip()
-    tested_model = str(previous.get("test_model", "")).strip()
-    test_value = str(previous.get("test", "")).strip()
+    if preferred and preferred not in values:
+        values.append(preferred)
 
-    # A success marker without its model identity is not safe to reuse.
-    if (
-        previous_model != new_model
-        or tested_model != new_model
-        or test_value != SUCCESS_TEST
-    ):
-        return
-
-    verified_at = str(previous.get("test_verified_at", "")).strip()
-    if not verified_at:
-        return
-
-    destination["test"] = SUCCESS_TEST
-    destination["test_model"] = new_model
-    destination["test_verified_at"] = verified_at
+    return values
 
 
-def save_selection(
-    model: str,
-    *,
-    verified: bool,
-    reason: str,
-    display_name: str = "",
-    models_listed: int = 0,
-    previous: dict[str, Any] | None = None,
-) -> None:
-    if not valid_model_name(model):
-        raise RuntimeError("Refusing to save an invalid model identifier.")
-
-    data: dict[str, Any] = {
-        "version": VERSION,
-        "status": "selected",
-        "model": model,
-        "model_resource": f"models/{model}",
-        "display_name": display_name,
-        "selected_at": utc_now(),
-        "verified": verified,
-        "verification_method": (
-            "models_api_list_only" if verified else "local_fallback"
-        ),
-        "reason": reason,
-        "compatible_models_listed": models_listed,
-        "generation_test_performed": False,
-        "external_generation_calls": 0,
-        "paid_generation_test_performed": False,
-    }
-
-    copy_valid_test_checkpoint(previous, model, data)
-    atomic_save(data)
-
-
-def api_get(url: str, api_key: str) -> dict[str, Any]:
-    separator = "&" if "?" in url else "?"
-    request_url = url + separator + urllib.parse.urlencode({"key": api_key})
-
+def api_request(url, timeout=45):
     request = urllib.request.Request(
-        request_url,
-        headers={"Accept": "application/json"},
+        url,
+        headers={
+            "x-goog-api-key": API_KEY,
+            "Accept": "application/json",
+        },
         method="GET",
     )
 
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=TIMEOUT_SECONDS,
-        ) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:400]
-        raise RuntimeError(
-            f"Gemini model-list HTTP {exc.code}: {detail}"
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise RuntimeError(
-            f"Gemini model-list request failed ({type(exc).__name__})."
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Gemini returned invalid JSON for model listing.") from exc
+    with urllib.request.urlopen(
+        request, timeout=timeout
+    ) as response:
+        return json.loads(
+            response.read().decode("utf-8")
+        )
 
-    if not isinstance(result, dict):
-        raise RuntimeError("Gemini returned an invalid model-list response.")
+
+def discover_models():
+    """
+    One GET request only.
+    No generateContent testing here.
+    """
+
+    log("Discovering compatible Gemini models.")
+
+    result = api_request(
+        f"{BASE_URL}/models"
+    )
+
+    available = {}
+
+    for item in result.get("models", []):
+        if not isinstance(item, dict):
+            continue
+
+        resource = str(
+            item.get("name", "")
+        ).strip()
+
+        methods = item.get(
+            "supportedGenerationMethods", []
+        )
+
+        if "generateContent" not in methods:
+            continue
+
+        model = normalize_model(resource)
+
+        if not model:
+            continue
+
+        available[model] = {
+            "resource": resource,
+            "display_name": str(
+                item.get("displayName", "")
+            ),
+        }
+
+    return available
+
+
+def save_selection(
+    model,
+    resource,
+    display_name,
+    fallback_order,
+    selection_source,
+):
+    OUTPUT_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result = {
+        "status": "selected",
+        "model": model,
+        "model_resource": resource,
+        "display_name": display_name,
+        "selected_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "selection_source": selection_source,
+        "fallback_order": fallback_order,
+        "tested_models": [],
+        "generation_test_performed": False,
+        "selector_version": 2,
+    }
+
+    temp_file = OUTPUT_FILE.with_suffix(
+        ".json.tmp"
+    )
+
+    try:
+        with temp_file.open(
+            "w", encoding="utf-8"
+        ) as file:
+            json.dump(
+                result,
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+
+        os.replace(
+            temp_file,
+            OUTPUT_FILE,
+        )
+
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
 
     return result
 
 
-def list_compatible_models(api_key: str) -> list[dict[str, str]]:
-    url = BASE_URL + "/models?pageSize=100"
-    compatible: list[dict[str, str]] = []
-    seen_models: set[str] = set()
-    seen_tokens: set[str] = set()
-    page_count = 0
+def can_reuse_selection(existing, fallbacks):
+    if not isinstance(existing, dict):
+        return False
 
-    while url and page_count < MAX_MODEL_PAGES:
-        result = api_get(url, api_key)
-        page_count += 1
+    if existing.get("status") != "selected":
+        return False
 
-        entries = result.get("models", [])
-        if not isinstance(entries, list):
-            raise RuntimeError("Gemini model-list response has invalid models.")
+    if existing.get("selector_version") != 2:
+        return False
 
-        for item in entries:
-            if not isinstance(item, dict):
-                continue
-
-            resource = str(item.get("name", "")).strip()
-            methods = item.get("supportedGenerationMethods", [])
-
-            if not resource.startswith("models/"):
-                continue
-            if (
-                not isinstance(methods, list)
-                or "generateContent" not in methods
-            ):
-                continue
-
-            model = resource.split("/", 1)[1]
-            lowered = model.lower()
-
-            if not valid_model_name(model) or model in seen_models:
-                continue
-            if "gemini" not in lowered:
-                continue
-            if any(
-                term in lowered
-                for term in (
-                    "embedding",
-                    "image",
-                    "vision",
-                    "audio",
-                    "tts",
-                    "robotics",
-                    "aqa",
-                )
-            ):
-                continue
-
-            seen_models.add(model)
-            compatible.append({
-                "model": model,
-                "display_name": str(item.get("displayName", "")),
-            })
-
-        token = str(result.get("nextPageToken", "")).strip()
-        if not token:
-            url = ""
-            break
-        if token in seen_tokens:
-            raise RuntimeError("Gemini repeated a pagination token.")
-
-        seen_tokens.add(token)
-        url = BASE_URL + "/models?" + urllib.parse.urlencode({
-            "pageSize": "100",
-            "pageToken": token,
-        })
-
-    if url:
-        raise RuntimeError(
-            f"Gemini model listing exceeded {MAX_MODEL_PAGES} pages."
-        )
-
-    return compatible
-
-
-def choose_model(
-    models: list[dict[str, str]],
-    existing_model: str = "",
-) -> dict[str, str]:
-    if not models:
-        raise RuntimeError(
-            "The API key returned no compatible Gemini text models."
-        )
-
-    by_name = {item["model"]: item for item in models}
-
-    # Keep the existing configured model if the API still lists it.
-    if existing_model in by_name:
-        return by_name[existing_model]
-
-    # Preferred model is used only if the API confirms it is available.
-    if PREFERRED_MODEL in by_name:
-        return by_name[PREFERRED_MODEL]
-
-    def priority(item: dict[str, str]) -> tuple[int, str]:
-        name = item["model"].lower()
-
-        experimental = any(
-            token in name
-            for token in ("preview", "experimental", "exp-", "latest")
-        )
-        stability = 1 if experimental else 0
-
-        if "flash" in name and "lite" in name:
-            return stability, "0-" + name
-        if "flash" in name:
-            return stability, "1-" + name
-        if "pro" in name:
-            return stability, "2-" + name
-        return stability, "3-" + name
-
-    return sorted(models, key=priority)[0]
-
-
-def main() -> int:
-    log("===== GEMINI TEXT MODEL SELECTION =====")
-
-    existing = read_json(OUTPUT_FILE) or {}
-    existing_model = str(existing.get("model", "")).strip()
-    api_key = get_api_key()
-
-    if not api_key:
-        if (
-            existing.get("status") == "selected"
-            and valid_model_name(existing_model)
-            and existing.get("model_resource") == f"models/{existing_model}"
-        ):
-            log("No API key: retaining existing configured model.")
-            log("Model:", existing_model)
-            log("Availability verified in this run: no")
-            log("Network requests: 0")
-            return 0
-
-        save_selection(
-            PREFERRED_MODEL,
-            verified=False,
-            reason=(
-                "No Gemini API key available. Local default only; "
-                "availability is unverified. No generation request made."
-            ),
-            previous=existing,
-        )
-        log("No API key; saved unverified local default:", PREFERRED_MODEL)
-        log("Network requests: 0")
-        return 0
-
-    log("Listing compatible Gemini text models.")
-    log("No text-generation test is performed in this step.")
-
-    models = list_compatible_models(api_key)
-    selected = choose_model(models, existing_model)
-    model = selected["model"]
-
-    save_selection(
-        model,
-        verified=True,
-        display_name=selected.get("display_name", ""),
-        reason=(
-            "Model was returned by the Gemini API and supports generateContent. "
-            "No generation test was performed."
-        ),
-        models_listed=len(models),
-        previous=existing,
+    model = normalize_model(
+        existing.get("model")
     )
 
-    log("Selected model:", model)
-    log("Compatible text models listed:", len(models))
-    log("Availability confirmed by model listing: yes")
-    log("Generation request made: no")
+    if not model:
+        return False
 
-    saved = read_json(OUTPUT_FILE) or {}
-    if saved.get("test") == SUCCESS_TEST and saved.get("test_model") == model:
-        log("Successful test checkpoint preserved for the same model.")
-    elif existing_model and existing_model != model:
-        log("Model changed; old model's successful test was not reused.")
-    elif existing.get("test") == SUCCESS_TEST:
-        log("Old test checkpoint was not reused because its model identity was missing or mismatched.")
+    if model not in fallbacks:
+        return False
 
-    log("Saved:", OUTPUT_FILE)
-    return 0
+    return True
+
+
+def main():
+    log("Starting model selection.")
+
+    if not API_KEY:
+        raise SystemExit(
+            "ERROR: GEMINI_API_KEY is not set."
+        )
+
+    fallbacks = configured_fallbacks()
+
+    if not fallbacks:
+        raise SystemExit(
+            "ERROR: No configured Gemini models."
+        )
+
+    existing = read_existing_selection()
+
+    # --------------------------------------------------------
+    # REUSE PREVIOUS SUCCESSFUL SELECTION
+    # --------------------------------------------------------
+
+    if can_reuse_selection(
+        existing, fallbacks
+    ):
+        model = existing["model"]
+
+        log(
+            f"Reusing previously selected model: {model}"
+        )
+
+        existing["fallback_order"] = fallbacks
+        existing["selection_source"] = (
+            "reused_previous_selection"
+        )
+        existing["generation_test_performed"] = False
+
+        temp_file = OUTPUT_FILE.with_suffix(
+            ".json.tmp"
+        )
+
+        try:
+            with temp_file.open(
+                "w", encoding="utf-8"
+            ) as file:
+                json.dump(
+                    existing,
+                    file,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                file.write("\n")
+                file.flush()
+                os.fsync(file.fileno())
+
+            os.replace(temp_file, OUTPUT_FILE)
+
+        finally:
+            if temp_file.exists():
+                temp_file.unlink()
+
+        log("No model discovery or test request needed.")
+        log(f"Selected model: {model}")
+        return
+
+    # --------------------------------------------------------
+    # DISCOVERY: ONE GET REQUEST
+    # --------------------------------------------------------
+
+    try:
+        available = discover_models()
+
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(
+            "utf-8", errors="replace"
+        )
+
+        raise SystemExit(
+            f"ERROR: Gemini model discovery failed. "
+            f"HTTP {exc.code}: {body[:700]}"
+        )
+
+    except Exception as exc:
+        raise SystemExit(
+            f"ERROR: Gemini model discovery failed: {exc}"
+        )
+
+    # --------------------------------------------------------
+    # SELECT ONLY CONFIGURED MODELS
+    # --------------------------------------------------------
+
+    log("Checking configured fallback order.")
+
+    for position, model in enumerate(
+        fallbacks, start=1
+    ):
+        log(
+            f"Priority {position}: {model}"
+        )
+
+        details = available.get(model)
+
+        if not details:
+            log(
+                f"Unavailable or incompatible: {model}"
+            )
+            continue
+
+        selected = save_selection(
+            model=model,
+            resource=details["resource"],
+            display_name=details["display_name"],
+            fallback_order=fallbacks,
+            selection_source="configured_fallback_order",
+        )
+
+        log("GEMINI MODEL SELECTED")
+        log(f"Model: {selected['model']}")
+        log(f"Saved: {OUTPUT_FILE}")
+        log(
+            "Generation test: NOT performed by selector"
+        )
+        log(
+            "The separate test_gemini.py step "
+            "performs the actual API test."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # NO CONFIGURED MODEL AVAILABLE
+    # --------------------------------------------------------
+
+    raise SystemExit(
+        "ERROR: None of the configured Gemini "
+        "fallback models supports generateContent. "
+        "No unconfigured model was substituted."
+    )
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except KeyboardInterrupt:
-        log("Model selection cancelled.")
-        raise SystemExit(130)
-    except Exception as exc:
-        log("MODEL SELECTION FAILED:", str(exc))
-        raise SystemExit(1)
+    main()
