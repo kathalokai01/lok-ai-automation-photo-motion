@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Katha Lok AI: adaptive, speech-aligned, resumable caption renderer."""
+"""Burn readable, speech-synchronized captions into Photo Motion videos."""
 
 from __future__ import annotations
 
@@ -12,39 +12,42 @@ import shutil
 import subprocess
 import sys
 from difflib import SequenceMatcher
-from fractions import Fraction
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from input_config import (
-    load_and_validate, get_format, get_parts, get_scenes,
-    get_fps, get_caption_font, get_caption_font_size,
+    load_and_validate,
+    get_format,
+    get_parts,
+    get_scenes,
+    get_fps,
+    get_caption_font,
+    get_caption_font_size,
 )
 
 OUT = ROOT / "output"
 RENDER_DIR = OUT / "scene_renders"
 CAPTIONED_DIR = RENDER_DIR / "captioned"
 CAPTION_DIR = OUT / "captions"
+
+RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 AUDIO_MANIFEST = OUT / "narration" / "audio_jobs.json"
 CAPTION_MANIFEST = CAPTION_DIR / "captions.json"
-RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 ALIGNMENT_CACHE = CAPTION_DIR / "word_alignment_cache.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
+
 PART_DIR = OUT / "parts"
 VIDEO_DIR = OUT / "videos"
 
-VERSION = "burn-captions-v34-external-font-path-fix"
+VERSION = "burn-captions-v40-multilingual-audio-aligned"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 1.25
-FPS_TOLERANCE = 0.02
-ALIGNMENT_MODEL = os.environ.get(
-    "CAPTION_ALIGNMENT_MODEL", "openai/whisper-tiny"
-).strip()
-ALIGNMENT_MIN_MATCH = 0.55
+FPS_TOLERANCE = 0.03
+ALIGNMENT_MIN_MATCH = 0.48
 ALIGNMENT_TIMEOUT = 300
 
 PALETTES = [
@@ -61,72 +64,31 @@ def log(*args):
     print(*args, flush=True)
 
 
-def json_safe(value):
-    """Convert nested Python data into strictly JSON-compatible values."""
-    if isinstance(value, dict):
-        result = {}
-        for key, item in value.items():
-            if isinstance(key, tuple):
-                safe_key = ":".join(str(part) for part in key)
-            elif key is None:
-                safe_key = "null"
-            elif isinstance(key, (str, int, float, bool)):
-                safe_key = str(key)
-            else:
-                safe_key = str(key)
+def digest_bytes(data):
+    return hashlib.sha256(data).hexdigest()
 
-            if safe_key in result:
-                raise RuntimeError(
-                    f"JSON key collision after normalization: {safe_key!r}"
-                )
-            result[safe_key] = json_safe(item)
-        return result
 
-    if isinstance(value, (list, tuple)):
-        return [json_safe(item) for item in value]
-
-    if isinstance(value, set):
-        return [json_safe(item) for item in sorted(value, key=str)]
-
-    if isinstance(value, Path):
-        return value.as_posix()
-
-    if value is None or isinstance(value, (str, int, float, bool)):
-        if isinstance(value, float) and not math.isfinite(value):
-            raise RuntimeError("Non-finite float cannot be written as JSON")
-        return value
-
-    return str(value)
+def digest_file(path):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def digest_data(data):
     raw = json.dumps(
-        json_safe(data),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+        data, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), default=str,
     ).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
-
-
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def sha256_text(value):
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+    return digest_bytes(raw)
 
 
 def read_json(path, required=True, default=None):
     path = Path(path)
     if not path.is_file():
         if required:
-            raise RuntimeError(f"Required manifest missing: {path}")
+            raise RuntimeError(f"Required file missing: {path}")
         return default
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
@@ -139,118 +101,30 @@ def read_json(path, required=True, default=None):
 def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    safe_data = json_safe(data)
-
+    temp = path.with_name(path.name + ".tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(
-                safe_data,
-                handle,
-                ensure_ascii=False,
-                indent=2,
-                allow_nan=False,
-            )
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        with temp.open("w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
     finally:
-        temporary.unlink(missing_ok=True)
-
-
-def relative(path):
-    """Return repo-relative paths; preserve absolute paths for system fonts."""
-    resolved = Path(path).resolve()
-    try:
-        return resolved.relative_to(ROOT.resolve()).as_posix()
-    except ValueError:
-        return resolved.as_posix()
-
-
-def safe_file(value, label, minimum=1):
-    if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"{label}: missing file path")
-    path = Path(value.strip())
-    if not path.is_absolute():
-        path = ROOT / path
-    path = path.resolve()
-    if not path.is_relative_to(ROOT.resolve()):
-        raise RuntimeError(f"{label}: path outside project directory")
-    if not path.is_file():
-        raise RuntimeError(f"{label}: file not found: {path}")
-    if path.stat().st_size < minimum:
-        raise RuntimeError(f"{label}: file is too small: {path.name}")
-    return path
+        temp.unlink(missing_ok=True)
 
 
 def run(command, label, timeout=900):
     result = subprocess.run(
-        [str(item) for item in command],
+        [str(x) for x in command],
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
     )
     if result.returncode:
-        output = (result.stderr or result.stdout or "")[-3000:]
-        raise RuntimeError(f"{label} failed: {output}")
+        detail = (result.stderr or result.stdout or "")[-3500:]
+        raise RuntimeError(f"{label} failed: {detail}")
     return result
-
-
-def parse_fps(value, label):
-    try:
-        rate = float(Fraction(str(value)))
-    except (ValueError, ZeroDivisionError, TypeError):
-        raise RuntimeError(f"Invalid FPS in {label}: {value!r}")
-    if not math.isfinite(rate) or rate <= 0:
-        raise RuntimeError(f"Invalid FPS in {label}: {value!r}")
-    return rate
-
-
-def media_info(path):
-    result = run([
-        "ffprobe", "-v", "error",
-        "-show_entries",
-        "format=duration:stream=codec_type,width,height,avg_frame_rate,r_frame_rate",
-        "-of", "json", str(path),
-    ], f"Inspect {Path(path).name}", timeout=90)
-
-    try:
-        data = json.loads(result.stdout)
-        duration = float(data["format"]["duration"])
-    except Exception as exc:
-        raise RuntimeError(f"Invalid media information: {path}") from exc
-
-    if not math.isfinite(duration) or duration <= 0:
-        raise RuntimeError(f"Invalid media duration: {path}")
-
-    streams = data.get("streams", [])
-    video = next((x for x in streams if x.get("codec_type") == "video"), None)
-    audio = next((x for x in streams if x.get("codec_type") == "audio"), None)
-    rate = None
-
-    if video:
-        rate = video.get("avg_frame_rate")
-        if not rate or rate in ("0/0", "N/A"):
-            rate = video.get("r_frame_rate")
-
-    return {
-        "duration": duration,
-        "width": int(video.get("width") or 0) if video else 0,
-        "height": int(video.get("height") or 0) if video else 0,
-        "fps": parse_fps(rate, Path(path).name) if rate else 0.0,
-        "has_video": video is not None,
-        "has_audio": audio is not None,
-    }
-
-
-def require_fps(info, expected, label):
-    actual = float(info.get("fps", 0))
-    if actual <= 0 or abs(actual - expected) > FPS_TOLERANCE:
-        raise RuntimeError(
-            f"FPS mismatch in {label}: expected {expected}, got {actual:.4f}"
-        )
 
 
 def rows_from(data, *keys):
@@ -273,193 +147,91 @@ def first_path(row, keys):
     return None
 
 
-def positive_int(value, label):
+def safe_file(value, label, minimum=1):
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"{label}: file path missing")
+    path = Path(value.strip())
+    if not path.is_absolute():
+        path = ROOT / path
+    path = path.resolve()
+
+    if not path.is_relative_to(ROOT.resolve()):
+        raise RuntimeError(f"{label}: path is outside project directory")
+    if not path.is_file():
+        raise RuntimeError(f"{label}: file does not exist: {path}")
+    if path.stat().st_size < minimum:
+        raise RuntimeError(f"{label}: file is too small: {path.name}")
+    return path
+
+
+def relative(path):
+    path = Path(path).resolve()
     try:
-        result = int(value)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"Invalid {label}") from exc
-    if result < 1:
-        raise RuntimeError(f"{label} must be positive")
-    return result
+        return path.relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
-def resolve_actual_parts(mode, configured_parts, scenes, render_data, audio_data):
-    render_rows = rows_from(render_data, "completed_scenes", "scenes")
-    audio_rows = rows_from(audio_data, "jobs", "audio_jobs", "scenes")
+def media_info(path):
+    result = run([
+        "ffprobe", "-v", "error",
+        "-show_entries",
+        "format=duration:stream=codec_type,width,height,avg_frame_rate,r_frame_rate",
+        "-of", "json", str(path),
+    ], f"Inspect {Path(path).name}", timeout=90)
 
-    if not render_rows or not audio_rows:
-        raise RuntimeError("Render or narration manifest has no scene rows")
+    try:
+        data = json.loads(result.stdout)
+        duration = float(data["format"]["duration"])
+    except Exception as exc:
+        raise RuntimeError(f"Cannot inspect media: {path}") from exc
 
-    render_parts = {
-        positive_int(row.get("part"), "render part")
-        for row in render_rows if isinstance(row, dict)
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(f"Invalid media duration: {path}")
+
+    streams = data.get("streams", [])
+    video = next(
+        (s for s in streams if s.get("codec_type") == "video"), None
+    )
+    audio = next(
+        (s for s in streams if s.get("codec_type") == "audio"), None
+    )
+
+    fps_value = None
+    if video:
+        fps_value = video.get("avg_frame_rate")
+        if not fps_value or fps_value in {"0/0", "N/A"}:
+            fps_value = video.get("r_frame_rate")
+
+    try:
+        fps = (
+            float(eval_fraction(fps_value))
+            if fps_value else 0.0
+        )
+    except Exception:
+        fps = 0.0
+
+    return {
+        "duration": duration,
+        "width": int(video.get("width") or 0) if video else 0,
+        "height": int(video.get("height") or 0) if video else 0,
+        "fps": fps,
+        "has_video": video is not None,
+        "has_audio": audio is not None,
     }
-    audio_parts = {
-        positive_int(row.get("part"), "narration part")
-        for row in audio_rows if isinstance(row, dict)
-    }
 
-    if not render_parts or render_parts != audio_parts:
-        raise RuntimeError("Render and narration part mappings differ")
 
-    actual_parts = max(render_parts)
+def eval_fraction(value):
+    from fractions import Fraction
+    return Fraction(str(value))
 
-    if render_parts != set(range(1, actual_parts + 1)):
-        raise RuntimeError("Part numbering is not continuous")
 
-    if mode == "full" and actual_parts != configured_parts:
+def require_fps(info, expected, label):
+    actual = float(info.get("fps", 0))
+    if actual <= 0 or abs(actual - expected) > FPS_TOLERANCE:
         raise RuntimeError(
-            f"FULL part count mismatch: configured={configured_parts}, "
-            f"actual={actual_parts}"
+            f"FPS mismatch in {label}: expected {expected}, got {actual:.4f}"
         )
-
-    expected = actual_parts * scenes
-    if len(render_rows) != expected or len(audio_rows) != expected:
-        raise RuntimeError(
-            f"Scene count mismatch: expected={expected}, "
-            f"render={len(render_rows)}, narration={len(audio_rows)}"
-        )
-
-    for data, label in ((render_data, "Render"), (audio_data, "Narration")):
-        declared = data.get("total_parts")
-        if declared is not None and int(declared) != actual_parts:
-            raise RuntimeError(f"{label} manifest total_parts mismatch")
-
-    return actual_parts
-
-
-def load_caption_map(parts, scenes):
-    data = read_json(CAPTION_MANIFEST)
-    if not isinstance(data, dict) or data.get("status") != "completed":
-        raise RuntimeError("Caption manifest is missing or incomplete")
-
-    mapping = {}
-    for row in rows_from(data, "captions", "scenes"):
-        if not isinstance(row, dict):
-            raise RuntimeError("Invalid caption manifest row")
-        try:
-            key = (
-                int(row["part"]),
-                int(row.get("scene", row.get("local_scene", 0))),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("Invalid caption scene mapping") from exc
-
-        text = row.get(
-            "text", row.get("caption", row.get("caption_text", ""))
-        )
-        if not isinstance(text, str) or not text.strip():
-            raise RuntimeError(f"Caption text is empty for scene {key}")
-        if key in mapping:
-            raise RuntimeError(f"Duplicate caption scene: {key}")
-        mapping[key] = re.sub(r"\s+", " ", text).strip()
-
-    expected = {
-        (part, scene)
-        for part in range(1, parts + 1)
-        for scene in range(1, scenes + 1)
-    }
-    if set(mapping) != expected:
-        raise RuntimeError(
-            "Caption mapping mismatch: "
-            f"missing={sorted(expected - set(mapping))}; "
-            f"extra={sorted(set(mapping) - expected)}"
-        )
-    return mapping
-
-
-def validate_chunk_records(raw_chunks, key, audio_duration):
-    if not isinstance(raw_chunks, list) or not raw_chunks:
-        raise RuntimeError(f"TTS chunk records missing for scene {key}")
-
-    chunks = []
-    for position, chunk in enumerate(raw_chunks, 1):
-        if not isinstance(chunk, dict):
-            raise RuntimeError(f"Invalid TTS chunk record for scene {key}")
-        try:
-            index = int(chunk["index"])
-            duration = float(chunk["duration"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid TTS chunk timing: {key}") from exc
-
-        if index != position or not math.isfinite(duration) or duration <= 0:
-            raise RuntimeError(f"Invalid TTS chunk order/duration: {key}")
-
-        text = chunk.get("text")
-        if not isinstance(text, str) or not text.strip():
-            raise RuntimeError(f"TTS chunk text missing: {key}")
-
-        text = re.sub(r"\s+", " ", text).strip()
-        declared_hash = chunk.get("text_sha256")
-        if declared_hash and declared_hash != sha256_text(text):
-            raise RuntimeError(f"TTS chunk text checksum mismatch: {key}")
-
-        chunks.append({
-            "index": index,
-            "duration": duration,
-            "text": text,
-            "sha256": chunk.get("sha256"),
-            "output": chunk.get("output"),
-            "provider": chunk.get("provider"),
-        })
-
-    total = sum(item["duration"] for item in chunks)
-    if total <= 0:
-        raise RuntimeError(f"Invalid TTS chunk duration total: {key}")
-
-    scale = audio_duration / total
-    for item in chunks:
-        item["duration"] *= scale
-    return chunks
-
-
-def load_audio_map(parts, scenes, data):
-    if not isinstance(data, dict) or data.get("status") != "completed":
-        raise RuntimeError("Narration audio manifest incomplete")
-
-    mapping = {}
-    for row in rows_from(data, "jobs", "audio_jobs", "scenes"):
-        if not isinstance(row, dict):
-            raise RuntimeError("Invalid narration job row")
-        try:
-            key = (int(row["part"]), int(row["scene"]))
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("Invalid narration scene mapping") from exc
-        if key in mapping:
-            raise RuntimeError(f"Duplicate narration scene: {key}")
-        if str(row.get("status", "")).lower() != "completed":
-            raise RuntimeError(f"Narration incomplete: {key}")
-
-        audio_path = safe_file(
-            first_path(row, ("output", "audio_path", "path", "file", "audio")),
-            f"Narration {key}", MIN_AUDIO_BYTES,
-        )
-        info = media_info(audio_path)
-        if not info["has_audio"]:
-            raise RuntimeError(f"Narration has no audio stream: {key}")
-
-        chunks = validate_chunk_records(
-            row.get("chunks"), key, info["duration"]
-        )
-        mapping[key] = {
-            "path": audio_path,
-            "duration": info["duration"],
-            "sha256": sha256_file(audio_path),
-            "chunks": chunks,
-        }
-
-    expected = {
-        (part, scene)
-        for part in range(1, parts + 1)
-        for scene in range(1, scenes + 1)
-    }
-    if set(mapping) != expected:
-        raise RuntimeError(
-            "Narration mapping mismatch: "
-            f"missing={sorted(expected - set(mapping))}; "
-            f"extra={sorted(set(mapping) - expected)}"
-        )
-    return mapping
 
 
 def clean_text(value):
@@ -467,26 +239,33 @@ def clean_text(value):
 
 
 def normalize_word(value):
-    return re.sub(r"[^\w]", "", str(value or "").lower(), flags=re.UNICODE)
+    return re.sub(
+        r"[^\w]", "", str(value or "").lower(), flags=re.UNICODE
+    )
 
 
-def transcript_words(text):
-    return [token for token in re.findall(r"\S+", text) if normalize_word(token)]
+def words_from(text):
+    return [
+        token for token in re.findall(r"\S+", clean_text(text))
+        if normalize_word(token)
+    ]
 
 
-def split_phrases(text):
+def split_phrases(text, max_chars=38, max_words=7):
     text = clean_text(text)
     if not text:
         return []
 
-    sentences = re.split(r"(?<=[.!?।…])\s+", text)
+    sentences = re.split(r"(?<=[.!?।…！？])\s+", text)
     phrases = []
 
     for sentence in sentences:
         current = []
         for word in sentence.split():
             candidate = " ".join(current + [word])
-            if current and (len(candidate) > 38 or len(current) >= 7):
+            if current and (
+                len(candidate) > max_chars or len(current) >= max_words
+            ):
                 phrases.append(" ".join(current))
                 current = [word]
             else:
@@ -498,211 +277,427 @@ def split_phrases(text):
     for phrase in phrases:
         if merged and len(merged[-1].split()) <= 2:
             candidate = merged[-1] + " " + phrase
-            if len(candidate) <= 44:
+            if len(candidate) <= max_chars + 8:
                 merged[-1] = candidate
                 continue
         merged.append(phrase)
+
     return merged or [text]
 
 
-def load_whisper_aligner():
+def resolve_font(family):
+    result = run(
+        ["fc-match", "-f", "%{file}\n", family],
+        f"Resolve font {family}", timeout=60,
+    )
+    lines = result.stdout.strip().splitlines()
+    if not lines:
+        raise RuntimeError(f"Caption font not found: {family}")
+
+    path = Path(lines[0]).resolve()
+    if not path.is_file():
+        raise RuntimeError(f"Font file missing: {path}")
+    return path
+
+
+def caption_map(parts, scenes):
+    data = read_json(CAPTION_MANIFEST)
+    if not isinstance(data, dict) or data.get("status") != "completed":
+        raise RuntimeError("Caption preparation manifest is incomplete")
+
+    mapping = {}
+    for row in rows_from(data, "captions", "scenes"):
+        if not isinstance(row, dict):
+            raise RuntimeError("Invalid caption record")
+
+        try:
+            key = (
+                int(row["part"]),
+                int(row.get("scene", row.get("local_scene", 0))),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("Invalid caption part/scene") from exc
+
+        text = clean_text(
+            row.get("text", row.get("caption", row.get("caption_text", "")))
+        )
+        if not text:
+            raise RuntimeError(f"Empty caption for scene {key}")
+        if key in mapping:
+            raise RuntimeError(f"Duplicate caption scene {key}")
+
+        mapping[key] = {
+            "text": text,
+            "language": clean_text(row.get("caption_language", "hindi")),
+            "sha256": row.get("caption_sha256") or digest_bytes(
+                text.encode("utf-8")
+            ),
+        }
+
+    expected = {
+        (p, s)
+        for p in range(1, parts + 1)
+        for s in range(1, scenes + 1)
+    }
+    if set(mapping) != expected:
+        raise RuntimeError(
+            "Caption scene mapping mismatch; "
+            f"missing={sorted(expected - set(mapping))}; "
+            f"extra={sorted(set(mapping) - expected)}"
+        )
+    return mapping
+
+
+def audio_map(parts, scenes):
+    data = read_json(AUDIO_MANIFEST)
+    if not isinstance(data, dict) or data.get("status") != "completed":
+        raise RuntimeError("TTS audio manifest is incomplete")
+
+    mapping = {}
+    for row in rows_from(data, "jobs", "audio_jobs", "scenes"):
+        if not isinstance(row, dict):
+            raise RuntimeError("Invalid TTS audio job")
+
+        try:
+            key = (int(row["part"]), int(row["scene"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("Invalid TTS scene mapping") from exc
+
+        if key in mapping:
+            raise RuntimeError(f"Duplicate TTS scene: {key}")
+        if str(row.get("status", "")).lower() not in {
+            "completed", "reused",
+        }:
+            raise RuntimeError(f"TTS scene is not complete: {key}")
+
+        audio_path = safe_file(
+            first_path(
+                row,
+                ("output", "audio_path", "path", "file", "audio"),
+            ),
+            f"Narration {key}", MIN_AUDIO_BYTES,
+        )
+        info = media_info(audio_path)
+        if not info["has_audio"]:
+            raise RuntimeError(f"Narration audio stream missing: {key}")
+
+        raw_chunks = row.get("chunks")
+        chunks = []
+        if isinstance(raw_chunks, list):
+            for position, chunk in enumerate(raw_chunks, 1):
+                if not isinstance(chunk, dict):
+                    continue
+                try:
+                    duration = float(chunk.get("duration", 0))
+                except (TypeError, ValueError):
+                    continue
+                text = clean_text(chunk.get("text", ""))
+                if duration > 0 and text:
+                    chunks.append({
+                        "index": position,
+                        "duration": duration,
+                        "text": text,
+                    })
+
+        mapping[key] = {
+            "path": audio_path,
+            "duration": info["duration"],
+            "sha256": digest_file(audio_path),
+            "chunks": chunks,
+            "provider": row.get("provider"),
+        }
+
+    expected = {
+        (p, s)
+        for p in range(1, parts + 1)
+        for s in range(1, scenes + 1)
+    }
+    if set(mapping) != expected:
+        raise RuntimeError(
+            "TTS scene mapping mismatch; "
+            f"missing={sorted(expected - set(mapping))}; "
+            f"extra={sorted(set(mapping) - expected)}"
+        )
+    return mapping
+
+
+def render_map(data, parts, scenes):
+    if not isinstance(data, dict) or data.get("status") != "completed":
+        raise RuntimeError("Photo Motion render manifest is incomplete")
+
+    rows = rows_from(data, "completed_scenes", "scenes")
+    expected_count = parts * scenes
+    if len(rows) != expected_count:
+        raise RuntimeError(
+            f"Expected {expected_count} rendered scenes; found {len(rows)}"
+        )
+
+    mapping = {}
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise RuntimeError(f"Invalid render scene {index}")
+
+        try:
+            part = int(row["part"])
+            scene = int(row.get("local_scene", row.get("scene", 0)))
+            global_scene = int(row.get("global_scene", index))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid render mapping at row {index}"
+            ) from exc
+
+        expected_part = (index - 1) // scenes + 1
+        expected_scene = (index - 1) % scenes + 1
+        if (part, scene, global_scene) != (
+            expected_part, expected_scene, index
+        ):
+            raise RuntimeError(f"Render scene order mismatch at row {index}")
+
+        source = safe_file(
+            first_path(
+                row,
+                ("source_rendered_video", "source_video", "video", "output"),
+            ),
+            f"Rendered scene {(part, scene)}",
+            MIN_VIDEO_BYTES,
+        )
+        mapping[(part, scene)] = {
+            **row,
+            "source_path": source,
+            "source_sha256": digest_file(source),
+        }
+
+    return mapping
+
+
+def whisper_language(language):
+    language = clean_text(language).lower()
+    if language in {"english", "en", "eng"}:
+        return "english"
+    if language in {"hinglish", "mixed", "hi-en", "en-hi"}:
+        return None
+    return "hindi"
+
+
+def load_aligner():
     try:
         import torch
         from transformers import pipeline
+
         device = 0 if torch.cuda.is_available() else -1
+        model = os.environ.get(
+            "CAPTION_ALIGNMENT_MODEL", "openai/whisper-tiny"
+        ).strip()
+
         log(
-            "Loading local alignment model:", ALIGNMENT_MODEL,
-            "| device:", "GPU" if device == 0 else "CPU",
+            "Loading speech alignment model:",
+            model,
+            "device=" + ("GPU" if device == 0 else "CPU"),
         )
+
         return pipeline(
             "automatic-speech-recognition",
-            model=ALIGNMENT_MODEL,
+            model=model,
             device=device,
             chunk_length_s=30,
             stride_length_s=(5, 5),
         )
     except Exception as exc:
-        log("WORD ALIGNMENT UNAVAILABLE:", type(exc).__name__, str(exc)[:400])
+        log("Speech alignment unavailable:", str(exc)[:400])
         return None
 
 
-def whisper_word_timestamps(recognizer, audio_path):
-    if recognizer is None:
+def recognize_words(aligner, audio_path, language):
+    if aligner is None:
         return []
+
     try:
-        result = recognizer(
+        kwargs = {"task": "transcribe"}
+        lang = whisper_language(language)
+        if lang:
+            kwargs["language"] = lang
+
+        result = aligner(
             str(audio_path),
-            generate_kwargs={"language": "hindi", "task": "transcribe"},
+            generate_kwargs=kwargs,
             return_timestamps="word",
         )
-        words = []
-        for chunk in result.get("chunks", []) if isinstance(result, dict) else []:
+
+        output = []
+        for chunk in result.get("chunks", []):
             if not isinstance(chunk, dict):
                 continue
+
             timestamp = chunk.get("timestamp")
             text = clean_text(chunk.get("text", ""))
-            if not isinstance(timestamp, (list, tuple)) or len(timestamp) != 2:
+
+            if not isinstance(timestamp, (tuple, list)) or len(timestamp) != 2:
                 continue
+            if not text:
+                continue
+
             try:
-                start, end = float(timestamp[0]), float(timestamp[1])
+                start, end = map(float, timestamp)
             except (TypeError, ValueError):
                 continue
+
             if (
-                not math.isfinite(start) or not math.isfinite(end)
-                or start < 0 or end <= start
+                not math.isfinite(start)
+                or not math.isfinite(end)
+                or start < 0
+                or end <= start
             ):
                 continue
-            for token in transcript_words(text):
-                words.append({"word": token, "start": start, "end": end})
-        return words
+
+            for token in words_from(text):
+                output.append({
+                    "word": token,
+                    "start": start,
+                    "end": end,
+                })
+
+        return output
     except Exception as exc:
-        log("Whisper alignment failed:", Path(audio_path).name, str(exc)[:300])
+        log("Speech recognition failed:", Path(audio_path).name, str(exc)[:250])
         return []
 
 
-def align_transcript_words(caption_text, recognized_words, duration):
-    source = transcript_words(caption_text)
-    if not source or not recognized_words or duration <= 0:
+def align_words(caption_text, recognized, duration):
+    source = words_from(caption_text)
+    if not source or not recognized or duration <= 0:
         return None, 0.0
 
-    recognized = [normalize_word(item["word"]) for item in recognized_words]
-    matcher = SequenceMatcher(
-        None, [normalize_word(x) for x in source],
-        recognized, autojunk=False,
-    )
-    matches = []
+    left = [normalize_word(x) for x in source]
+    right = [normalize_word(x["word"]) for x in recognized]
+
+    matcher = SequenceMatcher(None, left, right, autojunk=False)
+    matched = []
+
     for block in matcher.get_matching_blocks():
         for offset in range(block.size):
-            si, ri = block.a + offset, block.b + offset
-            matches.append((
-                si, recognized_words[ri]["start"],
-                recognized_words[ri]["end"],
+            i = block.a + offset
+            j = block.b + offset
+            matched.append((
+                i,
+                max(0.0, min(duration, float(recognized[j]["start"]))),
+                max(0.0, min(duration, float(recognized[j]["end"]))),
             ))
 
-    similarity = len(matches) / max(1, len(source))
+    similarity = len(matched) / max(1, len(source))
     if similarity < ALIGNMENT_MIN_MATCH:
         return None, similarity
 
-    timings = [None] * len(source)
-    for index, start, end in matches:
-        timings[index] = (
-            max(0.0, min(float(start), duration)),
-            max(0.0, min(float(end), duration)),
-        )
+    times = [None] * len(source)
+    for index, start, end in matched:
+        times[index] = (start, end)
 
-    known = [(i, t) for i, t in enumerate(timings) if t is not None]
+    known = [(i, value) for i, value in enumerate(times) if value]
     if not known:
         return None, similarity
 
-    first_index, first_time = known[0]
+    # Interpolate unmatched words between measured word timestamps.
+    first_index, first_value = known[0]
     if first_index:
-        step = max(0.04, first_time[0] / first_index)
+        step = first_value[0] / first_index
         for i in range(first_index):
-            end = first_time[0] - step * (first_index - i - 1)
-            timings[i] = (max(0.0, end - step), end)
+            end = step * (i + 1)
+            times[i] = (max(0, end - step), end)
 
-    for position in range(len(known) - 1):
-        left_index, left_time = known[position]
-        right_index, right_time = known[position + 1]
+    for pair_index in range(len(known) - 1):
+        left_index, left_value = known[pair_index]
+        right_index, right_value = known[pair_index + 1]
         gap = right_index - left_index
         if gap <= 1:
             continue
-        start, end = left_time[1], right_time[0]
+
+        start = left_value[1]
+        end = right_value[0]
         weights = [
             max(1, len(source[i]))
             for i in range(left_index + 1, right_index)
         ]
         total = sum(weights)
         cursor = start
+
         for offset, weight in enumerate(weights, 1):
             next_cursor = (
                 end if offset == len(weights)
-                else cursor + max(0.0, end - start) * weight / total
+                else cursor + max(0, end - start) * weight / total
             )
-            timings[left_index + offset] = (cursor, next_cursor)
+            times[left_index + offset] = (cursor, next_cursor)
             cursor = next_cursor
 
-    last_index, last_time = known[-1]
+    last_index, last_value = known[-1]
     if last_index < len(source) - 1:
         remaining = len(source) - last_index - 1
-        step = max(0.0, duration - last_time[1]) / remaining
+        step = max(0, duration - last_value[1]) / remaining
         for i in range(last_index + 1, len(source)):
-            start = last_time[1] + step * (i - last_index - 1)
-            timings[i] = (start, min(duration, start + step))
+            start = last_value[1] + step * (i - last_index - 1)
+            times[i] = (start, min(duration, start + step))
 
     result = []
-    for index, timing in enumerate(timings):
+    for word, timing in zip(source, times):
         if timing is None:
             return None, similarity
         start, end = timing
-        start = max(0.0, min(float(start), duration))
-        end = max(0.0, min(float(end), duration))
-        if end <= start:
-            end = min(duration, start + 0.06)
+        start = max(0.0, min(duration, start))
+        end = max(start + 0.04, min(duration, end))
+        if end > duration:
+            end = duration
+            start = min(start, end - 0.04)
+
         result.append({
-            "word": source[index],
+            "word": word,
             "start": round(start, 3),
             "end": round(end, 3),
         })
+
     return result, similarity
 
-
-def phrases_from_word_timings(words):
-    result, current = [], []
+def phrase_cues_from_words(words):
+    cues = []
+    current = []
     start = end = None
+
     for item in words:
         if not current:
             start = item["start"]
+
         current.append(item["word"])
         end = item["end"]
-        joined = " ".join(current)
+        text = " ".join(current)
+
         if (
-            len(joined) >= 36 or len(current) >= 7
+            len(text) >= 38
+            or len(current) >= 7
             or re.search(r"[।.!?！？]$", item["word"])
         ):
-            result.append({
+            cues.append({
                 "start": start,
                 "end": max(start + 0.06, end),
-                "text": joined,
+                "text": text,
             })
             current, start, end = [], None, None
+
     if current:
-        result.append({
+        cues.append({
             "start": start,
             "end": max(start + 0.06, end),
             "text": " ".join(current),
         })
-    return result
+
+    return cues
 
 
-def normalize_cues(cues, duration):
-    clean = []
-    for index, cue in enumerate(cues):
-        start = max(0.0, min(float(cue["start"]), duration))
-        end = max(start, min(float(cue["end"]), duration))
-        if index + 1 < len(cues):
-            next_start = max(
-                0.0, min(float(cues[index + 1]["start"]), duration)
-            )
-            end = min(end, next_start)
-        if end - start < 0.08:
-            end = min(duration, start + 0.08)
-        if end > start:
-            clean.append({
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "text": clean_text(cue["text"]),
-            })
-    if not clean:
-        raise RuntimeError("Caption cues have no valid time ranges")
-    return clean
-
-
-def allocate_phrases(phrases, weights, start, end):
-    total = sum(weights)
-    if total <= 0 or end <= start:
+def allocate_phrases(phrases, start, end):
+    if not phrases or end <= start:
         return []
-    result, cursor = [], start
+
+    weights = [max(1, len(item.split())) for item in phrases]
+    total = sum(weights)
+    cursor = start
+    result = []
+
     for index, (phrase, weight) in enumerate(zip(phrases, weights)):
         next_cursor = (
             end if index == len(phrases) - 1
@@ -714,68 +709,93 @@ def allocate_phrases(phrases, weights, start, end):
             "text": phrase,
         })
         cursor = next_cursor
+
     return result
 
 
-def make_chunk_cues(caption_text, chunks, duration):
-    phrases = split_phrases(caption_text)
+def chunk_based_cues(text, chunks, duration):
+    phrases = split_phrases(text)
     if not phrases or duration <= 0:
-        raise RuntimeError("Cannot time empty captions")
+        raise RuntimeError("Cannot create captions from empty narration")
 
-    chunk_total = sum(item["duration"] for item in chunks)
-    if chunk_total <= 0:
-        raise RuntimeError("Invalid total TTS chunk duration")
+    valid_chunks = [
+        item for item in chunks
+        if float(item.get("duration", 0)) > 0
+    ]
 
-    weights = [max(1, len(item.split())) for item in phrases]
-    total_words = sum(weights)
-    result, phrase_cursor, time_cursor = [], 0, 0.0
+    if not valid_chunks:
+        return allocate_phrases(phrases, 0, duration)
 
-    for chunk_index, chunk in enumerate(chunks):
-        chunk_start = time_cursor
+    total_duration = sum(
+        float(item["duration"]) for item in valid_chunks
+    )
+    if total_duration <= 0:
+        return allocate_phrases(phrases, 0, duration)
+
+    total_words = sum(max(1, len(x.split())) for x in phrases)
+    cursor_phrase = 0
+    cursor_time = 0.0
+    result = []
+
+    for index, chunk in enumerate(valid_chunks):
         chunk_end = (
-            duration if chunk_index == len(chunks) - 1
+            duration if index == len(valid_chunks) - 1
             else min(
                 duration,
-                time_cursor + duration * chunk["duration"] / chunk_total,
+                cursor_time
+                + duration * float(chunk["duration"]) / total_duration,
             )
         )
-        time_cursor = chunk_end
 
-        if phrase_cursor >= len(phrases):
+        if cursor_phrase >= len(phrases):
             break
 
-        if chunk_index == len(chunks) - 1:
-            next_cursor = len(phrases)
+        if index == len(valid_chunks) - 1:
+            next_phrase = len(phrases)
         else:
-            target = total_words * chunk["duration"] / chunk_total
+            target = (
+                total_words
+                * float(chunk["duration"])
+                / total_duration
+            )
             accumulated = 0
-            next_cursor = phrase_cursor
-            while next_cursor < len(phrases):
-                if next_cursor > phrase_cursor and accumulated >= target:
+            next_phrase = cursor_phrase
+
+            while next_phrase < len(phrases):
+                if (
+                    next_phrase > cursor_phrase
+                    and accumulated >= target
+                ):
                     break
-                accumulated += weights[next_cursor]
-                next_cursor += 1
-            next_cursor = max(phrase_cursor + 1, next_cursor)
+                accumulated += max(
+                    1, len(phrases[next_phrase].split())
+                )
+                next_phrase += 1
+
+            next_phrase = max(cursor_phrase + 1, next_phrase)
 
         result.extend(allocate_phrases(
-            phrases[phrase_cursor:next_cursor],
-            weights[phrase_cursor:next_cursor],
-            chunk_start, chunk_end,
+            phrases[cursor_phrase:next_phrase],
+            cursor_time,
+            chunk_end,
         ))
-        phrase_cursor = next_cursor
 
-    if phrase_cursor < len(phrases):
-        if not result:
-            result = allocate_phrases(phrases, weights, 0, duration)
+        cursor_phrase = next_phrase
+        cursor_time = chunk_end
+
+    if cursor_phrase < len(phrases):
+        if result:
+            result[-1]["text"] += " " + " ".join(
+                phrases[cursor_phrase:]
+            )
+            result[-1]["end"] = duration
         else:
-            result[-1]["text"] += " " + " ".join(phrases[phrase_cursor:])
+            result = allocate_phrases(phrases, 0, duration)
 
-    return normalize_cues(result, duration)
+    return result
 
 
 def silence_boundaries(audio_path, duration):
-    if duration <= 0:
-        return []
     try:
         result = subprocess.run(
             [
@@ -784,69 +804,131 @@ def silence_boundaries(audio_path, duration):
                 "-af", "silencedetect=noise=-35dB:d=0.18",
                 "-f", "null", "-",
             ],
-            capture_output=True, text=True,
-            timeout=180, check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
         )
+
         if result.returncode:
             return []
+
         output = (result.stderr or "") + "\n" + (result.stdout or "")
         starts = [
             float(x) for x in re.findall(
-                r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", output
+                r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)",
+                output,
             )
         ]
         ends = [
             float(x) for x in re.findall(
-                r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)", output
+                r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)",
+                output,
             )
         ]
+
         points = []
         for start, end in zip(starts, ends):
-            midpoint = (start + end) / 2
-            if end > start and 0.05 < midpoint < duration - 0.05:
-                points.append(midpoint)
+            middle = (start + end) / 2
+            if 0.05 < middle < duration - 0.05:
+                points.append(middle)
+
         return sorted(set(round(x, 3) for x in points))
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+
+    except Exception as exc:
+        log("Silence detection unavailable:", str(exc)[:200])
         return []
 
 
-def refine_with_silence(cues, audio_path, duration):
+def refine_silence(cues, audio_path, duration):
     boundaries = silence_boundaries(audio_path, duration)
     if not boundaries:
-        return cues, "measured-tts-chunk-duration-estimate"
+        return cues, "measured-audio-duration-estimate"
 
     refined = []
+
     for index, cue in enumerate(cues):
-        start, end = cue["start"], cue["end"]
+        start = float(cue["start"])
+        end = float(cue["end"])
+
         candidates = [
             point for point in boundaries
             if abs(point - end) <= 0.45
             and point > start + 0.12
             and point < duration - 0.05
         ]
+
         if candidates:
-            end = min(candidates, key=lambda point: abs(point - end))
+            end = min(candidates, key=lambda x: abs(x - end))
+
         if index + 1 < len(cues):
-            end = min(end, cues[index + 1]["start"])
+            end = min(end, float(cues[index + 1]["start"]))
+
         if end - start < 0.08:
             end = min(duration, start + 0.08)
+
         if end > start:
             refined.append({
                 "start": round(start, 3),
                 "end": round(end, 3),
-                "text": cue["text"],
+                "text": clean_text(cue["text"]),
             })
-    return (
-        (refined, "tts-chunk-duration-and-silence-assisted")
-        if refined else (cues, "measured-tts-chunk-duration-estimate")
-    )
+
+    if not refined:
+        return cues, "measured-audio-duration-estimate"
+
+    return refined, "audio-duration-and-silence-assisted"
+
+
+def normalize_cues(cues, duration):
+    clean = []
+
+    for cue in cues:
+        try:
+            start = max(0.0, min(duration, float(cue["start"])))
+            end = max(0.0, min(duration, float(cue["end"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        text = clean_text(cue.get("text"))
+        if not text or end <= start:
+            continue
+
+        if end - start < 0.08:
+            end = min(duration, start + 0.08)
+
+        if end > start:
+            clean.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+            })
+
+    clean.sort(key=lambda item: (item["start"], item["end"]))
+
+    for index in range(len(clean) - 1):
+        clean[index]["end"] = min(
+            clean[index]["end"],
+            clean[index + 1]["start"],
+        )
+
+    clean = [
+        cue for cue in clean
+        if cue["end"] - cue["start"] >= 0.04
+    ]
+
+    if not clean:
+        raise RuntimeError("Caption cues contain no valid time ranges")
+
+    return clean
 
 
 def build_scene_cues(
-    caption_text, narration, duration,
-    recognizer, alignment_cache, cache_key,
+    text, narration, duration, aligner, alignment_cache, cache_key,
+    language,
 ):
     cached = alignment_cache.get(cache_key)
+
     if isinstance(cached, dict) and cached.get("status") == "aligned":
         words = cached.get("words", [])
         if words and all(
@@ -856,51 +938,54 @@ def build_scene_cues(
             and isinstance(item.get("end"), (int, float))
             for item in words
         ):
-            cues = phrases_from_word_timings(words)
+            cues = phrase_cues_from_words(words)
             if cues:
                 return normalize_cues(cues, duration), "whisper-word-alignment"
 
-    recognized = whisper_word_timestamps(recognizer, narration["path"])
-    words, similarity = align_transcript_words(
-        caption_text, recognized, duration
+    recognized = recognize_words(
+        aligner, narration["path"], language
     )
+    aligned, similarity = align_words(text, recognized, duration)
 
-    if words:
+    if aligned:
         alignment_cache[cache_key] = {
             "status": "aligned",
-            "model": ALIGNMENT_MODEL,
             "similarity": round(similarity, 4),
-            "words": words,
+            "words": aligned,
         }
-        cues = phrases_from_word_timings(words)
+        cues = phrase_cues_from_words(aligned)
         if cues:
             return normalize_cues(cues, duration), "whisper-word-alignment"
 
     alignment_cache[cache_key] = {
         "status": "fallback",
-        "model": ALIGNMENT_MODEL,
         "similarity": round(similarity, 4),
-        "reason": "ASR timestamps unavailable or transcript mismatch",
+        "reason": "ASR unavailable or transcript did not match",
     }
-    log(
-        "Using measured TTS fallback:", cache_key,
-        "| transcript match:", round(similarity, 3),
+
+    cues = chunk_based_cues(
+        text, narration["chunks"], duration
     )
-    cues = make_chunk_cues(
-        caption_text, narration["chunks"], duration
+    cues, method = refine_silence(
+        cues, narration["path"], duration
     )
-    return refine_with_silence(cues, narration["path"], duration)
+    return normalize_cues(cues, duration), method
+
 
 def srt_time(seconds):
     milliseconds = max(0, int(round(seconds * 1000)))
     hours, remainder = divmod(milliseconds, 3_600_000)
     minutes, remainder = divmod(remainder, 60_000)
-    secs, millis = divmod(remainder, 1000)
-    return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
+    seconds_part, millis = divmod(remainder, 1000)
+    return (
+        f"{hours:02}:{minutes:02}:"
+        f"{seconds_part:02},{millis:03}"
+    )
 
 
 def write_srt(path, cues):
     blocks = []
+
     for index, cue in enumerate(cues, 1):
         blocks.extend([
             str(index),
@@ -908,22 +993,9 @@ def write_srt(path, cues):
             cue["text"],
             "",
         ])
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(blocks), encoding="utf-8")
-
-
-def resolve_font(family):
-    result = run(
-        ["fc-match", "-f", "%{file}\n", family],
-        f"Resolve caption font {family}", timeout=60,
-    )
-    candidates = result.stdout.strip().splitlines()
-    if not candidates:
-        raise RuntimeError(f"Font not found: {family}")
-    path = Path(candidates[0]).resolve()
-    if not path.is_file():
-        raise RuntimeError(f"Font file missing: {path}")
-    return path
 
 
 def sample_luma(video, timestamp):
@@ -938,34 +1010,39 @@ def sample_luma(video, timestamp):
             "scale=1:1:flags=area,format=gray",
             "-f", "rawvideo", "-",
         ],
-        capture_output=True, timeout=90, check=False,
+        capture_output=True,
+        timeout=90,
+        check=False,
     )
+
     if result.returncode or not result.stdout:
         return 64
     return int(result.stdout[0])
 
 
-def contrast_style(video, duration, part, scene, story_seed, width, height):
+def contrast_style(video, duration, part, scene, seed, width, height):
     samples = [
         sample_luma(video, duration * fraction)
         for fraction in (0.18, 0.50, 0.82)
     ]
     average = sum(samples) / len(samples)
-    seed = hashlib.sha256(
-        f"{story_seed}:{part}:{scene}".encode("utf-8")
+
+    token = hashlib.sha256(
+        f"{seed}:{part}:{scene}".encode("utf-8")
     ).digest()
-    palette = PALETTES[seed[0] % len(PALETTES)]
+    palette = PALETTES[token[0] % len(PALETTES)]
 
     if average >= 145:
-        primary, outline, mode = (
-            palette["dark"], "&H00FFFFFF", "light-background"
-        )
+        primary = palette["dark"]
+        outline = "&H00FFFFFF"
+        mode = "dark-text-on-light-background"
     else:
-        primary, outline, mode = (
-            palette["light"], "&H00101010", "dark-background"
-        )
+        primary = palette["light"]
+        outline = "&H00101010"
+        mode = "light-text-on-dark-background"
 
     spread = max(samples) - min(samples)
+
     return {
         "mode": mode,
         "palette": palette["name"],
@@ -982,17 +1059,24 @@ def contrast_style(video, duration, part, scene, story_seed, width, height):
 
 def escape_filter_path(path):
     value = str(Path(path).resolve()).replace("\\", "/")
+
     for old, new in (
-        (":", r"\:"), ("'", r"\'"), (",", r"\,"),
-        ("[", r"\["), ("]", r"\]"), (";", r"\;"),
+        (":", r"\:"),
+        ("'", r"\'"),
+        (",", r"\,"),
+        ("[", r"\["),
+        ("]", r"\]"),
+        (";", r"\;"),
     ):
         value = value.replace(old, new)
+
     return value
 
 
 def caption_filter(srt_path, font_path, family, size, style):
     subtitle_file = escape_filter_path(srt_path)
     font_directory = escape_filter_path(font_path.parent)
+
     ass_style = (
         f"FontName={family},FontSize={int(size)},"
         f"PrimaryColour={style['primary']},"
@@ -1004,50 +1088,67 @@ def caption_filter(srt_path, font_path, family, size, style):
         "MarginL=42,MarginR=42,"
         f"MarginV={style['margin_vertical']}"
     )
+
     return (
         f"subtitles=filename='{subtitle_file}':"
-        f"fontsdir='{font_directory}':force_style='{ass_style}'"
+        f"fontsdir='{font_directory}':"
+        f"force_style='{ass_style}'"
     )
 
 
 def burn_one(
-    source, destination, cues, video_duration,
-    font_path, family, size, style, width, height, fps,
+    source, destination, cues, duration,
+    font_path, family, size, style,
+    width, height, fps,
 ):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_srt = destination.with_suffix(".srt")
-    temp_video = destination.with_name(destination.stem + ".tmp.mp4")
+    temp_video = destination.with_name(
+        destination.stem + ".tmp.mp4"
+    )
     temp_video.unlink(missing_ok=True)
 
     try:
         write_srt(temp_srt, cues)
-        vf = caption_filter(temp_srt, font_path, family, size, style)
-        run(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", str(source),
-                "-vf", vf,
-                "-map", "0:v:0", "-map", "0:a:0?",
-                "-c:v", "libx264", "-preset", "veryfast",
-                "-crf", "20", "-pix_fmt", "yuv420p",
-                "-r", str(fps), "-fps_mode", "cfr",
-                "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-                "-af", "aresample=async=1:first_pts=0",
-                "-t", f"{video_duration:.3f}",
-                "-movflags", "+faststart", str(temp_video),
-            ],
-            f"Burn captions into {destination.name}", timeout=900,
+        video_filter = caption_filter(
+            temp_srt, font_path, family, size, style
         )
+
+        run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source),
+            "-vf", video_filter,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-r", str(fps),
+            "-fps_mode", "cfr",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "48000",
+            "-af", "aresample=async=1:first_pts=0",
+            "-t", f"{duration:.3f}",
+            "-movflags", "+faststart",
+            str(temp_video),
+        ], f"Burn captions into {destination.name}", timeout=900)
+
         info = media_info(temp_video)
+
         if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(f"Captioned file lacks audio/video: {destination}")
+            raise RuntimeError("Captioned video lacks video/audio")
         if (info["width"], info["height"]) != (width, height):
-            raise RuntimeError(f"Captioned dimensions mismatch: {destination}")
+            raise RuntimeError("Captioned video dimensions changed")
         require_fps(info, fps, destination.name)
-        if abs(info["duration"] - video_duration) > DURATION_TOLERANCE:
-            raise RuntimeError(f"Captioned duration mismatch: {destination}")
+
+        if abs(info["duration"] - duration) > DURATION_TOLERANCE:
+            raise RuntimeError("Captioned video duration mismatch")
+
         os.replace(temp_video, destination)
         return media_info(destination)
+
     finally:
         temp_srt.unlink(missing_ok=True)
         temp_video.unlink(missing_ok=True)
@@ -1056,126 +1157,101 @@ def burn_one(
 def concat_videos(paths, destination, width, height, fps):
     if not paths:
         raise RuntimeError(f"No videos supplied for {destination.name}")
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     list_file = destination.with_suffix(".concat.txt")
-    temporary = destination.with_name(destination.stem + ".tmp.mp4")
+    temporary = destination.with_name(
+        destination.stem + ".tmp.mp4"
+    )
 
     try:
         lines = []
+
         for path in paths:
             info = media_info(path)
+
             if not info["has_video"] or not info["has_audio"]:
-                raise RuntimeError(f"Cannot merge incomplete video: {path}")
+                raise RuntimeError(f"Incomplete merge input: {path}")
             if (info["width"], info["height"]) != (width, height):
-                raise RuntimeError(f"Wrong resolution in merge input: {path}")
+                raise RuntimeError(f"Merge resolution mismatch: {path}")
             require_fps(info, fps, path.name)
+
             resolved = str(path.resolve())
             if "\n" in resolved or "\r" in resolved:
-                raise RuntimeError("Invalid newline in video path")
-            lines.append("file '" + resolved.replace("'", "'\\''") + "'")
+                raise RuntimeError("Invalid newline in merge path")
 
-        list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        temporary.unlink(missing_ok=True)
-        run(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "concat", "-safe", "0", "-i", str(list_file),
-                "-c:v", "libx264", "-preset", "veryfast",
-                "-crf", "20", "-pix_fmt", "yuv420p",
-                "-r", str(fps), "-fps_mode", "cfr",
-                "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-                "-movflags", "+faststart", str(temporary),
-            ],
-            f"Merge {destination.name}", timeout=1800,
+            lines.append(
+                "file '" + resolved.replace("'", "'\\''") + "'"
+            )
+
+        list_file.write_text(
+            "\n".join(lines) + "\n",
+            encoding="utf-8",
         )
+        temporary.unlink(missing_ok=True)
+
+        run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(list_file),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-r", str(fps),
+            "-fps_mode", "cfr",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "48000",
+            "-movflags", "+faststart",
+            str(temporary),
+        ], f"Merge {destination.name}", timeout=1800)
+
         info = media_info(temporary)
+
         if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(f"Merged file lacks audio/video: {destination}")
+            raise RuntimeError("Merged video lacks audio/video")
         if (info["width"], info["height"]) != (width, height):
-            raise RuntimeError(f"Merged dimensions mismatch: {destination}")
+            raise RuntimeError("Merged video resolution mismatch")
         require_fps(info, fps, destination.name)
+
         os.replace(temporary, destination)
         return media_info(destination)
+
     finally:
         list_file.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)
-
-
-def load_render_map(manifest, parts, scenes):
-    if not isinstance(manifest, dict) or manifest.get("status") != "completed":
-        raise RuntimeError("Render manifest is invalid or incomplete")
-    rows = rows_from(manifest, "completed_scenes", "scenes")
-    expected_count = parts * scenes
-    if len(rows) != expected_count:
-        raise RuntimeError(
-            f"Expected {expected_count} rendered scenes; found {len(rows)}"
-        )
-
-    mapping = {}
-    for index, row in enumerate(rows, 1):
-        if not isinstance(row, dict):
-            raise RuntimeError(f"Invalid render row: {index}")
-        try:
-            part = int(row["part"])
-            scene = int(row.get("local_scene", row.get("scene", 0)))
-            global_scene = int(row.get("global_scene", index))
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid render mapping at row {index}") from exc
-
-        expected_part = (index - 1) // scenes + 1
-        expected_scene = (index - 1) % scenes + 1
-        if (part, scene, global_scene) != (
-            expected_part, expected_scene, index
-        ):
-            raise RuntimeError(f"Render scene order mismatch at row {index}")
-
-        source = safe_file(
-            first_path(
-                row,
-                ("source_rendered_video", "source_video", "video", "output"),
-            ),
-            f"Rendered source {(part, scene)}",
-            MIN_VIDEO_BYTES,
-        )
-        declared_hash = row.get("sha256")
-        if (
-            declared_hash
-            and row.get("video") == row.get("source_rendered_video")
-            and declared_hash != sha256_file(source)
-        ):
-            raise RuntimeError(f"Render source hash mismatch: {(part, scene)}")
-        mapping[(part, scene)] = {**row, "source_path": source}
-    return mapping
 
 
 def load_progress():
     data = read_json(PROGRESS_FILE, required=False, default={})
     if not isinstance(data, dict):
         return {}
-    rows = data.get("scenes", {})
-    return rows if isinstance(rows, dict) else {}
+    scenes = data.get("scenes", {})
+    return scenes if isinstance(scenes, dict) else {}
 
 
-def valid_cached_caption(
-    destination, previous, signature,
-    width, height, expected_duration, fps,
-):
-    if not destination.is_file() or not isinstance(previous, dict):
+def cached_video_valid(path, previous, signature, width, height, duration, fps):
+    if not path.is_file() or not isinstance(previous, dict):
         return False
     if previous.get("signature") != signature:
         return False
+
     try:
-        if previous.get("sha256") != sha256_file(destination):
+        if previous.get("sha256") != digest_file(path):
             return False
-        info = media_info(destination)
+
+        info = media_info(path)
         if not info["has_video"] or not info["has_audio"]:
             return False
         if (info["width"], info["height"]) != (width, height):
             return False
-        if abs(info["duration"] - expected_duration) > DURATION_TOLERANCE:
+        if abs(info["duration"] - duration) > DURATION_TOLERANCE:
             return False
-        require_fps(info, fps, destination.name)
+
+        require_fps(info, fps, path.name)
         return True
+
     except Exception:
         return False
 
@@ -1186,98 +1262,182 @@ def main():
             raise RuntimeError(f"Required command not installed: {command}")
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
+
     mode = str(get_format(config)).strip().lower()
-    configured_parts = positive_int(get_parts(config), "PARTS")
-    scenes = positive_int(get_scenes(config), "SCENES")
-    fps = positive_int(get_fps(config), "FPS")
+    configured_parts = int(get_parts(config))
+    scenes = int(get_scenes(config))
+    fps = int(get_fps(config))
 
     if mode not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
-    if fps > 60:
+    if configured_parts < 1 or scenes < 1:
+        raise RuntimeError("PARTS and SCENES must be positive")
+    if not 1 <= fps <= 60:
         raise RuntimeError("FPS must be between 1 and 60")
 
     width, height = (
         (720, 1280) if mode == "short" else (1280, 720)
     )
-    manifest = read_json(RENDER_MANIFEST)
+
+    render_data = read_json(RENDER_MANIFEST)
     audio_data = read_json(AUDIO_MANIFEST)
 
-    if str(manifest.get("format", "")).strip().lower() != mode:
-        raise RuntimeError("Render manifest FORMAT differs from Input/topic.txt")
-
-    parts = resolve_actual_parts(
-        mode, configured_parts, scenes, manifest, audio_data
-    )
-    expected_count = parts * scenes
-
-    if int(manifest.get("width", width)) != width:
-        raise RuntimeError("Render manifest width mismatch")
-    if int(manifest.get("height", height)) != height:
-        raise RuntimeError("Render manifest height mismatch")
-    try:
-        source_fps = float(manifest.get("fps"))
-    except (TypeError, ValueError):
-        raise RuntimeError("Render manifest FPS missing or invalid")
-    if abs(source_fps - fps) > FPS_TOLERANCE:
+    if str(render_data.get("format", "")).lower() != mode:
         raise RuntimeError(
-            f"Render manifest FPS mismatch: expected {fps}, got {source_fps}"
+            "Render manifest format differs from Input/topic.txt"
         )
+
+    render_rows = rows_from(
+        render_data, "completed_scenes", "scenes"
+    )
+    audio_rows = rows_from(
+        audio_data, "jobs", "audio_jobs", "scenes"
+    )
+
+    if not render_rows or not audio_rows:
+        raise RuntimeError("Render or TTS manifest has no scene records")
+
+    render_parts = {
+        int(row["part"]) for row in render_rows
+        if isinstance(row, dict) and row.get("part") is not None
+    }
+    audio_parts = {
+        int(row["part"]) for row in audio_rows
+        if isinstance(row, dict) and row.get("part") is not None
+    }
+
+    if not render_parts or render_parts != audio_parts:
+        raise RuntimeError("Render and TTS part mappings differ")
+
+    parts = max(render_parts)
+
+    if render_parts != set(range(1, parts + 1)):
+        raise RuntimeError("Part numbering is not continuous")
+
+    if mode == "full" and parts != configured_parts:
+        raise RuntimeError(
+            f"FULL part count mismatch: configured={configured_parts}, "
+            f"actual={parts}"
+        )
+
+    expected_count = parts * scenes
+    if len(render_rows) != expected_count:
+        raise RuntimeError("Rendered scene count does not match PARTS/SCENES")
+    if len(audio_rows) != expected_count:
+        raise RuntimeError("TTS scene count does not match PARTS/SCENES")
+
+    for data, label in (
+        (render_data, "Render"),
+        (audio_data, "TTS"),
+    ):
+        declared = data.get("total_parts")
+        if declared is not None and int(declared) != parts:
+            raise RuntimeError(f"{label} total_parts mismatch")
+
+    if int(render_data.get("width", width)) != width:
+        raise RuntimeError("Render width mismatch")
+    if int(render_data.get("height", height)) != height:
+        raise RuntimeError("Render height mismatch")
+
+    try:
+        render_fps = float(render_data["fps"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Render manifest FPS is missing") from exc
+
+    if abs(render_fps - fps) > FPS_TOLERANCE:
+        raise RuntimeError("Render manifest FPS differs from input")
 
     family = str(get_caption_font(config)).strip()
     if not family:
         raise RuntimeError("CAPTION_FONT is empty")
-    configured_size = get_caption_font_size(config)
 
+    configured_size = get_caption_font_size(config)
     if str(configured_size).strip().lower() == "auto":
         size = 24 if mode == "short" else 28
     else:
         try:
             size = int(configured_size)
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "CAPTION_FONT_SIZE must be auto or an integer"
-            ) from exc
+            raise RuntimeError("CAPTION_FONT_SIZE is invalid") from exc
 
-    size = max(16, min(size, 40 if mode == "short" else 44))
+    if not 16 <= size <= 64:
+        raise RuntimeError("CAPTION_FONT_SIZE must be between 16 and 64")
+
     font_path = resolve_font(family)
-    font_hash = sha256_file(font_path)
+    font_hash = digest_file(font_path)
 
-    captions = load_caption_map(parts, scenes)
-    audio = load_audio_map(parts, scenes, audio_data)
-    source_map = load_render_map(manifest, parts, scenes)
+    captions = caption_map(parts, scenes)
+    audio = audio_map(parts, scenes)
+    rendered = {}
 
-    story_seed = digest_data({
-        "captions": captions, "format": mode,
-        "parts": parts, "scenes": scenes,
-    })
-    cached = load_progress()
-    alignment_cache = read_json(
-        ALIGNMENT_CACHE, required=False, default={}
-    )
-    if not isinstance(alignment_cache, dict):
-        alignment_cache = {}
+    for index, row in enumerate(render_rows, 1):
+        part = int(row["part"])
+        scene = int(row.get("local_scene", row.get("scene", 0)))
+        global_scene = int(row.get("global_scene", index))
+
+        expected_part = (index - 1) // scenes + 1
+        expected_scene = (index - 1) % scenes + 1
+
+        if (part, scene, global_scene) != (
+            expected_part, expected_scene, index
+        ):
+            raise RuntimeError(f"Render order mismatch at scene {index}")
+
+        source = safe_file(
+            first_path(
+                row,
+                ("source_rendered_video", "source_video", "video", "output"),
+            ),
+            f"Rendered scene {(part, scene)}",
+            MIN_VIDEO_BYTES,
+        )
+
+        rendered[(part, scene)] = {
+            "row": row,
+            "path": source,
+            "sha256": digest_file(source),
+        }
 
     CAPTIONED_DIR.mkdir(parents=True, exist_ok=True)
     CAPTION_DIR.mkdir(parents=True, exist_ok=True)
     PART_DIR.mkdir(parents=True, exist_ok=True)
     VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
-    log("CAPTION BURN VERSION:", VERSION)
-    log("FORMAT:", mode)
-    log("ACTUAL PARTS:", parts)
-    log("SCENES:", expected_count)
-    log("FONT:", family, "| SIZE:", size)
-    log("ALIGNMENT MODEL:", ALIGNMENT_MODEL)
+    alignment_cache = read_json(
+        ALIGNMENT_CACHE, required=False, default={}
+    )
+    if not isinstance(alignment_cache, dict):
+        alignment_cache = {}
 
-    recognizer = load_whisper_aligner()
+    cached = load_progress()
+    aligner = load_aligner()
+
+    seed = digest_data({
+        "captions": {
+            f"{p}:{s}": captions[(p, s)]["sha256"]
+            for p in range(1, parts + 1)
+            for s in range(1, scenes + 1)
+        },
+        "format": mode,
+        "parts": parts,
+        "scenes": scenes,
+    })
+
     completed = {}
-    final_srt_cues = []
+    final_cues = []
     global_cursor = 0.0
-    timing_methods = {}
+    methods = {}
     reused_count = 0
     burned_count = 0
-    alignment_count = 0
+    aligned_count = 0
     fallback_count = 0
+
+    log("CAPTION BURN VERSION:", VERSION)
+    log("FORMAT:", mode)
+    log("PARTS:", parts)
+    log("SCENES:", expected_count)
+    log("FONT:", family, "SIZE:", size)
+    log("FPS:", fps)
 
     for index in range(1, expected_count + 1):
         part = (index - 1) // scenes + 1
@@ -1285,98 +1445,119 @@ def main():
         key = (part, scene)
         cache_key = f"{part}:{scene}"
 
-        row = source_map[key]
-        source = row["source_path"]
+        source = rendered[key]["path"]
         source_info = media_info(source)
 
         if not source_info["has_video"] or not source_info["has_audio"]:
-            raise RuntimeError(f"Rendered source lacks audio/video: {key}")
-        if (source_info["width"], source_info["height"]) != (width, height):
-            raise RuntimeError(f"Rendered source dimensions mismatch: {key}")
+            raise RuntimeError(f"Rendered scene has no audio/video: {key}")
+        if (source_info["width"], source_info["height"]) != (
+            width, height
+        ):
+            raise RuntimeError(f"Rendered scene resolution mismatch: {key}")
         require_fps(source_info, fps, f"rendered scene {key}")
 
         narration = audio[key]
+        caption = captions[key]
         video_duration = source_info["duration"]
         audio_duration = narration["duration"]
-        cue_duration = min(audio_duration, video_duration)
+        cue_duration = min(video_duration, audio_duration)
 
         alignment_key = digest_data({
             "version": VERSION,
-            "model": ALIGNMENT_MODEL,
             "audio_sha256": narration["sha256"],
-            "caption_sha256": sha256_text(captions[key]),
+            "caption_sha256": caption["sha256"],
+            "language": caption["language"],
         })
 
         cues, timing_method = build_scene_cues(
-            captions[key], narration, cue_duration,
-            recognizer, alignment_cache, alignment_key,
+            caption["text"],
+            narration,
+            cue_duration,
+            aligner,
+            alignment_cache,
+            alignment_key,
+            caption["language"],
         )
-
-        if timing_method == "whisper-word-alignment":
-            alignment_count += 1
-        else:
-            fallback_count += 1
 
         write_json(ALIGNMENT_CACHE, alignment_cache)
 
+        if timing_method == "whisper-word-alignment":
+            aligned_count += 1
+        else:
+            fallback_count += 1
+
+        methods[timing_method] = methods.get(timing_method, 0) + 1
+
         style = contrast_style(
-            source, video_duration, part, scene,
-            story_seed, width, height,
+            source,
+            video_duration,
+            part,
+            scene,
+            seed,
+            width,
+            height,
         )
 
         destination = (
             CAPTIONED_DIR
             / f"part_{part:02d}_scene_{scene:03d}.mp4"
         )
-        source_hash = sha256_file(source)
 
         signature = digest_data({
             "version": VERSION,
-            "source_sha256": source_hash,
+            "source_sha256": rendered[key]["sha256"],
             "audio_sha256": narration["sha256"],
-            "caption": captions[key],
+            "caption_sha256": caption["sha256"],
             "font": family,
             "font_sha256": font_hash,
             "font_size": size,
             "fps": fps,
-            "video_duration": round(video_duration, 4),
-            "audio_duration": round(audio_duration, 4),
-            "alignment_key": alignment_key,
+            "duration": round(video_duration, 4),
             "timing_method": timing_method,
             "cues": cues,
             "style": style,
         })
 
         previous = cached.get(cache_key, {})
-        reused = valid_cached_caption(
-            destination, previous, signature,
-            width, height, video_duration, fps,
+        reused = cached_video_valid(
+            destination,
+            previous,
+            signature,
+            width,
+            height,
+            video_duration,
+            fps,
         )
 
         if reused:
-            result_info = media_info(destination)
+            info = media_info(destination)
             reused_count += 1
             log(f"REUSED {index}/{expected_count}: {destination.name}")
         else:
-            result_info = burn_one(
-                source, destination, cues, video_duration,
-                font_path, family, size, style,
-                width, height, fps,
+            info = burn_one(
+                source,
+                destination,
+                cues,
+                video_duration,
+                font_path,
+                family,
+                size,
+                style,
+                width,
+                height,
+                fps,
             )
             burned_count += 1
             log(
-                f"BURNED {index}/{expected_count}: {destination.name}; "
-                f"{style['palette']}/{style['mode']}; {timing_method}"
+                f"BURNED {index}/{expected_count}: "
+                f"{destination.name} | {style['palette']} | {timing_method}"
             )
 
-        require_fps(result_info, fps, destination.name)
-        timing_methods[timing_method] = (
-            timing_methods.get(timing_method, 0) + 1
-        )
-        output_hash = sha256_file(destination)
+        require_fps(info, fps, destination.name)
+        output_hash = digest_file(destination)
 
         completed[key] = {
-            **row,
+            **rendered[key]["row"],
             "part": part,
             "scene": scene,
             "local_scene": scene,
@@ -1385,20 +1566,22 @@ def main():
             "source_rendered_video": relative(source),
             "video": relative(destination),
             "output": relative(destination),
-            "duration": round(result_info["duration"], 4),
+            "duration": round(info["duration"], 4),
             "width": width,
             "height": height,
-            "fps": round(result_info["fps"], 4),
+            "fps": round(info["fps"], 4),
             "captions_burned": True,
+            "caption_language": caption["language"],
             "caption_style": style,
             "caption_timing": timing_method,
             "caption_alignment_model": (
-                ALIGNMENT_MODEL
+                os.environ.get(
+                    "CAPTION_ALIGNMENT_MODEL", "openai/whisper-tiny"
+                )
                 if timing_method == "whisper-word-alignment"
                 else None
             ),
             "caption_alignment_key": alignment_key,
-            "caption_chunk_count": len(narration["chunks"]),
             "caption_cue_count": len(cues),
             "fingerprint": signature,
             "signature": signature,
@@ -1411,22 +1594,20 @@ def main():
             "signature": signature,
             "sha256": output_hash,
             "path": relative(destination),
-            "fps": round(result_info["fps"], 4),
             "caption_style": style,
             "caption_timing": timing_method,
             "caption_alignment_key": alignment_key,
-            "caption_chunk_count": len(narration["chunks"]),
             "caption_cue_count": len(cues),
         }
 
         for cue in cues:
-            final_srt_cues.append({
+            final_cues.append({
                 "start": global_cursor + cue["start"],
                 "end": global_cursor + cue["end"],
                 "text": cue["text"],
             })
 
-        global_cursor += result_info["duration"]
+        global_cursor += info["duration"]
 
         write_json(PROGRESS_FILE, {
             "status": "in_progress",
@@ -1437,27 +1618,27 @@ def main():
             "fps": fps,
             "completed_count": index,
             "total_scenes": expected_count,
-            "alignment_model": ALIGNMENT_MODEL,
             "scenes": cached,
         })
 
     if len(completed) != expected_count:
         raise RuntimeError("Captioned scene count mismatch")
 
-    ordered_cues = sorted(
-        final_srt_cues,
-        key=lambda item: (item["start"], item["end"]),
+    write_srt(
+        FINAL_SRT,
+        sorted(final_cues, key=lambda item: item["start"]),
     )
-    write_srt(FINAL_SRT, ordered_cues)
 
     part_paths = []
+
     for part in range(1, parts + 1):
-        scene_paths = [
+        paths = [
             ROOT / completed[(part, scene)]["video"]
             for scene in range(1, scenes + 1)
         ]
+
         part_path = PART_DIR / f"part_{part:02d}.mp4"
-        concat_videos(scene_paths, part_path, width, height, fps)
+        concat_videos(paths, part_path, width, height, fps)
         part_paths.append(part_path)
         log("PART READY:", relative(part_path))
 
@@ -1465,7 +1646,6 @@ def main():
     final_info = concat_videos(
         part_paths, final_path, width, height, fps
     )
-    require_fps(final_info, fps, final_path.name)
 
     alias_name = (
         "katha_lok_ai_short.mp4"
@@ -1474,7 +1654,9 @@ def main():
     )
     alias_path = VIDEO_DIR / alias_name
     shutil.copy2(final_path, alias_path)
+
     alias_info = media_info(alias_path)
+    require_fps(final_info, fps, final_path.name)
     require_fps(alias_info, fps, alias_path.name)
 
     opposite = VIDEO_DIR / (
@@ -1491,6 +1673,7 @@ def main():
     ]
 
     part_manifest = []
+
     for index, path in enumerate(part_paths, 1):
         info = media_info(path)
         part_manifest.append({
@@ -1499,20 +1682,20 @@ def main():
             "scene_count": scenes,
             "path": relative(path),
             "output": relative(path),
-            "sha256": sha256_file(path),
+            "sha256": digest_file(path),
             "duration": round(info["duration"], 4),
             "fps": round(info["fps"], 4),
         })
 
-    if alignment_count and fallback_count:
-        overall_timing = "mixed-whisper-and-estimated"
-    elif alignment_count:
+    if aligned_count and fallback_count:
+        overall_timing = "mixed-whisper-and-audio-estimate"
+    elif aligned_count:
         overall_timing = "whisper-word-alignment"
     else:
-        overall_timing = "estimated-fallback-only"
+        overall_timing = "audio-duration-fallback"
 
     final_manifest = {
-        **manifest,
+        **render_data,
         "status": "completed",
         "version": VERSION,
         "format": mode,
@@ -1522,11 +1705,10 @@ def main():
         "width": width,
         "height": height,
         "captions_burned": True,
-        "caption_style": "story-scene-adaptive-contrast",
+        "caption_style": "adaptive-scene-contrast",
         "caption_timing": overall_timing,
-        "caption_timing_methods": timing_methods,
-        "caption_alignment_model": ALIGNMENT_MODEL,
-        "caption_alignment_scenes": alignment_count,
+        "caption_timing_methods": methods,
+        "caption_alignment_scenes": aligned_count,
         "caption_fallback_scenes": fallback_count,
         "caption_font": family,
         "caption_font_file": relative(font_path),
@@ -1538,19 +1720,20 @@ def main():
         "scenes": ordered_rows,
         "parts": part_manifest,
         "final_video": relative(final_path),
-        "final_video_sha256": sha256_file(final_path),
+        "final_video_sha256": digest_file(final_path),
         "final_video_fps": round(final_info["fps"], 4),
         "alias": relative(alias_path),
-        "alias_sha256": sha256_file(alias_path),
+        "alias_sha256": digest_file(alias_path),
         "alias_fps": round(alias_info["fps"], 4),
         "duration": round(final_info["duration"], 4),
         "resolution": [width, height],
         "caption_manifest": relative(CAPTION_MANIFEST),
         "final_srt": relative(FINAL_SRT),
-        "final_srt_sha256": sha256_file(FINAL_SRT),
+        "final_srt_sha256": digest_file(FINAL_SRT),
         "captioned_new": burned_count,
         "captioned_reused": reused_count,
     }
+
     write_json(RENDER_MANIFEST, final_manifest)
 
     write_json(PROGRESS_FILE, {
@@ -1563,29 +1746,33 @@ def main():
         "completed_count": expected_count,
         "total_scenes": expected_count,
         "final_video": relative(final_path),
-        "final_video_sha256": sha256_file(final_path),
-        "alignment_model": ALIGNMENT_MODEL,
-        "alignment_scenes": alignment_count,
+        "final_video_sha256": digest_file(final_path),
+        "alignment_scenes": aligned_count,
         "fallback_scenes": fallback_count,
         "scenes": cached,
     })
 
+    log("=" * 55)
     log("CAPTION BURN COMPLETE")
     log("FORMAT:", mode)
-    log("ACTUAL PARTS:", parts)
+    log("PARTS:", parts)
     log("SCENES:", expected_count)
     log("FPS:", fps)
     log("NEW:", burned_count, "| REUSED:", reused_count)
-    log("WORD-ALIGNED SCENES:", alignment_count)
-    log("FALLBACK SCENES:", fallback_count)
-    log("TIMING METHODS:", timing_methods)
+    log("WORD-ALIGNED:", aligned_count)
+    log("FALLBACK:", fallback_count)
+    log("TIMING METHODS:", methods)
     log("FINAL VIDEO:", relative(final_path))
     log("FINAL SRT:", relative(FINAL_SRT))
+    log("=" * 55)
 
 
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        log("CAPTION BURN CANCELLED")
+        sys.exit(130)
     except Exception as exc:
         log("CAPTION BURN FAILED:", str(exc))
         sys.exit(1)
