@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Story-grounded YouTube metadata generation for Katha Lok AI."""
+"""Generate accurate, story-grounded YouTube metadata for Katha Lok AI."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import load_and_validate, get_format, get_topic
+from input_config import load_and_validate, get_format, get_topic, get_title_source
 
 INPUT_TOPIC = ROOT / "Input" / "topic.txt"
 INPUT_STORY = ROOT / "output" / "story" / "ai_story.json"
@@ -31,17 +31,44 @@ OUTPUT_DESCRIPTION = OUTPUT_DIR / "youtube_description.txt"
 OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 
-VERSION = "youtube-metadata-v10-complete-story-grounded"
+VERSION = "youtube-metadata-v11-story-integrity"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
 MAX_DESCRIPTION_CHARS = 5000
 MAX_TAGS = 20
-MIN_TAGS = 8
+MIN_TAGS = 5
 MAX_TAG_LENGTH = 100
+MIN_STORY_WORDS = 30
 
 RETRYABLE_HTTP = {408, 409, 425, 429, 500, 502, 503, 504}
 PERMANENT_HTTP = {400, 401, 403, 404}
+
+TITLE_KEYS = (
+    "final_title",
+    "generated_title",
+    "story_title",
+    "title",
+)
+
+STORY_TEXT_KEYS = (
+    "story_text",
+    "full_story",
+    "complete_story",
+    "original_story",
+    "content",
+    "narration",
+    "script",
+    "source_text",
+)
+
+SUMMARY_KEYS = (
+    "story_summary",
+    "summary",
+    "synopsis",
+    "logline",
+    "short_summary",
+)
 
 
 def log(*values: Any) -> None:
@@ -89,12 +116,28 @@ def atomic_write_json(path: Path, data: dict) -> None:
     )
 
 
+def nested_objects(data: dict) -> list[dict]:
+    result = [data]
+    for key in ("story", "metadata", "story_metadata", "result"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            result.append(value)
+    return result
+
+
+def first_text(data: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = clean(data.get(key))
+        if value:
+            return value
+    return ""
+
+
 def load_config() -> tuple[dict, str, str]:
     if not INPUT_TOPIC.is_file():
         raise RuntimeError("Input/topic.txt is missing.")
 
     config = load_and_validate(INPUT_TOPIC)
-
     if not isinstance(config, dict):
         raise RuntimeError("Input configuration is invalid.")
 
@@ -116,7 +159,6 @@ def load_selected_model() -> str:
         )
 
     model = clean(data.get("model"))
-
     if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
         raise RuntimeError(f"Invalid selected Gemini model: {model!r}")
 
@@ -127,24 +169,25 @@ def ordered_parts(story: dict) -> list[dict]:
     parts = story.get("parts")
 
     if not isinstance(parts, list):
+        nested = story.get("story")
+        parts = nested.get("parts") if isinstance(nested, dict) else None
+
+    if not isinstance(parts, list):
         return []
 
     indexed = []
-
     for index, part in enumerate(parts, 1):
         if not isinstance(part, dict):
             continue
-
         try:
             number = int(part.get("part", index))
         except (TypeError, ValueError):
             number = index
-
         indexed.append((number, part))
 
     indexed.sort(key=lambda item: item[0])
-
     numbers = [number for number, _ in indexed]
+
     if numbers and numbers != list(range(1, len(numbers) + 1)):
         raise RuntimeError("Story part numbering is not continuous.")
 
@@ -171,8 +214,8 @@ def ordered_scenes(scenes: list) -> list[dict]:
         indexed.append((number, scene))
 
     indexed.sort(key=lambda item: item[0])
-
     numbers = [number for number, _ in indexed]
+
     if numbers and numbers != list(range(1, len(numbers) + 1)):
         raise RuntimeError("Global scene numbering is not continuous.")
 
@@ -187,6 +230,7 @@ def extract_part_narration(parts: list[dict]) -> str:
             part.get("narration")
             or part.get("text")
             or part.get("story")
+            or part.get("content")
         )
 
         if narration:
@@ -198,13 +242,13 @@ def extract_part_narration(parts: list[dict]) -> str:
             continue
 
         for scene in ordered_scenes(scenes):
-            text = clean(
+            value = clean(
                 scene.get("narration")
                 or scene.get("narration_text")
                 or scene.get("text")
             )
-            if text:
-                sections.append(text)
+            if value:
+                sections.append(value)
 
     return "\n\n".join(sections).strip()
 
@@ -213,34 +257,33 @@ def extract_scene_narration(story: dict) -> str:
     scenes = story.get("scenes")
 
     if not isinstance(scenes, list):
+        nested = story.get("story")
+        scenes = nested.get("scenes") if isinstance(nested, dict) else None
+
+    if not isinstance(scenes, list):
         return ""
 
     sections = []
-
     for scene in ordered_scenes(scenes):
-        text = clean(
+        value = clean(
             scene.get("narration")
             or scene.get("narration_text")
             or scene.get("text")
         )
-        if text:
-            sections.append(text)
+        if value:
+            sections.append(value)
 
     return "\n\n".join(sections).strip()
 
 
 def extract_canonical_story(story: dict) -> tuple[str, str]:
-    """Prefer complete story text; otherwise reconstruct in story order."""
+    """Use the complete story, or reconstruct it in strict story order."""
 
-    for key in (
-        "story_text",
-        "full_story",
-        "original_story",
-        "complete_story",
-    ):
-        value = clean(story.get(key))
-        if len(value) >= 100:
-            return value, key
+    for obj in nested_objects(story):
+        for key in STORY_TEXT_KEYS:
+            value = clean(obj.get(key))
+            if len(value) >= 100:
+                return value, key
 
     parts = ordered_parts(story)
     reconstructed = extract_part_narration(parts)
@@ -249,44 +292,44 @@ def extract_canonical_story(story: dict) -> tuple[str, str]:
         return reconstructed, "ordered_parts_and_scenes"
 
     reconstructed = extract_scene_narration(story)
-
     if len(reconstructed) >= 100:
         return reconstructed, "ordered_top_level_scenes"
 
-    for key in ("story", "content", "narration", "script", "source_text"):
-        value = clean(story.get(key))
-        if len(value) >= 100:
-            return value, key
-
     raise RuntimeError(
-        "Complete story narration not found in ai_story.json. "
-        "Metadata generation stopped instead of inventing a story."
+        "Complete story narration not found. "
+        "Metadata generation stopped instead of inventing story content."
     )
 
 
 def validate_story_status(story: dict) -> None:
-    status = clean(story.get("status")).lower()
+    statuses = [
+        clean(obj.get("status")).lower()
+        for obj in nested_objects(story)
+        if obj.get("status")
+    ]
 
-    if status not in {"completed", "complete", "success"}:
+    if statuses and not any(
+        status in {"completed", "complete", "success", "done"}
+        for status in statuses
+    ):
         raise RuntimeError(
-            f"Story is not completed. Found status={status!r}."
+            f"Story is not completed. Found status values: {statuses}"
         )
 
-    if story.get("error"):
-        raise RuntimeError("Story JSON contains an error field.")
-
-    if story.get("format"):
-        mode = clean(story.get("format")).lower()
-        if mode not in {"short", "full"}:
-            raise RuntimeError(
-                f"Invalid story format in ai_story.json: {mode!r}"
-            )
+    for obj in nested_objects(story):
+        if obj.get("error"):
+            raise RuntimeError("Story JSON contains an error field.")
 
 
 def prepare_story(story: dict, selected_mode: str) -> dict:
     validate_story_status(story)
 
     story_mode = clean(story.get("format")).lower()
+    if story_mode and story_mode not in {"short", "full"}:
+        raise RuntimeError(
+            f"Invalid story format in ai_story.json: {story_mode!r}"
+        )
+
     if story_mode and story_mode != selected_mode:
         raise RuntimeError(
             f"Story format mismatch: input={selected_mode}, "
@@ -296,30 +339,24 @@ def prepare_story(story: dict, selected_mode: str) -> dict:
     story_text, source = extract_canonical_story(story)
     parts = ordered_parts(story)
 
-    existing_title = clean(
-        story.get("final_title")
-        or story.get("generated_title")
-        or story.get("story_title")
-        or story.get("title")
-    )
+    existing_title = ""
+    summary = ""
+
+    for obj in nested_objects(story):
+        existing_title = existing_title or first_text(obj, TITLE_KEYS)
+        summary = summary or first_text(obj, SUMMARY_KEYS)
 
     words = len(story_text.split())
-
-    if words < 30:
+    if words < MIN_STORY_WORDS:
         raise RuntimeError(
             f"Story is too short for metadata: {words} words."
-        )
-
-    if not existing_title:
-        log(
-            "Story title is missing. Gemini must derive it "
-            "from the complete story."
         )
 
     return {
         "text": story_text,
         "source": source,
         "existing_title": existing_title,
+        "summary": summary,
         "character_count": len(story_text),
         "word_count": words,
         "part_count": len(parts),
@@ -327,17 +364,20 @@ def prepare_story(story: dict, selected_mode: str) -> dict:
 
 
 def normalize_title(value: Any) -> str:
-    title = clean(value)
-    title = title.strip("\"'“”‘’")
+    title = clean(value).strip("\"'“”‘’")
     title = re.sub(r"\s+", " ", title)
 
     if not title:
         raise RuntimeError("Generated YouTube title is empty.")
 
     if len(title) > MAX_TITLE_CHARS:
-        title = title[:MAX_TITLE_CHARS].rsplit(" ", 1)[0].rstrip(" ,.!?;:")
-        if not title:
-            raise RuntimeError("Generated title cannot fit YouTube limit.")
+        shortened = title[:MAX_TITLE_CHARS]
+        if " " in shortened:
+            shortened = shortened.rsplit(" ", 1)[0]
+        title = shortened.rstrip(" ,.!?;:।")
+
+    if not title:
+        raise RuntimeError("Generated title cannot fit YouTube limit.")
 
     return title
 
@@ -349,7 +389,9 @@ def normalize_description(value: Any) -> str:
         raise RuntimeError("Generated YouTube description is empty.")
 
     if len(description) > MAX_DESCRIPTION_CHARS:
-        description = description[:MAX_DESCRIPTION_CHARS - 3].rstrip() + "..."
+        description = (
+            description[:MAX_DESCRIPTION_CHARS - 3].rstrip() + "..."
+        )
 
     return description
 
@@ -431,6 +473,7 @@ def make_fingerprint(
         "topic": topic,
         "story_text": story["text"],
         "existing_title": story["existing_title"],
+        "summary": story["summary"],
         "story_source": story["source"],
         "model": model,
         "format": mode,
@@ -472,11 +515,7 @@ def load_cache(
             return None
 
         return validate_metadata(
-            data,
-            topic,
-            model,
-            fingerprint,
-            mode,
+            data, topic, model, fingerprint, mode
         )
 
     except Exception as exc:
@@ -522,7 +561,6 @@ def extract_response_text(result: dict) -> str:
 
 def parse_metadata_json(response: str) -> dict:
     response = response.strip()
-
     response = re.sub(
         r"^\s*```(?:json)?\s*",
         "",
@@ -559,28 +597,31 @@ def build_prompt(topic: str, story: dict, mode: str) -> str:
     if mode == "short":
         format_instruction = """
 यह YouTube SHORT वीडियो है।
-- Title छोटा, प्रभावशाली और कहानी के वास्तविक रहस्य से जुड़ा हो।
-- Description में इसे Short के रूप में ही प्रस्तुत करें।
-- Full-length video, full movie या लंबी फिल्म न लिखें।
+- Title संक्षिप्त और कहानी के वास्तविक रहस्य/संघर्ष पर आधारित हो।
+- Description इसे केवल Short के रूप में प्रस्तुत करे।
+- Full movie, full-length video या लंबी फिल्म न लिखें।
+- Short के लिए अनावश्यक लंबा विवरण न दें।
 """
     else:
         format_instruction = """
 यह FULL-LENGTH कहानी वीडियो है।
 - Title पूरी कहानी के केंद्रीय संघर्ष और परिणाम पर आधारित हो।
-- Description में पूरी कहानी का सही सार दें।
+- Description में पूरी कहानी का सही सार हो।
 - इसे YouTube Short न बताएं।
 """
 
     return f"""
-आप Katha Lok AI के अनुभवी Hindi YouTube metadata editor हैं।
-
-आपको पूरी कहानी पढ़कर ही metadata बनाना है।
+आप Katha Lok AI के Hindi YouTube metadata editor हैं।
+पूरी कहानी पढ़कर ही metadata बनाएं।
 
 USER TOPIC:
 {topic or "उपलब्ध नहीं"}
 
 EXISTING STORY TITLE:
 {story["existing_title"] or "उपलब्ध नहीं"}
+
+AVAILABLE STORY SUMMARY:
+{story["summary"] or "अलग summary उपलब्ध नहीं"}
 
 VIDEO FORMAT:
 {mode.upper()}
@@ -593,28 +634,26 @@ COMPLETE STORY:
 {story["text"]}
 </complete_story>
 
-महत्वपूर्ण निर्देश:
+अनिवार्य निर्देश:
 
-1. पूरी कहानी पढ़ें। केवल पहली पंक्ति या शुरुआती घटना से title न बनाएं।
-2. मुख्य पात्र, वास्तविक संघर्ष, रहस्य, turning point और ending समझें।
-3. Title कहानी के वास्तविक सार पर आधारित हो।
-4. अगर पुराना title कहानी से मेल नहीं खाता, तो नया बेहतर title बनाएं।
-5. कहानी में मौजूद न होने वाले पात्र, घटनाएं, जगह या twist न जोड़ें।
-6. Description कहानी का सही और स्पष्ट सार बताए।
-7. Description में गलत दावा, fake promise या invented ending न हो।
-8. Suspense तभी लिखें जब कहानी में वास्तव में suspense हो।
-9. Tags कहानी के पात्र, विषय, genre, घटना और भाषा से संबंधित हों।
-10. 10 से 20 अलग-अलग उपयोगी tags दें।
-11. Hindi और relevant English search terms का स्वाभाविक मिश्रण रखें।
-12. Trending लेकिन असंबंधित keywords न जोड़ें।
-13. दूसरे creators, brands या unrelated channels के नाम न जोड़ें।
-14. कोई नकली URL, social link, credit या source न बनाएं।
-15. Description में कहानी से असंबंधित hashtags न जोड़ें।
-16. Title अधिकतम 100 characters का हो।
-17. Description अधिकतम 5000 characters का हो।
-18. भाषा स्वाभाविक Hindi Devanagari हो। जरूरी English terms रख सकते हैं।
-19. Metadata में केवल एक चुना हुआ FORMAT इस्तेमाल करें।
-20. Output में केवल मांगा गया JSON लौटाएं।
+1. पूरी कहानी पढ़ें; केवल पहली पंक्ति से title न बनाएं।
+2. मुख्य पात्र, संघर्ष, रहस्य, turning point और ending समझें।
+3. Title कहानी के वास्तविक सार और सबसे महत्वपूर्ण घटना पर आधारित हो।
+4. मौजूदा title गलत या कमजोर हो तो नया बेहतर title बनाएं।
+5. कहानी में न मौजूद पात्र, घटनाएं, जगह या twist न जोड़ें।
+6. Description कहानी का सटीक सार बताए; invented ending न लिखें।
+7. Suspense का दावा तभी करें जब कहानी में वास्तव में suspense हो।
+8. Tags कहानी के पात्र, विषय, genre, घटना और भाषा से संबंधित हों।
+9. 10 से 20 अलग-अलग उपयोगी tags देने का प्रयास करें।
+10. Hindi और relevant English search terms का स्वाभाविक मिश्रण रखें।
+11. असंबंधित trending keywords, दूसरे creators या brands के नाम न जोड़ें।
+12. नकली URL, social links, credits या sources न बनाएं।
+13. Description में असंबंधित hashtags न जोड़ें।
+14. Title अधिकतम 100 characters का हो।
+15. Description अधिकतम 5000 characters का हो।
+16. भाषा स्वाभाविक Hindi Devanagari हो; जरूरी English terms रख सकते हैं।
+17. चुने गए FORMAT से अलग video format का दावा न करें।
+18. Output में केवल JSON लौटाएं।
 
 JSON FORMAT:
 {{
@@ -650,7 +689,6 @@ def generate_metadata(
     }
 
     prompt = build_prompt(topic, story, mode)
-
     encoded_model = urllib.parse.quote(model, safe="-._")
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
@@ -662,16 +700,12 @@ def generate_metadata(
     for attempt in range(1, MAX_RETRIES + 1):
         payload = {
             "contents": [
-                {
-                    "parts": [
-                        {"text": prompt}
-                    ]
-                }
+                {"parts": [{"text": prompt}]}
             ],
             "generationConfig": {
                 "responseMimeType": "application/json",
                 "responseSchema": schema,
-                "temperature": 0.45,
+                "temperature": 0.35,
             },
         }
 
@@ -726,7 +760,6 @@ def generate_metadata(
 
             if exc.code in PERMANENT_HTTP:
                 break
-
             if exc.code not in RETRYABLE_HTTP:
                 break
 
@@ -764,7 +797,11 @@ def build_combined_text(metadata: dict) -> str:
     )
 
 
-def verify_saved_text(path: Path, expected: str, label: str) -> None:
+def verify_saved_text(
+    path: Path,
+    expected: str,
+    label: str,
+) -> None:
     if not path.is_file():
         raise RuntimeError(f"Saved {label} file is missing.")
 
@@ -787,32 +824,19 @@ def save_outputs(metadata: dict) -> None:
 
     combined = build_combined_text(validated)
 
-    # Each file is written atomically to avoid partial JSON/text files.
     atomic_write_json(OUTPUT_JSON, validated)
-
-    atomic_write(
-        OUTPUT_TITLE,
-        validated["title"] + "\n",
-    )
-
+    atomic_write(OUTPUT_TITLE, validated["title"] + "\n")
     atomic_write(
         OUTPUT_DESCRIPTION,
         validated["description"] + "\n",
     )
-
     atomic_write(
         OUTPUT_TAGS,
-        ", ".join(validated["tags"]) + "\n",
+        "\n".join(validated["tags"]) + "\n",
     )
+    atomic_write(OUTPUT_TEXT, combined)
 
-    atomic_write(
-        OUTPUT_TEXT,
-        combined,
-    )
-
-    # Read back and validate the saved files.
     saved_json = read_json(OUTPUT_JSON)
-
     verified = validate_metadata(
         saved_json,
         validated["topic"],
@@ -831,25 +855,27 @@ def save_outputs(metadata: dict) -> None:
         validated["title"],
         "title",
     )
-
     verify_saved_text(
         OUTPUT_DESCRIPTION,
         validated["description"],
         "description",
     )
-
-    saved_tags = normalize_tags(
-        OUTPUT_TAGS.read_text(encoding="utf-8").split(",")
-    )
-
-    if saved_tags != validated["tags"]:
-        raise RuntimeError("Saved YouTube tags verification failed.")
-
     verify_saved_text(
         OUTPUT_TEXT,
         combined,
         "combined metadata",
     )
+
+    saved_tags = [
+        clean(item)
+        for item in OUTPUT_TAGS.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if clean(item)
+    ]
+
+    if saved_tags != validated["tags"]:
+        raise RuntimeError("Saved YouTube tags verification failed.")
 
     log("All YouTube metadata files saved and verified.")
 
@@ -859,7 +885,6 @@ def main() -> None:
 
     story_data = read_json(INPUT_STORY)
     prepared = prepare_story(story_data, mode)
-
     model = load_selected_model()
 
     fingerprint = make_fingerprint(
@@ -908,6 +933,11 @@ def main() -> None:
             mode=mode,
             fingerprint=fingerprint,
         )
+
+    metadata["topic"] = topic
+    metadata["model"] = model
+    metadata["format"] = mode
+    metadata["input_fingerprint"] = fingerprint
 
     save_outputs(metadata)
 
