@@ -72,13 +72,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TITLE": "",
     "STORY_TEXT": "",
     "PRESERVE_STORY_TEXT": True,
+
+    # PARTS accepts either a fixed count (e.g. 4) or a range (e.g. 8-11).
+    # PARTS stores the currently selected/initial count for legacy callers.
     "PARTS": 1,
+    "PARTS_MIN": 1,
+    "PARTS_MAX": 1,
+
     "SCENES": 1,
     "STORY_LENGTH": "auto",
     "SCENE_DURATION": "auto",
     "CAPTIONS": "hindi",
     "CAPTION_FONT": "Hind",
     "CAPTION_FONT_SIZE": 28,
+
     "TTS_MAIN_1": "fish_audio",
     "TTS_MAIN_2": "gemini_tts",
     "TTS_MAIN_3": "edge_tts",
@@ -90,6 +97,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TTS_CHUNK_CHECKPOINT": True,
     "TTS_VALIDATE_AUDIO": True,
     "TTS_MAX_PROVIDER_ATTEMPTS": 1,
+
     "IMAGE_PROVIDER_ORDER": ",".join(ALL_IMAGE_PROVIDERS),
     "IMAGE_FALLBACK_ENABLED": True,
     "IMAGE_ALLOW_BILLABLE": True,
@@ -103,9 +111,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ),
     "GEMINI_IMAGE_MODEL": "gemini-2.5-flash-image",
     "REPLICATE_IMAGE_MODEL": "black-forest-labs/flux-schnell",
+
     "PART_HOOK": True,
     "PART_SUSPENSE": True,
     "FINAL_RESOLUTION": True,
+
     "VISUAL_STYLE": "cinematic_realistic",
     "REALISM": "high",
     "CHARACTER_BIBLE": True,
@@ -124,11 +134,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "AVOID_GLITCH_EFFECTS": True,
     "NATURAL_MOTION": True,
     "REALISTIC_LIGHTING": True,
+
     "MUSIC": True,
     "MUSIC_STYLE": "cinematic",
     "SFX": True,
     "AMBIENT_SOUND": True,
     "TRANSITIONS": "cinematic",
+
     "WATERMARK": False,
     "LOGO": False,
     "RESUME_ENABLED": True,
@@ -150,6 +162,9 @@ INT_KEYS = {
 
 _TRUE_VALUES = {"true", "yes", "on", "1", "enabled"}
 _FALSE_VALUES = {"false", "no", "off", "0", "disabled"}
+
+_PARTS_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+_PARTS_SINGLE_RE = re.compile(r"^\s*(\d+)\s*$")
 
 
 def parse_bool(value: Any, key: str = "value") -> bool:
@@ -216,7 +231,8 @@ def _parse_scalar(key: str, raw_value: str) -> Any:
     if key in BOOL_KEYS:
         return parse_bool(value, key)
 
-    if key in INT_KEYS:
+    # PARTS is parsed separately because it may contain a range such as 8-11.
+    if key in INT_KEYS and key != "PARTS":
         try:
             return int(value)
         except (TypeError, ValueError) as exc:
@@ -332,6 +348,7 @@ def load_input_config(
 
     return config
 
+
 def normalize_format(config: dict[str, Any]) -> str:
     value = str(config.get("FORMAT", "")).strip().lower()
 
@@ -367,8 +384,118 @@ def _positive_int(
     return value
 
 
+def parse_parts_range(value: Any) -> tuple[int, int]:
+    """Parse a fixed PARTS count or an inclusive range such as '8-11'."""
+    if isinstance(value, bool):
+        raise ValueError("PARTS must be a positive integer or range.")
+
+    if isinstance(value, int):
+        minimum = maximum = value
+    else:
+        raw = str(value).strip()
+        single = _PARTS_SINGLE_RE.fullmatch(raw)
+        ranged = _PARTS_RANGE_RE.fullmatch(raw)
+
+        if single:
+            minimum = maximum = int(single.group(1))
+        elif ranged:
+            minimum = int(ranged.group(1))
+            maximum = int(ranged.group(2))
+        else:
+            raise ValueError(
+                "PARTS must be a single number (e.g. 4) "
+                "or an inclusive range (e.g. 8-11)."
+            )
+
+    if minimum < 1 or maximum < 1:
+        raise ValueError("PARTS values must be greater than zero.")
+
+    if minimum > maximum:
+        raise ValueError(
+            f"Invalid PARTS range {minimum}-{maximum}: "
+            "the first number cannot exceed the second."
+        )
+
+    if maximum > 100:
+        raise ValueError("PARTS cannot exceed 100.")
+
+    return minimum, maximum
+
+
+def get_parts_range(config: dict[str, Any]) -> tuple[int, int]:
+    """Return the allowed (minimum, maximum) number of story parts."""
+    if "PARTS_MIN" in config and "PARTS_MAX" in config:
+        try:
+            minimum = int(config["PARTS_MIN"])
+            maximum = int(config["PARTS_MAX"])
+        except (TypeError, ValueError):
+            minimum, maximum = parse_parts_range(config.get("PARTS", 1))
+    else:
+        minimum, maximum = parse_parts_range(config.get("PARTS", 1))
+
+    if minimum < 1 or maximum < minimum or maximum > 100:
+        raise ValueError(
+            f"Invalid PARTS limits: minimum={minimum}, maximum={maximum}."
+        )
+
+    return minimum, maximum
+
+
 def get_parts(config: dict[str, Any]) -> int:
-    return _positive_int(config, "PARTS", 1)
+    """
+    Return the currently selected part count.
+
+    For a range, legacy pipeline callers receive the lower bound until
+    story_length_policy selects and stores the final count.
+    """
+    minimum, maximum = get_parts_range(config)
+
+    raw_selected = config.get("PARTS_SELECTED")
+    if raw_selected not in (None, ""):
+        try:
+            selected = int(raw_selected)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("PARTS_SELECTED must be an integer.") from exc
+
+        if not minimum <= selected <= maximum:
+            raise ValueError(
+                f"PARTS_SELECTED={selected} is outside "
+                f"the configured PARTS range {minimum}-{maximum}."
+            )
+        return selected
+
+    try:
+        current = int(config.get("PARTS", minimum))
+    except (TypeError, ValueError):
+        current = minimum
+
+    if minimum <= current <= maximum:
+        return current
+
+    return minimum
+
+
+def set_selected_parts(
+    config: dict[str, Any],
+    count: int,
+) -> int:
+    """Store a final part count selected by story_length_policy."""
+    minimum, maximum = get_parts_range(config)
+
+    try:
+        selected = int(count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Selected part count must be an integer.") from exc
+
+    if not minimum <= selected <= maximum:
+        raise ValueError(
+            f"Selected part count {selected} is outside "
+            f"the allowed range {minimum}-{maximum}."
+        )
+
+    config["PARTS_SELECTED"] = selected
+    config["PARTS"] = selected
+    return selected
 
 
 def get_scenes(config: dict[str, Any]) -> int:
@@ -572,7 +699,6 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
 
     return result
 
-
 def get_image_provider_order(config: dict[str, Any]) -> list[str]:
     raw = config.get(
         "IMAGE_PROVIDER_ORDER",
@@ -600,6 +726,7 @@ def get_image_provider_order(config: dict[str, Any]) -> list[str]:
             result.append(provider)
 
     return result
+
 
 def fallback_enabled_value(config: dict[str, Any]) -> bool:
     return parse_bool(
@@ -898,13 +1025,38 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             key,
         )
 
-    config["PARTS"] = get_parts(config)
+    # Parse PARTS before converting it to an integer. This preserves
+    # both fixed-count input (PARTS=4) and range input (PARTS=8-11).
+    raw_parts = config.get("PARTS", 1)
+    minimum_parts, maximum_parts = parse_parts_range(raw_parts)
+
+    config["PARTS_MIN"] = minimum_parts
+    config["PARTS_MAX"] = maximum_parts
+
+    raw_selected = config.get("PARTS_SELECTED")
+    if raw_selected not in (None, ""):
+        try:
+            selected_parts = int(raw_selected)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "PARTS_SELECTED must be an integer."
+            ) from exc
+
+        if not minimum_parts <= selected_parts <= maximum_parts:
+            raise ValueError(
+                f"PARTS_SELECTED={selected_parts} is outside "
+                f"the configured range {minimum_parts}-{maximum_parts}."
+            )
+    else:
+        # Until story_length_policy selects a count, use the minimum.
+        selected_parts = minimum_parts
+
+    config["PARTS"] = selected_parts
+    config["PARTS_SELECTED"] = selected_parts
+
     config["SCENES"] = get_scenes(config)
     config["FPS"] = get_fps(config)
     config["MAX_RETRIES"] = get_max_retries(config)
-
-    if config["PARTS"] > 100:
-        raise ValueError("PARTS cannot exceed 100.")
 
     if config["SCENES"] > 500:
         raise ValueError("SCENES cannot exceed 500.")
@@ -925,6 +1077,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 
     return config
 
+
 def load_and_validate(
     path: str | Path = "Input/topic.txt",
 ) -> dict[str, Any]:
@@ -933,6 +1086,7 @@ def load_and_validate(
 
 def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
     image_settings = get_image_provider_settings(config)
+    minimum_parts, maximum_parts = get_parts_range(config)
 
     return {
         "FORMAT": get_format(config),
@@ -944,7 +1098,12 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
             "PRESERVE_STORY_TEXT",
         ),
         "TITLE_SOURCE_AVAILABLE": bool(get_title_source(config)),
+
         "PARTS": get_parts(config),
+        "PARTS_MIN": minimum_parts,
+        "PARTS_MAX": maximum_parts,
+        "PARTS_SELECTED": get_parts(config),
+
         "SCENES": get_scenes(config),
         "FPS": get_fps(config),
         "VOICE": str(config.get("VOICE", "")),
@@ -956,6 +1115,7 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "STORY_LENGTH": str(config.get("STORY_LENGTH", "")),
         "SCENE_DURATION": str(config.get("SCENE_DURATION", "")),
         "FAILURE_POLICY": str(config.get("FAILURE_POLICY", "")),
+
         "RESUME_ENABLED": parse_bool(
             config.get("RESUME_ENABLED", True),
             "RESUME_ENABLED",
@@ -968,6 +1128,7 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
             config.get("SKIP_COMPLETED_SCENES", True),
             "SKIP_COMPLETED_SCENES",
         ),
+
         "TTS_PROVIDER_ORDER": get_tts_provider_order(config),
         "TTS_ALLOW_PAID": parse_bool(
             config.get("TTS_ALLOW_PAID", True),
@@ -990,6 +1151,7 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
             config.get("TTS_CHUNK_CHECKPOINT", True),
             "TTS_CHUNK_CHECKPOINT",
         ),
+
         "IMAGE_PROVIDER_ORDER": image_settings["IMAGE_PROVIDER_ORDER"],
         "IMAGE_FALLBACK_ENABLED": image_settings[
             "IMAGE_FALLBACK_ENABLED"
