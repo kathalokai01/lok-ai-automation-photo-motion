@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Katha Lok AI — story-grounded planning with separate extra scenes."""
+"""Story-grounded scene planning with independent Hook, Suspense and Resolution."""
 
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v9-separate-hook-suspense-resolution"
-MAPPING_VERSION = 5
+VERSION = "story-plan-v10-role-safe-complete-story-mapping"
+MAPPING_VERSION = 6
 MAX_PARTS = 1000
 MAX_TOTAL_MAIN_SCENES = 1000
 
@@ -65,6 +65,7 @@ FULL_BEATS = (
 )
 
 SENTENCE_ENDINGS = re.compile(r"(?<=[।॥.!?！？…])\s+")
+CLAUSE_ENDINGS = re.compile(r"(?<=[,，;:])\s+")
 
 
 def log(*values: Any, file=None) -> None:
@@ -75,6 +76,14 @@ def clean_text(value: Any) -> str:
     if value is None:
         return ""
     return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def normalize_text(value: Any) -> str:
+    text = str(value or "").replace("\ufeff", "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def word_count(value: Any) -> int:
@@ -103,7 +112,6 @@ def read_json(path: Path):
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -115,64 +123,132 @@ def write_json(path: Path, data: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def as_bool(
-    config: dict,
-    key: str,
-    default: bool = True,
-) -> bool:
+def as_bool(config: dict, key: str, default: bool = True) -> bool:
     value = config.get(key, default)
-
     if isinstance(value, bool):
         return value
-
     if isinstance(value, int) and value in (0, 1):
         return bool(value)
-
     value = str(value).strip().lower()
-
     if value in {"true", "yes", "on", "1", "enabled"}:
         return True
-
     if value in {"false", "no", "off", "0", "disabled", ""}:
         return False
-
     return default
 
 
 def split_sentences(text: str) -> list[str]:
-    """Split at paragraph and sentence boundaries, retaining punctuation."""
-    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    """Split only at complete sentence or paragraph boundaries."""
+    text = normalize_text(text)
     result = []
-
     for block in re.split(r"\n+", text):
         block = block.strip()
         if not block:
             continue
-
-        pieces = SENTENCE_ENDINGS.split(block)
-
-        for sentence in pieces:
+        for sentence in SENTENCE_ENDINGS.split(block):
             sentence = clean_text(sentence)
             if sentence:
                 result.append(sentence)
-
     return result
 
 
-def _split_long_sentence(
-    sentence: str,
-    maximum: int = 180,
-) -> list[str]:
-    """Split exceptionally long units while retaining token order."""
-    tokens = sentence.split()
-
-    if len(tokens) <= maximum:
-        return [sentence]
-
-    return [
-        " ".join(tokens[index:index + maximum])
-        for index in range(0, len(tokens), maximum)
+def split_clauses(sentence: str) -> list[str]:
+    """Use punctuation-based clause boundaries only when necessary."""
+    sentence = clean_text(sentence)
+    if not sentence:
+        return []
+    pieces = [
+        clean_text(piece)
+        for piece in CLAUSE_ENDINGS.split(sentence)
+        if clean_text(piece)
     ]
+    return pieces or [sentence]
+
+
+def _split_story_units(text: str, required_units: int) -> list[str]:
+    """
+    Create enough natural units for the requested scene count.
+    Sentence boundaries are preferred; comma/semicolon/colon boundaries
+    are secondary. Never split by arbitrary word count.
+    """
+    sentences = split_sentences(text)
+    if not sentences:
+        raise RuntimeError("Story text has no usable sentences.")
+
+    units = list(sentences)
+    if len(units) < required_units:
+        expanded = []
+        for sentence in units:
+            expanded.extend(split_clauses(sentence))
+        units = expanded
+
+    if len(units) < required_units:
+        raise RuntimeError(
+            "The story does not contain enough natural sentence/clause "
+            f"boundaries for {required_units} main scenes. "
+            "The planner will not cut narration mid-sentence."
+        )
+
+    return units
+
+
+def _group_units(units: list[str], count: int) -> list[str]:
+    """Distribute natural units chronologically with balanced word counts."""
+    if count < 1 or len(units) < count:
+        raise RuntimeError("Insufficient natural story units for requested grouping.")
+
+    groups = []
+    cursor = 0
+    remaining_words = sum(word_count(unit) for unit in units)
+
+    for group_index in range(count):
+        remaining_groups = count - group_index
+        remaining_units = len(units) - cursor
+
+        if remaining_groups == 1:
+            groups.append(" ".join(units[cursor:]))
+            cursor = len(units)
+            break
+
+        target = remaining_words / remaining_groups
+        max_take = remaining_units - (remaining_groups - 1)
+        selected = []
+        selected_words = 0
+
+        while cursor < len(units) and len(selected) < max_take:
+            next_words = word_count(units[cursor])
+            if selected and abs(selected_words - target) <= abs(
+                selected_words + next_words - target
+            ):
+                break
+
+            selected.append(units[cursor])
+            selected_words += next_words
+            cursor += 1
+
+            if selected_words >= target:
+                break
+
+        if not selected:
+            selected.append(units[cursor])
+            selected_words = word_count(units[cursor])
+            cursor += 1
+
+        groups.append(" ".join(selected))
+        remaining_words -= selected_words
+
+    if cursor != len(units) or len(groups) != count:
+        raise RuntimeError("Natural story-unit grouping was incomplete.")
+
+    if any(not clean_text(group) for group in groups):
+        raise RuntimeError("Story mapping produced an empty main scene.")
+
+    original = clean_text(" ".join(units))
+    reconstructed = clean_text(" ".join(groups))
+    if original != reconstructed:
+        raise RuntimeError("Story mapping lost, duplicated or reordered text.")
+
+    return groups
 
 
 def story_anchors(
@@ -181,87 +257,33 @@ def story_anchors(
     total_scenes: int,
 ) -> list[str]:
     """
-    Distribute all story sentences over main scenes chronologically.
-    No source sentence is silently discarded or reordered.
+    Map the complete story to main scenes in original chronological order.
+    Every scene gets real story material; empty padded anchors are forbidden.
     """
     if total_scenes < 1:
         raise RuntimeError("Total main scene count must be positive.")
 
-    sentences = []
-
-    for sentence in split_sentences(story_text):
-        sentences.extend(_split_long_sentence(sentence))
-
-    if not sentences:
-        fallback = clean_text(topic)
-
-        if not fallback:
-            raise RuntimeError(
-                "Cannot create story anchors: story text and topic are empty."
-            )
-
-        return [fallback] * total_scenes
-
-    if len(sentences) <= total_scenes:
-        return sentences + [""] * (total_scenes - len(sentences))
-
-    weights = [
-        max(1, word_count(sentence))
-        for sentence in sentences
-    ]
-
-    remaining_words = sum(weights)
-    cursor = 0
-    anchors = []
-
-    for scene_index in range(total_scenes):
-        remaining_scenes = total_scenes - scene_index
-        remaining_units = len(sentences) - cursor
-
-        if remaining_scenes == 1:
-            anchors.append(" ".join(sentences[cursor:]))
-            cursor = len(sentences)
-            break
-
-        target = remaining_words / remaining_scenes
-        max_take = remaining_units - (remaining_scenes - 1)
-
-        selected = []
-        selected_words = 0
-
-        while cursor < len(sentences) and len(selected) < max_take:
-            next_weight = weights[cursor]
-
-            if selected and abs(selected_words - target) <= abs(
-                selected_words + next_weight - target
-            ):
-                break
-
-            selected.append(sentences[cursor])
-            selected_words += next_weight
-            cursor += 1
-
-            if selected_words >= target:
-                break
-
-        if not selected:
-            selected.append(sentences[cursor])
-            selected_words += weights[cursor]
-            cursor += 1
-
-        anchors.append(" ".join(selected))
-        remaining_words -= selected_words
-
-    if len(anchors) != total_scenes or cursor != len(sentences):
-        raise RuntimeError("Story anchor distribution is incomplete.")
-
-    original = clean_text(" ".join(sentences))
-    reconstructed = clean_text(" ".join(anchors))
-
-    if original != reconstructed:
+    text = normalize_text(story_text)
+    if not text:
+        if not clean_text(topic):
+            raise RuntimeError("Story text and topic are both empty.")
         raise RuntimeError(
-            "Story anchor integrity failed: text was lost, reordered or duplicated."
+            "A topic alone cannot produce story-grounded scene anchors. "
+            "Generate the complete story before planning scenes."
         )
+
+    units = _split_story_units(text, total_scenes)
+    anchors = _group_units(units, total_scenes)
+
+    if len(anchors) != total_scenes:
+        raise RuntimeError("Story anchor count does not match requested scenes.")
+
+    for index, anchor in enumerate(anchors, 1):
+        if not clean_text(anchor):
+            raise RuntimeError(f"Main scene {index} has an empty story anchor.")
+
+    if word_count(" ".join(anchors)) != word_count(text):
+        raise RuntimeError("Story anchor mapping changed the total word count.")
 
     return anchors
 
@@ -272,26 +294,11 @@ def select_beat(
     total: int,
 ) -> tuple[str, str]:
     beats = SHORT_BEATS if format_type == "short" else FULL_BEATS
-
     if total <= 1:
         return beats[0]
-
-    position = round(
-        index * (len(beats) - 1) / (total - 1)
-    )
+    position = round(index * (len(beats) - 1) / (total - 1))
     position = max(0, min(position, len(beats) - 1))
-
     return beats[position]
-
-
-def _part_anchor(
-    anchors: list[str],
-    start: int,
-    end: int,
-    topic: str,
-) -> str:
-    value = clean_text(" ".join(anchors[start:end]))
-    return value or clean_text(topic)
 
 
 def _make_main_scene(
@@ -301,46 +308,43 @@ def _make_main_scene(
     global_number: int,
     total_main_scenes: int,
     anchor: str,
-    topic: str,
 ) -> dict:
     beat, description = select_beat(
         format_type,
         global_number - 1,
         total_main_scenes,
     )
-
-    subject = clean_text(anchor) or clean_text(topic)
-
-    purpose = (
-        f"{description} Relevant chronological story material: "
-        f"{subject}. Preserve source chronology and causality."
-        if subject else description
-    )
+    anchor = clean_text(anchor)
+    if not anchor:
+        raise RuntimeError(
+            f"Cannot create main scene {global_number} without story text."
+        )
 
     return {
         "part": part_number,
         "scene": scene_number,
         "global_scene_number": global_number,
-        "scene_id": (
-            f"part_{part_number:02d}_scene_{scene_number:02d}"
-        ),
+        "scene_id": f"part_{part_number:02d}_scene_{scene_number:02d}",
         "role": "main",
         "beat": beat,
         "beat_description": description,
-        "purpose": purpose,
+        "purpose": (
+            f"{description} Story material: {anchor}. "
+            "Preserve chronology, causality and the source meaning."
+        ),
         "story_anchor": anchor,
         "continuity_rule": (
-            "Keep character identity, age, face, body, clothing, "
-            "location, objects, chronology and physical continuity "
-            "consistent with the source story and character bible."
+            "Keep character identity, age, face, body, clothing, location, "
+            "objects, chronology and physical continuity consistent with "
+            "the complete story and character bible."
         ),
         "invention_policy": (
-            "Do not invent unsupported characters, relationships, "
-            "motives, locations, objects, events, dialogue or twists."
+            "Do not invent unsupported characters, relationships, motives, "
+            "locations, objects, events, dialogue, clues or twists."
         ),
         "visual_policy": (
-            "Visuals must depict the exact narrated story moment. "
-            "Do not use unrelated stock scenes or generic imagery."
+            "Depict the exact narrated story moment. Do not use unrelated "
+            "stock scenes, generic imagery or events from another part."
         ),
     }
 
@@ -349,82 +353,82 @@ def _make_extra_scene(
     part_number: int,
     kind: str,
     anchor: str,
-    topic: str,
     format_type: str,
     final_part: bool,
 ) -> dict:
     """Create a separate Hook, Suspense or Resolution record."""
-    anchor = clean_text(anchor) or clean_text(topic)
-
-    if kind == "hook":
-        role = "hook"
-        scene_id = f"part_{part_number:02d}_hook"
-        title = f"भाग {part_number} — Hook"
-        purpose = (
-            "Create an immediate, story-specific opening that raises "
-            "curiosity, danger or an important question using only "
-            "events and facts established in the story."
-        )
-        instruction = (
-            "The hook is a separate opening scene. It must not replace, "
-            "renumber, or alter any main story scene. Do not invent an "
-            "event, character, clue or outcome."
-        )
-
-    elif kind == "suspense":
-        role = "suspense"
-        scene_id = f"part_{part_number:02d}_suspense"
-        title = f"भाग {part_number} — Suspense"
-        purpose = (
-            "Create a genuine unresolved story-related question or "
-            "consequence from the end of this part. The suspense must "
-            "lead naturally into the next part."
-        )
-        instruction = (
-            "This is a separate ending scene for a non-final part. "
-            "Do not resolve the central story prematurely. Do not "
-            "fabricate a cliffhanger or unsupported twist."
-        )
-
-    else:
-        role = "resolution"
-        scene_id = f"part_{part_number:02d}_resolution"
-        title = f"भाग {part_number} — Resolution"
-        purpose = (
-            "Deliver the actual resolution of the complete story, "
-            "showing the consequences of established events and "
-            "closing the central conflict."
-        )
-        instruction = (
-            "This is a separate final resolution scene. Use the actual "
-            "source ending. Do not create a new ending or leave an "
-            "artificial cliffhanger."
-        )
-
+    anchor = clean_text(anchor)
     if not anchor:
-        anchor = clean_text(topic)
+        raise RuntimeError(
+            f"Part {part_number} {kind} scene has no story anchor."
+        )
 
+    definitions = {
+        "hook": {
+            "title": f"भाग {part_number} — Hook",
+            "purpose": (
+                "Create an immediate story-specific opening that raises "
+                "curiosity, danger or an important question using established "
+                "story facts only."
+            ),
+            "instruction": (
+                "This is a separate opening scene. It must not replace, "
+                "renumber or alter any main story scene. Do not invent an "
+                "event, character, clue, twist or outcome."
+            ),
+        },
+        "suspense": {
+            "title": f"भाग {part_number} — Suspense",
+            "purpose": (
+                "Create a genuine unresolved question or consequence from "
+                "the end of this non-final part, leading naturally into "
+                "the next part."
+            ),
+            "instruction": (
+                "This is a separate ending scene for a non-final part. "
+                "Do not resolve the central story prematurely. Do not "
+                "fabricate a cliffhanger or unsupported twist."
+            ),
+        },
+        "resolution": {
+            "title": f"भाग {part_number} — Resolution",
+            "purpose": (
+                "Deliver the actual resolution of the complete story, "
+                "showing the consequences of established events and "
+                "closing the central conflict."
+            ),
+            "instruction": (
+                "This is the separate final resolution scene. Use the "
+                "actual source ending. Do not create a new ending or "
+                "leave an artificial cliffhanger."
+            ),
+        },
+    }
+
+    if kind not in definitions:
+        raise RuntimeError(f"Unsupported extra-scene kind: {kind}")
+
+    definition = definitions[kind]
     return {
         "part": part_number,
         "scene": None,
         "global_scene_number": None,
-        "scene_id": scene_id,
-        "role": role,
+        "scene_id": f"part_{part_number:02d}_{kind}",
+        "role": kind,
         "kind": kind,
-        "title": title,
-        "beat": role,
-        "beat_description": purpose,
-        "purpose": purpose,
+        "title": definition["title"],
+        "beat": kind,
+        "beat_description": definition["purpose"],
+        "purpose": definition["purpose"],
         "story_anchor": anchor,
         "source_format": format_type,
         "is_final_part": bool(final_part),
         "separate_from_main_scenes": True,
         "main_scene_numbering_affected": False,
-        "instruction": instruction,
+        "instruction": definition["instruction"],
         "continuity_rule": (
-            "Maintain the same character identities, appearance, "
-            "clothing, location, objects and chronology as the main "
-            "story scenes in this part."
+            "Maintain the same character identities, appearance, clothing, "
+            "locations, objects and chronology as the main story scenes."
         ),
         "invention_policy": (
             "Use only established story facts. Do not add unrelated "
@@ -432,7 +436,7 @@ def _make_extra_scene(
         ),
         "visual_policy": (
             "Depict the exact story-specific hook, suspense or resolution "
-            "moment. Use live-action photorealism and avoid generic imagery."
+            "moment. Use cinematic live-action realism and avoid generic imagery."
         ),
     }
 
@@ -447,15 +451,16 @@ def build_plan(
     dynamic_short: bool = False,
 ) -> dict:
     """
-    Build exact main-scene counts plus separately numbered extra scenes.
+    Build exact main-scene counts and independent extra-scene records.
 
-    The main scene numbering remains part_XX_scene_YY.
-    Hook/Suspense/Resolution records use separate IDs and never consume
-    the configured main scene count.
+    Every part gets a Hook.
+    Every non-final part gets Suspense.
+    The final part gets Resolution and no Suspense.
+    These records never consume main scene numbering.
     """
     format_type = clean_text(format_type).lower()
     topic = clean_text(topic)
-    story_text = clean_text(story_text)
+    story_text = normalize_text(story_text)
 
     if format_type not in {"short", "full"}:
         raise RuntimeError("FORMAT must be short or full.")
@@ -467,35 +472,21 @@ def build_plan(
         raise RuntimeError("PARTS and SCENES must be integers.")
 
     if not 1 <= parts_count <= MAX_PARTS:
-        raise RuntimeError(
-            f"PARTS must be between 1 and {MAX_PARTS}."
-        )
-
+        raise RuntimeError(f"PARTS must be between 1 and {MAX_PARTS}.")
     if scenes_per_part < 1:
         raise RuntimeError("SCENES must be a positive integer.")
 
     total_main_scenes = parts_count * scenes_per_part
-
     if total_main_scenes > MAX_TOTAL_MAIN_SCENES:
         raise RuntimeError(
             f"Requested plan exceeds {MAX_TOTAL_MAIN_SCENES} main scenes."
         )
-
-    if not topic and not story_text:
+    if not story_text:
         raise RuntimeError(
-            "A topic or complete story is required for planning."
+            "A complete story is required before story-grounded planning."
         )
 
-    anchors = story_anchors(
-        story_text,
-        topic,
-        total_main_scenes,
-    )
-
-    part_hook = as_bool(config, "PART_HOOK", True)
-    part_suspense = as_bool(config, "PART_SUSPENSE", True)
-    final_resolution = as_bool(config, "FINAL_RESOLUTION", True)
-
+    anchors = story_anchors(story_text, topic, total_main_scenes)
     parts = []
     global_number = 0
 
@@ -503,102 +494,63 @@ def build_plan(
         start = (part_number - 1) * scenes_per_part
         end = start + scenes_per_part
         part_anchors = anchors[start:end]
+        if len(part_anchors) != scenes_per_part:
+            raise RuntimeError(
+                f"Part {part_number} does not have the required scene anchors."
+            )
 
         scenes = []
-
         for scene_number, anchor in enumerate(part_anchors, 1):
             global_number += 1
-
             scenes.append(
                 _make_main_scene(
-                    format_type=format_type,
-                    part_number=part_number,
-                    scene_number=scene_number,
-                    global_number=global_number,
-                    total_main_scenes=total_main_scenes,
-                    anchor=anchor,
-                    topic=topic,
-                )
-            )
-
-        part_story_anchor = _part_anchor(
-            anchors,
-            start,
-            end,
-            topic,
-        )
-
-        first_anchor = clean_text(
-            part_anchors[0] if part_anchors else ""
-        ) or part_story_anchor
-
-        last_anchor = clean_text(
-            part_anchors[-1] if part_anchors else ""
-        ) or part_story_anchor
-
-        is_final_part = part_number == parts_count
-
-        hook_scene = (
-            _make_extra_scene(
-                part_number,
-                "hook",
-                first_anchor,
-                topic,
-                format_type,
-                is_final_part,
-            )
-            if part_hook
-            else None
-        )
-
-        suspense_scene = None
-        resolution_scene = None
-
-        if is_final_part:
-            if final_resolution:
-                resolution_scene = _make_extra_scene(
-                    part_number,
-                    "resolution",
-                    last_anchor,
-                    topic,
                     format_type,
-                    True,
+                    part_number,
+                    scene_number,
+                    global_number,
+                    total_main_scenes,
+                    anchor,
                 )
-        elif part_suspense:
-            suspense_scene = _make_extra_scene(
-                part_number,
-                "suspense",
-                last_anchor,
-                topic,
-                format_type,
-                False,
             )
+
+        part_anchor = clean_text(" ".join(part_anchors))
+        first_anchor = part_anchors[0]
+        last_anchor = part_anchors[-1]
+        is_final = part_number == parts_count
+
+        hook = _make_extra_scene(
+            part_number, "hook", first_anchor, format_type, is_final
+        )
+        suspense = (
+            None if is_final else
+            _make_extra_scene(
+                part_number, "suspense", last_anchor, format_type, False
+            )
+        )
+        resolution = (
+            _make_extra_scene(
+                part_number, "resolution", last_anchor, format_type, True
+            ) if is_final else None
+        )
+
+        extras = [
+            item for item in (hook, suspense, resolution)
+            if isinstance(item, dict)
+        ]
 
         parts.append({
             "part": part_number,
             "part_id": f"part_{part_number:02d}",
             "title": f"भाग {part_number}",
             "main_scene_count": scenes_per_part,
-            "hook_required": bool(part_hook),
-            "suspense_required": bool(
-                part_suspense and not is_final_part
-            ),
-            "final_resolution": bool(
-                final_resolution and is_final_part
-            ),
-            "story_anchor": part_story_anchor,
-            "hook_scene": hook_scene,
-            "suspense_scene": suspense_scene,
-            "resolution_scene": resolution_scene,
-            "extra_scenes": [
-                item
-                for item in (
-                    hook_scene,
-                    suspense_scene,
-                    resolution_scene,
-                )
-                if isinstance(item, dict)
-            ],
+            "hook_required": True,
+            "suspense_required": not is_final,
+            "final_resolution": is_final,
+            "story_anchor": part_anchor,
+            "hook_scene": hook,
+            "suspense_scene": suspense,
+            "resolution_scene": resolution,
+            "extra_scenes": extras,
             "scenes": scenes,
         })
 
@@ -612,7 +564,6 @@ def build_plan(
         "scenes_per_part": scenes_per_part,
         "total_main_scenes": total_main_scenes,
         "dynamic_short_parts": bool(dynamic_short),
-        "anchors": anchors,
         "parts": parts,
     }
 
@@ -624,25 +575,16 @@ def build_plan(
         "topic": topic,
         "title": topic or "",
         "title_source": (
-            "explicit_topic" if topic
-            else "deferred_to_full_story_generation"
+            "explicit_topic" if topic else "complete_story_generation"
         ),
         "parts_count": parts_count,
         "scenes_per_part": scenes_per_part,
         "total_scenes": total_main_scenes,
         "total_main_scenes": total_main_scenes,
-        "total_hook_scenes": sum(
-            1 for part in parts if part["hook_scene"]
-        ),
-        "total_suspense_scenes": sum(
-            1 for part in parts if part["suspense_scene"]
-        ),
-        "total_resolution_scenes": sum(
-            1 for part in parts if part["resolution_scene"]
-        ),
-        "total_extra_scenes": sum(
-            len(part["extra_scenes"]) for part in parts
-        ),
+        "total_hook_scenes": parts_count,
+        "total_suspense_scenes": max(0, parts_count - 1),
+        "total_resolution_scenes": 1,
+        "total_extra_scenes": parts_count + max(0, parts_count - 1) + 1,
         "scene_order": "hook_then_main_then_suspense_or_resolution",
         "main_scene_order": "part_then_scene",
         "mapping_version": MAPPING_VERSION,
@@ -650,7 +592,7 @@ def build_plan(
         "source_fingerprint": fingerprint(source_payload),
         "source": {
             "input_file": "Input/topic.txt",
-            "story_text_provided": bool(story_text),
+            "story_text_provided": True,
             "story_word_count": word_count(story_text),
             "planning_mode": "offline_story_grounded",
             "api_calls": 0,
@@ -678,68 +620,46 @@ def validate_extra_scene(
         )
 
     expected_id = f"part_{part_number:02d}_{kind}"
+    expected_fields = {
+        "scene_id": expected_id,
+        "role": kind,
+        "kind": kind,
+        "part": part_number,
+        "scene": None,
+        "global_scene_number": None,
+        "separate_from_main_scenes": True,
+        "main_scene_numbering_affected": False,
+    }
 
-    if clean_text(record.get("scene_id")) != expected_id:
-        raise RuntimeError(
-            f"Incorrect {kind} scene ID in part {part_number}."
-        )
-
-    if clean_text(record.get("role")) != kind:
-        raise RuntimeError(
-            f"Incorrect {kind} role in part {part_number}."
-        )
-
-    if record.get("part") != part_number:
-        raise RuntimeError(
-            f"Incorrect part mapping in {expected_id}."
-        )
-
-    if record.get("scene") is not None:
-        raise RuntimeError(
-            f"{expected_id} must not use a main scene number."
-        )
-
-    if record.get("global_scene_number") is not None:
-        raise RuntimeError(
-            f"{expected_id} must not consume a main global scene number."
-        )
-
-    if record.get("separate_from_main_scenes") is not True:
-        raise RuntimeError(
-            f"{expected_id} is not marked as a separate scene."
-        )
-
-    if record.get("main_scene_numbering_affected") is not False:
-        raise RuntimeError(
-            f"{expected_id} must not affect main scene numbering."
-        )
-
-    for field in (
-        "kind",
-        "title",
-        "beat",
-        "beat_description",
-        "purpose",
-        "story_anchor",
-        "instruction",
-        "continuity_rule",
-        "invention_policy",
-        "visual_policy",
-    ):
-        if not clean_text(record.get(field)):
+    for field, expected in expected_fields.items():
+        if record.get(field) != expected:
             raise RuntimeError(
-                f"Missing {field} in {expected_id}."
+                f"Incorrect {field} in {expected_id}: "
+                f"expected {expected!r}, got {record.get(field)!r}."
             )
-
-    if clean_text(record.get("kind")) != kind:
-        raise RuntimeError(
-            f"Incorrect extra-scene kind in {expected_id}."
-        )
 
     if bool(record.get("is_final_part")) != bool(final_part):
         raise RuntimeError(
             f"Incorrect final-part flag in {expected_id}."
         )
+
+    required_text = (
+        "title",
+        "beat",
+        "beat_description",
+        "purpose",
+        "story_anchor",
+        "source_format",
+        "instruction",
+        "continuity_rule",
+        "invention_policy",
+        "visual_policy",
+    )
+    for field in required_text:
+        if not clean_text(record.get(field)):
+            raise RuntimeError(
+                f"Missing {field} in {expected_id}."
+            )
 
 
 def validate_plan(
@@ -749,7 +669,7 @@ def validate_plan(
     parts_count: int,
     scenes_per_part: int,
 ) -> None:
-    """Validate main scenes and separately planned extra scenes."""
+    """Validate main scenes, role separation, ordering and plan metadata."""
     if not isinstance(plan, dict):
         raise RuntimeError("Story plan must be a JSON object.")
 
@@ -766,21 +686,18 @@ def validate_plan(
 
     if format_type not in {"short", "full"}:
         raise RuntimeError("Invalid plan format.")
-
-    if parts_count < 1 or scenes_per_part < 1:
-        raise RuntimeError(
-            "Plan part and scene counts must be positive."
-        )
+    if not 1 <= parts_count <= MAX_PARTS:
+        raise RuntimeError("Invalid plan part count.")
+    if scenes_per_part < 1:
+        raise RuntimeError("Invalid scenes-per-part count.")
 
     expected_total = parts_count * scenes_per_part
-
     if expected_total > MAX_TOTAL_MAIN_SCENES:
-        raise RuntimeError(
-            "Plan exceeds the main-scene safety limit."
-        )
+        raise RuntimeError("Plan exceeds the main-scene safety limit.")
 
     expected_values = {
         "status": "planned",
+        "script_version": VERSION,
         "format": format_type,
         "topic": topic,
         "parts_count": parts_count,
@@ -792,45 +709,33 @@ def validate_plan(
         "mapping_version": MAPPING_VERSION,
     }
 
-    for key, expected in expected_values.items():
-        if plan.get(key) != expected:
+    for field, expected in expected_values.items():
+        if plan.get(field) != expected:
             raise RuntimeError(
-                f"Story plan mismatch for {key}: "
-                f"expected {expected!r}, got {plan.get(key)!r}."
+                f"Story plan mismatch for {field}: "
+                f"expected {expected!r}, got {plan.get(field)!r}."
             )
 
     if clean_text(plan.get("title")) != topic:
-        raise RuntimeError(
-            "Story plan title does not match the configured topic."
-        )
+        raise RuntimeError("Story plan title does not match configured topic.")
 
     if not re.fullmatch(
         r"[a-fA-F0-9]{64}",
         clean_text(plan.get("source_fingerprint")),
     ):
-        raise RuntimeError(
-            "Story plan source_fingerprint is invalid."
-        )
+        raise RuntimeError("Story plan source_fingerprint is invalid.")
 
     source = plan.get("source")
-
     if not isinstance(source, dict):
-        raise RuntimeError(
-            "Story plan source metadata is missing."
-        )
-
+        raise RuntimeError("Story plan source metadata is missing.")
     if source.get("api_calls") != 0:
-        raise RuntimeError(
-            "Story planning must not make external API calls."
-        )
-
+        raise RuntimeError("Story planning must not make external API calls.")
     if source.get("planning_mode") != "offline_story_grounded":
-        raise RuntimeError(
-            "Unexpected story planning mode."
-        )
+        raise RuntimeError("Unexpected story planning mode.")
+    if source.get("story_text_provided") is not True:
+        raise RuntimeError("Story plan was not built from complete story text.")
 
     parts = plan.get("parts")
-
     if not isinstance(parts, list) or len(parts) != parts_count:
         raise RuntimeError(
             f"Story plan must contain exactly {parts_count} parts."
@@ -840,78 +745,62 @@ def validate_plan(
     total_suspense = 0
     total_resolutions = 0
     global_number = 0
+    all_main_anchors = []
 
     for part_number, part in enumerate(parts, 1):
         if not isinstance(part, dict):
-            raise RuntimeError(
-                f"Invalid plan part {part_number}."
-            )
+            raise RuntimeError(f"Invalid plan part {part_number}.")
 
-        if part.get("part") != part_number:
-            raise RuntimeError(
-                f"Incorrect part numbering at part {part_number}."
-            )
-
-        expected_part_id = f"part_{part_number:02d}"
-
-        if clean_text(part.get("part_id")) != expected_part_id:
-            raise RuntimeError(
-                f"Incorrect part ID: {expected_part_id}."
-            )
-
-        if part.get("main_scene_count") != scenes_per_part:
-            raise RuntimeError(
-                f"Main scene count metadata mismatch in part {part_number}."
-            )
+        expected_part_values = {
+            "part": part_number,
+            "part_id": f"part_{part_number:02d}",
+            "main_scene_count": scenes_per_part,
+        }
+        for field, expected in expected_part_values.items():
+            if part.get(field) != expected:
+                raise RuntimeError(
+                    f"Part {part_number} has invalid {field}."
+                )
 
         scenes = part.get("scenes")
-
-        if (
-            not isinstance(scenes, list)
-            or len(scenes) != scenes_per_part
-        ):
+        if not isinstance(scenes, list) or len(scenes) != scenes_per_part:
             raise RuntimeError(
                 f"Part {part_number} must contain exactly "
                 f"{scenes_per_part} main scenes."
             )
 
         if not clean_text(part.get("story_anchor")):
-            raise RuntimeError(
-                f"Part {part_number} has no story anchor."
-            )
+            raise RuntimeError(f"Part {part_number} has no story anchor.")
 
+        part_anchors = []
         for scene_number, scene in enumerate(scenes, 1):
             global_number += 1
-
             expected_id = (
                 f"part_{part_number:02d}_scene_{scene_number:02d}"
             )
 
             if not isinstance(scene, dict):
-                raise RuntimeError(
-                    f"Invalid main scene: {expected_id}."
-                )
+                raise RuntimeError(f"Invalid main scene: {expected_id}.")
 
-            required_values = {
+            expected_scene_values = {
                 "part": part_number,
                 "scene": scene_number,
                 "global_scene_number": global_number,
                 "scene_id": expected_id,
                 "role": "main",
             }
-
-            for field, expected in required_values.items():
+            for field, expected in expected_scene_values.items():
                 if scene.get(field) != expected:
                     raise RuntimeError(
                         f"Incorrect {field} in {expected_id}: "
-                        f"expected {expected!r}, "
-                        f"got {scene.get(field)!r}."
+                        f"expected {expected!r}, got {scene.get(field)!r}."
                     )
 
             for field in (
                 "beat",
                 "beat_description",
                 "purpose",
+                "story_anchor",
                 "continuity_rule",
                 "invention_policy",
                 "visual_policy",
@@ -921,43 +810,31 @@ def validate_plan(
                         f"Missing required {field} in {expected_id}."
                     )
 
-            anchor = scene.get("story_anchor", "")
+            anchor = clean_text(scene.get("story_anchor"))
+            part_anchors.append(anchor)
+            all_main_anchors.append(anchor)
 
-            if not isinstance(anchor, str):
-                raise RuntimeError(
-                    f"Invalid story_anchor in {expected_id}."
-                )
-
-        is_final_part = part_number == parts_count
-
-        hook_required = bool(part.get("hook_required"))
-        suspense_required = bool(part.get("suspense_required"))
-        resolution_required = bool(part.get("final_resolution"))
-
-        if not hook_required:
+        if clean_text(" ".join(part_anchors)) != clean_text(
+            part.get("story_anchor")
+        ):
             raise RuntimeError(
-                f"Part {part_number} must have a separate hook scene."
+                f"Part {part_number} story_anchor does not match its main scenes."
             )
 
-        if is_final_part:
-            if suspense_required:
-                raise RuntimeError(
-                    "The final part cannot require a suspense cliffhanger."
-                )
+        is_final = part_number == parts_count
+        expected_hook = True
+        expected_suspense = not is_final
+        expected_resolution = is_final
 
-            if not resolution_required:
+        expected_flags = {
+            "hook_required": expected_hook,
+            "suspense_required": expected_suspense,
+            "final_resolution": expected_resolution,
+        }
+        for field, expected in expected_flags.items():
+            if part.get(field) is not expected:
                 raise RuntimeError(
-                    "The final part must have a resolution scene."
-                )
-        else:
-            if resolution_required:
-                raise RuntimeError(
-                    f"Non-final part {part_number} cannot contain final resolution."
-                )
-
-            if not suspense_required:
-                raise RuntimeError(
-                    f"Non-final part {part_number} must have suspense."
+                    f"Part {part_number} has incorrect {field} flag."
                 )
 
         hook = part.get("hook_scene")
@@ -965,46 +842,44 @@ def validate_plan(
         resolution = part.get("resolution_scene")
 
         validate_extra_scene(
-            hook,
-            part_number,
-            "hook",
-            hook_required,
-            is_final_part,
+            hook, part_number, "hook", True, is_final
         )
-
         validate_extra_scene(
-            suspense,
-            part_number,
-            "suspense",
-            suspense_required,
-            False,
+            suspense, part_number, "suspense", expected_suspense, False
         )
-
         validate_extra_scene(
-            resolution,
-            part_number,
-            "resolution",
-            resolution_required,
-            True,
+            resolution, part_number, "resolution", expected_resolution, True
         )
 
-        expected_extra_scenes = [
-            item
-            for item in (hook, suspense, resolution)
+        expected_extras = [
+            item for item in (hook, suspense, resolution)
             if isinstance(item, dict)
         ]
+        extras = part.get("extra_scenes")
 
-        extra_scenes = part.get("extra_scenes")
-
-        if not isinstance(extra_scenes, list):
+        if not isinstance(extras, list) or extras != expected_extras:
             raise RuntimeError(
-                f"Part {part_number} extra_scenes must be a list."
+                f"Part {part_number} extra_scenes does not match its "
+                "separate Hook/Suspense/Resolution records."
             )
 
-        if extra_scenes != expected_extra_scenes:
+        if clean_text(hook.get("story_anchor")) != clean_text(part_anchors[0]):
             raise RuntimeError(
-                f"Part {part_number} extra_scenes list does not match "
-                "its separate Hook/Suspense/Resolution records."
+                f"Part {part_number} Hook is not anchored to its opening scene."
+            )
+
+        if suspense is not None and clean_text(
+            suspense.get("story_anchor")
+        ) != clean_text(part_anchors[-1]):
+            raise RuntimeError(
+                f"Part {part_number} Suspense is not anchored to its ending scene."
+            )
+
+        if resolution is not None and clean_text(
+            resolution.get("story_anchor")
+        ) != clean_text(part_anchors[-1]):
+            raise RuntimeError(
+                "Final Resolution is not anchored to the final main scene."
             )
 
         total_hooks += int(hook is not None)
@@ -1012,121 +887,97 @@ def validate_plan(
         total_resolutions += int(resolution is not None)
 
     if global_number != expected_total:
-        raise RuntimeError(
-            "Main scene global numbering is incorrect."
-        )
+        raise RuntimeError("Main scene global numbering is incorrect.")
 
     expected_hooks = parts_count
     expected_suspense = max(0, parts_count - 1)
     expected_resolutions = 1
+    expected_extras = expected_hooks + expected_suspense + expected_resolutions
 
-    expected_totals = {
+    metadata = {
         "total_scenes": expected_total,
         "total_main_scenes": expected_total,
         "total_hook_scenes": expected_hooks,
         "total_suspense_scenes": expected_suspense,
         "total_resolution_scenes": expected_resolutions,
-        "total_extra_scenes": (
-            expected_hooks
-            + expected_suspense
-            + expected_resolutions
-        ),
+        "total_extra_scenes": expected_extras,
     }
 
-    for field, expected in expected_totals.items():
+    for field, expected in metadata.items():
         try:
             actual = int(plan.get(field, -1))
         except (TypeError, ValueError):
             actual = -1
-
         if actual != expected:
             raise RuntimeError(
                 f"Plan metadata mismatch for {field}: "
                 f"expected {expected}, got {actual}."
             )
 
-    if total_hooks != expected_hooks:
-        raise RuntimeError(
-            "Separate Hook scene count does not match part count."
-        )
+    if (total_hooks, total_suspense, total_resolutions) != (
+        expected_hooks,
+        expected_suspense,
+        expected_resolutions,
+    ):
+        raise RuntimeError("Separate Hook/Suspense/Resolution counts are invalid.")
 
-    if total_suspense != expected_suspense:
-        raise RuntimeError(
-            "Separate Suspense scene count does not match non-final parts."
-        )
+    if len(all_main_anchors) != expected_total:
+        raise RuntimeError("Main scene anchor count is invalid.")
 
-    if total_resolutions != expected_resolutions:
+    if any(not anchor for anchor in all_main_anchors):
+        raise RuntimeError("One or more main scenes have empty story anchors.")
+
+    if word_count(" ".join(all_main_anchors)) != int(
+        source.get("story_word_count", -1)
+    ):
         raise RuntimeError(
-            "The plan must contain exactly one final Resolution scene."
+            "Main scene anchors do not preserve the complete source story word count."
         )
 
 
 def read_story_text_direct(path: Path) -> str:
-    """
-    Read the complete multiline STORY_TEXT block independently of the
-    configuration parser.
-    """
+    """Read the complete multiline STORY_TEXT assignment."""
     if not path.is_file():
         return ""
 
-    lines = path.read_text(
-        encoding="utf-8-sig"
-    ).splitlines()
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
 
     for index, line in enumerate(lines):
-        match = re.match(
-            r"^\s*STORY_TEXT\s*=\s*(.*?)\s*$",
-            line,
-        )
-
+        match = re.match(r"^\s*STORY_TEXT\s*=\s*(.*?)\s*$", line)
         if not match:
             continue
 
         value = match.group(1).strip()
-        delimiter = None
-
-        if value.startswith('"""'):
-            delimiter = '"""'
-        elif value.startswith("'''"):
-            delimiter = "'''"
+        delimiter = (
+            '"""' if value.startswith('"""')
+            else "'''" if value.startswith("'''")
+            else None
+        )
 
         if delimiter:
             remainder = value[len(delimiter):]
             closing = remainder.find(delimiter)
 
             if closing >= 0:
-                trailing = remainder[
-                    closing + len(delimiter):
-                ].strip()
-
+                trailing = remainder[closing + len(delimiter):].strip()
                 if trailing and not trailing.startswith("#"):
                     raise RuntimeError(
                         "Unexpected content after STORY_TEXT closing delimiter."
                     )
-
                 return remainder[:closing].strip()
 
             collected = [remainder] if remainder else []
-
-            for next_index in range(index + 1, len(lines)):
-                current = lines[next_index]
+            for current in lines[index + 1:]:
                 closing = current.find(delimiter)
-
                 if closing >= 0:
                     if current[:closing]:
                         collected.append(current[:closing])
-
-                    trailing = current[
-                        closing + len(delimiter):
-                    ].strip()
-
+                    trailing = current[closing + len(delimiter):].strip()
                     if trailing and not trailing.startswith("#"):
                         raise RuntimeError(
                             "Unexpected content after STORY_TEXT closing delimiter."
                         )
-
                     return "\n".join(collected).strip()
-
                 collected.append(current)
 
             raise RuntimeError(
@@ -1136,37 +987,30 @@ def read_story_text_direct(path: Path) -> str:
         if len(value) >= 2 and value[0] == value[-1]:
             if value[0] in {"'", '"'}:
                 return value[1:-1].strip()
-
         return value
 
     return ""
 
 
-def get_complete_input_story(
-    config: dict,
-    path: Path,
-) -> str:
-    """Use the complete direct input if the config parser truncated it."""
-    parsed = clean_text(get_story_text(config))
-    direct = clean_text(read_story_text_direct(path))
+def get_complete_input_story(config: dict, path: Path) -> str:
+    """Prefer the complete direct multiline input if parsing truncated it."""
+    parsed = normalize_text(get_story_text(config))
+    direct = normalize_text(read_story_text_direct(path))
 
-    parsed_words = word_count(parsed)
-    direct_words = word_count(direct)
-
-    if direct_words > parsed_words:
+    if word_count(direct) > word_count(parsed):
         log(
             "STORY_TEXT parser mismatch:",
-            f"parsed={parsed_words}",
-            f"direct={direct_words}",
+            f"parsed={word_count(parsed)}",
+            f"direct={word_count(direct)}",
         )
         log("Using complete direct STORY_TEXT input.")
         return direct
 
-    if parsed and direct and parsed_words != direct_words:
+    if parsed and direct and word_count(parsed) != word_count(direct):
         log(
             "STORY_TEXT word-count difference:",
-            f"parsed={parsed_words}",
-            f"direct={direct_words}",
+            f"parsed={word_count(parsed)}",
+            f"direct={word_count(direct)}",
         )
 
     return parsed or direct
@@ -1174,59 +1018,39 @@ def get_complete_input_story(
 
 def main() -> None:
     if not INPUT_FILE.is_file():
-        raise RuntimeError(
-            f"Input file is missing: {INPUT_FILE}"
-        )
+        raise RuntimeError(f"Input file is missing: {INPUT_FILE}")
 
     config = load_and_validate(str(INPUT_FILE))
-
     format_type = clean_text(get_format(config)).lower()
     topic = clean_text(get_topic(config))
-    story_text = get_complete_input_story(
-        config,
-        INPUT_FILE,
-    )
+    story_text = get_complete_input_story(config, INPUT_FILE)
 
     try:
-        configured_parts = int(get_parts(config))
+        parts_count = int(get_parts(config))
         scenes_per_part = int(get_scenes(config))
     except (TypeError, ValueError):
-        raise RuntimeError(
-            "PARTS and SCENES must be valid integers."
-        )
+        raise RuntimeError("PARTS and SCENES must be valid integers.")
 
     if format_type not in {"short", "full"}:
-        raise RuntimeError(
-            f"Unsupported FORMAT: {format_type!r}."
-        )
-
-    if configured_parts < 1 or scenes_per_part < 1:
-        raise RuntimeError(
-            "PARTS and SCENES must be positive integers."
-        )
-
-    if configured_parts > MAX_PARTS:
-        raise RuntimeError(
-            f"PARTS cannot exceed {MAX_PARTS}."
-        )
-
-    if configured_parts * scenes_per_part > MAX_TOTAL_MAIN_SCENES:
+        raise RuntimeError(f"Unsupported FORMAT: {format_type!r}.")
+    if parts_count < 1 or scenes_per_part < 1:
+        raise RuntimeError("PARTS and SCENES must be positive integers.")
+    if parts_count > MAX_PARTS:
+        raise RuntimeError(f"PARTS cannot exceed {MAX_PARTS}.")
+    if parts_count * scenes_per_part > MAX_TOTAL_MAIN_SCENES:
         raise RuntimeError(
             f"Requested plan exceeds {MAX_TOTAL_MAIN_SCENES} main scenes."
         )
-
-    if not topic and not story_text:
+    if not story_text:
         raise RuntimeError(
-            "Input/topic.txt must contain TOPIC or STORY_TEXT."
+            "A complete story is required before planning. "
+            "A topic alone is not sufficient for story-grounded scenes."
         )
-
-    if story_text and word_count(story_text) < 20:
+    if word_count(story_text) < 20:
         raise RuntimeError(
             "STORY_TEXT contains fewer than 20 words. "
             "Check the complete multiline input."
         )
-
-    parts_count = configured_parts
 
     plan = build_plan(
         config=config,
@@ -1247,11 +1071,9 @@ def main() -> None:
     )
 
     old_plan = read_json(OUTPUT_FILE)
-
     if (
         isinstance(old_plan, dict)
-        and old_plan.get("source_fingerprint")
-        == plan.get("source_fingerprint")
+        and old_plan.get("source_fingerprint") == plan.get("source_fingerprint")
         and old_plan.get("script_version") == VERSION
     ):
         try:
@@ -1265,20 +1087,10 @@ def main() -> None:
             log("Matching valid story-plan checkpoint preserved.")
             log("External API calls: 0")
             return
-
         except (RuntimeError, TypeError, ValueError, KeyError) as exc:
-            log(
-                "Existing plan is invalid; rebuilding:",
-                exc,
-            )
+            log("Existing plan is invalid; rebuilding:", exc)
 
     write_json(OUTPUT_FILE, plan)
-
-    main_anchor_count = sum(
-        bool(clean_text(scene.get("story_anchor")))
-        for part in plan["parts"]
-        for scene in part["scenes"]
-    )
 
     log("STORY PLAN: SUCCESS")
     log("Version:", VERSION)
@@ -1291,7 +1103,7 @@ def main() -> None:
     log("Separate Hook scenes:", plan["total_hook_scenes"])
     log("Separate Suspense scenes:", plan["total_suspense_scenes"])
     log("Separate Resolution scenes:", plan["total_resolution_scenes"])
-    log("Story-grounded main scenes:", main_anchor_count)
+    log("Total extra scenes:", plan["total_extra_scenes"])
     log("External API calls: 0")
     log("Output:", OUTPUT_FILE)
 
@@ -1299,16 +1111,10 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-
     except KeyboardInterrupt:
         log("Cancelled.")
         sys.exit(130)
-
     except Exception as exc:
         log("STORY PLAN: FAILED")
-        log(
-            type(exc).__name__ + ":",
-            str(exc),
-            file=sys.stderr,
-        )
+        log(type(exc).__name__ + ":", str(exc), file=sys.stderr)
         sys.exit(1)
