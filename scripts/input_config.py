@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validated configuration loader for the Photo Motion video pipeline."""
+"""Validated configuration loader for the Katha Lok AI video pipeline."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+
 
 ALL_TTS_PROVIDERS = (
     "fish_audio",
@@ -73,11 +74,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "STORY_TEXT": "",
     "PRESERVE_STORY_TEXT": True,
 
-    # PARTS accepts either a fixed count (e.g. 4) or a range (e.g. 8-11).
-    # PARTS stores the currently selected/initial count for legacy callers.
+    # PARTS_SPEC preserves the original fixed count or range.
+    # PARTS is the currently selected count used by legacy callers.
+    "PARTS_SPEC": "1",
     "PARTS": 1,
     "PARTS_MIN": 1,
     "PARTS_MAX": 1,
+    "PARTS_SELECTED": 1,
 
     "SCENES": 1,
     "STORY_LENGTH": "auto",
@@ -163,8 +166,8 @@ INT_KEYS = {
 _TRUE_VALUES = {"true", "yes", "on", "1", "enabled"}
 _FALSE_VALUES = {"false", "no", "off", "0", "disabled"}
 
-_PARTS_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
-_PARTS_SINGLE_RE = re.compile(r"^\s*(\d+)\s*$")
+_PARTS_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)$")
+_PARTS_SINGLE_RE = re.compile(r"^(\d+)$")
 
 
 def parse_bool(value: Any, key: str = "value") -> bool:
@@ -176,8 +179,10 @@ def parse_bool(value: Any, key: str = "value") -> bool:
 
     if isinstance(value, str):
         normalized = value.strip().lower()
+
         if normalized in _TRUE_VALUES:
             return True
+
         if normalized in _FALSE_VALUES:
             return False
 
@@ -217,8 +222,10 @@ def _unquote(value: str) -> str:
         if value[0] in ("'", '"'):
             try:
                 result = ast.literal_eval(value)
+
                 if isinstance(result, str):
                     return result
+
             except (ValueError, SyntaxError):
                 return value[1:-1]
 
@@ -231,8 +238,15 @@ def _parse_scalar(key: str, raw_value: str) -> Any:
     if key in BOOL_KEYS:
         return parse_bool(value, key)
 
-    # PARTS is parsed separately because it may contain a range such as 8-11.
-    if key in INT_KEYS and key != "PARTS":
+    # PARTS must remain text until parse_parts_range() handles it.
+    # This prevents values such as 7-11 from becoming a calculation.
+    if key == "PARTS":
+        return value
+
+    if key == "PARTS_SPEC":
+        return value
+
+    if key in INT_KEYS:
         try:
             return int(value)
         except (TypeError, ValueError) as exc:
@@ -281,6 +295,7 @@ def _read_multiline(
 
         if position >= 0:
             before = current[:position]
+
             if before:
                 collected.append(before)
 
@@ -309,7 +324,10 @@ def load_input_config(
     if not file_path.is_file():
         raise FileNotFoundError(f"Input config not found: {file_path}")
 
-    lines = file_path.read_text(encoding="utf-8-sig").splitlines()
+    lines = file_path.read_text(
+        encoding="utf-8-sig"
+    ).splitlines()
+
     index = 0
 
     while index < len(lines):
@@ -346,6 +364,11 @@ def load_input_config(
         config[key] = _parse_scalar(key, raw_value)
         index += 1
 
+    # Keep the exact original PARTS setting before validation changes
+    # PARTS into the currently selected integer.
+    if "PARTS" in config and config.get("PARTS") not in (None, ""):
+        config["PARTS_SPEC"] = str(config["PARTS"]).strip()
+
     return config
 
 
@@ -355,7 +378,7 @@ def normalize_format(config: dict[str, Any]) -> str:
     if value not in {"short", "full"}:
         raise ValueError(
             "FORMAT must be exactly 'short' or 'full'. "
-            "Aliases such as shorts, reels, long or landscape are not accepted."
+            "Use 'short' for vertical Shorts or 'full' for full-length video."
         )
 
     config["FORMAT"] = value
@@ -385,58 +408,98 @@ def _positive_int(
 
 
 def parse_parts_range(value: Any) -> tuple[int, int]:
-    """Parse a fixed PARTS count or an inclusive range such as '8-11'."""
+    """
+    Parse a fixed PARTS count or an inclusive range.
+
+    Examples:
+        4       -> (4, 4)
+        2-8     -> (2, 8)
+        4-6     -> (4, 6)
+        8-11    -> (8, 11)
+        12-18   -> (12, 18)
+
+    There is no hard-coded 8-11 restriction.
+    """
+
     if isinstance(value, bool):
-        raise ValueError("PARTS must be a positive integer or range.")
+        raise ValueError(
+            "PARTS must be a positive integer or an inclusive range."
+        )
 
     if isinstance(value, int):
         minimum = maximum = value
+
     else:
         raw = str(value).strip()
+
         single = _PARTS_SINGLE_RE.fullmatch(raw)
         ranged = _PARTS_RANGE_RE.fullmatch(raw)
 
         if single:
             minimum = maximum = int(single.group(1))
+
         elif ranged:
             minimum = int(ranged.group(1))
             maximum = int(ranged.group(2))
+
         else:
             raise ValueError(
-                "PARTS must be a single number (e.g. 4) "
-                "or an inclusive range (e.g. 8-11)."
+                "Invalid PARTS value. Use a fixed number such as PARTS=4 "
+                "or a range such as PARTS=2-8. "
+                "Do not use reversed ranges such as PARTS=11-8."
             )
 
     if minimum < 1 or maximum < 1:
-        raise ValueError("PARTS values must be greater than zero.")
+        raise ValueError(
+            "PARTS values must be positive integers greater than zero."
+        )
 
     if minimum > maximum:
         raise ValueError(
             f"Invalid PARTS range {minimum}-{maximum}: "
-            "the first number cannot exceed the second."
+            "the first number cannot be greater than the second."
         )
-
-    if maximum > 100:
-        raise ValueError("PARTS cannot exceed 100.")
 
     return minimum, maximum
 
 
 def get_parts_range(config: dict[str, Any]) -> tuple[int, int]:
-    """Return the allowed (minimum, maximum) number of story parts."""
-    if "PARTS_MIN" in config and "PARTS_MAX" in config:
-        try:
-            minimum = int(config["PARTS_MIN"])
-            maximum = int(config["PARTS_MAX"])
-        except (TypeError, ValueError):
-            minimum, maximum = parse_parts_range(config.get("PARTS", 1))
-    else:
-        minimum, maximum = parse_parts_range(config.get("PARTS", 1))
+    """
+    Return the original allowed (minimum, maximum) part count.
 
-    if minimum < 1 or maximum < minimum or maximum > 100:
-        raise ValueError(
-            f"Invalid PARTS limits: minimum={minimum}, maximum={maximum}."
-        )
+    PARTS_SPEC is preserved when PARTS is later changed to the selected
+    integer. This prevents the original range from being lost.
+    """
+
+    specification = config.get("PARTS_SPEC")
+
+    if specification in (None, ""):
+        specification = config.get("PARTS", 1)
+
+    minimum, maximum = parse_parts_range(specification)
+
+    # If explicit bounds are supplied by a compatible upstream caller,
+    # verify that they agree with the original PARTS specification.
+    explicit_min = config.get("PARTS_MIN")
+    explicit_max = config.get("PARTS_MAX")
+
+    if explicit_min not in (None, "") and explicit_max not in (None, ""):
+        try:
+            supplied_min = int(explicit_min)
+            supplied_max = int(explicit_max)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "PARTS_MIN and PARTS_MAX must be integers."
+            ) from exc
+
+        if (supplied_min, supplied_max) != (minimum, maximum):
+            # PARTS_SPEC is authoritative because it is the user's
+            # original Input value and must not be silently overwritten.
+            raise ValueError(
+                "PARTS configuration mismatch: "
+                f"PARTS_SPEC={minimum}-{maximum}, "
+                f"PARTS_MIN={supplied_min}, PARTS_MAX={supplied_max}."
+            )
 
     return minimum, maximum
 
@@ -445,27 +508,34 @@ def get_parts(config: dict[str, Any]) -> int:
     """
     Return the currently selected part count.
 
-    For a range, legacy pipeline callers receive the lower bound until
-    story_length_policy selects and stores the final count.
+    Before story_length_policy selects a count, the lower bound is used.
+    For a fixed count, the lower and upper bounds are identical.
     """
+
     minimum, maximum = get_parts_range(config)
 
     raw_selected = config.get("PARTS_SELECTED")
+
     if raw_selected not in (None, ""):
         try:
             selected = int(raw_selected)
         except (TypeError, ValueError) as exc:
-            raise ValueError("PARTS_SELECTED must be an integer.") from exc
+            raise ValueError(
+                "PARTS_SELECTED must be a positive integer."
+            ) from exc
 
         if not minimum <= selected <= maximum:
             raise ValueError(
                 f"PARTS_SELECTED={selected} is outside "
                 f"the configured PARTS range {minimum}-{maximum}."
             )
+
         return selected
 
+    raw_current = config.get("PARTS", minimum)
+
     try:
-        current = int(config.get("PARTS", minimum))
+        current = int(raw_current)
     except (TypeError, ValueError):
         current = minimum
 
@@ -479,13 +549,30 @@ def set_selected_parts(
     config: dict[str, Any],
     count: int,
 ) -> int:
-    """Store a final part count selected by story_length_policy."""
+    """
+    Store the final part count selected by story_length_policy.
+
+    The original PARTS_SPEC and PARTS_MIN/PARTS_MAX are preserved.
+    """
+
     minimum, maximum = get_parts_range(config)
+
+    if isinstance(count, bool):
+        raise ValueError(
+            "Selected part count must be a positive integer."
+        )
 
     try:
         selected = int(count)
     except (TypeError, ValueError) as exc:
-        raise ValueError("Selected part count must be an integer.") from exc
+        raise ValueError(
+            "Selected part count must be a positive integer."
+        ) from exc
+
+    if selected < 1:
+        raise ValueError(
+            "Selected part count must be greater than zero."
+        )
 
     if not minimum <= selected <= maximum:
         raise ValueError(
@@ -493,8 +580,12 @@ def set_selected_parts(
             f"the allowed range {minimum}-{maximum}."
         )
 
+    config["PARTS_SPEC"] = f"{minimum}-{maximum}" if minimum != maximum else str(minimum)
+    config["PARTS_MIN"] = minimum
+    config["PARTS_MAX"] = maximum
     config["PARTS_SELECTED"] = selected
     config["PARTS"] = selected
+
     return selected
 
 
@@ -524,21 +615,29 @@ def get_max_retries(config: dict[str, Any]) -> int:
 
 
 def get_caption_font(config: dict[str, Any]) -> str:
-    raw = str(config.get("CAPTION_FONT", "Hind")).strip().lower()
+    raw = str(
+        config.get("CAPTION_FONT", "Hind")
+    ).strip().lower()
 
     if raw not in CAPTION_FONTS:
-        allowed = ", ".join(sorted(set(CAPTION_FONTS.values())))
+        allowed = ", ".join(
+            sorted(set(CAPTION_FONTS.values()))
+        )
         raise ValueError(
-            f"Unsupported CAPTION_FONT: {raw!r}. Allowed fonts: {allowed}"
+            f"Unsupported CAPTION_FONT: {raw!r}. "
+            f"Allowed fonts: {allowed}"
         )
 
     canonical = CAPTION_FONTS[raw]
     config["CAPTION_FONT"] = canonical
+
     return canonical
 
 
 def get_caption_font_size(config: dict[str, Any]) -> int | str:
-    raw = str(config.get("CAPTION_FONT_SIZE", 28)).strip().lower()
+    raw = str(
+        config.get("CAPTION_FONT_SIZE", 28)
+    ).strip().lower()
 
     if raw == "auto":
         config["CAPTION_FONT_SIZE"] = "auto"
@@ -548,7 +647,8 @@ def get_caption_font_size(config: dict[str, Any]) -> int | str:
         size = int(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            "CAPTION_FONT_SIZE must be 'auto' or an integer from 16 to 64."
+            "CAPTION_FONT_SIZE must be 'auto' "
+            "or an integer from 16 to 64."
         ) from exc
 
     if not 16 <= size <= 64:
@@ -557,6 +657,7 @@ def get_caption_font_size(config: dict[str, Any]) -> int | str:
         )
 
     config["CAPTION_FONT_SIZE"] = size
+
     return size
 
 
@@ -566,11 +667,13 @@ def get_topic(config: dict[str, Any]) -> str:
 
 def get_story_text(config: dict[str, Any]) -> str:
     value = config.get("STORY_TEXT", "")
+
     return value if isinstance(value, str) else str(value)
 
 
 def get_title_source(config: dict[str, Any]) -> str:
-    """Return an explicit topic/title only; never mistake story's first line for title."""
+    """Return explicit TITLE or TOPIC, never the first line of STORY_TEXT."""
+
     title = str(config.get("TITLE", "")).strip()
 
     if title:
@@ -580,11 +683,20 @@ def get_title_source(config: dict[str, Any]) -> str:
 
 
 def has_story_input(config: dict[str, Any]) -> bool:
-    return bool(get_topic(config) or get_story_text(config).strip())
+    return bool(
+        get_topic(config)
+        or get_story_text(config).strip()
+    )
 
 
 def normalize_provider(value: Any) -> str:
-    provider = str(value or "").strip().lower().replace("-", "_")
+    provider = (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+
     spaced = provider.replace("_", " ")
 
     return PROVIDER_ALIASES.get(
@@ -594,12 +706,19 @@ def normalize_provider(value: Any) -> str:
 
 
 def normalize_image_provider(value: Any) -> str:
-    provider = str(value or "").strip().lower().replace("-", "_")
+    provider = (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+
     return IMAGE_PROVIDER_ALIASES.get(provider, provider)
 
 
 def _split_provider_list(raw: Any) -> list[str]:
     """Parse comma/semicolon strings and serialized Python provider lists."""
+
     if raw is None:
         return []
 
@@ -622,6 +741,7 @@ def _split_provider_list(raw: Any) -> list[str]:
                 values = list(parsed)
             else:
                 values = re.split(r"[,;]", value)
+
         else:
             values = re.split(r"[,;]", value)
 
@@ -643,7 +763,8 @@ def _split_provider_list(raw: Any) -> list[str]:
 
 
 def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
-    """Keep the three explicitly selected providers first, then configured fallback."""
+    """Keep the three selected providers first, then configured fallback."""
+
     main = [
         normalize_provider(config.get("TTS_MAIN_1", "")),
         normalize_provider(config.get("TTS_MAIN_2", "")),
@@ -657,7 +778,9 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
         )
 
     if len(set(main)) != 3:
-        raise ValueError("The three main TTS providers must be different.")
+        raise ValueError(
+            "The three main TTS providers must be different."
+        )
 
     allowed = set(ALL_TTS_PROVIDERS)
 
@@ -699,6 +822,7 @@ def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
 
     return result
 
+
 def get_image_provider_order(config: dict[str, Any]) -> list[str]:
     raw = config.get(
         "IMAGE_PROVIDER_ORDER",
@@ -708,7 +832,9 @@ def get_image_provider_order(config: dict[str, Any]) -> list[str]:
     requested = _split_provider_list(raw)
 
     if not requested:
-        raise ValueError("IMAGE_PROVIDER_ORDER cannot be empty.")
+        raise ValueError(
+            "IMAGE_PROVIDER_ORDER cannot be empty."
+        )
 
     allowed = set(ALL_IMAGE_PROVIDERS)
     result: list[str] = []
@@ -738,13 +864,16 @@ def fallback_enabled_value(config: dict[str, Any]) -> bool:
 def get_global_billable_permission(
     config: dict[str, Any],
 ) -> bool:
-    """Workflow environment is the upper-level billable permission switch."""
+    """Combine Input permission with the workflow environment permission."""
+
     configured = parse_bool(
         config.get("ALLOW_BILLABLE_PROVIDERS", True),
         "ALLOW_BILLABLE_PROVIDERS",
     )
 
-    environment_value = os.environ.get("ALLOW_BILLABLE_PROVIDERS")
+    environment_value = os.environ.get(
+        "ALLOW_BILLABLE_PROVIDERS"
+    )
 
     if environment_value is None:
         return configured
@@ -761,7 +890,12 @@ def get_image_provider_settings(
     order = get_image_provider_order(config)
 
     raw_hf_spaces = (
-        str(config.get("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo"))
+        str(
+            config.get(
+                "HF_IMAGE_SPACE",
+                "mrfakename/Z-Image-Turbo",
+            )
+        )
         + ","
         + ",".join(
             _split_provider_list(
@@ -804,7 +938,9 @@ def get_image_provider_settings(
         )
 
     if not gemini_model:
-        raise ValueError("GEMINI_IMAGE_MODEL cannot be empty.")
+        raise ValueError(
+            "GEMINI_IMAGE_MODEL cannot be empty."
+        )
 
     if not re.fullmatch(
         r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
@@ -834,7 +970,6 @@ def get_image_provider_settings(
         "GEMINI_IMAGE_MODEL": gemini_model,
         "REPLICATE_IMAGE_MODEL": replicate_model,
     }
-
 
 def _validate_story_settings(config: dict[str, Any]) -> None:
     story_length = str(
@@ -869,15 +1004,21 @@ def _validate_story_settings(config: dict[str, Any]) -> None:
     if get_story_text(config).strip() and not preserve:
         raise ValueError(
             "STORY_TEXT is supplied but PRESERVE_STORY_TEXT is false. "
-            "Set it to true to protect the supplied story from rewriting."
+            "Set it to true to protect the supplied story."
         )
 
 
-def _validate_voice_and_audience(config: dict[str, Any]) -> None:
-    voice = str(config.get("VOICE", "male")).strip().lower()
+def _validate_voice_and_audience(
+    config: dict[str, Any],
+) -> None:
+    voice = str(
+        config.get("VOICE", "male")
+    ).strip().lower()
 
     if voice not in {"male", "female"}:
-        raise ValueError("VOICE must be 'male' or 'female'.")
+        raise ValueError(
+            "VOICE must be 'male' or 'female'."
+        )
 
     config["VOICE"] = voice
 
@@ -886,11 +1027,15 @@ def _validate_voice_and_audience(config: dict[str, Any]) -> None:
     ).strip().lower()
 
     if audience not in {"adult", "kids"}:
-        raise ValueError("AUDIENCE must be 'adult' or 'kids'.")
+        raise ValueError(
+            "AUDIENCE must be 'adult' or 'kids'."
+        )
 
     config["AUDIENCE"] = audience
 
-    speed = str(config.get("SPEED", "+0%")).strip()
+    speed = str(
+        config.get("SPEED", "+0%")
+    ).strip()
 
     if not re.fullmatch(r"[+-]?\d{1,2}%", speed):
         raise ValueError(
@@ -900,12 +1045,16 @@ def _validate_voice_and_audience(config: dict[str, Any]) -> None:
     speed_number = int(speed.replace("%", ""))
 
     if not -50 <= speed_number <= 50:
-        raise ValueError("SPEED must be between -50% and +50%.")
+        raise ValueError(
+            "SPEED must be between -50% and +50%."
+        )
 
     config["SPEED"] = speed
 
 
-def _validate_tts_settings(config: dict[str, Any]) -> None:
+def _validate_tts_settings(
+    config: dict[str, Any],
+) -> None:
     for key in (
         "TTS_CHUNK_MAX_CHARS",
         "TTS_CHUNK_MIN_CHARS",
@@ -917,7 +1066,10 @@ def _validate_tts_settings(config: dict[str, Any]) -> None:
             DEFAULT_CONFIG[key],
         )
 
-    if config["TTS_CHUNK_MIN_CHARS"] > config["TTS_CHUNK_MAX_CHARS"]:
+    if (
+        config["TTS_CHUNK_MIN_CHARS"]
+        > config["TTS_CHUNK_MAX_CHARS"]
+    ):
         raise ValueError(
             "TTS_CHUNK_MIN_CHARS cannot exceed TTS_CHUNK_MAX_CHARS."
         )
@@ -937,17 +1089,19 @@ def _validate_tts_settings(config: dict[str, Any]) -> None:
         "TTS_ALLOW_PAID",
     )
 
+    # Keep the three Input-selected providers first.
+    # Do not replace or reorder the user's configured providers.
     config["TTS_PROVIDER_ORDER"] = get_tts_provider_order(config)
 
-    # Global permission is retained separately. The TTS-specific switch
-    # can still disable paid TTS providers without changing provider order.
     config["TTS_BILLABLE_ALLOWED"] = (
         get_global_billable_permission(config)
         and config["TTS_ALLOW_PAID"]
     )
 
 
-def _validate_caption_settings(config: dict[str, Any]) -> None:
+def _validate_caption_settings(
+    config: dict[str, Any],
+) -> None:
     captions = str(
         config.get("CAPTIONS", "hindi")
     ).strip().lower()
@@ -963,7 +1117,9 @@ def _validate_caption_settings(config: dict[str, Any]) -> None:
     get_caption_font_size(config)
 
 
-def _validate_general_settings(config: dict[str, Any]) -> None:
+def _validate_general_settings(
+    config: dict[str, Any],
+) -> None:
     quality = str(
         config.get("QUALITY", "high")
     ).strip().lower()
@@ -976,7 +1132,10 @@ def _validate_general_settings(config: dict[str, Any]) -> None:
     config["QUALITY"] = quality
 
     failure_policy = str(
-        config.get("FAILURE_POLICY", "retry_then_checkpoint")
+        config.get(
+            "FAILURE_POLICY",
+            "retry_then_checkpoint",
+        )
     ).strip().lower()
 
     if failure_policy not in {
@@ -985,7 +1144,8 @@ def _validate_general_settings(config: dict[str, Any]) -> None:
         "stop",
     }:
         raise ValueError(
-            "FAILURE_POLICY must be retry_then_checkpoint, skip or stop."
+            "FAILURE_POLICY must be "
+            "retry_then_checkpoint, skip or stop."
         )
 
     config["FAILURE_POLICY"] = failure_policy
@@ -1000,11 +1160,16 @@ def _validate_general_settings(config: dict[str, Any]) -> None:
         "TRANSITIONS",
     ):
         value = str(
-            config.get(key, DEFAULT_CONFIG.get(key, ""))
+            config.get(
+                key,
+                DEFAULT_CONFIG.get(key, ""),
+            )
         ).strip()
 
         if not value:
-            raise ValueError(f"{key} cannot be empty.")
+            raise ValueError(
+                f"{key} cannot be empty."
+            )
 
         config[key] = value
 
@@ -1013,9 +1178,20 @@ def _validate_general_settings(config: dict[str, Any]) -> None:
     )
 
 
-def validate_config(config: dict[str, Any]) -> dict[str, Any]:
+def validate_config(
+    config: dict[str, Any],
+) -> dict[str, Any]:
     if not isinstance(config, dict):
-        raise TypeError("Configuration must be a dictionary.")
+        raise TypeError(
+            "Configuration must be a dictionary."
+        )
+
+    # Preserve the user's original PARTS specification before
+    # converting PARTS into the selected integer.
+    if config.get("PARTS_SPEC") in (None, ""):
+        config["PARTS_SPEC"] = str(
+            config.get("PARTS", 1)
+        ).strip()
 
     normalize_format(config)
 
@@ -1025,16 +1201,23 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             key,
         )
 
-    # Parse PARTS before converting it to an integer. This preserves
-    # both fixed-count input (PARTS=4) and range input (PARTS=8-11).
-    raw_parts = config.get("PARTS", 1)
-    minimum_parts, maximum_parts = parse_parts_range(raw_parts)
+    # Parse the original fixed count or range.
+    # No fixed 8-11 restriction is applied.
+    minimum_parts, maximum_parts = parse_parts_range(
+        config["PARTS_SPEC"]
+    )
 
     config["PARTS_MIN"] = minimum_parts
     config["PARTS_MAX"] = maximum_parts
 
     raw_selected = config.get("PARTS_SELECTED")
+
     if raw_selected not in (None, ""):
+        if isinstance(raw_selected, bool):
+            raise ValueError(
+                "PARTS_SELECTED must be a positive integer."
+            )
+
         try:
             selected_parts = int(raw_selected)
         except (TypeError, ValueError) as exc:
@@ -1045,21 +1228,26 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if not minimum_parts <= selected_parts <= maximum_parts:
             raise ValueError(
                 f"PARTS_SELECTED={selected_parts} is outside "
-                f"the configured range {minimum_parts}-{maximum_parts}."
+                f"the configured PARTS range "
+                f"{minimum_parts}-{maximum_parts}."
             )
+
     else:
-        # Until story_length_policy selects a count, use the minimum.
+        # For a range, begin at its lower bound.
+        # story_length_policy may select another count inside the range.
         selected_parts = minimum_parts
 
-    config["PARTS"] = selected_parts
     config["PARTS_SELECTED"] = selected_parts
+    config["PARTS"] = selected_parts
 
     config["SCENES"] = get_scenes(config)
     config["FPS"] = get_fps(config)
     config["MAX_RETRIES"] = get_max_retries(config)
 
     if config["SCENES"] > 500:
-        raise ValueError("SCENES cannot exceed 500.")
+        raise ValueError(
+            "SCENES cannot exceed 500."
+        )
 
     if not has_story_input(config):
         raise ValueError(
@@ -1081,24 +1269,38 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 def load_and_validate(
     path: str | Path = "Input/topic.txt",
 ) -> dict[str, Any]:
-    return validate_config(load_input_config(path))
+    return validate_config(
+        load_input_config(path)
+    )
 
 
-def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
+def get_config_summary(
+    config: dict[str, Any],
+) -> dict[str, Any]:
     image_settings = get_image_provider_settings(config)
     minimum_parts, maximum_parts = get_parts_range(config)
 
     return {
         "FORMAT": get_format(config),
         "TOPIC": get_topic(config),
-        "TITLE": str(config.get("TITLE", "")).strip(),
-        "HAS_STORY_TEXT": bool(get_story_text(config).strip()),
+        "TITLE": str(
+            config.get("TITLE", "")
+        ).strip(),
+        "HAS_STORY_TEXT": bool(
+            get_story_text(config).strip()
+        ),
         "PRESERVE_STORY_TEXT": parse_bool(
             config.get("PRESERVE_STORY_TEXT", True),
             "PRESERVE_STORY_TEXT",
         ),
-        "TITLE_SOURCE_AVAILABLE": bool(get_title_source(config)),
+        "TITLE_SOURCE_AVAILABLE": bool(
+            get_title_source(config)
+        ),
 
+        # Original range and selected count are reported separately.
+        "PARTS_SPEC": str(
+            config.get("PARTS_SPEC", "")
+        ),
         "PARTS": get_parts(config),
         "PARTS_MIN": minimum_parts,
         "PARTS_MAX": maximum_parts,
@@ -1106,22 +1308,39 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
 
         "SCENES": get_scenes(config),
         "FPS": get_fps(config),
-        "VOICE": str(config.get("VOICE", "")),
-        "AUDIENCE": str(config.get("AUDIENCE", "")),
-        "SPEED": str(config.get("SPEED", "+0%")),
-        "CAPTIONS": str(config.get("CAPTIONS", "")),
+        "VOICE": str(
+            config.get("VOICE", "")
+        ),
+        "AUDIENCE": str(
+            config.get("AUDIENCE", "")
+        ),
+        "SPEED": str(
+            config.get("SPEED", "+0%")
+        ),
+        "CAPTIONS": str(
+            config.get("CAPTIONS", "")
+        ),
         "CAPTION_FONT": get_caption_font(config),
         "CAPTION_FONT_SIZE": get_caption_font_size(config),
-        "STORY_LENGTH": str(config.get("STORY_LENGTH", "")),
-        "SCENE_DURATION": str(config.get("SCENE_DURATION", "")),
-        "FAILURE_POLICY": str(config.get("FAILURE_POLICY", "")),
+        "STORY_LENGTH": str(
+            config.get("STORY_LENGTH", "")
+        ),
+        "SCENE_DURATION": str(
+            config.get("SCENE_DURATION", "")
+        ),
+        "FAILURE_POLICY": str(
+            config.get("FAILURE_POLICY", "")
+        ),
 
         "RESUME_ENABLED": parse_bool(
             config.get("RESUME_ENABLED", True),
             "RESUME_ENABLED",
         ),
         "SAVE_CHECKPOINT_AFTER_EACH_SCENE": parse_bool(
-            config.get("SAVE_CHECKPOINT_AFTER_EACH_SCENE", True),
+            config.get(
+                "SAVE_CHECKPOINT_AFTER_EACH_SCENE",
+                True,
+            ),
             "SAVE_CHECKPOINT_AFTER_EACH_SCENE",
         ),
         "SKIP_COMPLETED_SCENES": parse_bool(
@@ -1152,7 +1371,9 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
             "TTS_CHUNK_CHECKPOINT",
         ),
 
-        "IMAGE_PROVIDER_ORDER": image_settings["IMAGE_PROVIDER_ORDER"],
+        "IMAGE_PROVIDER_ORDER": image_settings[
+            "IMAGE_PROVIDER_ORDER"
+        ],
         "IMAGE_FALLBACK_ENABLED": image_settings[
             "IMAGE_FALLBACK_ENABLED"
         ],
@@ -1169,14 +1390,20 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "IMAGE_POLLINATIONS_MODELS": image_settings[
             "POLLINATIONS_FREE_IMAGE_MODELS"
         ],
-        "IMAGE_GEMINI_MODEL": image_settings["GEMINI_IMAGE_MODEL"],
-        "IMAGE_REPLICATE_MODEL": image_settings["REPLICATE_IMAGE_MODEL"],
+        "IMAGE_GEMINI_MODEL": image_settings[
+            "GEMINI_IMAGE_MODEL"
+        ],
+        "IMAGE_REPLICATE_MODEL": image_settings[
+            "REPLICATE_IMAGE_MODEL"
+        ],
     }
 
 
-def print_config_summary(config: dict[str, Any]) -> None:
+def print_config_summary(
+    config: dict[str, Any],
+) -> None:
     print("==============================================")
-    print("PHOTO MOTION INPUT CONFIG")
+    print("KATHA LOK AI INPUT CONFIG")
     print("==============================================")
 
     for key, value in get_config_summary(config).items():
@@ -1189,7 +1416,9 @@ if __name__ == "__main__":
     import sys
 
     config_path = (
-        sys.argv[1] if len(sys.argv) > 1 else "Input/topic.txt"
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else "Input/topic.txt"
     )
 
     try:
@@ -1198,5 +1427,7 @@ if __name__ == "__main__":
         print("INPUT CONFIG VALIDATION: OK")
 
     except Exception as exc:
-        print(f"INPUT CONFIG VALIDATION: FAILED: {exc}")
+        print(
+            f"INPUT CONFIG VALIDATION: FAILED: {exc}"
+        )
         raise
