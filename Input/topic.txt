@@ -52,7 +52,7 @@ STORY_TEXT = """अयान के माथे पर पसीने की �
 # STORY STRUCTURE
 # ============================================================
 
-PARTS = 4
+PARTS = 9
 SCENES = 13
 
 STORY_LENGTH = "auto"              # auto | short | medium | long
