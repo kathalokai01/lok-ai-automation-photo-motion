@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create validated, resumable image-generation jobs for every story scene."""
+"""Build validated, story-grounded and resumable visual jobs."""
 
 from __future__ import annotations
 
@@ -23,16 +23,19 @@ from input_config import (
 )
 
 OUT = ROOT / "output"
+INPUT_FILE = ROOT / "Input" / "topic.txt"
 SCENES_FILE = OUT / "scenes" / "scenes.json"
 BIBLE_FILE = OUT / "story" / "character_bible.json"
 
 VISUALS_DIR = OUT / "visuals"
 JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
+JOBS_MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v6-all-scene-roles"
-PROMPT_VERSION = 6
-MIN_PROMPT_LENGTH = 12
+VERSION = "photo-motion-visual-jobs-v7-story-grounded-list-schema"
+PROMPT_VERSION = 7
+MIN_PROMPT_LENGTH = 24
+MIN_SCENE_TEXT = 8
 
 ROLE_ORDER = {
     "hook": 0,
@@ -40,8 +43,12 @@ ROLE_ORDER = {
     "suspense": 2,
     "resolution": 3,
 }
-
 ALLOWED_ROLES = set(ROLE_ORDER)
+
+IMAGE_SIZES = {
+    "short": (720, 1280),
+    "full": (1280, 720),
+}
 
 
 def log(*values: Any) -> None:
@@ -49,7 +56,7 @@ def log(*values: Any) -> None:
 
 
 def clean(value: Any) -> str:
-    if value is None or isinstance(value, (dict, list, tuple)):
+    if value is None or isinstance(value, (dict, list, tuple, set)):
         return ""
     return re.sub(r"\s+", " ", str(value)).strip()
 
@@ -57,7 +64,6 @@ def clean(value: Any) -> str:
 def as_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
-
     if value is None:
         return default
 
@@ -65,7 +71,6 @@ def as_bool(value: Any, default: bool = False) -> bool:
 
     if value in {"1", "true", "yes", "y", "on", "enabled"}:
         return True
-
     if value in {"0", "false", "no", "n", "off", "disabled"}:
         return False
 
@@ -83,7 +88,7 @@ def digest(value: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def read_json(path: Path, required: bool = False) -> dict | None:
+def read_json(path: Path, required: bool = False) -> Any:
     path = Path(path)
 
     if not path.is_file():
@@ -92,45 +97,24 @@ def read_json(path: Path, required: bool = False) -> dict | None:
         return None
 
     try:
-        data = json.loads(
-            path.read_text(encoding="utf-8-sig")
-        )
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
-        raise RuntimeError(
-            f"Cannot read JSON file {path}: {exc}"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise RuntimeError(
-            f"JSON root must be an object: {path}"
-        )
-
-    return data
+        raise RuntimeError(f"Cannot read JSON file {path}: {exc}") from exc
 
 
-def atomic_json(path: Path, data: dict) -> None:
+def atomic_json(path: Path, data: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
 
     try:
-        with temporary.open(
-            "w",
-            encoding="utf-8",
-            newline="\n",
-        ) as stream:
-            json.dump(
-                data,
-                stream,
-                ensure_ascii=False,
-                indent=2,
-            )
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
 
         os.replace(temporary, path)
-
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -140,7 +124,7 @@ def safe_number(value: Any, default: Any = "auto") -> Any:
         return default
 
     if isinstance(value, str) and value.strip().lower() in {
-        "", "auto", "dynamic", "variable"
+        "", "auto", "dynamic", "variable", "unknown"
     }:
         return "auto"
 
@@ -149,10 +133,10 @@ def safe_number(value: Any, default: Any = "auto") -> Any:
     except (TypeError, ValueError):
         return default
 
-    if not 0 < number <= 3600:
+    if not 0.5 <= number <= 3600:
         return default
 
-    return round(number, 3)
+    return round(number, 4)
 
 
 def normalize_role(scene: dict) -> str:
@@ -171,7 +155,12 @@ def normalize_role(scene: dict) -> str:
     return role
 
 
-def normalize_scene_id(scene: dict, part: int, role: str, local: int) -> str:
+def normalize_scene_id(
+    scene: dict,
+    part: int,
+    role: str,
+    local_scene: int | None,
+) -> str:
     scene_id = clean(
         scene.get("scene_id")
         or scene.get("id")
@@ -180,22 +169,51 @@ def normalize_scene_id(scene: dict, part: int, role: str, local: int) -> str:
 
     if not scene_id:
         if role == "main":
-            scene_id = f"part_{part:02d}_scene_{local:02d}"
+            scene_id = f"part_{part:02d}_scene_{local_scene:02d}"
         else:
             scene_id = f"part_{part:02d}_{role}"
 
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", scene_id):
-        raise RuntimeError(
-            f"Unsafe or invalid scene_id: {scene_id!r}"
-        )
+        raise RuntimeError(f"Unsafe or invalid scene_id: {scene_id!r}")
 
     return scene_id
 
 
-def load_character_bible() -> dict:
+def normalize_character_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    if not isinstance(value, list):
+        value = [value]
+
+    result = []
+
+    for item in value:
+        if isinstance(item, dict):
+            candidate = (
+                item.get("id")
+                or item.get("character_id")
+                or item.get("name")
+            )
+        else:
+            candidate = item
+
+        text = clean(candidate)
+        if text and text.casefold() not in {
+            existing.casefold() for existing in result
+        }:
+            result.append(text)
+
+    return result
+
+
+def load_character_bible(config: dict) -> dict:
+    enabled = as_bool(config.get("CHARACTER_BIBLE"), True)
     data = read_json(BIBLE_FILE)
 
     if data is None:
+        if enabled:
+            log("WARNING: Character Bible missing; visual jobs will use scene references only.")
         return {
             "status": "disabled",
             "characters": [],
@@ -203,12 +221,14 @@ def load_character_bible() -> dict:
             "world": {},
         }
 
+    if not isinstance(data, dict):
+        raise RuntimeError("Character Bible root must be a JSON object.")
+
     status = clean(data.get("status")).lower()
 
     if status not in {"completed", "disabled"}:
         raise RuntimeError(
-            "Character Bible is not ready: "
-            f"status={status or 'missing'}."
+            f"Character Bible is not ready: status={status or 'missing'}."
         )
 
     characters = data.get("characters", [])
@@ -216,27 +236,18 @@ def load_character_bible() -> dict:
     world = data.get("world", {})
 
     if not isinstance(characters, list):
-        raise RuntimeError(
-            "Character Bible characters must be a list."
-        )
-
+        raise RuntimeError("Character Bible characters must be a list.")
     if not isinstance(scene_map, list):
-        raise RuntimeError(
-            "Character Bible scene_character_map must be a list."
-        )
-
+        raise RuntimeError("Character Bible scene_character_map must be a list.")
     if not isinstance(world, dict):
-        raise RuntimeError(
-            "Character Bible world must be an object."
-        )
+        raise RuntimeError("Character Bible world must be an object.")
 
-    valid_ids = set()
+    known_ids = set()
+    known_names = set()
 
-    for character in characters:
+    for index, character in enumerate(characters, 1):
         if not isinstance(character, dict):
-            raise RuntimeError(
-                "Character Bible contains an invalid character record."
-            )
+            raise RuntimeError(f"Invalid Character Bible record #{index}.")
 
         character_id = clean(
             character.get("id") or character.get("character_id")
@@ -245,139 +256,148 @@ def load_character_bible() -> dict:
 
         if not character_id or not name:
             raise RuntimeError(
-                "Every Character Bible record requires an ID and name."
+                f"Character Bible record #{index} requires an ID and name."
             )
 
-        if character_id in valid_ids:
-            raise RuntimeError(
-                f"Duplicate Character Bible ID: {character_id}"
-            )
+        if character_id.casefold() in known_ids:
+            raise RuntimeError(f"Duplicate Character Bible ID: {character_id}")
 
-        valid_ids.add(character_id)
+        known_ids.add(character_id.casefold())
+        known_names.add(name.casefold())
 
-    for row in scene_map:
+    for index, row in enumerate(scene_map, 1):
         if not isinstance(row, dict):
-            raise RuntimeError(
-                "Character Bible contains an invalid scene mapping."
-            )
+            raise RuntimeError(f"Invalid Character Bible scene map row #{index}.")
 
-        for character_id in row.get("character_ids", []):
-            if character_id not in valid_ids:
-                raise RuntimeError(
-                    "Character Bible scene map contains an unknown ID: "
-                    f"{character_id}"
-                )
+        references = normalize_character_values(
+            row.get("character_ids")
+        )
+
+        unknown = [
+            value for value in references
+            if value.casefold() not in known_ids
+            and value.casefold() not in known_names
+        ]
+
+        if unknown:
+            raise RuntimeError(
+                f"Character Bible mapping #{index} contains unknown "
+                f"characters: {unknown[:10]}"
+            )
 
     return data
 
 
-def character_references(scene: dict, bible: dict) -> list[str]:
-    """Resolve names and stable IDs for main and extra scenes."""
-
-    values = (
-        scene.get("character_ids")
-        or scene.get("characters")
-        or scene.get("character_names")
-        or []
-    )
-
-    if not isinstance(values, list):
-        values = [values]
-
+def find_scene_character_references(
+    scene: dict,
+    bible: dict,
+) -> list[dict]:
     wanted = {
-        clean(value).casefold()
-        for value in values
-        if clean(value)
+        value.casefold()
+        for value in normalize_character_values(
+            scene.get("character_ids")
+            or scene.get("characters")
+            or scene.get("character_names")
+        )
     }
 
     scene_id = clean(scene.get("scene_id"))
     part = scene.get("part")
     scene_number = scene.get("scene")
 
-    # Match extra scenes by scene_id, because their main scene number is None.
     for row in bible.get("scene_character_map", []):
         if not isinstance(row, dict):
             continue
 
-        same_scene = (
-            clean(row.get("scene_id")) == scene_id
-            if scene_id else False
+        same_id = (
+            bool(scene_id)
+            and clean(row.get("scene_id")) == scene_id
         )
-
-        same_main_position = (
-            row.get("part") == part
+        same_position = (
+            scene_number is not None
+            and row.get("part") == part
             and row.get("scene") == scene_number
-            and scene_number is not None
         )
 
-        if same_scene or same_main_position:
-            for value in (
-                row.get("character_ids", [])
-                + row.get("character_names", [])
-                + row.get("characters", [])
+        if same_id or same_position:
+            for key in (
+                "character_ids",
+                "character_names",
+                "characters",
             ):
-                if clean(value):
-                    wanted.add(clean(value).casefold())
+                wanted.update(
+                    value.casefold()
+                    for value in normalize_character_values(row.get(key))
+                )
 
     selected = []
 
     for character in bible.get("characters", []):
+        if not isinstance(character, dict):
+            continue
+
         candidates = {
             clean(character.get("id")).casefold(),
             clean(character.get("character_id")).casefold(),
             clean(character.get("name")).casefold(),
         }
 
-        candidates.update(
-            clean(alias).casefold()
-            for alias in character.get("aliases", [])
-            if clean(alias)
-        )
+        aliases = normalize_character_values(character.get("aliases"))
+        candidates.update(value.casefold() for value in aliases)
 
         if wanted.intersection(candidates):
             selected.append(character)
 
-    # A scene may have no explicit character reference. Do not inject
-    # every character in the story into that scene.
-    return [
-        {
-            key: character[key]
-            for key in (
-                "id",
-                "character_id",
-                "name",
-                "aliases",
-                "age",
-                "gender",
-                "appearance",
-                "face_features",
-                "skin_tone",
-                "hair",
-                "eyes",
-                "body_features",
-                "height",
-                "build",
-                "clothing",
-                "accessories",
-                "distinctive_features",
-                "visual_identity",
-                "continuity_notes",
-                "consistency_rules",
-            )
-            if key in character and character[key] not in (None, "", [])
-        }
-        for character in selected
-    ]
+    return selected
 
 
-def character_context(scene: dict, bible: dict) -> str:
-    selected = character_references(scene, bible)
+def compact_character_reference(character: dict) -> dict:
+    fields = (
+        "id",
+        "character_id",
+        "name",
+        "aliases",
+        "age",
+        "gender",
+        "appearance",
+        "face_features",
+        "skin_tone",
+        "hair",
+        "eyes",
+        "body_features",
+        "height",
+        "build",
+        "clothing",
+        "accessories",
+        "distinctive_features",
+        "visual_identity",
+        "continuity_notes",
+        "consistency_rules",
+    )
+
+    result = {}
+
+    for key in fields:
+        value = character.get(key)
+        if value not in (None, "", [], {}):
+            result[key] = value
+
+    return result
+
+
+def character_prompt_context(scene: dict, bible: dict) -> str:
+    selected = find_scene_character_references(scene, bible)
 
     if not selected:
         return ""
 
+    compact = [
+        compact_character_reference(character)
+        for character in selected
+    ]
+
     return json.dumps(
-        selected,
+        compact,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -385,25 +405,29 @@ def character_context(scene: dict, bible: dict) -> str:
 
 def build_negative_prompt(config: dict, source: dict) -> str:
     values = [
-        "unrealistic anatomy",
         "distorted face",
+        "unrealistic anatomy",
         "extra fingers",
         "missing fingers",
-        "duplicated people",
         "fused limbs",
+        "duplicated people",
         "plastic skin",
         "waxy face",
+        "crossed eyes",
+        "deformed hands",
         "floating objects",
-        "unwanted text",
+        "wrong story event",
+        "unrelated characters",
+        "unrelated props",
+        "wrong location",
+        "wrong time period",
         "captions",
         "subtitles",
-        "watermark",
+        "written text",
         "logo",
+        "watermark",
         "low resolution",
-        "blurred main subject",
-        "unrelated characters",
-        "unrelated objects",
-        "wrong story event",
+        "blurry main subject",
     ]
 
     if as_bool(config.get("AVOID_CARTOON_LOOK"), True):
@@ -414,6 +438,7 @@ def build_negative_prompt(config: dict, source: dict) -> str:
             "2D drawing",
             "3D animated character",
             "painting",
+            "storybook illustration",
         ])
 
     if as_bool(config.get("AVOID_NEON"), True):
@@ -449,6 +474,9 @@ def build_prompt(
     config: dict,
     source: dict,
     bible: dict,
+    format_name: str,
+    width: int,
+    height: int,
 ) -> str:
     visual = clean(
         source.get("visual_prompt")
@@ -456,97 +484,103 @@ def build_prompt(
         or source.get("description")
     )
 
+    narration = clean(
+        source.get("narration")
+        or source.get("text")
+        or source.get("story_text")
+    )
+
     if len(visual) < MIN_PROMPT_LENGTH:
         raise RuntimeError(
-            f"Scene {source.get('scene_id')!r} "
-            "has no usable story-matched visual prompt."
+            f"Scene {source.get('scene_id')!r} has no usable visual_prompt."
+        )
+
+    if len(narration) < MIN_SCENE_TEXT:
+        raise RuntimeError(
+            f"Scene {source.get('scene_id')!r} has no usable narration."
         )
 
     role = normalize_role(source)
 
-    sections = [
-        visual,
-        (
-            "Photorealistic live-action cinematic film still. "
-            "Real human actors, believable physical environment, "
-            "natural skin texture, realistic eyes and anatomy."
-        ),
-        (
-            "Depict the exact event described by this scene's narration. "
-            "Do not replace the event with a generic illustration."
-        ),
-        (
-            "Show the story-relevant people together with the objects, "
-            "creatures, vehicles, tools, buildings, clothing and environment "
-            "that the scene actually requires."
-        ),
-        (
-            "Preserve the source story's location, time period, actions, "
-            "relationships and emotional context. Do not add unrelated "
-            "people, props, events or settings."
-        ),
-        (
-            "Use physically plausible lighting, shadows, reflections, "
-            "materials, perspective and natural human proportions."
-        ),
-        (
-            "Do not include captions, subtitles, logos, labels, "
-            "watermarks or written text."
-        ),
-    ]
-
     style = clean(config.get("VISUAL_STYLE")) or "cinematic_realistic"
     realism = clean(config.get("REALISM")) or "high"
     quality = clean(config.get("QUALITY")) or "high"
-    camera_style = clean(config.get("CAMERA_STYLE")) or "cinematic"
+    camera = clean(config.get("CAMERA_STYLE")) or "cinematic"
     lighting = clean(config.get("LIGHTING")) or "cinematic"
     mood = clean(source.get("mood") or config.get("MOOD")) or "dramatic"
 
-    sections.append(
-        f"Visual style: {style}. Realism: {realism}. Quality: {quality}."
-    )
-    sections.append(f"Camera language: {camera_style}.")
-    sections.append(
-        "Lighting treatment: "
-        + clean(
-            source.get("lighting_prompt")
-            or source.get("lighting")
-            or lighting
-        )
-        + "."
-    )
-    sections.append(f"Emotional mood: {mood}.")
+    sections = [
+        "STORY-SPECIFIC IMAGE: " + visual,
+        (
+            "Create one coherent, photorealistic live-action cinematic "
+            "film frame. Use realistic human actors, natural skin texture, "
+            "believable facial features, accurate anatomy and real-world "
+            "materials. It must look like a frame from a professionally "
+            "shot live-action film, not an illustration or slideshow."
+        ),
+        (
+            "Show the exact action and story moment described by this "
+            "scene. Preserve the scene's actual people, relationships, "
+            "location, time period, objects and emotional meaning. "
+            "Do not invent a different event or replace specific story "
+            "details with generic imagery."
+        ),
+        (
+            "The visual_prompt is the primary visual instruction. "
+            "Narration is context for understanding the event, not a "
+            "request to print words into the image."
+        ),
+        (
+            f"Output composition: {format_name}; exact target dimensions "
+            f"{width}x{height}; preserve the complete important subject "
+            "inside the frame with suitable headroom and safe margins."
+        ),
+        f"Visual style: {style}. Realism: {realism}. Quality: {quality}.",
+        f"Camera language: {camera}.",
+        f"Lighting: {clean(source.get('lighting_prompt') or source.get('lighting') or lighting)}.",
+        f"Emotional mood: {mood}.",
+        (
+            "Use physically plausible lighting, natural shadows, "
+            "realistic reflections, believable depth, correct perspective "
+            "and cinematic composition."
+        ),
+        (
+            "No captions, subtitles, typography, labels, speech bubbles, "
+            "logos, watermarks or readable text."
+        ),
+    ]
 
     if role != "main":
         sections.append(
-            f"Scene role: {role.upper()}. "
-            "Keep this as a separate visual record; do not merge it "
-            "into or renumber the main numbered scenes."
+            f"SCENE ROLE: {role.upper()}. Preserve this as its own "
+            "separate story image. Do not merge it with another scene "
+            "or change the main scene numbering."
         )
 
     for key, label in (
         ("action", "Visible physical action"),
-        ("world_context", "Story-world location and continuity"),
-        ("location", "Location"),
+        ("world_context", "Story-world continuity"),
+        ("location", "Exact location"),
         ("time_period", "Time period"),
         ("camera_prompt", "Camera direction"),
-        ("dialogue", "Story dialogue context"),
+        ("dialogue", "Dialogue context for facial expression and action"),
     ):
         value = clean(source.get(key))
         if value:
             sections.append(f"{label}: {value}")
 
     if as_bool(config.get("CHARACTER_CONSISTENCY"), True):
-        context = character_context(source, bible)
+        context = character_prompt_context(source, bible)
 
         if context:
             sections.append(
-                "APPROVED CHARACTER IDENTITY REFERENCES. "
-                "Preserve each listed character's face, age range, "
-                "gender identity, body proportions, hair, defining features "
-                "and identity. Clothing changes only when the scene "
-                "explicitly requires them. Do not mix identities: "
-                + context
+                "CHARACTER IDENTITY LOCK: Use only the approved character "
+                "references relevant to this scene. Preserve the same "
+                "recognizable face, age range, skin tone, hair, eyes, "
+                "body proportions and identity across every scene. "
+                "Do not swap, merge or randomly redesign characters. "
+                "Change clothing only when the story explicitly requires it. "
+                "Approved references: " + context
             )
 
     if as_bool(config.get("WORLD_CONSISTENCY"), True):
@@ -554,8 +588,9 @@ def build_prompt(
 
         if world:
             sections.append(
-                "APPROVED STORY-WORLD CONTINUITY: "
-                + json.dumps(world, ensure_ascii=False)
+                "STORY WORLD CONTINUITY: Preserve this world's established "
+                "locations, era, architecture, environment and visual rules: "
+                + json.dumps(world, ensure_ascii=False, separators=(",", ":"))
             )
 
     return "\n\n".join(
@@ -564,14 +599,14 @@ def build_prompt(
 
 
 def image_dimensions(format_name: str) -> tuple[int, int]:
-    if format_name == "short":
-        return 768, 1024
-
-    return 1024, 576
+    if format_name not in IMAGE_SIZES:
+        raise RuntimeError(f"Unsupported output format: {format_name!r}")
+    return IMAGE_SIZES[format_name]
 
 
 def scene_order_key(scene: dict) -> tuple:
     role = normalize_role(scene)
+    part = int(scene["part"])
 
     try:
         local = int(scene.get("scene") or 0)
@@ -579,14 +614,14 @@ def scene_order_key(scene: dict) -> tuple:
         local = 0
 
     return (
-        int(scene.get("part", 0)),
+        part,
         ROLE_ORDER[role],
         local,
         clean(scene.get("scene_id")),
     )
 
 
-def flatten_scenes(
+def normalize_scene_rows(
     document: dict,
     expected_parts: int,
     expected_scenes: int,
@@ -602,18 +637,15 @@ def flatten_scenes(
     prepared = []
     seen_ids = set()
     seen_main = set()
+
     role_counts = {
-        "hook": {},
-        "main": {},
-        "suspense": {},
-        "resolution": {},
+        role: {}
+        for role in ALLOWED_ROLES
     }
 
     for index, original in enumerate(rows, 1):
         if not isinstance(original, dict):
-            raise RuntimeError(
-                f"Scene row {index} is not an object."
-            )
+            raise RuntimeError(f"Scene row {index} is not a JSON object.")
 
         try:
             part = int(original.get("part"))
@@ -624,91 +656,74 @@ def flatten_scenes(
 
         if not 1 <= part <= expected_parts:
             raise RuntimeError(
-                f"Invalid part number {part} in scene row {index}."
+                f"Scene row {index}: part {part} is outside "
+                f"the configured range 1-{expected_parts}."
             )
 
         role = normalize_role(original)
-
-        scene_value = original.get(
+        raw_scene = original.get(
             "scene",
             original.get("local_scene"),
         )
 
         if role == "main":
             try:
-                local = int(scene_value)
+                local_scene = int(raw_scene)
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(
                     f"Main scene in part {part} has no valid scene number."
                 ) from exc
 
-            if not 1 <= local <= expected_scenes:
+            if not 1 <= local_scene <= expected_scenes:
                 raise RuntimeError(
                     f"Main scene number outside configured range: "
-                    f"{part}/{local}."
+                    f"{part}/{local_scene}."
                 )
 
-            pair = (part, local)
+            pair = (part, local_scene)
             if pair in seen_main:
                 raise RuntimeError(
-                    f"Duplicate main scene: {part}/{local}."
+                    f"Duplicate main scene mapping: {part}/{local_scene}."
                 )
 
             seen_main.add(pair)
-            scene_number = local
+            source_scene_number = local_scene
 
         else:
-            # Extra scene records stay separate and do not alter main
-            # scene numbering. Their image-job slot is assigned later.
-            scene_number = None
+            source_scene_number = None
 
-            if scene_value not in (None, ""):
+            if raw_scene not in (None, ""):
                 try:
-                    int(scene_value)
-                except (TypeError, ValueError):
+                    int(raw_scene)
+                except (TypeError, ValueError) as exc:
                     raise RuntimeError(
-                        f"Invalid scene field on extra scene "
-                        f"{original.get('scene_id')}."
-                    )
+                        f"Extra scene {original.get('scene_id')!r} "
+                        "contains an invalid source scene number."
+                    ) from exc
 
         scene_id = normalize_scene_id(
             original,
             part,
             role,
-            scene_number or 0,
+            source_scene_number,
         )
 
         if scene_id in seen_ids:
-            raise RuntimeError(
-                f"Duplicate visual scene ID: {scene_id}."
-            )
+            raise RuntimeError(f"Duplicate visual scene ID: {scene_id}.")
 
         seen_ids.add(scene_id)
-
-        if role == "hook":
-            role_counts["hook"][part] = (
-                role_counts["hook"].get(part, 0) + 1
-            )
-
-        elif role == "suspense":
-            role_counts["suspense"][part] = (
-                role_counts["suspense"].get(part, 0) + 1
-            )
-
-        elif role == "resolution":
-            role_counts["resolution"][part] = (
-                role_counts["resolution"].get(part, 0) + 1
-            )
+        role_counts[role][part] = role_counts[role].get(part, 0) + 1
 
         prepared.append({
             **dict(original),
             "part": part,
-            "scene": scene_number,
-            "local_scene": scene_number,
+            "scene": source_scene_number,
+            "local_scene": source_scene_number,
             "scene_id": scene_id,
             "id": scene_id,
             "role": role,
             "scene_type": role,
+            "source_scene_number": source_scene_number,
             "is_extra_scene": role != "main",
         })
 
@@ -719,30 +734,29 @@ def flatten_scenes(
     }
 
     missing_main = sorted(expected_main - seen_main)
-    extra_main = sorted(seen_main - expected_main)
+    unexpected_main = sorted(seen_main - expected_main)
 
-    if missing_main or extra_main:
+    if missing_main or unexpected_main:
         raise RuntimeError(
             "Main scene mapping mismatch. "
-            f"Missing={missing_main[:20]}, extra={extra_main[:20]}."
+            f"Missing={missing_main[:20]}, "
+            f"unexpected={unexpected_main[:20]}."
         )
 
-    # Each part must have one Hook. Non-final parts need one Suspense;
-    # final part needs one Resolution. Extras are separate records.
     for part in range(1, expected_parts + 1):
         if role_counts["hook"].get(part, 0) != 1:
             raise RuntimeError(
-                f"Part {part} must have exactly one separate Hook scene."
+                f"Part {part} must contain exactly one separate Hook scene."
             )
 
         if part < expected_parts:
             if role_counts["suspense"].get(part, 0) != 1:
                 raise RuntimeError(
-                    f"Non-final part {part} must have exactly one "
+                    f"Non-final part {part} must contain exactly one "
                     "separate Suspense scene."
                 )
 
-            if role_counts["resolution"].get(part, 0):
+            if role_counts["resolution"].get(part, 0) != 0:
                 raise RuntimeError(
                     f"Non-final part {part} must not contain Resolution."
                 )
@@ -750,11 +764,11 @@ def flatten_scenes(
         else:
             if role_counts["resolution"].get(part, 0) != 1:
                 raise RuntimeError(
-                    "Final part must have exactly one separate "
+                    "Final part must contain exactly one separate "
                     "Resolution scene."
                 )
 
-            if role_counts["suspense"].get(part, 0):
+            if role_counts["suspense"].get(part, 0) != 0:
                 raise RuntimeError(
                     "Final part must not contain a Suspense scene."
                 )
@@ -766,76 +780,99 @@ def build_jobs(
     scenes: list[dict],
     bible: dict,
     format_name: str,
+    source_fingerprint: str,
+    config_signature: str,
 ) -> list[dict]:
     width, height = image_dimensions(format_name)
+    image_size = f"{width}x{height}"
+
     jobs = []
-    global_number = 0
-    part_slots = {}
+    part_slots: dict[int, int] = {}
 
-    for source in scenes:
-        global_number += 1
-
+    for global_number, source in enumerate(scenes, 1):
         part = int(source["part"])
         role = normalize_role(source)
 
         part_slots[part] = part_slots.get(part, 0) + 1
         image_slot = part_slots[part]
 
+        scene_id = clean(source["scene_id"])
+
         prompt = build_prompt(
-            config,
-            source,
-            bible,
+            config=config,
+            source=source,
+            bible=bible,
+            format_name=format_name,
+            width=width,
+            height=height,
         )
 
-        negative = build_negative_prompt(
-            config,
-            source,
-        )
+        negative = build_negative_prompt(config, source)
 
-        # Keep actual narration timing metadata. "auto" is retained
-        # when no measured duration is available; no arbitrary 5-second
-        # duration is assigned here.
         duration = safe_number(
             source.get("duration")
             or source.get("scene_duration")
-            or source.get("duration_seconds"),
+            or source.get("duration_seconds")
+            or source.get("narration_duration"),
             default="auto",
         )
 
-        scene_id = clean(source["scene_id"])
-
+        # Store images in one canonical image directory.
+        # No legacy part_XX/scene_XX image-manifest layout is created.
         relative_image = (
-            f"output/visuals/part_{part:02d}/"
-            f"{scene_id}.png"
+            f"output/visuals/images/"
+            f"{global_number:04d}_{scene_id}.png"
         )
 
-        if role == "main":
-            source_scene_number = int(source["scene"])
-        else:
-            source_scene_number = None
+        source_scene_number = (
+            int(source["source_scene_number"])
+            if role == "main"
+            else None
+        )
 
-        job = {
-            # Image-worker sequence number. This remains unique even
-            # for Hook/Suspense/Resolution records with scene=None.
-            "id": scene_id,
+        source_signature = digest(source)
+
+        prompt_signature = digest({
+            "prompt_version": PROMPT_VERSION,
+            "prompt": prompt,
+            "negative_prompt": negative,
+            "image_size": image_size,
             "scene_id": scene_id,
             "part": part,
+            "role": role,
+            "source_scene_signature": source_signature,
+            "config_signature": config_signature,
+        })
+
+        job = {
+            "id": scene_id,
+            "scene_id": scene_id,
+            "source_scene_id": scene_id,
+
+            "part": part,
+
+            # Sequential image-worker slot within this part.
             "scene": image_slot,
             "local_scene": image_slot,
+
+            # Global order is continuous across all parts and extra roles.
             "global_scene": global_number,
             "scene_index": global_number,
 
-            # Original story numbering is preserved separately.
+            # Preserve the original numbered story scene separately.
             "source_scene_number": source_scene_number,
             "source_local_scene": source_scene_number,
-            "source_scene_id": scene_id,
 
             "role": role,
             "scene_type": role,
             "is_extra_scene": role != "main",
 
             "title": clean(source.get("title")),
-            "narration": clean(source.get("narration")),
+            "narration": clean(
+                source.get("narration")
+                or source.get("text")
+                or source.get("story_text")
+            ),
             "dialogue": clean(source.get("dialogue")),
 
             "prompt": prompt,
@@ -843,30 +880,37 @@ def build_jobs(
             "visual_prompt": prompt,
             "negative_prompt": negative,
 
-            "image_size": f"{width}x{height}",
+            "image_size": image_size,
             "image_width": width,
             "image_height": height,
+
             "image_path": relative_image,
             "output_path": relative_image,
 
             "duration": duration,
             "scene_duration": duration,
-
-            "character_ids": (
-                source.get("character_ids")
-                if isinstance(source.get("character_ids"), list)
-                else []
+            "duration_source": (
+                "source_scene"
+                if isinstance(duration, (int, float))
+                else "pending_narration_audio_measurement"
             ),
-            "characters": (
+
+            "character_ids": normalize_character_values(
+                source.get("character_ids")
+                or source.get("characters")
+                or source.get("character_names")
+            ),
+            "characters": normalize_character_values(
                 source.get("characters")
-                if isinstance(source.get("characters"), list)
-                else []
+                or source.get("character_names")
             ),
 
             "world_context": clean(
                 source.get("world_context")
                 or source.get("location")
             ),
+            "location": clean(source.get("location")),
+            "time_period": clean(source.get("time_period")),
 
             "camera_prompt": clean(
                 source.get("camera_prompt")
@@ -878,21 +922,20 @@ def build_jobs(
             ),
             "mood": clean(source.get("mood")),
 
-            "source_scene_signature": digest(source),
-            "prompt_signature": digest({
-                "prompt_version": PROMPT_VERSION,
-                "prompt": prompt,
-                "negative_prompt": negative,
-                "image_size": f"{width}x{height}",
-                "scene_id": scene_id,
-                "role": role,
-                "source_scene_signature": digest(source),
-            }),
+            "source_scene_signature": source_signature,
+            "prompt_signature": prompt_signature,
+
+            "visual_jobs_version": VERSION,
+            "prompt_version": PROMPT_VERSION,
+            "source_fingerprint": source_fingerprint,
+            "config_signature": config_signature,
+
+            "image_status": "pending",
         }
 
         if len(prompt) < MIN_PROMPT_LENGTH:
             raise RuntimeError(
-                f"Generated prompt is too short for {scene_id}."
+                f"Generated prompt is too short for scene {scene_id}."
             )
 
         jobs.append(job)
@@ -905,6 +948,7 @@ def validate_jobs(
     expected_scenes: list[dict],
     expected_parts: int,
     expected_main_scenes: int,
+    format_name: str,
 ) -> None:
     if not isinstance(jobs, list) or not jobs:
         raise RuntimeError("No visual jobs were generated.")
@@ -913,7 +957,6 @@ def validate_jobs(
         clean(scene.get("scene_id"))
         for scene in expected_scenes
     ]
-
     actual_ids = [
         clean(job.get("scene_id"))
         for job in jobs
@@ -922,19 +965,14 @@ def validate_jobs(
     if len(actual_ids) != len(set(actual_ids)):
         raise RuntimeError("Duplicate scene_id in visual jobs.")
 
-    if set(actual_ids) != set(expected_ids):
-        missing = sorted(set(expected_ids) - set(actual_ids))
-        extra = sorted(set(actual_ids) - set(expected_ids))
-
+    if actual_ids != expected_ids:
         raise RuntimeError(
-            "Visual job scene mapping mismatch. "
-            f"Missing={missing[:20]}, extra={extra[:20]}."
+            "Visual jobs do not match the validated story-scene order."
         )
 
     if len(jobs) != len(expected_scenes):
         raise RuntimeError(
-            f"Visual job count mismatch: "
-            f"{len(jobs)}/{len(expected_scenes)}."
+            f"Visual job count mismatch: {len(jobs)}/{len(expected_scenes)}."
         )
 
     main_jobs = [
@@ -948,23 +986,50 @@ def validate_jobs(
             f"{len(main_jobs)}/{expected_main_scenes}."
         )
 
+    expected_width, expected_height = image_dimensions(format_name)
+
+    seen_paths = set()
+    part_slots: dict[int, list[int]] = {}
+
     for index, job in enumerate(jobs, 1):
         if job.get("global_scene") != index:
             raise RuntimeError(
-                f"Global job numbering error at {job.get('scene_id')}."
+                f"Global numbering error at {job.get('scene_id')}."
             )
 
-        part = job.get("part")
-        local = job.get("local_scene")
+        try:
+            part = int(job.get("part"))
+            local = int(job.get("local_scene"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid part or local slot for {job.get('scene_id')}."
+            ) from exc
 
-        if not isinstance(part, int) or not 1 <= part <= expected_parts:
+        if not 1 <= part <= expected_parts:
             raise RuntimeError(
                 f"Invalid part mapping for {job.get('scene_id')}."
             )
 
-        if not isinstance(local, int) or local < 1:
+        if local < 1:
             raise RuntimeError(
-                f"Invalid image-worker scene slot for {job.get('scene_id')}."
+                f"Invalid image-worker slot for {job.get('scene_id')}."
+            )
+
+        part_slots.setdefault(part, []).append(local)
+
+        if job.get("image_width") != expected_width:
+            raise RuntimeError(
+                f"Incorrect image width for {job.get('scene_id')}."
+            )
+
+        if job.get("image_height") != expected_height:
+            raise RuntimeError(
+                f"Incorrect image height for {job.get('scene_id')}."
+            )
+
+        if job.get("image_size") != f"{expected_width}x{expected_height}":
+            raise RuntimeError(
+                f"Incorrect image_size for {job.get('scene_id')}."
             )
 
         if not clean(job.get("prompt")):
@@ -972,9 +1037,14 @@ def validate_jobs(
                 f"Empty visual prompt for {job.get('scene_id')}."
             )
 
+        if not clean(job.get("narration")):
+            raise RuntimeError(
+                f"Missing narration for {job.get('scene_id')}."
+            )
+
         if not clean(job.get("image_path")):
             raise RuntimeError(
-                f"Missing image output path for {job.get('scene_id')}."
+                f"Missing image path for {job.get('scene_id')}."
             )
 
         if not clean(job.get("prompt_signature")):
@@ -982,18 +1052,23 @@ def validate_jobs(
                 f"Missing prompt signature for {job.get('scene_id')}."
             )
 
-    expected_order = sorted(
-        expected_scenes,
-        key=scene_order_key,
-    )
+        path = clean(job.get("image_path"))
 
-    if [
-        clean(row.get("scene_id"))
-        for row in expected_order
-    ] != actual_ids:
-        raise RuntimeError(
-            "Visual jobs are not in required part/role order."
-        )
+        if path in seen_paths:
+            raise RuntimeError(f"Duplicate image output path: {path}")
+
+        seen_paths.add(path)
+
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            raise RuntimeError(
+                f"Unsafe image output path for {job.get('scene_id')}: {path}"
+            )
+
+    for part, slots in part_slots.items():
+        if slots != list(range(1, len(slots) + 1)):
+            raise RuntimeError(
+                f"Image-worker slots for part {part} are not continuous."
+            )
 
 
 def build_config_signature(
@@ -1010,6 +1085,7 @@ def build_config_signature(
         "CAMERA_STYLE",
         "LIGHTING",
         "MOOD",
+        "CHARACTER_BIBLE",
         "CHARACTER_CONSISTENCY",
         "WORLD_CONSISTENCY",
         "SCENE_CONTINUITY",
@@ -1022,7 +1098,7 @@ def build_config_signature(
         "REALISTIC_LIGHTING",
     )
 
-    selected = {
+    settings = {
         key: config.get(key)
         for key in keys
     }
@@ -1034,29 +1110,88 @@ def build_config_signature(
         "parts": parts_count,
         "scenes_per_part": scenes_per_part,
         "image_size": image_size,
-        "visual_settings": selected,
+        "settings": settings,
     })
+
+
+def load_previous_progress() -> dict:
+    previous = read_json(CHECKPOINT_FILE)
+
+    if not isinstance(previous, dict):
+        return {}
+
+    rows = previous.get("scene_progress", [])
+
+    if not isinstance(rows, list):
+        return {}
+
+    result = {}
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        scene_id = clean(row.get("scene_id"))
+        signature = clean(row.get("prompt_signature"))
+
+        if scene_id and signature:
+            result[(scene_id, signature)] = row
+
+    return result
 
 
 def build_progress(
     jobs: list[dict],
     source_fingerprint: str,
     config_signature: str,
+    previous_progress: dict,
 ) -> dict:
+    scene_progress = []
+    completed = 0
+
+    for job in jobs:
+        key = (
+            clean(job.get("scene_id")),
+            clean(job.get("prompt_signature")),
+        )
+        old = previous_progress.get(key, {})
+
+        # Keep only matching records. A changed scene or prompt cannot
+        # inherit a stale completion state.
+        old_status = clean(old.get("status")).lower()
+        status = (
+            old_status
+            if old_status in {"generated", "existing", "completed"}
+            else "pending"
+        )
+
+        if status in {"generated", "existing", "completed"}:
+            completed += 1
+
+        scene_progress.append({
+            "scene_id": job["scene_id"],
+            "part": job["part"],
+            "global_scene": job["global_scene"],
+            "role": job["role"],
+            "image_path": job["image_path"],
+            "prompt_signature": job["prompt_signature"],
+            "status": status,
+            "image_sha256": clean(old.get("image_sha256")),
+        })
+
+    total = len(jobs)
+
     return {
         "version": VERSION,
         "status": "ready",
         "stage": "visual_jobs_prepared",
         "source_fingerprint": source_fingerprint,
         "config_signature": config_signature,
-        "total_jobs": len(jobs),
-
-        # Preparing a job is not the same as successfully generating
-        # its image. The image worker owns image-completion checkpoints.
-        "prepared_jobs": len(jobs),
-        "completed_jobs": 0,
-        "remaining_jobs": len(jobs),
-
+        "total_jobs": total,
+        "prepared_jobs": total,
+        "completed_jobs": completed,
+        "remaining_jobs": total - completed,
+        "scene_progress": scene_progress,
         "scene_order": [
             {
                 "part": job["part"],
@@ -1074,13 +1209,13 @@ def build_progress(
 
 
 def main() -> int:
-    log("=" * 60)
-    log("KATHA LOK AI — STORY-MATCHED VISUAL JOB BUILDER")
-    log("=" * 60)
+    log("=" * 64)
+    log("KATHA LOK AI — STORY-GROUNDED VISUAL JOB BUILDER")
+    log("VERSION:", VERSION)
+    log("IMAGE API CALLS: 0")
+    log("=" * 64)
 
-    config = load_and_validate(
-        ROOT / "Input" / "topic.txt"
-    )
+    config = load_and_validate(INPUT_FILE)
 
     format_name = get_format(config)
     parts_count = get_parts(config)
@@ -1091,38 +1226,23 @@ def main() -> int:
             f"Unsupported output format: {format_name!r}."
         )
 
-    if parts_count < 1 or scenes_per_part < 1:
-        raise RuntimeError(
-            "PARTS and SCENES must both be positive integers."
-        )
+    if not isinstance(parts_count, int) or parts_count < 1:
+        raise RuntimeError("PARTS must be a positive integer.")
 
-    source_document = read_json(
-        SCENES_FILE,
-        required=True,
-    )
+    if not isinstance(scenes_per_part, int) or scenes_per_part < 1:
+        raise RuntimeError("SCENES must be a positive integer.")
 
-    bible = load_character_bible()
+    source_document = read_json(SCENES_FILE, required=True)
 
-    scenes = flatten_scenes(
+    if not isinstance(source_document, dict):
+        raise RuntimeError("scenes.json root must be an object.")
+
+    bible = load_character_bible(config)
+
+    scenes = normalize_scene_rows(
         source_document,
-        parts_count,
-        scenes_per_part,
-    )
-
-    jobs = build_jobs(
-        config=config,
-        scenes=scenes,
-        bible=bible,
-        format_name=format_name,
-    )
-
-    expected_main_scenes = parts_count * scenes_per_part
-
-    validate_jobs(
-        jobs=jobs,
-        expected_scenes=scenes,
         expected_parts=parts_count,
-        expected_main_scenes=expected_main_scenes,
+        expected_scenes=scenes_per_part,
     )
 
     source_fingerprint = digest({
@@ -1130,7 +1250,8 @@ def main() -> int:
         "character_bible": bible,
     })
 
-    image_size = jobs[0]["image_size"]
+    width, height = image_dimensions(format_name)
+    image_size = f"{width}x{height}"
 
     config_signature = build_config_signature(
         config=config,
@@ -1140,100 +1261,115 @@ def main() -> int:
         image_size=image_size,
     )
 
+    jobs = build_jobs(
+        config=config,
+        scenes=scenes,
+        bible=bible,
+        format_name=format_name,
+        source_fingerprint=source_fingerprint,
+        config_signature=config_signature,
+    )
+
+    expected_main_scenes = parts_count * scenes_per_part
+
+    validate_jobs(
+        jobs=jobs,
+        expected_scenes=scenes,
+        expected_parts=parts_count,
+        expected_main_scenes=expected_main_scenes,
+        format_name=format_name,
+    )
+
     role_counts = {
-        role: sum(
-            1 for job in jobs
-            if job.get("role") == role
-        )
-        for role in ("hook", "main", "suspense", "resolution")
+        role: sum(1 for job in jobs if job.get("role") == role)
+        for role in ROLE_ORDER
     }
 
-    document = {
-        "version": VERSION,
-        "prompt_version": PROMPT_VERSION,
-        "status": "completed",
-        "stage": "visual_jobs_prepared",
-
-        "format": format_name,
-        "title": clean(source_document.get("title")),
-        "topic": clean(source_document.get("topic")),
-
-        "parts": parts_count,
-        "total_parts": parts_count,
-        "scenes_per_part": scenes_per_part,
-
-        "total_scenes": len(jobs),
-        "total_jobs": len(jobs),
-        "total_main_scenes": expected_main_scenes,
-        "total_extra_scenes": len(jobs) - expected_main_scenes,
-
-        "scene_role_counts": role_counts,
-        "image_size": image_size,
-
-        "source_fingerprint": source_fingerprint,
-        "config_signature": config_signature,
-
-        "character_bible_status": bible.get(
-            "status", "unknown"
-        ),
-        "character_count": len(
-            bible.get("characters", [])
-        ),
-
-        "scene_order": (
-            "part_then_hook_then_main_then_suspense_or_resolution"
-        ),
-
-        "jobs": jobs,
-    }
+    previous_progress = load_previous_progress()
 
     progress = build_progress(
         jobs=jobs,
         source_fingerprint=source_fingerprint,
         config_signature=config_signature,
+        previous_progress=previous_progress,
     )
 
-    # Do not overwrite files until all records and mappings validate.
+    # The canonical worker input is one JSON list.
+    # Metadata is stored separately so image workers can consume
+    # the list directly without schema conversion.
+    manifest = {
+        "version": VERSION,
+        "prompt_version": PROMPT_VERSION,
+        "status": "completed",
+        "stage": "visual_jobs_prepared",
+        "format": format_name,
+        "parts": parts_count,
+        "scenes_per_part": scenes_per_part,
+        "total_jobs": len(jobs),
+        "total_main_scenes": expected_main_scenes,
+        "total_extra_scenes": len(jobs) - expected_main_scenes,
+        "scene_role_counts": role_counts,
+        "image_size": image_size,
+        "source_fingerprint": source_fingerprint,
+        "config_signature": config_signature,
+        "character_bible_status": bible.get("status", "unknown"),
+        "character_count": len(bible.get("characters", [])),
+        "scene_order": "part_then_hook_then_main_then_suspense_or_resolution",
+        "image_api_calls": 0,
+        "jobs_file": "output/visuals/visual_jobs.json",
+    }
+
     VISUALS_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    atomic_json(JOBS_FILE, document)
+    # Write the validated canonical jobs list only after every job passes.
+    atomic_json(JOBS_FILE, jobs)
+    atomic_json(JOBS_MANIFEST_FILE, manifest)
     atomic_json(CHECKPOINT_FILE, progress)
 
-    log("-" * 60)
+    # Read-after-write validation prevents partial or malformed artifacts
+    # from being treated as successful job preparation.
+    saved_jobs = read_json(JOBS_FILE, required=True)
+    saved_manifest = read_json(JOBS_MANIFEST_FILE, required=True)
+    saved_progress = read_json(CHECKPOINT_FILE, required=True)
+
+    if not isinstance(saved_jobs, list) or len(saved_jobs) != len(jobs):
+        raise RuntimeError("Saved visual_jobs.json failed validation.")
+
+    if saved_manifest.get("source_fingerprint") != source_fingerprint:
+        raise RuntimeError("Saved visual jobs manifest fingerprint mismatch.")
+
+    if saved_progress.get("total_jobs") != len(jobs):
+        raise RuntimeError("Saved visual progress checkpoint is incomplete.")
+
+    log("-" * 64)
     log("VISUAL JOBS READY")
     log("Format:", format_name)
+    log("Image dimensions:", image_size)
     log("Parts:", parts_count)
     log("Main scenes per part:", scenes_per_part)
-    log("Total main scene jobs:", role_counts["main"])
+    log("Main jobs:", role_counts["main"])
     log("Hook jobs:", role_counts["hook"])
     log("Suspense jobs:", role_counts["suspense"])
     log("Resolution jobs:", role_counts["resolution"])
     log("Total image jobs:", len(jobs))
-    log("Image size:", image_size)
-    log("Character Bible:", bible.get("status", "unknown"))
+    log("Matching previous progress:", progress["completed_jobs"])
+    log("Remaining jobs:", progress["remaining_jobs"])
     log("Jobs file:", JOBS_FILE.relative_to(ROOT))
+    log("Manifest:", JOBS_MANIFEST_FILE.relative_to(ROOT))
     log("Checkpoint:", CHECKPOINT_FILE.relative_to(ROOT))
     log("Image API calls: 0")
-    log("-" * 60)
+    log("-" * 64)
 
     return 0
 
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
-
+        raise SystemExit(main())
     except KeyboardInterrupt:
-        print(
-            "VISUAL JOB GENERATION CANCELLED",
-            file=sys.stderr,
-        )
-        sys.exit(130)
-
+        log("VISUAL JOB GENERATION CANCELLED")
+        raise SystemExit(130)
     except Exception as exc:
-        print(
-            f"VISUAL JOB GENERATION FAILED: {exc}",
-            file=sys.stderr,
-        )
+        log("VISUAL JOB GENERATION FAILED:", exc)
         raise
