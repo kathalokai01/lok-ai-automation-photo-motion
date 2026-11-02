@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validated, resumable cinematic Photo Motion renderer."""
+"""Cinematic, resumable Photo Motion renderer for story scene roles."""
 
 from __future__ import annotations
 
@@ -25,18 +25,29 @@ from input_config import (
 
 OUTPUT = ROOT / "output"
 VISUALS = OUTPUT / "visuals"
-JOBS_FILE = VISUALS / "visual_jobs.json"
+JOBS_FILE = VISUALS / "photo_motion_jobs.json"
+LEGACY_JOBS_FILE = VISUALS / "visual_jobs.json"
 DEPTH_FILE = VISUALS / "depth_maps" / "depth_manifest.json"
 
 RENDER_DIR = OUTPUT / "photo_motion"
 MANIFEST_FILE = RENDER_DIR / "photo_motion_manifest.json"
+CHECKPOINT_FILE = OUTPUT / "checkpoints" / "photo_motion_progress.json"
 
-VERSION = "photo-motion-v10-exact-mapping-verified-resume"
+VERSION = "photo-motion-v11-role-aware-resume"
 CRF = 20
 PRESET = "medium"
 MIN_IMAGE_BYTES = 1000
 MIN_DEPTH_BYTES = 100
 MIN_VIDEO_BYTES = 1000
+MIN_DURATION = 0.5
+MAX_DURATION = 3600
+
+ROLE_ORDER = {
+    "hook": 0,
+    "main": 1,
+    "suspense": 2,
+    "resolution": 3,
+}
 
 EFFECTS = (
     "zoom_in", "zoom_out",
@@ -54,14 +65,6 @@ def log(*values):
     print(*values, flush=True)
 
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def digest_data(value):
     raw = json.dumps(
         value,
@@ -71,6 +74,14 @@ def digest_data(value):
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def read_json(path, default=None):
@@ -86,7 +97,6 @@ def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-
     try:
         temporary.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -102,12 +112,10 @@ def safe_path(value, label, must_exist=True):
         raise RuntimeError(f"{label}: path is missing")
 
     path = Path(value.strip())
-
     if not path.is_absolute():
         path = ROOT / path
 
     path = path.resolve()
-
     if not path.is_relative_to(ROOT.resolve()):
         raise RuntimeError(f"{label}: path escapes project directory")
 
@@ -122,17 +130,26 @@ def positive_int(value, label):
         result = int(value)
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"Invalid {label}: {value!r}") from exc
-
     if result < 1:
         raise RuntimeError(f"{label} must be at least 1")
-
     return result
+
+
+def valid_duration(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or not MIN_DURATION <= number <= MAX_DURATION:
+        return None
+    return number
 
 
 def run_command(command, label, timeout=1800):
     command = [str(item) for item in command]
     log("$", " ".join(command))
-
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
@@ -141,171 +158,305 @@ def run_command(command, label, timeout=1800):
         timeout=timeout,
         check=False,
     )
-
     if result.stdout:
         log(result.stdout[-5000:])
-
     if result.returncode:
         raise RuntimeError(
             f"{label} failed with exit code {result.returncode}"
         )
 
 
-def load_job_rows():
-    data = read_json(JOBS_FILE)
+def normalize_role(row):
+    value = str(
+        row.get("role")
+        or row.get("scene_type")
+        or row.get("type")
+        or "main"
+    ).strip().lower()
 
-    if isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict):
+    aliases = {
+        "opening": "hook",
+        "intro": "hook",
+        "part_hook": "hook",
+        "main_scene": "main",
+        "story": "main",
+        "cliffhanger": "suspense",
+        "ending": "resolution",
+        "final": "resolution",
+    }
+    value = aliases.get(value, value)
+
+    if value not in ROLE_ORDER:
+        raise RuntimeError(
+            f"Unsupported Photo Motion scene role: {value!r}"
+        )
+    return value
+
+
+def load_job_document():
+    if JOBS_FILE.is_file():
+        document = read_json(JOBS_FILE)
+        source = JOBS_FILE
+    elif LEGACY_JOBS_FILE.is_file():
+        document = read_json(LEGACY_JOBS_FILE)
+        source = LEGACY_JOBS_FILE
+    else:
+        raise RuntimeError(
+            "Photo Motion jobs are missing. "
+            "Expected output/visuals/photo_motion_jobs.json."
+        )
+
+    if isinstance(document, list):
+        rows = document
+        metadata = {}
+    elif isinstance(document, dict):
         rows = (
-            data.get("jobs")
-            or data.get("visual_jobs")
-            or data.get("scenes")
+            document.get("jobs")
+            or document.get("photo_motion_jobs")
+            or document.get("visual_jobs")
+            or document.get("scenes")
             or []
         )
+        metadata = document
     else:
         rows = []
+        metadata = {}
 
     if not isinstance(rows, list) or not rows:
-        raise RuntimeError(
-            "visual_jobs.json is missing or contains no scene jobs"
-        )
+        raise RuntimeError(f"{source.name} contains no jobs")
 
-    return rows
+    return metadata, rows, source
 
 
-def scene_duration(row):
-    for key in (
-        "duration",
-        "scene_duration",
-        "duration_seconds",
-        "seconds",
-    ):
-        try:
-            value = float(row.get(key))
-        except (TypeError, ValueError):
-            continue
-
-        if math.isfinite(value) and 0.5 <= value <= 3600:
-            return value
-
-    raise RuntimeError(
-        "Every visual job must contain a valid scene duration"
-    )
-
-
-def validate_image(path, scene_number):
+def image_dimensions(path, scene_id):
     from PIL import Image
 
     if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
         raise RuntimeError(
-            f"Scene {scene_number}: image is missing or too small: {path}"
+            f"{scene_id}: image missing or too small: {path}"
         )
 
     try:
         with Image.open(path) as image:
             image.verify()
-
         with Image.open(path) as image:
             width, height = image.size
             image_format = image.format
-
-        if width < 64 or height < 64:
-            raise RuntimeError("Image dimensions are smaller than 64x64")
-
-        if image_format not in {"PNG", "JPEG", "WEBP"}:
-            raise RuntimeError(
-                f"Unsupported image format: {image_format}"
-            )
-
     except Exception as exc:
         raise RuntimeError(
-            f"Scene {scene_number}: invalid image: {exc}"
+            f"{scene_id}: invalid image: {exc}"
         ) from exc
 
+    if width < 64 or height < 64:
+        raise RuntimeError(f"{scene_id}: image dimensions below 64x64")
+    if image_format not in {"PNG", "JPEG", "WEBP"}:
+        raise RuntimeError(
+            f"{scene_id}: unsupported image format {image_format}"
+        )
     return width, height
+
+
+def resolve_output_target(row, global_number):
+    part = positive_int(row.get("part"), "part")
+    scene_id = str(
+        row.get("scene_id")
+        or row.get("id")
+        or f"part_{part:02d}_scene_{global_number:04d}"
+    ).strip()
+
+    safe_id = "".join(
+        char if char.isalnum() or char in "-_" else "_"
+        for char in scene_id
+    )
+    if not safe_id:
+        safe_id = f"scene_{global_number:04d}"
+
+    folder = RENDER_DIR / f"part_{part:02d}"
+    return folder / f"{safe_id}.mp4"
+
+
+def resolve_duration(row):
+    """Use measured narration timing when supplied; retain auto otherwise."""
+    for key in (
+        "audio_duration",
+        "narration_duration",
+        "measured_duration",
+        "duration",
+        "scene_duration",
+        "duration_seconds",
+        "seconds",
+    ):
+        value = valid_duration(row.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def prepare_jobs(rows, expected_parts, scenes_per_part):
     prepared = []
-    seen = set()
-
-    expected_count = expected_parts * scenes_per_part
-
-    if len(rows) != expected_count:
-        raise RuntimeError(
-            "Visual job count does not match Input/topic.txt: "
-            f"expected {expected_count}, found {len(rows)}"
-        )
+    seen_ids = set()
+    seen_global = set()
+    main_mapping = set()
+    role_counts = {
+        role: {} for role in ROLE_ORDER
+    }
 
     for index, row in enumerate(rows, 1):
         if not isinstance(row, dict):
-            raise RuntimeError(f"Visual job {index} is not an object")
+            raise RuntimeError(f"Photo Motion job {index} is not an object")
 
-        try:
-            part = positive_int(row.get("part"), "part number")
-            local_scene = positive_int(
-                row.get("local_scene", row.get("scene")),
-                "local scene number",
-            )
-            global_scene = positive_int(
-                row.get("global_scene", row.get("global_scene_number", index)),
-                "global scene number",
-            )
-        except RuntimeError as exc:
-            raise RuntimeError(f"Visual job {index}: {exc}") from exc
-
-        expected_part = (index - 1) // scenes_per_part + 1
-        expected_scene = (index - 1) % scenes_per_part + 1
-
-        if (part, local_scene, global_scene) != (
-            expected_part, expected_scene, index
-        ):
+        part = positive_int(row.get("part"), "part")
+        if part > expected_parts:
             raise RuntimeError(
-                f"Scene mapping error at row {index}: "
-                f"found part={part}, scene={local_scene}, "
-                f"global={global_scene}; expected "
-                f"part={expected_part}, scene={expected_scene}, "
-                f"global={index}"
+                f"Job {index}: part {part} exceeds configured parts "
+                f"{expected_parts}"
             )
 
-        key = (part, local_scene)
-        if key in seen:
-            raise RuntimeError(f"Duplicate scene mapping: {key}")
-        seen.add(key)
+        role = normalize_role(row)
+        scene_id = str(
+            row.get("scene_id")
+            or row.get("id")
+            or ""
+        ).strip()
 
-        image_value = row.get("image_path") or row.get("image")
+        if not scene_id:
+            raise RuntimeError(f"Job {index}: scene_id is missing")
+        if scene_id in seen_ids:
+            raise RuntimeError(f"Duplicate scene_id: {scene_id}")
+        seen_ids.add(scene_id)
+
+        global_number = positive_int(
+            row.get("global_scene", row.get("global_scene_number", index)),
+            "global scene number",
+        )
+        if global_number in seen_global:
+            raise RuntimeError(
+                f"Duplicate global job number: {global_number}"
+            )
+        seen_global.add(global_number)
+
+        local_slot = positive_int(
+            row.get("local_scene", row.get("scene", index)),
+            "local image slot",
+        )
+
+        source_scene = row.get(
+            "source_scene_number",
+            row.get("source_local_scene"),
+        )
+
+        if role == "main":
+            source_scene = positive_int(
+                source_scene if source_scene is not None else local_slot,
+                "main source scene number",
+            )
+            if source_scene > scenes_per_part:
+                raise RuntimeError(
+                    f"{scene_id}: main scene number exceeds SCENES"
+                )
+            pair = (part, source_scene)
+            if pair in main_mapping:
+                raise RuntimeError(
+                    f"Duplicate main scene mapping: {pair}"
+                )
+            main_mapping.add(pair)
+        else:
+            if source_scene not in (None, ""):
+                source_scene = positive_int(
+                    source_scene,
+                    "extra scene source number",
+                )
+            else:
+                source_scene = None
+
         image = safe_path(
-            image_value,
-            f"scene {global_scene} image",
+            row.get("image_path") or row.get("image"),
+            f"{scene_id} image",
         )
+        width, height = image_dimensions(image, scene_id)
 
-        image_width, image_height = validate_image(
-            image,
-            global_scene,
-        )
+        duration = resolve_duration(row)
+        target = resolve_output_target(row, global_number)
 
         prepared.append({
-            "number": global_scene,
+            "number": global_number,
+            "scene_id": scene_id,
             "part": part,
-            "local_scene": local_scene,
+            "role": role,
+            "local_scene": local_slot,
+            "source_scene_number": source_scene,
             "image": image,
             "image_sha256": sha256_file(image),
-            "image_width": image_width,
-            "image_height": image_height,
-            "duration": scene_duration(row),
-            "target": RENDER_DIR / f"scene_{global_scene:04d}.mp4",
+            "image_width": width,
+            "image_height": height,
+            "duration": duration,
+            "duration_source": (
+                "measured_narration"
+                if duration is not None
+                else "awaiting_narration_timing"
+            ),
+            "target": target,
+            "source_job": dict(row),
         })
 
-    if len(seen) != expected_count:
-        raise RuntimeError("Some configured scenes are missing")
+        role_counts[role][part] = (
+            role_counts[role].get(part, 0) + 1
+        )
+
+    expected_main = {
+        (part, scene)
+        for part in range(1, expected_parts + 1)
+        for scene in range(1, scenes_per_part + 1)
+    }
+    if main_mapping != expected_main:
+        missing = sorted(expected_main - main_mapping)
+        extra = sorted(main_mapping - expected_main)
+        raise RuntimeError(
+            "Main scene mapping mismatch. "
+            f"Missing={missing[:20]}, extra={extra[:20]}"
+        )
+
+    for part in range(1, expected_parts + 1):
+        if role_counts["hook"].get(part, 0) != 1:
+            raise RuntimeError(
+                f"Part {part} must have exactly one Hook job"
+            )
+
+        if part < expected_parts:
+            if role_counts["suspense"].get(part, 0) != 1:
+                raise RuntimeError(
+                    f"Part {part} must have exactly one Suspense job"
+                )
+            if role_counts["resolution"].get(part, 0):
+                raise RuntimeError(
+                    f"Non-final part {part} cannot have Resolution"
+                )
+        else:
+            if role_counts["resolution"].get(part, 0) != 1:
+                raise RuntimeError(
+                    "Final part must have exactly one Resolution job"
+                )
+            if role_counts["suspense"].get(part, 0):
+                raise RuntimeError(
+                    "Final part cannot have Suspense"
+                )
+
+    prepared.sort(
+        key=lambda item: (
+            item["part"],
+            ROLE_ORDER[item["role"]],
+            item["source_scene_number"]
+            if item["source_scene_number"] is not None
+            else item["local_scene"],
+            item["number"],
+        )
+    )
 
     return prepared
 
 
 def read_depth_maps(prepared):
     data = read_json(DEPTH_FILE)
-
     if data is None:
         log("Depth manifest unavailable; 2D motion will be used.")
         return {}
@@ -320,157 +471,119 @@ def read_depth_maps(prepared):
             or []
         )
     else:
-        raise RuntimeError("Depth manifest has an invalid structure")
+        raise RuntimeError("Depth manifest has invalid structure")
 
     if not isinstance(rows, list):
-        raise RuntimeError("Depth manifest scene list is invalid")
+        raise RuntimeError("Depth manifest rows are invalid")
 
     expected = {
         item["number"]: item["image_sha256"]
         for item in prepared
     }
-
     result = {}
+
     from PIL import Image
 
     for row in rows:
         if not isinstance(row, dict):
             continue
-
         try:
             number = positive_int(
                 row.get("global_scene", row.get("scene")),
                 "depth scene number",
             )
+            if number not in expected:
+                continue
+
             path = safe_path(
                 row.get("depth_map")
                 or row.get("depth_path")
                 or row.get("path")
                 or row.get("file"),
-                f"scene {number} depth map",
+                f"depth map {number}",
             )
-        except RuntimeError:
-            continue
+            if path.stat().st_size < MIN_DEPTH_BYTES:
+                continue
+            if row.get("image_sha256") != expected[number]:
+                continue
 
-        if number not in expected:
-            continue
-
-        if path.stat().st_size < MIN_DEPTH_BYTES:
-            log(f"WARNING: Scene {number} depth map is too small")
-            continue
-
-        if row.get("image_sha256") != expected[number]:
-            log(f"WARNING: Scene {number} depth map is stale")
-            continue
-
-        try:
             with Image.open(path) as image:
                 image.verify()
-
             with Image.open(path) as image:
                 if image.width < 64 or image.height < 64:
-                    raise ValueError("Depth map is smaller than 64x64")
-                if image.mode not in {"1", "L", "I", "I;16", "F"}:
-                    image.convert("L")
+                    continue
 
+            actual_hash = sha256_file(path)
+            declared_hash = row.get("depth_sha256")
+            if declared_hash and declared_hash != actual_hash:
+                continue
+
+            model = str(row.get("model", "unknown"))
+            status = str(row.get("status", "unknown")).lower()
+            ai_depth = (
+                "depth-anything" in model.lower()
+                and "pseudo" not in status
+                and "fallback" not in status
+            )
+
+            result[number] = {
+                "path": path,
+                "depth_sha256": actual_hash,
+                "model": model,
+                "status": status,
+                "is_ai_depth": ai_depth,
+            }
         except Exception as exc:
-            log(f"WARNING: Scene {number} depth map rejected: {exc}")
-            continue
-
-        actual_hash = sha256_file(path)
-        declared_hash = row.get("depth_sha256")
-
-        if declared_hash and declared_hash != actual_hash:
-            log(f"WARNING: Scene {number} depth checksum mismatch")
-            continue
-
-        model = str(row.get("model", "unknown"))
-        status = str(row.get("status", "unknown")).lower()
-
-        is_ai_depth = (
-            "depth-anything" in model.lower()
-            and "pseudo" not in status
-            and "fallback" not in status
-        )
-
-        result[number] = {
-            "path": path,
-            "image_sha256": expected[number],
-            "depth_sha256": actual_hash,
-            "model": model,
-            "status": status,
-            "is_ai_depth": is_ai_depth,
-        }
+            log(f"WARNING: rejected depth row: {exc}")
 
     log("Validated depth maps:", len(result))
-    log("AI depth maps:", sum(
-        1 for item in result.values() if item["is_ai_depth"]
-    ))
-    log("Approximate depth maps:", sum(
-        1 for item in result.values() if not item["is_ai_depth"]
-    ))
-
     return result
 
 
 def previous_entries():
     data = read_json(MANIFEST_FILE, {})
-
-    if isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict):
-        rows = data.get("scenes", [])
-    else:
-        rows = []
-
+    rows = data if isinstance(data, list) else (
+        data.get("scenes", []) if isinstance(data, dict) else []
+    )
     result = {}
 
     if isinstance(rows, list):
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            try:
-                number = int(row.get("global_scene", row.get("scene")))
-                if number > 0:
-                    result[number] = row
-            except (TypeError, ValueError):
-                continue
-
+            key = str(row.get("scene_id") or "")
+            if key:
+                result[key] = row
     return result
 
 
 def build_effect_plan(prepared, depth_maps):
     seed = digest_data([
         {
-            "scene": item["number"],
+            "scene_id": item["scene_id"],
             "image": item["image_sha256"],
-            "duration": round(item["duration"], 4),
+            "duration": item["duration"],
         }
         for item in prepared
     ])
-
     rng = random.Random(int(seed[:16], 16))
     plan = {}
-    recent = []
+    recent_by_part = {}
 
     for item in prepared:
+        recent = recent_by_part.setdefault(item["part"], [])
         choices = list(EFFECTS)
-        depth = depth_maps.get(item["number"])
-
-        if depth:
+        if item["number"] in depth_maps:
             choices.extend(["parallax", "parallax"])
 
         available = [
             effect for effect in choices
             if effect not in recent
-        ]
-
-        if not available:
-            available = choices
+        ] or choices
 
         effect = rng.choice(available)
-        plan[item["number"]] = effect
-        recent = (recent + [effect])[-2:]
+        plan[item["scene_id"]] = effect
+        recent_by_part[item["part"]] = (recent + [effect])[-2:]
 
     return plan
 
@@ -494,26 +607,15 @@ def make_filter(effect, frames, width, height, fps):
         zoom = "1.16"
         progress = (
             f"(1-on/{denominator})"
-            if effect == "pan_left"
-            else f"on/{denominator}"
+            if effect == "pan_left" else f"on/{denominator}"
         )
         x = f"(iw-iw/zoom)*{progress}"
 
-    elif effect in {"pan_up", "pan_down"}:
-        zoom = "1.16"
+    elif effect in {"pan_up", "pan_down", "tilt_up", "tilt_down"}:
+        zoom = "1.13" if effect.startswith("tilt") else "1.16"
         progress = (
             f"(1-on/{denominator})"
-            if effect == "pan_up"
-            else f"on/{denominator}"
-        )
-        y = f"(ih-ih/zoom)*{progress}"
-
-    elif effect in {"tilt_up", "tilt_down"}:
-        zoom = "1.13"
-        progress = (
-            f"(1-on/{denominator})"
-            if effect == "tilt_up"
-            else f"on/{denominator}"
+            if effect.endswith("up") else f"on/{denominator}"
         )
         y = f"(ih-ih/zoom)*{progress}"
 
@@ -530,7 +632,6 @@ def make_filter(effect, frames, width, height, fps):
     elif effect.startswith("zoom_pan_"):
         zoom = f"min(1+0.14*on/{denominator},1.14)"
         direction = effect.rsplit("_", 1)[-1]
-
         if direction == "left":
             x = f"(iw-iw/zoom)*(1-on/{denominator})"
         elif direction == "right":
@@ -573,31 +674,27 @@ def make_filter(effect, frames, width, height, fps):
         "setsar=1",
         "format=yuv420p",
     ])
-
     return ",".join(filters)
+
 
 def probe_clip(path, ffprobe, width, height, expected_duration, fps):
     path = Path(path)
-
     if not path.is_file() or path.stat().st_size < MIN_VIDEO_BYTES:
-        raise RuntimeError(f"Rendered video is missing or too small: {path}")
+        raise RuntimeError(f"Rendered clip missing or too small: {path}")
 
     result = subprocess.run(
         [
-            ffprobe,
-            "-v", "error",
+            ffprobe, "-v", "error",
             "-show_entries",
             "stream=codec_type,width,height,r_frame_rate,avg_frame_rate:"
             "format=duration",
-            "-of", "json",
-            str(path),
+            "-of", "json", str(path),
         ],
         capture_output=True,
         text=True,
         timeout=90,
         check=False,
     )
-
     if result.returncode:
         raise RuntimeError(
             f"ffprobe failed for {path.name}: {result.stderr[-1500:]}"
@@ -606,56 +703,41 @@ def probe_clip(path, ffprobe, width, height, expected_duration, fps):
     try:
         data = json.loads(result.stdout)
         duration = float(data["format"]["duration"])
-        streams = data.get("streams", [])
-
         video = next(
-            (
-                stream for stream in streams
-                if stream.get("codec_type") == "video"
-            ),
-            None,
+            stream for stream in data.get("streams", [])
+            if stream.get("codec_type") == "video"
         )
-    except (ValueError, TypeError, KeyError) as exc:
+    except (ValueError, TypeError, KeyError, StopIteration) as exc:
         raise RuntimeError(
             f"Invalid media metadata for {path.name}"
         ) from exc
 
-    if video is None:
-        raise RuntimeError(f"No video stream in {path.name}")
-
-    actual_width = int(video.get("width", 0))
-    actual_height = int(video.get("height", 0))
-
-    if (actual_width, actual_height) != (width, height):
+    if (
+        int(video.get("width", 0)) != width
+        or int(video.get("height", 0)) != height
+    ):
         raise RuntimeError(
             f"{path.name}: expected {width}x{height}, "
-            f"got {actual_width}x{actual_height}"
+            f"got {video.get('width')}x{video.get('height')}"
         )
 
     if not math.isfinite(duration) or duration <= 0:
-        raise RuntimeError(f"Invalid duration in {path.name}")
+        raise RuntimeError(f"Invalid clip duration: {path.name}")
 
     tolerance = max(0.12, 2.0 / fps)
-
     if abs(duration - expected_duration) > tolerance:
         raise RuntimeError(
             f"{path.name}: duration {duration:.3f}s; "
             f"expected {expected_duration:.3f}s"
         )
 
-    rate = (
-        video.get("avg_frame_rate")
-        or video.get("r_frame_rate")
-        or ""
-    )
-
+    rate = video.get("avg_frame_rate") or video.get("r_frame_rate") or ""
     try:
         if "/" in rate:
             numerator, denominator = rate.split("/", 1)
             actual_fps = float(numerator) / float(denominator)
         else:
             actual_fps = float(rate)
-
         if (
             not math.isfinite(actual_fps)
             or abs(actual_fps - fps) > 0.5
@@ -664,45 +746,31 @@ def probe_clip(path, ffprobe, width, height, expected_duration, fps):
                 f"{path.name}: FPS {actual_fps}; expected {fps}"
             )
     except (ValueError, ZeroDivisionError):
-        raise RuntimeError(
-            f"Invalid frame rate in {path.name}: {rate!r}"
-        )
+        raise RuntimeError(f"Invalid FPS in {path.name}: {rate!r}")
 
     return duration
 
 
-def make_signature(
-    item,
-    effect,
-    depth,
-    frames,
-    fps,
-    mode,
-    width,
-    height,
-):
-    renderer_hash = sha256_file(Path(__file__))
+def make_signature(item, effect, depth, frames, fps, mode, width, height):
     parallax_script = ROOT / "scripts" / "depth_parallax.py"
-
     parallax_hash = (
         sha256_file(parallax_script)
         if effect == "parallax" and parallax_script.is_file()
         else None
     )
-
     return digest_data({
         "version": VERSION,
-        "renderer_sha256": renderer_hash,
+        "renderer_sha256": sha256_file(Path(__file__)),
         "parallax_sha256": parallax_hash,
-        "image_sha256": item["image_sha256"],
+        "scene_id": item["scene_id"],
+        "role": item["role"],
         "part": item["part"],
-        "local_scene": item["local_scene"],
+        "source_scene_number": item["source_scene_number"],
+        "image_sha256": item["image_sha256"],
         "duration": round(item["duration"], 5),
         "frames": frames,
         "effect": effect,
-        "depth_sha256": (
-            depth["depth_sha256"] if depth else None
-        ),
+        "depth_sha256": depth["depth_sha256"] if depth else None,
         "depth_model": depth["model"] if depth else None,
         "width": width,
         "height": height,
@@ -713,51 +781,33 @@ def make_signature(
     })
 
 
-def try_reuse(
-    item,
-    previous,
-    signature,
-    ffprobe,
-    expected_duration,
-    fps,
-    width,
-    height,
-):
+def try_reuse(item, previous, signature, ffprobe, duration, fps, width, height):
     if not isinstance(previous, dict):
         return None
-
     if previous.get("cache_signature") != signature:
         return None
 
     try:
-        path = safe_path(
-            previous.get("video"),
-            "cached scene video",
-        )
-
+        path = safe_path(previous.get("video"), "cached Photo Motion clip")
         if path != item["target"]:
             return None
-
         actual_hash = sha256_file(path)
-
         if previous.get("video_sha256") != actual_hash:
             return None
 
         actual_duration = probe_clip(
-            path,
-            ffprobe,
-            width,
-            height,
-            expected_duration,
-            fps,
+            path, ffprobe, width, height, duration, fps
         )
-
         row = dict(previous)
         row.update({
+            "scene_id": item["scene_id"],
+            "role": item["role"],
+            "scene_type": item["role"],
             "scene": item["number"],
             "global_scene": item["number"],
             "part": item["part"],
             "local_scene": item["local_scene"],
+            "source_scene_number": item["source_scene_number"],
             "image": item["image"].relative_to(ROOT).as_posix(),
             "image_sha256": item["image_sha256"],
             "video": path.relative_to(ROOT).as_posix(),
@@ -770,33 +820,21 @@ def try_reuse(
             "format": row.get("format"),
             "status": "completed",
         })
-
         return row
-
     except (OSError, ValueError, RuntimeError):
         return None
 
 
-def render_parallax(
-    item,
-    depth,
-    temporary,
-    frames,
-    fps,
-    width,
-    height,
-):
+def render_parallax(item, depth, temporary, frames, fps, width, height):
     script = ROOT / "scripts" / "depth_parallax.py"
-
     if not script.is_file():
         raise RuntimeError(
-            "Depth parallax renderer is missing: scripts/depth_parallax.py"
+            "Depth parallax renderer missing: scripts/depth_parallax.py"
         )
 
     run_command(
         [
-            sys.executable,
-            str(script),
+            sys.executable, str(script),
             "--image", str(item["image"]),
             "--depth", str(depth["path"]),
             "--output", str(temporary),
@@ -806,35 +844,17 @@ def render_parallax(
             "--frames", str(frames),
             "--strength", "0.026",
         ],
-        f"Depth parallax scene {item['number']}",
+        f"Depth parallax {item['scene_id']}",
         timeout=1800,
     )
 
 
-def render_2d(
-    item,
-    effect,
-    temporary,
-    frames,
-    fps,
-    width,
-    height,
-    ffmpeg,
-):
-    filters = make_filter(
-        effect,
-        frames,
-        width,
-        height,
-        fps,
-    )
-
+def render_2d(item, effect, temporary, frames, fps, width, height, ffmpeg):
+    filters = make_filter(effect, frames, width, height, fps)
     run_command(
         [
             ffmpeg,
-            "-hide_banner",
-            "-loglevel", "error",
-            "-y",
+            "-hide_banner", "-loglevel", "error", "-y",
             "-loop", "1",
             "-framerate", str(fps),
             "-i", str(item["image"]),
@@ -850,31 +870,17 @@ def render_2d(
             "-movflags", "+faststart",
             str(temporary),
         ],
-        f"2D Photo Motion scene {item['number']}",
+        f"2D Photo Motion {item['scene_id']}",
         timeout=1800,
     )
 
 
-def build_manifest(
-    entries,
-    mode,
-    width,
-    height,
-    fps,
-    expected_count,
-    status,
-    error=None,
-):
+def build_manifest(entries, mode, width, height, fps, prepared, status, error=None):
     rows = [
-        entries[number]
-        for number in sorted(entries)
+        entries[item["scene_id"]]
+        for item in prepared
+        if item["scene_id"] in entries
     ]
-
-    completed = sum(
-        row.get("status") == "completed"
-        for row in rows
-    )
-
     document = {
         "status": status,
         "version": VERSION,
@@ -883,105 +889,127 @@ def build_manifest(
         "width": width,
         "height": height,
         "fps": fps,
-        "expected_scene_count": expected_count,
-        "completed_count": completed,
-        "total_scenes": expected_count,
+        "expected_scene_count": len(prepared),
+        "completed_count": sum(
+            row.get("status") == "completed" for row in rows
+        ),
+        "total_scenes": len(prepared),
+        "scene_role_counts": {
+            role: sum(item["role"] == role for item in prepared)
+            for role in ROLE_ORDER
+        },
         "scenes": rows,
         "depth_parallax_count": sum(
-            row.get("effect_is_depth_guided") is True
-            for row in rows
+            row.get("effect_is_depth_guided") is True for row in rows
         ),
         "ai_depth_parallax_count": sum(
-            row.get("effect_uses_ai_depth") is True
-            for row in rows
+            row.get("effect_uses_ai_depth") is True for row in rows
         ),
         "approximate_depth_parallax_count": sum(
             row.get("depth_is_approximate_fallback") is True
             for row in rows
         ),
         "two_d_motion_count": sum(
-            row.get("effect_is_depth_guided") is False
-            for row in rows
+            row.get("effect_is_depth_guided") is False for row in rows
         ),
     }
-
     if error:
         document["last_error"] = str(error)[:2000]
-
     return document
+
+
+def build_checkpoint(entries, prepared, status, error=None):
+    rows = []
+    for item in prepared:
+        row = entries.get(item["scene_id"])
+        rows.append({
+            "scene_id": item["scene_id"],
+            "part": item["part"],
+            "role": item["role"],
+            "status": (
+                row.get("status", "pending")
+                if isinstance(row, dict) else "pending"
+            ),
+            "video": row.get("video") if isinstance(row, dict) else None,
+        })
+    result = {
+        "version": VERSION,
+        "stage": "photo_motion",
+        "status": status,
+        "total_jobs": len(prepared),
+        "completed_jobs": sum(
+            row["status"] == "completed" for row in rows
+        ),
+        "jobs": rows,
+    }
+    if error:
+        result["last_error"] = str(error)[:2000]
+    return result
+
+
+def resolve_output_dimensions(mode):
+    if mode == "short":
+        return 720, 1280
+    if mode == "full":
+        return 1280, 720
+    raise RuntimeError(f"Unsupported FORMAT: {mode}")
 
 
 def main():
     config = load_and_validate(ROOT / "Input" / "topic.txt")
-
     mode = str(get_format(config)).strip().lower()
-    configured_parts = positive_int(
-        get_parts(config),
-        "PARTS",
-    )
-    scenes_per_part = positive_int(
-        get_scenes(config),
-        "SCENES",
-    )
-    fps = positive_int(
-        get_fps(config),
-        "FPS",
-    )
-
-    if mode not in {"short", "full"}:
-        raise RuntimeError(f"Unsupported FORMAT: {mode}")
+    configured_parts = positive_int(get_parts(config), "PARTS")
+    scenes_per_part = positive_int(get_scenes(config), "SCENES")
+    fps = positive_int(get_fps(config), "FPS")
 
     if not 1 <= fps <= 60:
         raise RuntimeError(f"FPS must be between 1 and 60: {fps}")
 
-    if mode == "short":
-        width, height = 720, 1280
-    else:
-        width, height = 1280, 720
-
+    width, height = resolve_output_dimensions(mode)
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
-
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and ffprobe are required")
 
+    metadata, rows, jobs_source = load_job_document()
+    prepared = prepare_jobs(rows, configured_parts, scenes_per_part)
+
+    declared_parts = metadata.get("parts") or metadata.get("total_parts")
+    if declared_parts is not None and int(declared_parts) != configured_parts:
+        raise RuntimeError(
+            "Photo Motion job PARTS do not match Input/topic.txt"
+        )
+
+    declared_scenes = metadata.get("scenes_per_part")
+    if declared_scenes is not None and int(declared_scenes) != scenes_per_part:
+        raise RuntimeError(
+            "Photo Motion job SCENES do not match Input/topic.txt"
+        )
+
     RENDER_DIR.mkdir(parents=True, exist_ok=True)
-
-    expected_count = configured_parts * scenes_per_part
-
-    prepared = prepare_jobs(
-        load_job_rows(),
-        configured_parts,
-        scenes_per_part,
-    )
+    CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     depth_maps = read_depth_maps(prepared)
     effect_plan = build_effect_plan(prepared, depth_maps)
     previous = previous_entries()
 
-    expected_numbers = {
-        item["number"] for item in prepared
-    }
-
-    entries = {
-        number: row
-        for number, row in previous.items()
-        if number in expected_numbers
-    }
+    entries = {}
+    for item in prepared:
+        old = previous.get(item["scene_id"])
+        if isinstance(old, dict):
+            entries[item["scene_id"]] = old
 
     def checkpoint(status="in_progress", error=None):
         write_json(
             MANIFEST_FILE,
             build_manifest(
-                entries,
-                mode,
-                width,
-                height,
-                fps,
-                expected_count,
-                status,
-                error,
+                entries, mode, width, height, fps,
+                prepared, status, error,
             ),
+        )
+        write_json(
+            CHECKPOINT_FILE,
+            build_checkpoint(entries, prepared, status, error),
         )
 
     checkpoint()
@@ -994,45 +1022,44 @@ def main():
 
     log("=" * 60)
     log("PHOTO MOTION VERSION:", VERSION)
+    log("JOBS SOURCE:", jobs_source.relative_to(ROOT))
     log("FORMAT:", mode)
     log("RESOLUTION:", f"{width}x{height}")
     log("FPS:", fps)
     log("PARTS:", configured_parts)
-    log("SCENES PER PART:", scenes_per_part)
-    log("TOTAL SCENES:", expected_count)
+    log("MAIN SCENES PER PART:", scenes_per_part)
+    log("TOTAL CLIPS INCLUDING EXTRAS:", len(prepared))
     log("VALID DEPTH MAPS:", len(depth_maps))
     log("=" * 60)
 
     try:
         for index, item in enumerate(prepared, 1):
-            number = item["number"]
-            frames = max(1, round(item["duration"] * fps))
-            expected_duration = frames / fps
+            if item["duration"] is None:
+                raise RuntimeError(
+                    f"{item['scene_id']}: narration duration is not yet "
+                    "available. Photo Motion will not invent a fixed "
+                    "4/5-second duration. Run this stage after measured "
+                    "narration timing is written into the job records."
+                )
 
-            depth = depth_maps.get(number)
-            effect = effect_plan[number]
+            duration = item["duration"]
+            frames = max(1, round(duration * fps))
+            expected_duration = frames / fps
+            depth = depth_maps.get(item["number"])
+            effect = effect_plan[item["scene_id"]]
 
             if effect == "parallax" and depth is None:
                 effect = EFFECTS[(index - 1) % len(EFFECTS)]
 
-            used_depth = (
-                depth if effect == "parallax" else None
-            )
-
+            used_depth = depth if effect == "parallax" else None
             signature = make_signature(
-                item,
-                effect,
-                used_depth,
-                frames,
-                fps,
-                mode,
-                width,
-                height,
+                item, effect, used_depth, frames,
+                fps, mode, width, height,
             )
 
             cached = try_reuse(
                 item,
-                previous.get(number),
+                previous.get(item["scene_id"]),
                 signature,
                 ffprobe,
                 expected_duration,
@@ -1040,61 +1067,41 @@ def main():
                 width,
                 height,
             )
-
             if cached:
-                entries[number] = cached
+                entries[item["scene_id"]] = cached
                 reused += 1
                 checkpoint()
                 log(
-                    f"REUSED {index}/{expected_count}: "
-                    f"scene {number}"
+                    f"REUSED {index}/{len(prepared)} "
+                    f"{item['scene_id']} ({item['role']})"
                 )
                 continue
 
             target = item["target"]
+            target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(
                 target.stem + ".rendering.mp4"
             )
-
             temporary.unlink(missing_ok=True)
 
             try:
                 if effect == "parallax" and used_depth:
                     render_parallax(
-                        item,
-                        used_depth,
-                        temporary,
-                        frames,
-                        fps,
-                        width,
-                        height,
+                        item, used_depth, temporary,
+                        frames, fps, width, height,
                     )
                 else:
                     render_2d(
-                        item,
-                        effect,
-                        temporary,
-                        frames,
-                        fps,
-                        width,
-                        height,
-                        ffmpeg,
+                        item, effect, temporary,
+                        frames, fps, width, height, ffmpeg,
                     )
 
                 actual_duration = probe_clip(
-                    temporary,
-                    ffprobe,
-                    width,
-                    height,
-                    expected_duration,
-                    fps,
+                    temporary, ffprobe, width, height,
+                    expected_duration, fps,
                 )
-
-                if target.exists():
-                    target.unlink()
-
+                target.unlink(missing_ok=True)
                 temporary.replace(target)
-
             except Exception:
                 temporary.unlink(missing_ok=True)
                 raise
@@ -1107,11 +1114,15 @@ def main():
                 used_depth and not used_depth["is_ai_depth"]
             )
 
-            row = {
-                "scene": number,
-                "global_scene": number,
+            entries[item["scene_id"]] = {
+                "scene_id": item["scene_id"],
+                "role": item["role"],
+                "scene_type": item["role"],
+                "scene": item["number"],
+                "global_scene": item["number"],
                 "part": item["part"],
                 "local_scene": item["local_scene"],
+                "source_scene_number": item["source_scene_number"],
                 "image": item["image"].relative_to(ROOT).as_posix(),
                 "image_sha256": item["image_sha256"],
                 "video": target.relative_to(ROOT).as_posix(),
@@ -1121,16 +1132,15 @@ def main():
                     if used_depth else None
                 ),
                 "depth_map_available": depth is not None,
-                "depth_model": (
-                    used_depth["model"] if used_depth else None
-                ),
+                "depth_model": used_depth["model"] if used_depth else None,
                 "depth_is_ai_estimated": is_ai_depth,
                 "depth_is_approximate_fallback": is_approximate_depth,
                 "effect": effect,
                 "effect_is_depth_guided": effect == "parallax",
                 "effect_uses_ai_depth": is_ai_depth,
                 "duration": round(actual_duration, 5),
-                "requested_duration": item["duration"],
+                "requested_duration": duration,
+                "duration_source": item["duration_source"],
                 "frames": frames,
                 "width": width,
                 "height": height,
@@ -1142,84 +1152,60 @@ def main():
                 "status": "completed",
             }
 
-            entries[number] = row
             generated += 1
-
             ai_parallax += int(is_ai_depth)
             approximate_parallax += int(is_approximate_depth)
             two_d_motion += int(effect != "parallax")
 
             checkpoint()
-
             log(
-                f"COMPLETED {index}/{expected_count}: "
-                f"part={item['part']} scene={item['local_scene']} "
-                f"effect={effect} "
-                f"depth={'AI' if is_ai_depth else 'approximate' if is_approximate_depth else 'not used'}"
+                f"COMPLETED {index}/{len(prepared)} "
+                f"part={item['part']} role={item['role']} "
+                f"scene_id={item['scene_id']} effect={effect}"
             )
 
-        if set(entries) != expected_numbers:
-            missing = sorted(expected_numbers - set(entries))
+        expected_ids = {item["scene_id"] for item in prepared}
+        if set(entries) != expected_ids:
+            missing = sorted(expected_ids - set(entries))
             raise RuntimeError(
-                f"Photo Motion output is missing scenes: {missing}"
+                f"Photo Motion output missing scene IDs: {missing}"
             )
 
-        verified_rows = []
-
+        verified = []
         for item in prepared:
-            number = item["number"]
-            row = entries.get(number)
-
-            if not isinstance(row, dict):
+            row = entries.get(item["scene_id"])
+            if not isinstance(row, dict) or row.get("status") != "completed":
                 raise RuntimeError(
-                    f"Scene {number} manifest row is missing"
+                    f"{item['scene_id']}: completed manifest row missing"
                 )
-
-            if row.get("status") != "completed":
-                raise RuntimeError(
-                    f"Scene {number} is not marked completed"
-                )
-
             if row.get("image_sha256") != item["image_sha256"]:
                 raise RuntimeError(
-                    f"Scene {number} image checksum mismatch"
+                    f"{item['scene_id']}: image checksum mismatch"
                 )
 
             target = safe_path(
                 row.get("video"),
-                f"scene {number} rendered video",
+                f"{item['scene_id']} rendered video",
             )
-
             if target != item["target"]:
                 raise RuntimeError(
-                    f"Scene {number} has an unexpected video path"
+                    f"{item['scene_id']}: unexpected rendered path"
                 )
 
             frames = max(1, round(item["duration"] * fps))
             expected_duration = frames / fps
-
             probe_clip(
-                target,
-                ffprobe,
-                width,
-                height,
-                expected_duration,
-                fps,
+                target, ffprobe, width, height,
+                expected_duration, fps,
             )
-
-            actual_hash = sha256_file(target)
-
-            if row.get("video_sha256") != actual_hash:
+            if sha256_file(target) != row.get("video_sha256"):
                 raise RuntimeError(
-                    f"Scene {number} video checksum mismatch"
+                    f"{item['scene_id']}: video checksum mismatch"
                 )
+            verified.append(row)
 
-            verified_rows.append(row)
-
-        if len(verified_rows) != expected_count:
-            raise RuntimeError(
-                "Final Photo Motion scene count validation failed"
-            )
+        if len(verified) != len(prepared):
+            raise RuntimeError("Final Photo Motion clip count mismatch")
 
         checkpoint(status="completed")
 
@@ -1231,8 +1217,8 @@ def main():
     log("PHOTO MOTION COMPLETE")
     log("FORMAT:", mode)
     log("PARTS:", configured_parts)
-    log("SCENES PER PART:", scenes_per_part)
-    log("TOTAL SCENES:", expected_count)
+    log("MAIN SCENES PER PART:", scenes_per_part)
+    log("TOTAL CLIPS:", len(prepared))
     log("NEW CLIPS:", generated)
     log("REUSED CLIPS:", reused)
     log("AI DEPTH PARALLAX:", ai_parallax)
@@ -1251,3 +1237,4 @@ if __name__ == "__main__":
     except Exception as exc:
         log("PHOTO MOTION FAILED:", str(exc))
         sys.exit(1)
+
