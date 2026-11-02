@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build main, hook, suspense and resolution visual scene records."""
+"""Build validated, role-aware scene records for the Photo Motion pipeline."""
 
 import hashlib
 import json
@@ -24,10 +24,17 @@ OUTPUT_DIR = ROOT / "output/scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v6-separated-extra-scenes"
-SCENE_PROMPT_VERSION = 6
+VERSION = "photo-motion-scenes-v7-strict-role-checkpoints"
+SCENE_PROMPT_VERSION = 7
 
+ROLE_ORDER = {
+    "hook": 0,
+    "main": 1,
+    "suspense": 2,
+    "resolution": 3,
+}
 EXTRA_ROLES = ("hook", "suspense", "resolution")
+ALLOWED_ROLES = set(ROLE_ORDER)
 
 
 def log(message=""):
@@ -64,11 +71,13 @@ def read_json(path, required=False):
         if required:
             raise FileNotFoundError(f"Required file missing: {path}")
         return None
+
     try:
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except Exception as exc:
         raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
+
     if not isinstance(data, dict):
         raise RuntimeError(f"JSON root must be an object: {path}")
     return data
@@ -78,11 +87,13 @@ def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
+
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
+
     os.replace(temporary, path)
 
 
@@ -157,26 +168,44 @@ def build_settings(config):
     }
 
 
+def canonical_extra_id(part_number, role):
+    return f"part_{part_number:02d}_{role}"
+
+
+def canonical_main_id(part_number, scene_number):
+    return f"part_{part_number:02d}_scene_{scene_number:02d}"
+
+
 def validate_extra_source(record, role, part_number):
     if not isinstance(record, dict):
         raise RuntimeError(
             f"Part {part_number} {role} record is not an object."
         )
-    if clean(record.get("role")).lower() not in {"", role}:
+
+    declared_role = clean(record.get("role")).lower()
+    if declared_role != role:
         raise RuntimeError(
-            f"Part {part_number}: {role} record has an incorrect role."
+            f"Part {part_number}: expected role {role}, "
+            f"received {declared_role or 'missing'}."
         )
-    if not clean(record.get("scene_id")):
+
+    expected_id = canonical_extra_id(part_number, role)
+    actual_id = clean(record.get("scene_id"))
+
+    if actual_id != expected_id:
         raise RuntimeError(
-            f"Part {part_number}: {role} record has no scene_id."
+            f"Part {part_number} {role} scene_id must be "
+            f"{expected_id}; received {actual_id or 'missing'}."
         )
+
     if not clean(record.get("narration")):
         raise RuntimeError(
-            f"Part {part_number}: {role} narration is empty."
+            f"Part {part_number} {role} narration is empty."
         )
+
     if not clean(record.get("visual_prompt")):
         raise RuntimeError(
-            f"Part {part_number}: {role} visual_prompt is empty."
+            f"Part {part_number} {role} visual_prompt is empty."
         )
 
 
@@ -193,6 +222,12 @@ def validate_story_sources(ai_story):
     parts = ai_story.get("parts")
     if not isinstance(parts, list) or not parts:
         raise RuntimeError("ai_story.json has no story parts.")
+
+    if ai_story.get("total_parts") not in (None, len(parts)):
+        raise RuntimeError("ai_story.json total_parts mismatch.")
+
+    if ai_story.get("parts_count") not in (None, len(parts)):
+        raise RuntimeError("ai_story.json parts_count mismatch.")
 
     expected_items = []
     seen_ids = set()
@@ -213,26 +248,35 @@ def validate_story_sources(ai_story):
                 raise RuntimeError(
                     f"Part {part_number}, scene {scene_number} is invalid."
                 )
+
             if source.get("scene") != scene_number:
                 raise RuntimeError(
                     f"Main scene numbering error in part {part_number}: "
                     f"expected {scene_number}, got {source.get('scene')}."
                 )
 
-            scene_id = (
-                clean(source.get("scene_id"))
-                or f"part_{part_number:02d}_scene_{scene_number:02d}"
+            expected_id = canonical_main_id(
+                part_number, scene_number
             )
+            scene_id = clean(source.get("scene_id"))
+
+            if scene_id != expected_id:
+                raise RuntimeError(
+                    f"Main scene ID mismatch: expected {expected_id}, "
+                    f"received {scene_id or 'missing'}."
+                )
+
             if scene_id in seen_ids:
                 raise RuntimeError(f"Duplicate scene_id: {scene_id}")
             seen_ids.add(scene_id)
 
             narration = clean(source.get("narration"))
             visual = clean(source.get("visual_prompt"))
+
             if not narration or not visual:
                 raise RuntimeError(
-                    f"Part {part_number}, scene {scene_number} is missing "
-                    "narration or visual_prompt."
+                    f"Part {part_number}, scene {scene_number} "
+                    "is missing narration or visual_prompt."
                 )
 
             expected_items.append({
@@ -248,26 +292,42 @@ def validate_story_sources(ai_story):
             main_scene_total += 1
 
         is_final = part_number == len(parts)
-        extra_definitions = [
-            ("hook_scene", "hook", True),
-            ("suspense_scene", "suspense", not is_final),
-            ("resolution_scene", "resolution", is_final),
-        ]
 
-        for field, role, should_exist in extra_definitions:
+        # हर भाग में Hook अनिवार्य है।
+        # अंतिम भाग में Resolution अनिवार्य है।
+        # केवल non-final भाग में Suspense अनिवार्य है।
+        required_roles = {
+            "hook_scene": "hook",
+            "suspense_scene": "suspense",
+            "resolution_scene": "resolution",
+        }
+
+        for field, role in required_roles.items():
             record = part.get(field)
-            if not should_exist:
-                if record is not None:
-                    raise RuntimeError(
-                        f"Unexpected {role} record in part {part_number}."
-                    )
-                continue
 
-            if record is None:
+            if role == "hook":
+                should_exist = True
+            elif role == "suspense":
+                should_exist = not is_final
+            else:
+                should_exist = is_final
+
+            if should_exist and record is None:
+                raise RuntimeError(
+                    f"Part {part_number}: required {role} record missing."
+                )
+
+            if not should_exist and record is not None:
+                raise RuntimeError(
+                    f"Part {part_number}: unexpected {role} record."
+                )
+
+            if not should_exist:
                 continue
 
             validate_extra_source(record, role, part_number)
-            scene_id = clean(record.get("scene_id"))
+            scene_id = clean(record["scene_id"])
+
             if scene_id in seen_ids:
                 raise RuntimeError(f"Duplicate scene_id: {scene_id}")
             seen_ids.add(scene_id)
@@ -284,16 +344,17 @@ def validate_story_sources(ai_story):
             })
 
     declared_total = ai_story.get("total_scenes")
-    if declared_total is not None and int(declared_total) != main_scene_total:
-        raise RuntimeError(
-            f"Main total_scenes mismatch: {declared_total}/{main_scene_total}."
-        )
+    if declared_total is not None:
+        try:
+            declared_total = int(declared_total)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("total_scenes is not an integer.") from exc
 
-    declared_parts = ai_story.get("total_parts")
-    if declared_parts is not None and int(declared_parts) != len(parts):
-        raise RuntimeError(
-            f"total_parts mismatch: {declared_parts}/{len(parts)}."
-        )
+        if declared_total != main_scene_total:
+            raise RuntimeError(
+                f"Main total_scenes mismatch: "
+                f"{declared_total}/{main_scene_total}."
+            )
 
     return mode, parts, expected_items, main_scene_total
 
@@ -311,30 +372,44 @@ def load_character_bible(settings):
             "status": "disabled",
             "characters": [],
             "scene_character_map": [],
+            "scene_roles": [],
             "world": {},
         }
 
     status = clean(bible.get("status")).lower()
     if status not in {"completed", "disabled"}:
         raise RuntimeError(
-            f"Character Bible status is not usable: {status or 'missing'}."
+            f"Character Bible status is not usable: "
+            f"{status or 'missing'}."
         )
 
     characters = bible.get("characters", [])
     scene_map = bible.get("scene_character_map", [])
+    scene_roles = bible.get("scene_roles", [])
     world = bible.get("world", {})
 
     if not isinstance(characters, list):
         raise RuntimeError("Character Bible characters must be an array.")
     if not isinstance(scene_map, list):
-        raise RuntimeError("Character Bible scene_character_map must be an array.")
+        raise RuntimeError(
+            "Character Bible scene_character_map must be an array."
+        )
+    if not isinstance(scene_roles, list):
+        raise RuntimeError("Character Bible scene_roles must be an array.")
     if not isinstance(world, dict):
         raise RuntimeError("Character Bible world must be an object.")
 
     return {
         "status": status,
-        "characters": [x for x in characters if isinstance(x, dict)],
-        "scene_character_map": [x for x in scene_map if isinstance(x, dict)],
+        "characters": [
+            row for row in characters if isinstance(row, dict)
+        ],
+        "scene_character_map": [
+            row for row in scene_map if isinstance(row, dict)
+        ],
+        "scene_roles": [
+            row for row in scene_roles if isinstance(row, dict)
+        ],
         "world": world,
     }
 
@@ -342,42 +417,64 @@ def load_character_bible(settings):
 def normalize_names(values):
     if values is None:
         return []
+
     if not isinstance(values, list):
         values = [values]
 
     result = []
     seen = set()
+
     for value in values:
         value = clean(value)
-        if value and value.casefold() not in seen:
-            seen.add(value.casefold())
+        key = value.casefold()
+
+        if value and key not in seen:
+            seen.add(key)
             result.append(value)
+
     return result
 
 
-def find_scene_character_map(bible, part_number, scene_number):
-    if scene_number is None:
-        return []
+def find_scene_character_map(bible, scene_id, part_number, scene_number):
+    for row in bible.get("scene_roles", []):
+        if clean(row.get("scene_id")) == scene_id:
+            return normalize_names(
+                row.get("character_ids")
+                or row.get("characters")
+                or []
+            )
 
     for row in bible.get("scene_character_map", []):
-        try:
-            row_part = int(row.get("part", -1))
-            row_scene = int(row.get("scene", -1))
-        except (TypeError, ValueError):
-            continue
-        if row_part == part_number and row_scene == scene_number:
+        if clean(row.get("scene_id")) == scene_id:
             return normalize_names(
-                row.get("characters")
-                or row.get("character_ids")
+                row.get("character_ids")
+                or row.get("characters")
                 or row.get("character_names")
                 or []
             )
+
+        if scene_number is not None:
+            try:
+                row_part = int(row.get("part", -1))
+                row_scene = int(row.get("scene", -1))
+            except (TypeError, ValueError):
+                continue
+
+            if row_part == part_number and row_scene == scene_number:
+                return normalize_names(
+                    row.get("characters")
+                    or row.get("character_ids")
+                    or row.get("character_names")
+                    or []
+                )
+
     return []
 
 
 def find_character_records(bible, references):
     if not references:
         return []
+
     wanted = {value.casefold() for value in references}
     matches = []
 
@@ -387,17 +484,24 @@ def find_character_records(bible, references):
             clean(character.get("name")),
             clean(character.get("character_id")),
         )
-        if any(value and value.casefold() in wanted for value in candidates):
+
+        if any(
+            value and value.casefold() in wanted
+            for value in candidates
+        ):
             matches.append(character)
+
     return matches
 
 
 def character_summary(records):
     summaries = []
     fields = (
-        "id", "name", "age", "appearance", "face", "hair", "clothing",
-        "distinctive_features", "personality", "visual_identity", "description",
+        "id", "name", "age", "appearance", "face", "hair",
+        "clothing", "distinctive_features", "personality",
+        "visual_identity", "description",
     )
+
     for item in records:
         summary = {
             key: item[key]
@@ -408,26 +512,35 @@ def character_summary(records):
         }
         if summary:
             summaries.append(summary)
+
     return summaries
 
 
 def build_negative_prompt(source, settings):
     values = []
+
     if settings["negative_prompt"]:
         values.extend([
             "cartoon", "anime", "comic-book illustration",
-            "2D illustration", "3D animated character", "plastic skin",
-            "waxy face", "unrealistic anatomy", "extra fingers",
-            "missing fingers", "duplicated people", "distorted face",
-            "floating objects", "unintended text", "subtitles",
-            "watermark", "logo",
+            "2D illustration", "3D animated character",
+            "plastic skin", "waxy face", "unrealistic anatomy",
+            "extra fingers", "missing fingers", "duplicated people",
+            "distorted face", "floating objects", "unintended text",
+            "subtitles", "watermark", "logo",
         ])
+
         if settings["avoid_cartoon"]:
-            values.extend(["cartoon style", "animated look", "drawn style"])
+            values.extend([
+                "cartoon style", "animated look", "drawn style"
+            ])
         if settings["avoid_neon"]:
-            values.extend(["unnecessary neon", "artificial neon glow"])
+            values.extend([
+                "unnecessary neon", "artificial neon glow"
+            ])
         if settings["avoid_glitch"]:
-            values.extend(["glitch effect", "digital distortion"])
+            values.extend([
+                "glitch effect", "digital distortion"
+            ])
 
     original = clean(source.get("negative_prompt"))
     if original:
@@ -435,11 +548,13 @@ def build_negative_prompt(source, settings):
 
     unique = []
     seen = set()
+
     for value in values:
         key = value.casefold()
         if key not in seen:
             seen.add(key)
             unique.append(value)
+
     return ", ".join(unique)
 
 
@@ -453,14 +568,17 @@ def build_visual_prompt(
 ):
     original = clean(source.get("visual_prompt"))
     if not original:
-        raise RuntimeError(f"{role} scene has an empty visual prompt.")
+        raise RuntimeError(
+            f"{role} scene has an empty visual prompt."
+        )
 
     pieces = [
         original,
         (
             "Photorealistic live-action cinematic film still. "
             f"Visual style: {settings['visual_style']}; "
-            f"realism: {settings['realism']}; quality: {settings['quality']}."
+            f"realism: {settings['realism']}; "
+            f"quality: {settings['quality']}."
         ),
     ]
 
@@ -468,38 +586,45 @@ def build_visual_prompt(
     if action:
         pieces.append("Physical action: " + action)
 
-    camera = clean(source.get("camera_prompt") or source.get("camera"))
+    camera = clean(
+        source.get("camera_prompt") or source.get("camera")
+    )
     if camera:
         pieces.append("Camera direction: " + camera)
     elif settings["cinematic_camera"]:
         pieces.append(
-            "Use purposeful cinematic framing, natural perspective and "
-            "physically plausible camera movement."
+            "Use purposeful cinematic framing, natural perspective "
+            "and physically plausible camera movement."
         )
 
-    lighting = clean(source.get("lighting_prompt") or source.get("lighting"))
+    lighting = clean(
+        source.get("lighting_prompt") or source.get("lighting")
+    )
     if lighting:
         pieces.append("Lighting direction: " + lighting)
     elif settings["realistic_lighting"]:
         pieces.append(
-            "Use physically plausible natural or motivated cinematic light, "
-            "realistic shadows and natural skin tones."
+            "Use physically plausible natural or motivated cinematic "
+            "light, realistic shadows and natural skin tones."
         )
 
     mood = clean(source.get("mood")) or settings["mood"]
     pieces.append("Emotional tone: " + mood)
 
-    world_context = clean(
+    location = clean(
         source.get("world_context") or source.get("location")
     )
-    if world_context:
-        pieces.append("Story location: " + world_context)
+    if location:
+        pieces.append("Story location: " + location)
 
     if settings["character_consistency"] and character_records:
         pieces.append(
-            "Preserve the exact established character identities, face, age, "
-            "hair, body type and clothing: "
-            + json.dumps(character_summary(character_records), ensure_ascii=False)
+            "Preserve the exact established character identities, "
+            "face, age, hair, body type and clothing: "
+            + json.dumps(
+                character_summary(character_records),
+                ensure_ascii=False,
+            )
         )
 
     if settings["world_consistency"] and world:
@@ -509,13 +634,18 @@ def build_visual_prompt(
         )
 
     if settings["scene_continuity"] and previous_scene:
-        previous_location = clean(previous_scene.get("world_context"))
+        previous_location = clean(
+            previous_scene.get("world_context")
+        )
         previous_characters = normalize_names(
             previous_scene.get("character_ids", [])
         )
+
         continuity = []
         if previous_location:
-            continuity.append("Previous location: " + previous_location)
+            continuity.append(
+                "Previous location: " + previous_location
+            )
         if previous_characters:
             continuity.append(
                 "Maintain recurring character identities: "
@@ -526,26 +656,26 @@ def build_visual_prompt(
 
     if settings["natural_motion"]:
         pieces.append(
-            "Depict believable body mechanics, natural gestures, subtle "
-            "environmental movement and realistic interaction with objects."
+            "Depict believable body mechanics, natural gestures, "
+            "subtle environmental movement and realistic interaction "
+            "with objects."
         )
 
     pieces.append(
-        "Show only the approved story event. Do not add unrelated people, "
-        "objects or events. Do not render captions, subtitles, labels or text."
+        "Show only the approved story event. Do not add unrelated "
+        "people, objects or events. Do not render captions, subtitles, "
+        "labels or text."
     )
+
     return "\n".join(pieces).strip()
 
-def build_scene_record(
-    item,
-    settings,
-    bible,
-    previous_scene,
-):
+
+def build_scene_record(item, settings, bible, previous_scene):
     source = item["source"]
     part_number = item["part"]
     scene_number = item["scene"]
     role = item["role"]
+    scene_id = item["scene_id"]
 
     references = normalize_names(
         source.get("characters")
@@ -553,13 +683,18 @@ def build_scene_record(
         or source.get("character_names")
     )
 
-    mapped = find_scene_character_map(
-        bible, part_number, scene_number
-    )
     if not references:
-        references = mapped
+        references = find_scene_character_map(
+            bible,
+            scene_id,
+            part_number,
+            scene_number,
+        )
 
-    character_records = find_character_records(bible, references)
+    character_records = find_character_records(
+        bible, references
+    )
+
     world = bible.get("world", {})
 
     visual_prompt = build_visual_prompt(
@@ -570,12 +705,6 @@ def build_scene_record(
         previous_scene=previous_scene,
         role=role,
     )
-
-    if not references and character_records:
-        references = normalize_names([
-            item.get("id") or item.get("name")
-            for item in character_records
-        ])
 
     camera_prompt = clean(
         source.get("camera_prompt")
@@ -600,15 +729,20 @@ def build_scene_record(
         if settings["sfx"] else ""
     )
     ambient = (
-        clean(source.get("ambient_sound") or source.get("ambient_prompt"))
+        clean(
+            source.get("ambient_sound")
+            or source.get("ambient_prompt")
+        )
         if settings["ambient_sound"] else ""
     )
     music = (
-        clean(source.get("music_prompt") or source.get("music_direction"))
+        clean(
+            source.get("music_prompt")
+            or source.get("music_direction")
+        )
         if settings["music"] else ""
     )
 
-    scene_id = item["scene_id"]
     scene_title = clean(source.get("title"))
     if not scene_title:
         scene_title = (
@@ -660,18 +794,26 @@ def build_scene_record(
         "source_scene_signature": digest(source),
     }
 
-
 def scene_order_key(scene):
-    role_order = {
-        "hook": 0,
-        "main": 1,
-        "suspense": 2,
-        "resolution": 3,
-    }
+    role = clean(scene.get("role")).lower()
+
+    try:
+        part = int(scene.get("part"))
+    except (TypeError, ValueError):
+        raise RuntimeError("Scene has an invalid part number.")
+
+    try:
+        local_scene = int(scene.get("scene") or 0)
+    except (TypeError, ValueError):
+        raise RuntimeError("Scene has an invalid local scene number.")
+
+    if role not in ROLE_ORDER:
+        raise RuntimeError(f"Unsupported scene role: {role!r}")
+
     return (
-        int(scene.get("part", 0)),
-        role_order.get(clean(scene.get("role")).lower(), 9),
-        int(scene.get("scene") or 0),
+        part,
+        ROLE_ORDER[role],
+        local_scene,
         clean(scene.get("scene_id")),
     )
 
@@ -680,9 +822,17 @@ def scene_is_valid(scene, expected):
     if not isinstance(scene, dict):
         return False
 
-    for key in ("part", "scene_id", "role"):
-        if scene.get(key) != expected.get(key):
-            return False
+    if scene.get("part") != expected["part"]:
+        return False
+
+    if scene.get("scene") != expected["scene"]:
+        return False
+
+    if clean(scene.get("scene_id")) != expected["scene_id"]:
+        return False
+
+    if clean(scene.get("role")) != expected["role"]:
+        return False
 
     if scene.get("status") != "completed":
         return False
@@ -690,12 +840,15 @@ def scene_is_valid(scene, expected):
     if clean(scene.get("narration")) != expected["narration"]:
         return False
 
-    if scene.get("source_scene_signature") != digest(expected["source"]):
+    if scene.get("source_scene_signature") != digest(
+        expected["source"]
+    ):
         return False
 
     for field in (
         "narration",
         "visual_prompt",
+        "negative_prompt",
         "camera_prompt",
         "lighting_prompt",
     ):
@@ -713,6 +866,13 @@ def load_existing_scenes(signature, settings):
     if not isinstance(data, dict):
         return {}
 
+    if data.get("version") != VERSION:
+        log("Existing scene version differs; old records will not be reused.")
+        return {}
+
+    if data.get("scene_prompt_version") != SCENE_PROMPT_VERSION:
+        return {}
+
     if data.get("generation_signature") != signature:
         log("Existing scenes have a different signature; not reusing them.")
         return {}
@@ -722,12 +882,21 @@ def load_existing_scenes(signature, settings):
         return {}
 
     result = {}
-    for scene in rows:
-        if not isinstance(scene, dict):
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        scene_id = clean(scene.get("scene_id"))
-        if scene_id:
-            result[scene_id] = scene
+
+        scene_id = clean(row.get("scene_id"))
+        if not scene_id:
+            continue
+
+        if scene_id in result:
+            raise RuntimeError(
+                f"Duplicate scene_id in existing scenes.json: {scene_id}"
+            )
+
+        result[scene_id] = row
+
     return result
 
 
@@ -737,6 +906,9 @@ def load_checkpoint(signature, settings):
 
     data = read_json(CHECKPOINT_FILE, required=False)
     if not isinstance(data, dict):
+        return set()
+
+    if data.get("version") != VERSION:
         return set()
 
     if data.get("generation_signature") != signature:
@@ -755,47 +927,133 @@ def load_checkpoint(signature, settings):
 
 def save_checkpoint(signature, completed_ids, total):
     completed = sorted(set(completed_ids))
+
     write_json(
         CHECKPOINT_FILE,
         {
             "version": VERSION,
             "status": (
-                "completed" if len(completed) == total else "in_progress"
+                "completed" if len(completed) == total
+                else "in_progress"
             ),
             "generation_signature": signature,
             "total_scenes": total,
             "completed_scene_ids": completed,
             "completed_count": len(completed),
-            "remaining_scenes": max(0, total - len(completed)),
+            "remaining_scenes": max(
+                0, total - len(completed)
+            ),
             "updated_at": int(time.time()),
         },
     )
 
 
-def validate_final_scenes(scenes, expected_items):
+def validate_role_counts(scenes, total_parts):
+    counts = {
+        role: {}
+        for role in ROLE_ORDER
+    }
+
+    for scene in scenes:
+        role = clean(scene.get("role")).lower()
+        part = scene.get("part")
+
+        if role not in ALLOWED_ROLES:
+            raise RuntimeError(
+                f"Unsupported scene role in final output: {role!r}"
+            )
+
+        counts[role][part] = counts[role].get(part, 0) + 1
+
+    for part in range(1, total_parts + 1):
+        if counts["hook"].get(part, 0) != 1:
+            raise RuntimeError(
+                f"Part {part} must contain exactly one Hook."
+            )
+
+        if part < total_parts:
+            if counts["suspense"].get(part, 0) != 1:
+                raise RuntimeError(
+                    f"Non-final part {part} must contain exactly "
+                    "one Suspense."
+                )
+
+            if counts["resolution"].get(part, 0) != 0:
+                raise RuntimeError(
+                    f"Non-final part {part} cannot contain Resolution."
+                )
+        else:
+            if counts["resolution"].get(part, 0) != 1:
+                raise RuntimeError(
+                    "Final part must contain exactly one Resolution."
+                )
+
+            if counts["suspense"].get(part, 0) != 0:
+                raise RuntimeError(
+                    "Final part cannot contain Suspense."
+                )
+
+    return counts
+
+
+def validate_final_scenes(scenes, expected_items, total_parts):
     expected_by_id = {
         item["scene_id"]: item
         for item in expected_items
     }
+
+    if len(expected_by_id) != len(expected_items):
+        raise RuntimeError("Source scene IDs are not unique.")
+
     actual_ids = set()
 
     for scene in scenes:
         if not isinstance(scene, dict):
-            raise RuntimeError("Output contains an invalid scene object.")
+            raise RuntimeError(
+                "Output contains an invalid scene object."
+            )
 
         scene_id = clean(scene.get("scene_id"))
         if not scene_id:
-            raise RuntimeError("Output scene is missing scene_id.")
+            raise RuntimeError(
+                "Output scene is missing scene_id."
+            )
+
         if scene_id in actual_ids:
-            raise RuntimeError(f"Duplicate scene_id in output: {scene_id}")
+            raise RuntimeError(
+                f"Duplicate scene_id in output: {scene_id}"
+            )
+
         if scene_id not in expected_by_id:
-            raise RuntimeError(f"Unexpected scene in output: {scene_id}")
+            raise RuntimeError(
+                f"Unexpected scene in output: {scene_id}"
+            )
 
         actual_ids.add(scene_id)
         expected = expected_by_id[scene_id]
 
         if not scene_is_valid(scene, expected):
-            raise RuntimeError(f"Scene validation failed: {scene_id}")
+            raise RuntimeError(
+                f"Scene validation failed: {scene_id}"
+            )
+
+        if scene.get("is_extra_scene") != (
+            expected["role"] != "main"
+        ):
+            raise RuntimeError(
+                f"Extra-scene flag mismatch: {scene_id}"
+            )
+
+        if expected["role"] == "main":
+            if scene.get("scene") != expected["scene"]:
+                raise RuntimeError(
+                    f"Main scene number changed: {scene_id}"
+                )
+        elif scene.get("scene") is not None:
+            raise RuntimeError(
+                f"Extra scene must not occupy a main scene number: "
+                f"{scene_id}"
+            )
 
     missing = sorted(set(expected_by_id) - actual_ids)
     if missing:
@@ -805,12 +1063,17 @@ def validate_final_scenes(scenes, expected_items):
 
     if len(scenes) != len(expected_items):
         raise RuntimeError(
-            f"Scene count mismatch: {len(scenes)}/{len(expected_items)}"
+            f"Scene count mismatch: "
+            f"{len(scenes)}/{len(expected_items)}"
         )
 
     ordered = sorted(scenes, key=scene_order_key)
     if scenes != ordered:
-        raise RuntimeError("Scene records are not in required part/role order.")
+        raise RuntimeError(
+            "Scene records are not in required part/role order."
+        )
+
+    validate_role_counts(scenes, total_parts)
 
 
 def build_output_metadata(
@@ -823,9 +1086,25 @@ def build_output_metadata(
     main_scene_total,
 ):
     parts = ai_story.get("parts", [])
+
     role_counts = {
-        role: sum(1 for item in scenes if item.get("role") == role)
-        for role in ("hook", "main", "suspense", "resolution")
+        role: sum(
+            1 for item in scenes
+            if item.get("role") == role
+        )
+        for role in ROLE_ORDER
+    }
+
+    part_role_counts = {
+        str(part): {
+            role: sum(
+                1 for item in scenes
+                if item.get("part") == part
+                and item.get("role") == role
+            )
+            for role in ROLE_ORDER
+        }
+        for part in range(1, len(parts) + 1)
     }
 
     return {
@@ -839,16 +1118,22 @@ def build_output_metadata(
         "generation_method": "offline_story_prompt_enrichment",
         "generation_signature": signature,
         "source_story_file": str(AI_STORY_FILE),
-        "character_bible_status": bible.get("status", "unknown"),
+        "character_bible_status": bible.get(
+            "status", "unknown"
+        ),
         "total_parts": len(parts),
         "total_scenes": len(scenes),
         "total_main_scenes": main_scene_total,
         "total_extra_scenes": len(scenes) - main_scene_total,
         "scene_role_counts": role_counts,
+        "part_role_counts": part_role_counts,
         "completed_scenes": sum(
-            1 for item in scenes if item.get("status") == "completed"
+            1 for item in scenes
+            if item.get("status") == "completed"
         ),
-        "scene_order": "part_then_hook_then_main_then_suspense_or_resolution",
+        "scene_order": (
+            "part_then_hook_then_main_then_suspense_or_resolution"
+        ),
         "input_config": settings,
         "scenes": scenes,
     }
@@ -863,6 +1148,7 @@ def main():
     settings = build_settings(config)
 
     ai_story = read_json(AI_STORY_FILE, required=True)
+
     mode, parts, expected_items, main_scene_total = (
         validate_story_sources(ai_story)
     )
@@ -874,9 +1160,17 @@ def main():
         )
 
     bible = load_character_bible(settings)
-    topic = clean(get_topic(config)) or clean(ai_story.get("topic"))
+
+    topic = (
+        clean(get_topic(config))
+        or clean(ai_story.get("topic"))
+    )
+
     input_story_text = clean(get_story_text(config))
-    story_text = clean(ai_story.get("story_text"))
+    story_text = (
+        clean(ai_story.get("story_text"))
+        or input_story_text
+    )
 
     signature = digest({
         "version": VERSION,
@@ -884,6 +1178,7 @@ def main():
         "format": mode,
         "topic": topic,
         "input_story_text": input_story_text,
+        "story_text": story_text,
         "ai_story": ai_story,
         "character_bible": bible,
         "settings": settings,
@@ -893,10 +1188,19 @@ def main():
     total_records = len(expected_items)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    existing = load_existing_scenes(signature, settings)
-    checkpoint = load_checkpoint(signature, settings)
+    existing = load_existing_scenes(
+        signature,
+        settings,
+    )
+    checkpoint = load_checkpoint(
+        signature,
+        settings,
+    )
 
     expected_by_id = {
         item["scene_id"]: item
@@ -904,51 +1208,62 @@ def main():
     }
 
     completed = {}
+
     for scene_id, item in expected_by_id.items():
         cached = existing.get(scene_id)
+
         if not scene_is_valid(cached, item):
             continue
 
-        if (
-            settings["skip_completed"]
-            and (scene_id in checkpoint or scene_id in existing)
-        ):
+        if not settings["skip_completed"]:
+            continue
+
+        # Checkpoint में नाम होने पर भी पूरा cached record दोबारा
+        # validate किए बिना reuse नहीं किया जाएगा।
+        if scene_id in checkpoint or scene_id in existing:
             completed[scene_id] = cached
 
     log(f"Format                  : {mode}")
     log(f"Parts                   : {total_parts}")
     log(f"Main scenes             : {main_scene_total}")
-    log(f"Extra scenes            : {total_records - main_scene_total}")
+    log(
+        f"Extra scenes            : "
+        f"{total_records - main_scene_total}"
+    )
     log(f"All scene records       : {total_records}")
     log(f"Character Bible         : {bible['status']}")
-    log(f"Reusable completed      : {len(completed)}/{total_records}")
+    log(
+        f"Reusable completed      : "
+        f"{len(completed)}/{total_records}"
+    )
     log("Scene generation mode   : OFFLINE")
     log("Additional Gemini calls : 0")
     log("=" * 60)
 
     for index, item in enumerate(expected_items, 1):
         scene_id = item["scene_id"]
+
         if scene_id in completed:
             log(
-                f"[{index}/{total_records}] {scene_id} reused; no API call."
+                f"[{index}/{total_records}] "
+                f"{scene_id} reused; no API call."
             )
             continue
 
+        current_key = (
+            item["part"],
+            ROLE_ORDER[item["role"]],
+            int(item["scene"] or 0),
+            scene_id,
+        )
+
         earlier = [
-            scene for scene in completed.values()
-            if scene_order_key(scene) < (
-                item["part"],
-                {
-                    "hook": 0,
-                    "main": 1,
-                    "suspense": 2,
-                    "resolution": 3,
-                }.get(item["role"], 9),
-                int(item["scene"] or 0),
-                scene_id,
-            )
+            scene
+            for scene in completed.values()
+            if scene_order_key(scene) < current_key
         ]
         earlier.sort(key=scene_order_key)
+
         previous_scene = earlier[-1] if earlier else None
 
         scene = build_scene_record(
@@ -962,24 +1277,35 @@ def main():
             raise RuntimeError(
                 f"Narration changed unexpectedly: {scene_id}"
             )
+
         if not scene["visual_prompt"]:
-            raise RuntimeError(f"Empty visual prompt: {scene_id}")
+            raise RuntimeError(
+                f"Empty visual prompt: {scene_id}"
+            )
+
+        if scene["scene_id"] != scene_id:
+            raise RuntimeError(
+                f"Scene ID changed unexpectedly: {scene_id}"
+            )
 
         completed[scene_id] = scene
+
         ordered_completed = sorted(
             completed.values(),
             key=scene_order_key,
         )
 
+        # प्रत्येक सफल scene के बाद scenes.json सुरक्षित करें।
         output = build_output_metadata(
-            ai_story,
-            settings,
-            bible,
-            signature,
-            ordered_completed,
-            "in_progress",
-            main_scene_total,
+            ai_story=ai_story,
+            settings=settings,
+            bible=bible,
+            signature=signature,
+            scenes=ordered_completed,
+            status="in_progress",
+            main_scene_total=main_scene_total,
         )
+
         write_json(OUTPUT_FILE, output)
 
         if settings["save_checkpoint"]:
@@ -990,8 +1316,8 @@ def main():
             )
 
         log(
-            f"[{index}/{total_records}] Saved {scene_id} "
-            f"({item['role']})."
+            f"[{index}/{total_records}] "
+            f"Saved {scene_id} ({item['role']})."
         )
 
     final_scenes = sorted(
@@ -999,18 +1325,24 @@ def main():
         key=scene_order_key,
     )
 
-    validate_final_scenes(final_scenes, expected_items)
+    validate_final_scenes(
+        final_scenes,
+        expected_items,
+        total_parts,
+    )
 
     final_output = build_output_metadata(
-        ai_story,
-        settings,
-        bible,
-        signature,
-        final_scenes,
-        "completed",
-        main_scene_total,
+        ai_story=ai_story,
+        settings=settings,
+        bible=bible,
+        signature=signature,
+        scenes=final_scenes,
+        status="completed",
+        main_scene_total=main_scene_total,
     )
+
     final_output["completed_at"] = int(time.time())
+
     write_json(OUTPUT_FILE, final_output)
 
     save_checkpoint(
@@ -1023,8 +1355,14 @@ def main():
     log("SCENE GENERATION COMPLETED")
     log(f"Parts                   : {total_parts}")
     log(f"Main scenes             : {main_scene_total}")
-    log(f"Extra scenes            : {total_records - main_scene_total}")
-    log(f"All scene records       : {len(final_scenes)}/{total_records}")
+    log(
+        f"Extra scenes            : "
+        f"{total_records - main_scene_total}"
+    )
+    log(
+        f"All scene records       : "
+        f"{len(final_scenes)}/{total_records}"
+    )
     log("Additional Gemini calls : 0")
     log(f"Output                  : {OUTPUT_FILE}")
     log(f"Checkpoint              : {CHECKPOINT_FILE}")
@@ -1035,8 +1373,14 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        log("Scene generation interrupted. Completed checkpoints preserved.")
+        log(
+            "Scene generation interrupted. "
+            "Completed checkpoints preserved."
+        )
         raise SystemExit(130)
     except Exception as exc:
-        log(f"SCENE GENERATION FAILED: {type(exc).__name__}: {exc}")
+        log(
+            f"SCENE GENERATION FAILED: "
+            f"{type(exc).__name__}: {exc}"
+        )
         raise SystemExit(1)
