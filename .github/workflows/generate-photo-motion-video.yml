@@ -1,252 +1,975 @@
-      - name: Validate final video and deliverables
+name: Generate Katha Lok AI Photo Motion Video
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: katha-photo-motion-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  generate-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+
+      FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
+      FISH_AUDIO_API_KEY: ${{ secrets.FISH_AUDIO_API_KEY }}
+      FISH_REFERENCE_ID: ${{ secrets.FISH_REFERENCE_ID }}
+      FISH_TTS_MODEL: ${{ vars.FISH_TTS_MODEL }}
+
+      GEMINI_TTS_MODEL: ${{ vars.GEMINI_TTS_MODEL }}
+      GEMINI_TTS_VOICE: ${{ vars.GEMINI_TTS_VOICE }}
+
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+      ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
+
+      CARTESIA_API_KEY: ${{ secrets.CARTESIA_API_KEY }}
+      CARTESIA_VOICE_ID: ${{ secrets.CARTESIA_VOICE_ID }}
+
+      FINEVOICE_API_KEY: ${{ secrets.FINEVOICE_API_KEY }}
+      FINEVOICE_VOICE_ID: ${{ secrets.FINEVOICE_VOICE_ID }}
+
+      MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      MINIMAX_TTS_VOICE_ID: ${{ secrets.MINIMAX_TTS_VOICE_ID }}
+      MINIMAX_TTS_MODEL: ${{ vars.MINIMAX_TTS_MODEL }}
+
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
+      REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+
+      POLLINATIONS_FREE_IMAGE_MODELS: "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"
+
+      ALLOW_BILLABLE_PROVIDERS: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Validate input and required pipeline files
         shell: bash
         run: |
           set -euo pipefail
 
-          python - <<'PY'
-          import hashlib
-          import json
-          import os
-          import shutil
-          import tempfile
-          from pathlib import Path
+          test -s Input/topic.txt
+          test -s requirements.txt
+          test -s .github/workflows/generate-photo-motion-video.yml
 
+          required_files=(
+            scripts/input_config.py
+            scripts/select_gemini_model.py
+            scripts/generate_story_plan.py
+            scripts/generate_story.py
+            scripts/validate_story_length.py
+            scripts/verify_story.py
+            scripts/generate_ai_story.py
+            scripts/generate_character_bible.py
+            scripts/generate_scenes.py
+            scripts/generate_narration.py
+            scripts/prepare_captions.py
+            scripts/generate_tts.py
+            scripts/generate_flow_music.py
+            scripts/generate_visuals.py
+            scripts/free_image_generator.py
+            scripts/generate_depth_maps.py
+            scripts/depth_parallax.py
+            scripts/photo_motion.py
+            scripts/generate_sound_design.py
+            scripts/validate_sfx_timing.py
+            scripts/render_video.py
+            scripts/install_caption_fonts.py
+            scripts/preview_caption_fonts.py
+            scripts/burn_captions.py
+            scripts/generate_thumbnail.py
+            scripts/generate_youtube_metadata.py
+            scripts/validate_final_output.py
+            scripts/package_output.py
+            scripts/pipeline_preflight.py
+          )
+
+          for file in "${required_files[@]}"; do
+            if [ ! -s "$file" ]; then
+              echo "::error::Required file missing or empty: $file"
+              exit 1
+            fi
+          done
+
+          python -m py_compile "${required_files[@]}"
+
+          python - <<'PY'
+          from pathlib import Path
           from scripts.input_config import (
               load_and_validate,
               get_format,
+              get_parts,
+              get_scenes,
+              get_fps,
+              get_tts_provider_order,
+              get_image_provider_order,
+              get_global_billable_permission,
           )
 
-          root = Path.cwd().resolve()
-          output = (root / "output").resolve()
-          render_manifest = (
-              output / "scene_renders" / "render_manifest.json"
-          )
-          video_dir = output / "videos"
+          config = load_and_validate(Path("Input/topic.txt"))
 
-          if not render_manifest.is_file():
-              raise SystemExit("Render manifest is missing.")
-
-          config = load_and_validate(root / "Input" / "topic.txt")
-          mode = str(get_format(config)).strip().lower()
+          mode = get_format(config)
+          parts = get_parts(config)
+          scenes = get_scenes(config)
+          fps = get_fps(config)
+          tts = get_tts_provider_order(config)
+          images = get_image_provider_order(config)
 
           if mode not in {"short", "full"}:
               raise SystemExit(f"Invalid FORMAT: {mode}")
 
-          data = json.loads(
-              render_manifest.read_text(encoding="utf-8-sig")
-          )
+          if parts < 1 or scenes < 1:
+              raise SystemExit("PARTS and SCENES must be positive.")
 
-          if not isinstance(data, dict):
-              raise SystemExit("Render manifest must be a JSON object.")
+          if not 1 <= fps <= 60:
+              raise SystemExit(f"Invalid FPS: {fps}")
 
-          if data.get("status") != "completed":
-              raise SystemExit("Render manifest is not completed.")
+          if len(tts) < 3 or len(set(tts)) != len(tts):
+              raise SystemExit("TTS provider order is invalid.")
 
-          if str(data.get("format", "")).lower() != mode:
-              raise SystemExit("Render manifest FORMAT mismatch.")
+          if not images or len(set(images)) != len(images):
+              raise SystemExit("Image provider order is invalid.")
 
-          def checked_output_file(value, label):
-              if not isinstance(value, str) or not value.strip():
-                  raise SystemExit(f"{label}: path missing.")
-
-              candidate = Path(value.strip())
-              if not candidate.is_absolute():
-                  candidate = root / candidate
-
-              resolved = candidate.resolve()
-
-              if not resolved.is_relative_to(output):
-                  raise SystemExit(f"{label}: path escapes output/.")
-
-              if not resolved.is_file():
-                  raise SystemExit(f"{label}: file missing: {resolved}")
-
-              if resolved.stat().st_size < 1000:
-                  raise SystemExit(f"{label}: file is too small.")
-
-              return resolved
-
-          source = checked_output_file(
-              data.get("final_video"),
-              "Final captioned video",
-          )
-
-          expected_name = (
-              "katha_lok_ai_short.mp4"
-              if mode == "short"
-              else "katha_lok_ai_full.mp4"
-          )
-
-          alias = checked_output_file(
-              data.get("alias"),
-              "Format-specific video alias",
-          ) if data.get("alias") else None
-
-          expected_alias = (video_dir / expected_name).resolve()
-
-          if alias is not None and alias != expected_alias:
+          if not get_global_billable_permission(config):
               raise SystemExit(
-                  "Render manifest points to the wrong format alias: "
-                  f"{alias}"
+                  "Input configuration does not allow billable providers."
               )
 
-          video_dir.mkdir(parents=True, exist_ok=True)
-
-          if source == expected_alias:
-              raise SystemExit(
-                  "Final video and format alias must be separate files."
-              )
-
-          def digest(path):
-              value = hashlib.sha256()
-              with path.open("rb") as handle:
-                  for chunk in iter(
-                      lambda: handle.read(1024 * 1024),
-                      b"",
-                  ):
-                      value.update(chunk)
-              return value.hexdigest()
-
-          source_hash = digest(source)
-
-          if (
-              not expected_alias.is_file()
-              or digest(expected_alias) != source_hash
-          ):
-              fd, temporary_name = tempfile.mkstemp(
-                  prefix=".format-video-",
-                  suffix=".mp4",
-                  dir=video_dir,
-              )
-              os.close(fd)
-              temporary = Path(temporary_name)
-
-              try:
-                  shutil.copy2(source, temporary)
-
-                  if digest(temporary) != source_hash:
-                      raise SystemExit(
-                          "Copied format video SHA256 mismatch."
-                      )
-
-                  os.replace(temporary, expected_alias)
-              finally:
-                  temporary.unlink(missing_ok=True)
-
-          if digest(expected_alias) != source_hash:
-              raise SystemExit(
-                  "Format-specific video does not match final video."
-              )
-
-          opposite_name = (
-              "katha_lok_ai_full.mp4"
-              if mode == "short"
-              else "katha_lok_ai_short.mp4"
-          )
-
-          opposite_candidates = (
-              video_dir / opposite_name,
-              output / opposite_name,
-          )
-
-          for candidate in opposite_candidates:
-              if not candidate.exists() and not candidate.is_symlink():
-                  continue
-
-              if candidate.is_symlink() or not candidate.is_file():
-                  raise SystemExit(
-                      f"Unsafe opposite-format output: {candidate}"
-                  )
-
-              candidate.unlink()
-              print("Removed opposite-format output:", candidate)
-
+          print("INPUT CONFIGURATION VALID")
           print("FORMAT:", mode)
-          print("FINAL VIDEO:", source)
-          print("FORMAT ALIAS:", expected_alias)
-          print("SHA256:", source_hash)
-          print("FORMAT VIDEO SYNCHRONIZATION: valid")
+          print("PARTS:", parts)
+          print("SCENES PER PART:", scenes)
+          print("CONFIGURED MAIN SCENES:", parts * scenes)
+          print("FPS:", fps)
+          print("TTS FALLBACK ORDER:", " -> ".join(tts))
+          print("IMAGE FALLBACK ORDER:", " -> ".join(images))
+          print("BILLABLE PROVIDERS ALLOWED: true")
           PY
 
-          python scripts/validate_final_output.py
+      - name: Calculate input and pipeline fingerprints
+        id: fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT_HASH="$(sha256sum Input/topic.txt | awk '{print $1}')"
+
+          {
+            sha256sum .github/workflows/generate-photo-motion-video.yml
+            sha256sum requirements.txt
+
+            find scripts -type f -name '*.py' -print0 \
+              | sort -z \
+              | xargs -0 -r sha256sum
+          } > /tmp/katha-photo-motion-pipeline.sha256
+
+          PIPELINE_HASH="$(
+            sha256sum /tmp/katha-photo-motion-pipeline.sha256 \
+              | awk '{print $1}'
+          )"
+
+          {
+            echo "input_hash=$INPUT_HASH"
+            echo "pipeline_hash=$PIPELINE_HASH"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Input fingerprint: $INPUT_HASH"
+          echo "Pipeline fingerprint: $PIPELINE_HASH"
+
+      - name: Restore matching resumable checkpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
+          CURRENT_PIPELINE_HASH: ${{ steps.fingerprints.outputs.pipeline_hash }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p output
+
+          TEMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          RUN_IDS="$(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow generate-photo-motion-video.yml \
+              --limit 30 \
+              --json databaseId,status,conclusion,createdAt \
+              --jq '
+                .[]
+                | select(.status == "completed")
+                | select(
+                    .conclusion == "success"
+                    or .conclusion == "failure"
+                    or .conclusion == "cancelled"
+                    or .conclusion == "timed_out"
+                )
+                | .databaseId
+              ' 2>/dev/null || true
+          )"
+
+          for RUN_ID in $RUN_IDS; do
+            DEST="$TEMP_DIR/$RUN_ID"
+            mkdir -p "$DEST"
+
+            echo "Checking saved checkpoint from run $RUN_ID"
+
+            if ! gh run download "$RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "katha-photo-motion-checkpoint-$RUN_ID" \
+              --dir "$DEST" 2>/dev/null; then
+              continue
+            fi
+
+            CHECKPOINT="$DEST/checkpoint.zip"
+
+            if [ ! -s "$CHECKPOINT" ]; then
+              continue
+            fi
+
+            if ! unzip -tq "$CHECKPOINT" >/dev/null 2>&1; then
+              echo "Skipping corrupt checkpoint: $RUN_ID"
+              continue
+            fi
+
+            if ! python - "$CHECKPOINT" "$DEST/extracted" <<'PY'
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          archive = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+
+          with zipfile.ZipFile(archive) as zf:
+              infos = zf.infolist()
+
+              if not infos:
+                  raise SystemExit("Empty checkpoint ZIP.")
+
+              total_size = 0
+              seen = set()
+
+              for info in infos:
+                  name = info.filename.replace("\\", "/")
+                  path = PurePosixPath(name)
+
+                  if (
+                      path.is_absolute()
+                      or not path.parts
+                      or any(part in {"", ".", ".."} for part in path.parts)
+                      or ":" in path.parts[0]
+                  ):
+                      raise SystemExit(f"Unsafe ZIP path: {name}")
+
+                  if name in seen:
+                      raise SystemExit(f"Duplicate ZIP path: {name}")
+
+                  seen.add(name)
+
+                  mode = info.external_attr >> 16
+                  if stat.S_ISLNK(mode):
+                      raise SystemExit(f"Symlink in checkpoint: {name}")
+
+                  total_size += info.file_size
+                  if total_size > 8 * 1024 * 1024 * 1024:
+                      raise SystemExit("Checkpoint exceeds 8 GiB.")
+
+              destination.mkdir(parents=True, exist_ok=True)
+              zf.extractall(destination)
+          PY
+            then
+              echo "Skipping unsafe checkpoint: $RUN_ID"
+              continue
+            fi
+
+            SAVED_OUTPUT="$DEST/extracted/output"
+
+            if [ ! -d "$SAVED_OUTPUT" ]; then
+              continue
+            fi
+
+            INPUT_FILE="$SAVED_OUTPUT/.resume-input.sha256"
+            PIPELINE_FILE="$SAVED_OUTPUT/.resume-pipeline.sha256"
+
+            if [ ! -s "$INPUT_FILE" ] || [ ! -s "$PIPELINE_FILE" ]; then
+              echo "Checkpoint fingerprints missing: $RUN_ID"
+              continue
+            fi
+
+            SAVED_INPUT_HASH="$(tr -d '\r\n' < "$INPUT_FILE")"
+            SAVED_PIPELINE_HASH="$(tr -d '\r\n' < "$PIPELINE_FILE")"
+
+            if [ "$SAVED_INPUT_HASH" != "$CURRENT_INPUT_HASH" ]; then
+              echo "Input changed; checkpoint rejected: $RUN_ID"
+              continue
+            fi
+
+            if [ "$SAVED_PIPELINE_HASH" != "$CURRENT_PIPELINE_HASH" ]; then
+              echo "Pipeline or dependency list changed; checkpoint rejected: $RUN_ID"
+              continue
+            fi
+
+            if [ -z "$(
+              find "$SAVED_OUTPUT" -type f \
+                ! -name '.resume-*' -print -quit
+            )" ]; then
+              echo "Empty checkpoint rejected: $RUN_ID"
+              continue
+            fi
+
+            cp -a "$SAVED_OUTPUT/." output/
+
+            echo "Matching checkpoint restored."
+            echo "Source run ID: $RUN_ID"
+            exit 0
+          done
+
+          echo "No matching checkpoint found; starting fresh."
+
+      - name: Install FFmpeg and system font tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            ffmpeg \
+            zip \
+            unzip \
+            fontconfig \
+            fonts-noto-core \
+            fonts-noto-extra
+
+          ffmpeg -version
+          ffprobe -version
+          fc-cache -f
+          fc-match "Noto Sans Devanagari"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip setuptools wheel
+
+          python -m pip install \
+            torch \
+            --index-url https://download.pytorch.org/whl/cpu
+
+          python -m pip install -r requirements.txt
+
+          python - <<'PY'
+          import cv2
+          import edge_tts
+          import gradio_client
+          import huggingface_hub
+          import numpy
+          import PIL
+          import requests
+          import torch
+          import transformers
+
+          print("Python dependencies imported successfully.")
+          print("OpenCV:", cv2.__version__)
+          print("NumPy:", numpy.__version__)
+          print("Pillow:", PIL.__version__)
+          print("PyTorch:", torch.__version__)
+          print("Transformers:", transformers.__version__)
+          PY
+
+      - name: Install Hindi caption fonts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/install_caption_fonts.py
+
+          fc-cache -f
+
+          fc-match "Noto Sans Devanagari"
+          fc-match "Mukta"
+          fc-match "Hind"
+          fc-match "Tiro Devanagari Hindi"
+
+      - name: Run strict Photo Motion preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/pipeline_preflight.py
 
           python - <<'PY'
           import json
           from pathlib import Path
 
-          report_path = Path("output/validation_report.json")
+          path = Path("output/preflight_report.json")
+          if not path.is_file():
+              raise SystemExit("Preflight report was not created.")
+
+          report = json.loads(path.read_text(encoding="utf-8"))
+
+          if report.get("ready_to_run") is not True:
+              for item in report.get("failures", []):
+                  print("PREFLIGHT FAILURE:", item)
+              raise SystemExit("Preflight did not approve generation.")
+
+          if report.get("api_calls_made") != 0:
+              raise SystemExit("Preflight must not make API calls.")
+
+          print("Preflight report verified.")
+          print("Checks passed:", report.get("checks_passed"))
+          PY
+
+      - name: Generate caption font preview
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/preview_caption_fonts.py
+
+          test -s output/captions/caption_font_preview.png
+          test -s output/captions/caption_font_preview.json
+
+      - name: Select Gemini model
+        run: python scripts/select_gemini_model.py
+
+      - name: Generate story plan
+        run: python scripts/generate_story_plan.py
+
+      - name: Generate story
+        run: python scripts/generate_story.py
+
+      - name: Validate exact story length and structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/validate_story_length.py
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report_path = Path(
+              "output/story/story_length_validation.json"
+          )
 
           if not report_path.is_file():
-              raise SystemExit("Final validation report is missing.")
+              raise SystemExit("Story length validation report is missing.")
 
           report = json.loads(
               report_path.read_text(encoding="utf-8")
           )
 
-          if report.get("status") != "completed":
-              raise SystemExit("Final validation did not complete.")
+          summary = report.get("summary")
+          if not isinstance(summary, dict):
+              raise SystemExit("Story length summary is missing.")
 
-          checks = report.get("checks")
-          if not isinstance(checks, dict):
-              raise SystemExit("Final validation checks are missing.")
+          if summary.get("valid") is not True:
+              for error in summary.get("structure_errors", []):
+                  print("STORY STRUCTURE ERROR:", error)
 
-          required = (
-              "photo_motion",
-              "narration",
-              "sound_design",
-              "render",
-              "captions",
-              "thumbnail",
-              "metadata",
-          )
+              for warning in summary.get("warnings", []):
+                  print("STORY WARNING:", warning)
 
-          for name in required:
-              result = checks.get(name)
-              if not isinstance(result, dict):
-                  raise SystemExit(
-                      f"Validation result missing: {name}"
-                  )
-              if result.get("status") != "valid":
-                  raise SystemExit(
-                      f"Validation failed: {name}"
-                  )
-
-          mode = report.get("format")
-          if mode not in {"short", "full"}:
-              raise SystemExit("Validation report FORMAT is invalid.")
-
-          render = checks["render"]
-          final_video = Path(render["final_video"])
-          alias = Path(render["alias"])
-
-          if not final_video.is_file() or not alias.is_file():
               raise SystemExit(
-                  "Validated final video or format alias is missing."
+                  "Story length validation failed; generation stopped."
               )
 
-          if final_video.stat().st_size < 1000:
-              raise SystemExit("Final video is too small.")
+          expected_parts = summary.get("parts_expected")
+          found_parts = summary.get("parts_found")
+          expected_scenes = summary.get("scenes_expected")
+          found_scenes = summary.get("scenes_found")
 
-          if alias.stat().st_size != final_video.stat().st_size:
+          if expected_parts != found_parts:
               raise SystemExit(
-                  "Final video and format alias sizes differ."
+                  f"PARTS mismatch: expected={expected_parts}, "
+                  f"found={found_parts}"
               )
 
-          expected_alias = (
-              "katha_lok_ai_short.mp4"
-              if mode == "short"
-              else "katha_lok_ai_full.mp4"
-          )
-
-          if alias.name != expected_alias:
+          if expected_scenes != found_scenes:
               raise SystemExit(
-                  "Validated format alias name is incorrect."
+                  f"SCENES mismatch: expected={expected_scenes}, "
+                  f"found={found_scenes}"
               )
 
-          print("FINAL VALIDATION: PASSED")
-          print("FORMAT:", mode)
-          print("PARTS:", report.get("parts"))
-          print("SCENES:", report.get("expected_scenes"))
-          print("FINAL VIDEO:", final_video)
-          print("FORMAT ALIAS:", alias)
+          print("STORY LENGTH VALIDATION PASSED")
+          print("Parts:", found_parts)
+          print("Scenes:", found_scenes)
+          print("Words:", summary.get("total_words"))
           PY
+
+      - name: Verify story preservation and consistency
+        run: python scripts/verify_story.py
+
+      - name: Generate AI story artifacts
+        run: python scripts/generate_ai_story.py
+
+      - name: Generate character bible
+        run: python scripts/generate_character_bible.py
+
+      - name: Generate scenes
+        run: python scripts/generate_scenes.py
+
+      - name: Prepare narration jobs
+        run: python scripts/generate_narration.py
+
+      - name: Prepare caption source
+        run: python scripts/prepare_captions.py
+
+      - name: Generate narration audio
+        run: python scripts/generate_tts.py
+
+      - name: Generate background music
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/generate_flow_music.py
+
+          if [ -s output/music/flow_music_manifest.json ]; then
+            echo "Background music manifest created."
+          else
+            echo "::warning::Music provider did not create a manifest."
+            echo "Sound design will apply its configured fallback."
+          fi
+
+      - name: Prepare visual generation jobs
+        run: python scripts/generate_visuals.py
+
+      - name: Generate scene images
+        run: python scripts/free_image_generator.py
+
+      - name: Generate depth maps
+        run: python scripts/generate_depth_maps.py
+
+      - name: Render Photo Motion scene clips
+        run: python scripts/photo_motion.py
+
+      - name: Generate music, ambience and sound effects
+        run: python scripts/generate_sound_design.py
+
+      - name: Validate sound effect timing
+        run: python scripts/validate_sfx_timing.py
+
+      - name: Render scene audio and video parts
+        run: python scripts/render_video.py
+
+      - name: Burn captions into final video
+        run: python scripts/burn_captions.py
+
+      - name: Generate story-specific thumbnail
+        run: python scripts/generate_thumbnail.py
+
+      - name: Generate YouTube metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/generate_youtube_metadata.py
+
+          test -s output/youtube_metadata.txt
+          test -s output/publish/youtube_metadata.json
+
+          echo "YouTube metadata files verified."
+
+      - name: Validate final video and deliverables
+        run: python scripts/validate_final_output.py
+
+      - name: Package and name output using story title
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/package_output.py
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import re
+          import zipfile
+          from pathlib import Path
+
+          manifest_path = Path("output/package_manifest.json")
+          story_path = Path("output/story/story.json")
+
+          if not manifest_path.is_file():
+              raise SystemExit("Package manifest is missing.")
+
+          if not story_path.is_file():
+              raise SystemExit("Completed story file is missing.")
+
+          manifest = json.loads(
+              manifest_path.read_text(encoding="utf-8")
+          )
+          story = json.loads(
+              story_path.read_text(encoding="utf-8")
+          )
+
+          if manifest.get("status") != "completed":
+              raise SystemExit("Package status is not completed.")
+
+          mode = manifest.get("format")
+          if mode not in {"short", "full"}:
+              raise SystemExit("Package format is invalid.")
+
+          title = str(
+              story.get("title")
+              or story.get("final_title")
+              or ""
+          ).strip()
+
+          if not title:
+              title_file = Path("output/story/final_title.txt")
+              if title_file.is_file():
+                  title = title_file.read_text(
+                      encoding="utf-8"
+                  ).strip()
+
+          if not title:
+              raise SystemExit(
+                  "Story title is missing; refusing generic ZIP name."
+              )
+
+          slug = re.sub(
+              r"[^\w]+",
+              "-",
+              title,
+              flags=re.UNICODE,
+          ).strip("-_")
+
+          slug = slug[:80].strip("-_")
+
+          if not slug:
+              raise SystemExit(
+                  "Story title cannot form a safe filename."
+              )
+
+          original_name = str(
+              manifest.get("archive", "")
+          ).strip()
+
+          source = (
+              Path(original_name)
+              if original_name
+              else Path("katha-lok-ai-photo-motion-output.zip")
+          )
+
+          if not source.is_file():
+              source = Path("katha-lok-ai-photo-motion-output.zip")
+
+          if not source.is_file():
+              raise SystemExit("Packaged ZIP file is missing.")
+
+          target = Path(f"katha-lok-{slug}-{mode}-output.zip")
+
+          if target.exists() and target.resolve() != source.resolve():
+              target.unlink()
+
+          if target.resolve() != source.resolve():
+              source.replace(target)
+
+          digest = hashlib.sha256()
+
+          with target.open("rb") as handle:
+              for chunk in iter(
+                  lambda: handle.read(1024 * 1024),
+                  b"",
+              ):
+                  digest.update(chunk)
+
+          with zipfile.ZipFile(target) as archive:
+              bad = archive.testzip()
+
+              if bad:
+                  raise SystemExit(f"Corrupt ZIP member: {bad}")
+
+              names = archive.namelist()
+
+              if len(names) != len(set(names)):
+                  raise SystemExit("Duplicate ZIP members found.")
+
+              if not names:
+                  raise SystemExit("ZIP is empty.")
+
+          manifest["archive"] = target.name
+          manifest["archive_sha256"] = digest.hexdigest()
+          manifest["archive_bytes"] = target.stat().st_size
+          manifest["archive_title"] = title
+
+          temporary = manifest_path.with_name(
+              manifest_path.name + ".tmp"
+          )
+
+          temporary.write_text(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=False,
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+
+          temporary.replace(manifest_path)
+
+          Path("output/package_archive_name.txt").write_text(
+              target.name + "\n",
+              encoding="utf-8",
+          )
+
+          print("Story title:", title)
+          print("Output mode:", mode)
+          print("Final ZIP:", target.name)
+          print("ZIP SHA256:", digest.hexdigest())
+          print("ZIP integrity: valid")
+          PY
+
+          ARCHIVE="$(cat output/package_archive_name.txt)"
+          test -s "$ARCHIVE"
+          test -s output/package_manifest.json
+          ls -lh "$ARCHIVE"
+
+      - name: Verify final package manifest and archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="$(cat output/package_archive_name.txt)"
+
+          python - "$ARCHIVE" <<'PY'
+          import hashlib
+          import json
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          manifest_path = Path("output/package_manifest.json")
+
+          if not archive.is_file() or archive.stat().st_size == 0:
+              raise SystemExit("Final story ZIP is missing or empty.")
+
+          manifest = json.loads(
+              manifest_path.read_text(encoding="utf-8")
+          )
+
+          if manifest.get("status") != "completed":
+              raise SystemExit("Package status is not completed.")
+
+          if manifest.get("archive") != archive.name:
+              raise SystemExit("Manifest archive name mismatch.")
+
+          if manifest.get("file_count", 0) <= 0:
+              raise SystemExit("Package contains no files.")
+
+          if manifest.get("zip_integrity") != "valid":
+              raise SystemExit("ZIP integrity is not valid.")
+
+          if manifest.get("manifest_zip_consistency") != "valid":
+              raise SystemExit(
+                  "ZIP and manifest consistency failed."
+              )
+
+          digest = hashlib.sha256()
+
+          with archive.open("rb") as handle:
+              for chunk in iter(
+                  lambda: handle.read(1024 * 1024),
+                  b"",
+              ):
+                  digest.update(chunk)
+
+          actual_hash = digest.hexdigest()
+
+          if actual_hash != manifest.get("archive_sha256"):
+              raise SystemExit(
+                  "Final ZIP SHA256 does not match manifest."
+              )
+
+          if archive.stat().st_size != manifest.get("archive_bytes"):
+              raise SystemExit("Final ZIP byte count mismatch.")
+
+          with zipfile.ZipFile(archive) as zf:
+              bad_member = zf.testzip()
+
+              if bad_member:
+                  raise SystemExit(
+                      f"Corrupt ZIP member: {bad_member}"
+                  )
+
+              names = zf.namelist()
+
+              if len(names) != len(set(names)):
+                  raise SystemExit(
+                      "ZIP contains duplicate file names."
+                  )
+
+              if not names:
+                  raise SystemExit("ZIP is empty.")
+
+          print("Final ZIP integrity: valid")
+          print("Final ZIP SHA256:", actual_hash)
+          print("Package format:", manifest["format"])
+          print("Packaged files:", manifest["file_count"])
+          print("Story ZIP:", archive.name)
+          PY
+
+      - name: Upload final Photo Motion deliverable
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: katha-lok-ai-photo-motion-output
+          path: |
+            katha-lok-*-short-output.zip
+            katha-lok-*-full-output.zip
+            output/package_manifest.json
+            output/validation_report.json
+            output/preflight_report.json
+            output/story/story_length_validation.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Save resumable checkpoint
+        if: always() && steps.fingerprints.outputs.input_hash != ''
+        shell: bash
+        env:
+          INPUT_HASH: ${{ steps.fingerprints.outputs.input_hash }}
+          PIPELINE_HASH: ${{ steps.fingerprints.outputs.pipeline_hash }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p output
+
+          printf '%s\n' "$INPUT_HASH" \
+            > output/.resume-input.sha256
+
+          printf '%s\n' "$PIPELINE_HASH" \
+            > output/.resume-pipeline.sha256
+
+          python - <<'PY'
+          import os
+          import stat
+          import zipfile
+          from pathlib import Path
+
+          root = Path("output")
+          archive = Path("checkpoint.zip")
+          temporary = Path("checkpoint.zip.tmp")
+
+          temporary.unlink(missing_ok=True)
+
+          if not root.is_dir():
+              raise SystemExit("Output directory is unavailable.")
+
+          files = []
+
+          for path in sorted(root.rglob("*")):
+              if path.is_symlink():
+                  raise SystemExit(
+                      f"Refusing to checkpoint symlink: {path}"
+                  )
+
+              if path.is_file():
+                  files.append(path)
+
+          if not files:
+              raise SystemExit(
+                  "No output files available for checkpoint."
+              )
+
+          with zipfile.ZipFile(
+              temporary,
+              "w",
+              compression=zipfile.ZIP_DEFLATED,
+              compresslevel=3,
+              allowZip64=True,
+          ) as zf:
+              for path in files:
+                  relative = path.as_posix()
+
+                  if (
+                      relative.startswith("/")
+                      or ".." in Path(relative).parts
+                  ):
+                      raise SystemExit(
+                          f"Unsafe checkpoint path: {relative}"
+                      )
+
+                  info = zipfile.ZipInfo(relative)
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = (
+                      stat.S_IFREG | 0o600
+                  ) << 16
+
+                  with path.open("rb") as source:
+                      with zf.open(info, "w") as destination:
+                          while True:
+                              chunk = source.read(1024 * 1024)
+
+                              if not chunk:
+                                  break
+
+                              destination.write(chunk)
+
+          with zipfile.ZipFile(temporary) as zf:
+              bad_member = zf.testzip()
+
+              if bad_member:
+                  raise SystemExit(
+                      "Checkpoint ZIP verification failed: "
+                      f"{bad_member}"
+                  )
+
+          os.replace(temporary, archive)
+
+          if not archive.is_file() or archive.stat().st_size == 0:
+              raise SystemExit(
+                  "Checkpoint ZIP was not created."
+              )
+
+          print(
+              "Checkpoint saved:",
+              archive.stat().st_size,
+              "bytes",
+          )
+          print("Checkpoint files:", len(files))
+          PY
+
+      - name: Upload resumable checkpoint
+        if: always() && steps.fingerprints.outputs.input_hash != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: katha-photo-motion-checkpoint-${{ github.run_id }}
+          path: checkpoint.zip
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
