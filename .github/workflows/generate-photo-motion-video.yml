@@ -74,6 +74,7 @@ jobs:
           set -euo pipefail
 
           test -s Input/topic.txt
+          test -s requirements.txt
           test -s .github/workflows/generate-photo-motion-video.yml
 
           required_files=(
@@ -155,13 +156,15 @@ jobs:
               raise SystemExit("Image provider order is invalid.")
 
           if not get_global_billable_permission(config):
-              raise SystemExit("Billable providers are disabled.")
+              raise SystemExit(
+                  "Input configuration does not allow billable providers."
+              )
 
           print("INPUT CONFIGURATION VALID")
           print("FORMAT:", mode)
           print("PARTS:", parts)
           print("SCENES PER PART:", scenes)
-          print("CONFIGURED SCENES:", parts * scenes)
+          print("CONFIGURED MAIN SCENES:", parts * scenes)
           print("FPS:", fps)
           print("TTS FALLBACK ORDER:", " -> ".join(tts))
           print("IMAGE FALLBACK ORDER:", " -> ".join(images))
@@ -176,14 +179,13 @@ jobs:
 
           INPUT_HASH="$(sha256sum Input/topic.txt | awk '{print $1}')"
 
-          find scripts -type f -name '*.py' -print0 \
-            | sort -z \
-            | xargs -0 -r sha256sum \
-            > /tmp/katha-photo-motion-files.sha256
-
           {
             sha256sum .github/workflows/generate-photo-motion-video.yml
-            cat /tmp/katha-photo-motion-files.sha256
+            sha256sum requirements.txt
+
+            find scripts -type f -name '*.py' -print0 \
+              | sort -z \
+              | xargs -0 -r sha256sum
           } > /tmp/katha-photo-motion-pipeline.sha256
 
           PIPELINE_HASH="$(
@@ -217,17 +219,26 @@ jobs:
             gh run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow generate-photo-motion-video.yml \
-              --limit 20 \
-              --json databaseId,status \
-              --jq '.[] | select(.status == "completed") | .databaseId' \
-              2>/dev/null || true
+              --limit 30 \
+              --json databaseId,status,conclusion,createdAt \
+              --jq '
+                .[]
+                | select(.status == "completed")
+                | select(
+                    .conclusion == "success"
+                    or .conclusion == "failure"
+                    or .conclusion == "cancelled"
+                    or .conclusion == "timed_out"
+                )
+                | .databaseId
+              ' 2>/dev/null || true
           )"
 
           for RUN_ID in $RUN_IDS; do
             DEST="$TEMP_DIR/$RUN_ID"
             mkdir -p "$DEST"
 
-            echo "Checking checkpoint from run $RUN_ID"
+            echo "Checking saved checkpoint from run $RUN_ID"
 
             if ! gh run download "$RUN_ID" \
               --repo "$GITHUB_REPOSITORY" \
@@ -321,7 +332,7 @@ jobs:
             fi
 
             if [ "$SAVED_PIPELINE_HASH" != "$CURRENT_PIPELINE_HASH" ]; then
-              echo "Pipeline changed; checkpoint rejected: $RUN_ID"
+              echo "Pipeline or dependency list changed; checkpoint rejected: $RUN_ID"
               continue
             fi
 
@@ -335,8 +346,8 @@ jobs:
 
             cp -a "$SAVED_OUTPUT/." output/
 
-            echo "Matching input and pipeline checkpoint restored."
-            echo "Run ID: $RUN_ID"
+            echo "Matching checkpoint restored."
+            echo "Source run ID: $RUN_ID"
             exit 0
           done
 
@@ -370,24 +381,10 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
 
           python -m pip install \
-            requests \
-            pillow \
-            edge-tts \
-            gradio_client \
-            huggingface_hub \
-            opencv-python-headless \
-            numpy \
-            imageio \
-            imageio-ffmpeg
-
-          python -m pip install \
             torch \
             --index-url https://download.pytorch.org/whl/cpu
 
-          python -m pip install \
-            transformers \
-            safetensors \
-            accelerate
+          python -m pip install -r requirements.txt
 
           python - <<'PY'
           import cv2
@@ -440,8 +437,7 @@ jobs:
           report = json.loads(path.read_text(encoding="utf-8"))
 
           if report.get("ready_to_run") is not True:
-              failures = report.get("failures", [])
-              for item in failures:
+              for item in report.get("failures", []):
                   print("PREFLIGHT FAILURE:", item)
               raise SystemExit("Preflight did not approve generation.")
 
@@ -673,11 +669,18 @@ jobs:
           slug = slug[:80].strip("-_")
 
           if not slug:
-              raise SystemExit("Story title cannot form a safe filename.")
+              raise SystemExit(
+                  "Story title cannot form a safe filename."
+              )
 
-          original_name = str(manifest.get("archive", "")).strip()
-          source = Path(original_name) if original_name else Path(
-              "katha-lok-ai-photo-motion-output.zip"
+          original_name = str(
+              manifest.get("archive", "")
+          ).strip()
+
+          source = (
+              Path(original_name)
+              if original_name
+              else Path("katha-lok-ai-photo-motion-output.zip")
           )
 
           if not source.is_file():
@@ -695,6 +698,7 @@ jobs:
               source.replace(target)
 
           digest = hashlib.sha256()
+
           with target.open("rb") as handle:
               for chunk in iter(
                   lambda: handle.read(1024 * 1024),
@@ -704,10 +708,12 @@ jobs:
 
           with zipfile.ZipFile(target) as archive:
               bad = archive.testzip()
+
               if bad:
                   raise SystemExit(f"Corrupt ZIP member: {bad}")
 
               names = archive.namelist()
+
               if len(names) != len(set(names)):
                   raise SystemExit("Duplicate ZIP members found.")
 
@@ -722,6 +728,7 @@ jobs:
           temporary = manifest_path.with_name(
               manifest_path.name + ".tmp"
           )
+
           temporary.write_text(
               json.dumps(
                   manifest,
@@ -730,6 +737,7 @@ jobs:
               ) + "\n",
               encoding="utf-8",
           )
+
           temporary.replace(manifest_path)
 
           Path("output/package_archive_name.txt").write_text(
@@ -786,9 +794,12 @@ jobs:
               raise SystemExit("ZIP integrity is not valid.")
 
           if manifest.get("manifest_zip_consistency") != "valid":
-              raise SystemExit("ZIP and manifest consistency failed.")
+              raise SystemExit(
+                  "ZIP and manifest consistency failed."
+              )
 
           digest = hashlib.sha256()
+
           with archive.open("rb") as handle:
               for chunk in iter(
                   lambda: handle.read(1024 * 1024),
@@ -799,21 +810,27 @@ jobs:
           actual_hash = digest.hexdigest()
 
           if actual_hash != manifest.get("archive_sha256"):
-              raise SystemExit("Final ZIP SHA256 does not match manifest.")
+              raise SystemExit(
+                  "Final ZIP SHA256 does not match manifest."
+              )
 
           if archive.stat().st_size != manifest.get("archive_bytes"):
               raise SystemExit("Final ZIP byte count mismatch.")
 
           with zipfile.ZipFile(archive) as zf:
               bad_member = zf.testzip()
+
               if bad_member:
                   raise SystemExit(
                       f"Corrupt ZIP member: {bad_member}"
                   )
 
               names = zf.namelist()
+
               if len(names) != len(set(names)):
-                  raise SystemExit("ZIP contains duplicate file names.")
+                  raise SystemExit(
+                      "ZIP contains duplicate file names."
+                  )
 
               if not names:
                   raise SystemExit("ZIP is empty.")
@@ -885,7 +902,9 @@ jobs:
                   files.append(path)
 
           if not files:
-              raise SystemExit("No output files available for checkpoint.")
+              raise SystemExit(
+                  "No output files available for checkpoint."
+              )
 
           with zipfile.ZipFile(
               temporary,
@@ -897,7 +916,10 @@ jobs:
               for path in files:
                   relative = path.as_posix()
 
-                  if relative.startswith("/") or ".." in Path(relative).parts:
+                  if (
+                      relative.startswith("/")
+                      or ".." in Path(relative).parts
+                  ):
                       raise SystemExit(
                           f"Unsafe checkpoint path: {relative}"
                       )
@@ -912,23 +934,33 @@ jobs:
                       with zf.open(info, "w") as destination:
                           while True:
                               chunk = source.read(1024 * 1024)
+
                               if not chunk:
                                   break
+
                               destination.write(chunk)
 
           with zipfile.ZipFile(temporary) as zf:
               bad_member = zf.testzip()
+
               if bad_member:
                   raise SystemExit(
-                      f"Checkpoint ZIP verification failed: {bad_member}"
+                      "Checkpoint ZIP verification failed: "
+                      f"{bad_member}"
                   )
 
           os.replace(temporary, archive)
 
           if not archive.is_file() or archive.stat().st_size == 0:
-              raise SystemExit("Checkpoint ZIP was not created.")
+              raise SystemExit(
+                  "Checkpoint ZIP was not created."
+              )
 
-          print("Checkpoint saved:", archive.stat().st_size, "bytes")
+          print(
+              "Checkpoint saved:",
+              archive.stat().st_size,
+              "bytes",
+          )
           print("Checkpoint files:", len(files))
           PY
 
