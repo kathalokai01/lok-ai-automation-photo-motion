@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resumable image generation with ordered provider fallback."""
+"""Resumable image generation with configured provider fallback."""
 
 from __future__ import annotations
 
@@ -31,19 +31,15 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v22"
+VERSION = "photo-motion-image-generator-v23"
 MIN_IMAGE_BYTES = 1000
 TIMEOUT = max(30, int(os.getenv("IMAGE_PROVIDER_TIMEOUT", "180")))
 BASE_SEED = 20261009
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "KathaLokAI-PhotoMotion/22.0"
+    "User-Agent": "KathaLokAI-PhotoMotion/23.0"
 })
-
-ENV_ALLOW_BILLABLE = os.getenv(
-    "ALLOW_BILLABLE_PROVIDERS", "true"
-).strip().lower() in {"1", "true", "yes", "on"}
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 REPLICATE_KEY = os.getenv("REPLICATE_API_TOKEN", "").strip()
@@ -53,19 +49,17 @@ HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 GEMINI_MODEL = os.getenv(
     "GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"
 ).strip()
+
 REPLICATE_MODEL = os.getenv(
     "REPLICATE_IMAGE_MODEL", "black-forest-labs/flux-schnell"
 ).strip()
 
 HF_SPACES = []
 POLLINATIONS_MODELS = []
+PROVIDER_ORDER = []
 
 ALLOW_BILLABLE = False
 IMAGE_FALLBACK_ENABLED = True
-
-DEFAULT_PROVIDER_ORDER = [
-    "huggingface", "pollinations", "gemini", "replicate"
-]
 
 PROVIDER_ALIASES = {
     "hf": "huggingface",
@@ -94,27 +88,42 @@ def log(*values):
 def env_bool(value, default=False):
     if value is None:
         return default
+
     text = str(value).strip().lower()
+
     if text in {"1", "true", "yes", "y", "on", "enabled"}:
         return True
+
     if text in {"0", "false", "no", "n", "off", "disabled"}:
         return False
+
     return default
 
 
 def split_values(value):
-    return list(dict.fromkeys(
-        item.strip()
-        for item in re.split(r"[,;]", str(value or ""))
-        if item.strip()
-    ))
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = re.split(r"[,;]", str(value or ""))
+
+    result = []
+
+    for item in values:
+        text = str(item or "").strip()
+
+        if text and text not in result:
+            result.append(text)
+
+    return result
 
 
 def sha256_file(path):
     digest = hashlib.sha256()
+
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
+
     return digest.hexdigest()
 
 
@@ -132,126 +141,166 @@ def stable_hash(value):
         separators=(",", ":"),
         default=str,
     )
+
     return sha256_text(raw)
 
 
 def read_json(path, default=None):
     path = Path(path)
+
     if not path.is_file():
         return default
+
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        return json.loads(
+            path.read_text(encoding="utf-8-sig")
+        )
     except (OSError, ValueError) as exc:
-        raise RuntimeError(f"Cannot read {path}: {exc}") from exc
+        raise RuntimeError(
+            f"Cannot read JSON file {path}: {exc}"
+        ) from exc
 
 
 def save_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+
     temporary = path.with_name(path.name + ".tmp")
+
     try:
         temporary.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
             encoding="utf-8",
         )
+
         temporary.replace(path)
+
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def parse_input_settings():
-    """Use the shared parser so quoted and multiline input stays consistent."""
-    from input_config import load_input_config
-    return load_input_config(INPUT_FILE)
+    sys.path.insert(0, str(ROOT / "scripts"))
+
+    from input_config import load_and_validate
+
+    return load_and_validate(INPUT_FILE)
 
 
 def apply_input_settings(config):
-    global HF_SPACES, POLLINATIONS_MODELS
-    global GEMINI_MODEL, REPLICATE_MODEL
-    global ALLOW_BILLABLE, IMAGE_FALLBACK_ENABLED
+    global HF_SPACES
+    global POLLINATIONS_MODELS
+    global GEMINI_MODEL
+    global REPLICATE_MODEL
+    global ALLOW_BILLABLE
+    global IMAGE_FALLBACK_ENABLED
+    global PROVIDER_ORDER
+
+    from input_config import get_image_provider_settings
+
+    settings = get_image_provider_settings(config)
+
+    PROVIDER_ORDER = list(
+        settings["IMAGE_PROVIDER_ORDER"]
+    )
 
     HF_SPACES = split_values(
-        str(config.get("HF_IMAGE_SPACE", "mrfakename/Z-Image-Turbo"))
-        + ","
-        + str(config.get("FREE_IMAGE_FALLBACK_SPACES", ""))
+        [
+            settings["HF_IMAGE_SPACE"],
+            *settings["FREE_IMAGE_FALLBACK_SPACES"],
+        ]
     )
 
     POLLINATIONS_MODELS = split_values(
-        config.get(
-            "POLLINATIONS_FREE_IMAGE_MODELS",
-            "black-forest-labs/flux.1-schnell,"
-            "tongyi-mai/z-image-turbo,"
-            "lykon/dreamshaper-8-lcm",
-        )
+        settings["POLLINATIONS_FREE_IMAGE_MODELS"]
     )
 
     GEMINI_MODEL = str(
-        config.get("GEMINI_IMAGE_MODEL") or GEMINI_MODEL
+        settings["GEMINI_IMAGE_MODEL"]
     ).strip()
 
     REPLICATE_MODEL = str(
-        config.get("REPLICATE_IMAGE_MODEL") or REPLICATE_MODEL
+        settings["REPLICATE_IMAGE_MODEL"]
     ).strip()
 
-    # Both workflow-level and input-level permission must allow paid calls.
-    ALLOW_BILLABLE = (
-        ENV_ALLOW_BILLABLE
-        and env_bool(config.get("ALLOW_BILLABLE_PROVIDERS"), True)
-        and env_bool(config.get("IMAGE_ALLOW_BILLABLE"), True)
+    ALLOW_BILLABLE = bool(
+        settings["ALLOW_BILLABLE_PROVIDERS"]
+        and settings["IMAGE_ALLOW_BILLABLE"]
     )
 
-    IMAGE_FALLBACK_ENABLED = env_bool(
-        config.get("IMAGE_FALLBACK_ENABLED"), True
+    IMAGE_FALLBACK_ENABLED = bool(
+        settings["IMAGE_FALLBACK_ENABLED"]
     )
+
+    if not PROVIDER_ORDER:
+        raise RuntimeError(
+            "IMAGE_PROVIDER_ORDER में कोई configured provider नहीं है."
+        )
 
     if not HF_SPACES:
-        raise RuntimeError("No Hugging Face image Space is configured.")
+        raise RuntimeError(
+            "Hugging Face के लिए कोई configured Space नहीं है."
+        )
+
     if not POLLINATIONS_MODELS:
-        raise RuntimeError("No Pollinations image model is configured.")
+        raise RuntimeError(
+            "Pollinations के लिए कोई configured model नहीं है."
+        )
+
     if not GEMINI_MODEL:
-        raise RuntimeError("GEMINI_IMAGE_MODEL is empty.")
+        raise RuntimeError(
+            "GEMINI_IMAGE_MODEL खाली है."
+        )
+
     if not re.fullmatch(
         r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
         REPLICATE_MODEL,
     ):
         raise RuntimeError(
-            "REPLICATE_IMAGE_MODEL must be owner/model-name."
+            "REPLICATE_IMAGE_MODEL में owner/model-name आवश्यक है."
         )
 
+    log("Configured image provider order:", PROVIDER_ORDER)
+    log("Configured Hugging Face Spaces:", HF_SPACES)
+    log("Configured Pollinations models:", POLLINATIONS_MODELS)
+    log("Configured Gemini model:", GEMINI_MODEL)
+    log("Configured Replicate model:", REPLICATE_MODEL)
+    log("Billable image providers allowed:", ALLOW_BILLABLE)
+    log("Image fallback enabled:", IMAGE_FALLBACK_ENABLED)
 
-def provider_order(config):
-    raw = config.get(
-        "IMAGE_PROVIDER_ORDER",
-        ",".join(DEFAULT_PROVIDER_ORDER),
-    )
-    result = []
 
-    for value in split_values(raw.lower()):
-        provider = PROVIDER_ALIASES.get(value)
-        if not provider:
-            raise RuntimeError(
-                f"Unsupported IMAGE_PROVIDER_ORDER entry: {value}"
-            )
-        if provider not in result:
-            result.append(provider)
+def normalize_provider(value):
+    key = str(value or "").strip().lower().replace("-", "_")
 
-    if not result:
-        raise RuntimeError("IMAGE_PROVIDER_ORDER is empty.")
+    if key not in PROVIDER_ALIASES:
+        raise RuntimeError(
+            f"Unsupported image provider: {value}"
+        )
 
-    return result
+    return PROVIDER_ALIASES[key]
 
 
 def safe_path(value, label):
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"Missing path for {label}.")
+        raise RuntimeError(
+            f"{label}: output path missing."
+        )
 
     path = Path(value.strip())
+
     if not path.is_absolute():
         path = ROOT / path
+
     path = path.resolve()
 
     if not path.is_relative_to(ROOT.resolve()):
-        raise RuntimeError(f"{label}: path escapes project directory.")
+        raise RuntimeError(
+            f"{label}: output path project directory से बाहर है."
+        )
 
     return path
 
@@ -259,30 +308,37 @@ def safe_path(value, label):
 def parse_size(value):
     try:
         width, height = map(
-            int, str(value).lower().strip().split("x", 1)
+            int,
+            str(value).lower().strip().split("x", 1),
         )
     except (TypeError, ValueError) as exc:
         raise RuntimeError(
-            f"Invalid image size {value!r}; expected WIDTHxHEIGHT."
+            f"Invalid image size {value!r}; WIDTHxHEIGHT आवश्यक है."
         ) from exc
 
-    if not (256 <= width <= 4096 and 256 <= height <= 4096):
+    if not (
+        256 <= width <= 4096
+        and 256 <= height <= 4096
+    ):
         raise RuntimeError(
-            f"Unsupported image dimensions: {width}x{height}."
+            f"Invalid image dimensions: {width}x{height}"
         )
 
     return width, height
 
 
 def get_jobs():
-    document = read_json(JOBS_FILE, required=True) if False else read_json(
-        JOBS_FILE
-    )
+    document = read_json(JOBS_FILE)
+
     if document is None:
-        raise RuntimeError(f"Visual jobs file is missing: {JOBS_FILE}")
+        raise RuntimeError(
+            f"Visual jobs file नहीं मिली: {JOBS_FILE}"
+        )
 
     if isinstance(document, list):
-        jobs, metadata = document, {}
+        jobs = document
+        metadata = {}
+
     elif isinstance(document, dict):
         jobs = (
             document.get("jobs")
@@ -291,57 +347,131 @@ def get_jobs():
             or []
         )
         metadata = document
+
     else:
-        raise RuntimeError("visual_jobs.json must be an object or list.")
+        raise RuntimeError(
+            "visual_jobs.json का root object या list होना चाहिए."
+        )
 
     if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError("visual_jobs.json contains no image jobs.")
+        raise RuntimeError(
+            "visual_jobs.json में कोई image job नहीं है."
+        )
 
     prepared = []
     seen_global = set()
     seen_local = set()
+    seen_ids = set()
+    seen_paths = set()
 
     for index, job in enumerate(jobs, 1):
         if not isinstance(job, dict):
-            raise RuntimeError(f"Image job {index} is not an object.")
+            raise RuntimeError(
+                f"Image job {index} valid object नहीं है."
+            )
 
         try:
             part = int(job.get("part", 1))
-            local = int(job.get("local_scene", job.get("scene", index)))
-            global_number = int(
-                job.get("global_scene", job.get("scene_index", index))
+
+            local = int(
+                job.get(
+                    "local_scene",
+                    job.get("scene", index),
+                )
             )
+
+            global_number = int(
+                job.get(
+                    "global_scene",
+                    job.get("scene_index", index),
+                )
+            )
+
         except (TypeError, ValueError) as exc:
             raise RuntimeError(
-                f"Invalid scene numbering in image job {index}."
+                f"Image job {index} की numbering गलत है."
             ) from exc
 
         if min(part, local, global_number) < 1:
-            raise RuntimeError("Part and scene numbers must be positive.")
-        if global_number in seen_global:
-            raise RuntimeError(f"Duplicate global scene: {global_number}.")
-        if (part, local) in seen_local:
-            raise RuntimeError(f"Duplicate part/scene: {part}/{local}.")
+            raise RuntimeError(
+                "Part और image scene numbers positive होने चाहिए."
+            )
 
-        seen_global.add(global_number)
-        seen_local.add((part, local))
+        if global_number in seen_global:
+            raise RuntimeError(
+                f"Duplicate global scene number: {global_number}"
+            )
+
+        if (part, local) in seen_local:
+            raise RuntimeError(
+                f"Duplicate image slot: part {part}, scene {local}"
+            )
+
+        scene_id = str(
+            job.get("scene_id")
+            or job.get("id")
+            or job.get("source_scene_id")
+            or ""
+        ).strip()
+
+        if not scene_id:
+            scene_id = f"part_{part:02d}_scene_{local:02d}"
+
+        if not re.fullmatch(
+            r"[A-Za-z0-9_.-]{1,120}",
+            scene_id,
+        ):
+            raise RuntimeError(
+                f"Invalid scene ID: {scene_id!r}"
+            )
+
+        if scene_id in seen_ids:
+            raise RuntimeError(
+                f"Duplicate scene ID: {scene_id}"
+            )
+
+        role = str(
+            job.get("role")
+            or job.get("scene_type")
+            or "main"
+        ).strip().lower()
+
+        if role not in {
+            "main",
+            "hook",
+            "suspense",
+            "resolution",
+        }:
+            raise RuntimeError(
+                f"Unsupported scene role: {role}"
+            )
 
         size = parse_size(
-            job.get("image_size", metadata.get("image_size", "1024x576"))
+            job.get(
+                "image_size",
+                metadata.get("image_size", "1024x576"),
+            )
         )
 
-        prompt = next((
-            str(job.get(key)).strip()
-            for key in (
-                "prompt", "image_prompt", "visual_prompt",
-                "scene_prompt", "description",
-            )
-            if isinstance(job.get(key), str) and job[key].strip()
-        ), "")
+        prompt = next(
+            (
+                str(job.get(key)).strip()
+                for key in (
+                    "prompt",
+                    "image_prompt",
+                    "visual_prompt",
+                    "scene_prompt",
+                    "description",
+                )
+                if isinstance(job.get(key), str)
+                and job[key].strip()
+            ),
+            "",
+        )
 
         if len(prompt) < 12:
             raise RuntimeError(
-                f"Scene {global_number}: missing or too-short prompt."
+                f"{scene_id}: visual prompt अनुपस्थित या बहुत छोटा है."
             )
 
         destination = safe_path(
@@ -350,16 +480,30 @@ def get_jobs():
             or job.get("image")
             or (
                 f"output/visuals/part_{part:02d}/"
-                f"scene_{local:02d}.png"
+                f"{scene_id}.png"
             ),
-            f"scene {global_number} output",
+            scene_id,
         )
+
+        relative_path = destination.relative_to(ROOT).as_posix()
+
+        if relative_path in seen_paths:
+            raise RuntimeError(
+                f"Duplicate image output path: {relative_path}"
+            )
+
+        seen_global.add(global_number)
+        seen_local.add((part, local))
+        seen_ids.add(scene_id)
+        seen_paths.add(relative_path)
 
         prepared.append({
             "scene": global_number,
             "global_scene": global_number,
             "part": part,
             "local_scene": local,
+            "scene_id": scene_id,
+            "role": role,
             "prompt": prompt,
             "negative_prompt": str(
                 job.get("negative_prompt", "")
@@ -367,25 +511,41 @@ def get_jobs():
             "size": size,
             "size_text": f"{size[0]}x{size[1]}",
             "destination": destination,
-            "duration": job.get("scene_duration", job.get("duration")),
-            "scene_id": job.get("id") or job.get("scene_id"),
+            "duration": job.get(
+                "scene_duration",
+                job.get("duration"),
+            ),
             "source_job": job,
         })
 
-    prepared.sort(key=lambda item: item["scene"])
-    numbers = [item["scene"] for item in prepared]
+    prepared.sort(
+        key=lambda item: item["global_scene"]
+    )
 
-    if numbers != list(range(1, len(prepared) + 1)):
+    expected_numbers = list(
+        range(1, len(prepared) + 1)
+    )
+
+    actual_numbers = [
+        item["global_scene"]
+        for item in prepared
+    ]
+
+    if actual_numbers != expected_numbers:
         raise RuntimeError(
-            "Global scene numbers must be continuous from 1. "
-            f"Received: {numbers}"
+            "Global image-job numbering continuous 1 से शुरू होनी चाहिए. "
+            f"Received: {actual_numbers}"
         )
 
-    ordered_pairs = [
-        (item["part"], item["local_scene"]) for item in prepared
+    ordered_slots = [
+        (item["part"], item["local_scene"])
+        for item in prepared
     ]
-    if ordered_pairs != sorted(ordered_pairs):
-        raise RuntimeError("Image jobs must be ordered part by part.")
+
+    if ordered_slots != sorted(ordered_slots):
+        raise RuntimeError(
+            "Image jobs part और local image slot के क्रम में नहीं हैं."
+        )
 
     return prepared, metadata
 
@@ -393,11 +553,16 @@ def get_jobs():
 def make_prompt(item):
     prompt = item["prompt"].strip()
     negative = item["negative_prompt"].strip()
-    return (
+
+    result = (
         f"{prompt}\n\n"
-        f"Photographic quality requirements: {QUALITY}\n\n"
-        + (f"Avoid: {negative}" if negative else "")
+        f"Photographic quality requirements: {QUALITY}"
     )
+
+    if negative:
+        result += f"\n\nAvoid: {negative}"
+
+    return result
 
 
 def prompt_hash(item):
@@ -407,7 +572,11 @@ def prompt_hash(item):
 def valid_image(path, size):
     try:
         path = Path(path)
-        if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
+
+        if (
+            not path.is_file()
+            or path.stat().st_size < MIN_IMAGE_BYTES
+        ):
             return False
 
         with Image.open(path) as image:
@@ -418,35 +587,54 @@ def valid_image(path, size):
                 image.format in {"PNG", "JPEG", "WEBP"}
                 and image.size == tuple(size)
             )
+
     except Exception:
         return False
 
 
 def save_image(image, destination, size):
     destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.stem + ".tmp.png")
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temporary = destination.with_name(
+        destination.stem + ".tmp.png"
+    )
 
     try:
         image = ImageOps.exif_transpose(image).convert("RGB")
+
         image = ImageOps.fit(
             image,
             tuple(size),
             method=Image.Resampling.LANCZOS,
         )
-        image.save(temporary, "PNG", optimize=True)
+
+        image.save(
+            temporary,
+            "PNG",
+            optimize=True,
+        )
 
         if not valid_image(temporary, size):
-            raise ValueError("Generated image failed validation.")
+            raise ValueError(
+                "Generated image validation failed."
+            )
 
         temporary.replace(destination)
+
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def save_image_bytes(raw, destination, size):
     if not raw:
-        raise ValueError("Provider returned empty image data.")
+        raise ValueError(
+            "Provider ने empty image data दिया."
+        )
+
     with Image.open(BytesIO(raw)) as image:
         image.load()
         save_image(image, destination, size)
@@ -454,57 +642,116 @@ def save_image_bytes(raw, destination, size):
 
 def response_image(response, destination, size, provider):
     response.raise_for_status()
-    content_type = response.headers.get("content-type", "").lower()
+
+    content_type = response.headers.get(
+        "content-type", ""
+    ).lower()
+
     if not content_type.startswith("image/"):
-        raise ValueError(f"{provider} returned non-image content.")
-    save_image_bytes(response.content, destination, size)
+        raise ValueError(
+            f"{provider} ने image के बजाय non-image response दिया."
+        )
+
+    save_image_bytes(
+        response.content,
+        destination,
+        size,
+    )
 
 
 def load_rows(path):
     document = read_json(path, {})
-    rows = (
-        document.get("scenes", [])
-        if isinstance(document, dict)
-        else document if isinstance(document, list) else []
-    )
-    result = {}
-    if isinstance(rows, list):
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                number = int(row.get("global_scene", row.get("scene")))
-            except (TypeError, ValueError):
-                continue
-            if number > 0:
-                result[number] = row
-    return result
+
+    if isinstance(document, dict):
+        rows = document.get("scenes", [])
+
+    elif isinstance(document, list):
+        rows = document
+
+    else:
+        rows = []
+
+    by_id = {}
+    by_global = {}
+
+    if not isinstance(rows, list):
+        return by_id, by_global
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        scene_id = str(
+            row.get("scene_id") or ""
+        ).strip()
+
+        if scene_id:
+            by_id[scene_id] = row
+
+        try:
+            number = int(
+                row.get("global_scene")
+                or row.get("scene")
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if number > 0:
+            by_global[number] = row
+
+    return by_id, by_global
 
 
 def previous_scene_rows():
-    rows = load_rows(IMAGE_MANIFEST)
-    rows.update(load_rows(GENERATION_MANIFEST))
-    return rows
+    by_id = {}
+    by_global = {}
+
+    for path in (
+        IMAGE_MANIFEST,
+        GENERATION_MANIFEST,
+    ):
+        current_id, current_global = load_rows(path)
+
+        by_id.update(current_id)
+        by_global.update(current_global)
+
+    return by_id, by_global
 
 
 def access_error(message):
-    text = str(message).lower()
-    return any(term in text for term in (
-        "429", "401", "403", "402", "quota", "rate limit",
-        "billing", "payment required", "insufficient credit",
-        "unauthorized", "forbidden", "resource exhausted",
-    ))
+    value = str(message).lower()
+
+    return any(
+        term in value
+        for term in (
+            "429",
+            "401",
+            "403",
+            "402",
+            "quota",
+            "rate limit",
+            "billing",
+            "payment required",
+            "insufficient credit",
+            "unauthorized",
+            "forbidden",
+            "resource exhausted",
+        )
+    )
 
 
 def build_negative_prompt(item):
     return item["negative_prompt"] or (
         "cartoon, anime, illustration, CGI, deformed anatomy, "
-        "extra fingers, duplicate people, watermark, logo, text"
+        "extra fingers, missing fingers, duplicate people, "
+        "watermark, logo, text, unrelated objects"
     )
+
 
 def hf_parameter_name(parameter):
     if not isinstance(parameter, dict):
         return ""
+
     return str(
         parameter.get("parameter_name")
         or parameter.get("name")
@@ -512,81 +759,182 @@ def hf_parameter_name(parameter):
     ).strip()
 
 
-def build_hf_arguments(parameters, prompt, size, seed, negative):
+def build_hf_arguments(
+    parameters,
+    prompt,
+    size,
+    seed,
+    negative,
+):
     width, height = size
     arguments = {}
     prompt_found = False
 
     for parameter in parameters:
         name = hf_parameter_name(parameter)
+
         if not name:
             continue
 
-        normalized = re.sub(r"[^a-z0-9]", "", name.lower())
+        normalized = re.sub(
+            r"[^a-z0-9]",
+            "",
+            name.lower(),
+        )
+
         required = (
-            not bool(parameter.get("parameter_has_default", True))
+            not bool(
+                parameter.get(
+                    "parameter_has_default",
+                    True,
+                )
+            )
             if "parameter_has_default" in parameter
             else bool(parameter.get("required", False))
         )
 
-        if any(token in normalized for token in (
-            "prompt", "description", "textprompt", "positiveprompt"
-        )):
+        if any(
+            token in normalized
+            for token in (
+                "prompt",
+                "description",
+                "textprompt",
+                "positiveprompt",
+            )
+        ):
             arguments[name] = prompt
             prompt_found = True
-        elif normalized in {"width", "imagewidth", "outputwidth"}:
+
+        elif normalized in {
+            "width",
+            "imagewidth",
+            "outputwidth",
+        }:
             arguments[name] = width
-        elif normalized in {"height", "imageheight", "outputheight"}:
+
+        elif normalized in {
+            "height",
+            "imageheight",
+            "outputheight",
+        }:
             arguments[name] = height
-        elif normalized in {"seed", "randomseed"}:
+
+        elif normalized in {
+            "seed",
+            "randomseed",
+        }:
             arguments[name] = seed
-        elif normalized in {"negativeprompt", "negative"}:
+
+        elif normalized in {
+            "negativeprompt",
+            "negative",
+        }:
             arguments[name] = negative
-        elif normalized in {"guidancescale", "guidance", "cfgscale"}:
+
+        elif normalized in {
+            "guidancescale",
+            "guidance",
+            "cfgscale",
+        }:
             arguments[name] = 7
-        elif normalized in {"steps", "numsteps", "inferencesteps"}:
+
+        elif normalized in {
+            "steps",
+            "numsteps",
+            "inferencesteps",
+        }:
             arguments[name] = 9
-        elif normalized in {"randomize", "randomizeseed"}:
+
+        elif normalized in {
+            "randomize",
+            "randomizeseed",
+        }:
             arguments[name] = False
+
         elif required:
             raise RuntimeError(
                 f"Unsupported required Hugging Face input: {name}"
             )
 
     if not prompt_found:
-        raise RuntimeError("Hugging Face endpoint has no prompt input.")
+        raise RuntimeError(
+            "Hugging Face endpoint में prompt input नहीं मिला."
+        )
+
     return arguments
 
 
-def generate_huggingface(prompt, destination, size, seed, space, negative):
+def generate_huggingface(
+    prompt,
+    destination,
+    size,
+    seed,
+    space,
+    negative,
+):
     if Client is None:
-        raise RuntimeError("gradio_client is not installed.")
+        raise RuntimeError(
+            "gradio_client installed नहीं है."
+        )
 
     options = {"verbose": False}
+
     if HF_TOKEN:
         options["hf_token"] = HF_TOKEN
 
     client = Client(space, **options)
-    api = client.view_api(return_format="dict")
-    endpoints = api.get("named_endpoints", {})
+
+    api = client.view_api(
+        return_format="dict"
+    )
+
+    endpoints = api.get(
+        "named_endpoints",
+        {},
+    )
 
     if not isinstance(endpoints, dict) or not endpoints:
-        raise RuntimeError(f"{space}: no named Gradio endpoints found.")
+        raise RuntimeError(
+            f"{space}: कोई named Gradio endpoint नहीं मिला."
+        )
 
-    preferred = ("/generate_image", "/generate", "/predict", "/run")
+    preferred = (
+        "/generate_image",
+        "/generate",
+        "/predict",
+        "/run",
+    )
+
     endpoint = next(
-        (name for name in preferred if name in endpoints),
+        (
+            name for name in preferred
+            if name in endpoints
+        ),
         next(iter(endpoints)),
     )
 
-    parameters = endpoints[endpoint].get("parameters", [])
+    parameters = endpoints[endpoint].get(
+        "parameters",
+        [],
+    )
+
     if not isinstance(parameters, list):
-        raise RuntimeError(f"{space}: invalid endpoint schema.")
+        raise RuntimeError(
+            f"{space}: endpoint parameters invalid हैं."
+        )
 
     arguments = build_hf_arguments(
-        parameters, prompt, size, seed, negative
+        parameters,
+        prompt,
+        size,
+        seed,
+        negative,
     )
-    result = client.predict(api_name=endpoint, **arguments)
+
+    result = client.predict(
+        api_name=endpoint,
+        **arguments,
+    )
 
     if isinstance(result, (list, tuple)):
         result = result[0] if result else None
@@ -605,30 +953,51 @@ def generate_huggingface(prompt, destination, size, seed, space, negative):
 
     if isinstance(result, str):
         candidate = Path(result)
+
         if candidate.is_file():
             with Image.open(candidate) as image:
                 save_image(image, destination, size)
             return
 
         if result.startswith(("https://", "http://")):
-            response = SESSION.get(result, timeout=TIMEOUT)
+            response = SESSION.get(
+                result,
+                timeout=TIMEOUT,
+            )
+
             response_image(
-                response, destination, size, "Hugging Face"
+                response,
+                destination,
+                size,
+                "Hugging Face",
             )
             return
 
-    raise ValueError(f"{space}: endpoint returned no usable image.")
+    raise ValueError(
+        f"{space}: usable image output नहीं मिला."
+    )
 
 
-def generate_pollinations(prompt, destination, size, seed, model):
+def generate_pollinations(
+    prompt,
+    destination,
+    size,
+    seed,
+    model,
+):
     width, height = size
+
     url = (
         "https://gen.pollinations.ai/image/"
         + quote(prompt, safe="")
     )
+
     headers = {}
+
     if POLLINATIONS_KEY:
-        headers["Authorization"] = f"Bearer {POLLINATIONS_KEY}"
+        headers["Authorization"] = (
+            f"Bearer {POLLINATIONS_KEY}"
+        )
 
     response = SESSION.get(
         url,
@@ -642,19 +1011,29 @@ def generate_pollinations(prompt, destination, size, seed, model):
         headers=headers,
         timeout=TIMEOUT,
     )
+
     response_image(
-        response, destination, size, f"Pollinations ({model})"
+        response,
+        destination,
+        size,
+        f"Pollinations ({model})",
     )
 
 
 def generate_gemini(prompt, destination, size):
     if not ALLOW_BILLABLE:
-        raise RuntimeError("Gemini blocked: billable providers disabled.")
+        raise RuntimeError(
+            "Gemini Image blocked: billable permission is disabled."
+        )
+
     if not GEMINI_KEY:
-        raise RuntimeError("GEMINI_API_KEY is missing.")
+        raise RuntimeError(
+            "GEMINI_API_KEY उपलब्ध नहीं है."
+        )
 
     width, height = size
     aspect = "9:16" if height > width else "16:9"
+
     endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         + quote(GEMINI_MODEL, safe="")
@@ -682,38 +1061,68 @@ def generate_gemini(prompt, destination, size):
         },
         timeout=TIMEOUT,
     )
+
     response.raise_for_status()
     data = response.json()
 
     for candidate in data.get("candidates", []):
         content = candidate.get("content", {})
+
         for item in content.get("parts", []):
-            inline = item.get("inlineData") or item.get("inline_data")
+            inline = (
+                item.get("inlineData")
+                or item.get("inline_data")
+            )
+
             if isinstance(inline, dict) and inline.get("data"):
                 raw = base64.b64decode(
-                    inline["data"], validate=True
+                    inline["data"],
+                    validate=True,
                 )
-                save_image_bytes(raw, destination, size)
+
+                save_image_bytes(
+                    raw,
+                    destination,
+                    size,
+                )
                 return
 
-    raise ValueError("Gemini response contained no inline image data.")
+    raise ValueError(
+        "Gemini response में image data नहीं मिला."
+    )
 
 
-def generate_replicate(prompt, destination, size, seed):
+def generate_replicate(
+    prompt,
+    destination,
+    size,
+    seed,
+):
     if not ALLOW_BILLABLE:
-        raise RuntimeError("Replicate blocked: billable providers disabled.")
+        raise RuntimeError(
+            "Replicate blocked: billable permission is disabled."
+        )
+
     if not REPLICATE_KEY:
-        raise RuntimeError("REPLICATE_API_TOKEN is missing.")
+        raise RuntimeError(
+            "REPLICATE_API_TOKEN उपलब्ध नहीं है."
+        )
 
     owner, separator, model = REPLICATE_MODEL.partition("/")
+
     if not separator or not owner or not model:
-        raise RuntimeError("REPLICATE_IMAGE_MODEL must be owner/model.")
+        raise RuntimeError(
+            "REPLICATE_IMAGE_MODEL में owner/model आवश्यक है."
+        )
 
     width, height = size
     aspect = "9:16" if height > width else "16:9"
 
     response = SESSION.post(
-        f"https://api.replicate.com/v1/models/{owner}/{model}/predictions",
+        (
+            "https://api.replicate.com/v1/models/"
+            f"{owner}/{model}/predictions"
+        ),
         headers={
             "Authorization": f"Bearer {REPLICATE_KEY}",
             "Content-Type": "application/json",
@@ -729,20 +1138,34 @@ def generate_replicate(prompt, destination, size, seed):
         },
         timeout=TIMEOUT,
     )
+
     response.raise_for_status()
     prediction = response.json()
     deadline = time.monotonic() + TIMEOUT
 
-    while prediction.get("status") in {"starting", "processing"}:
+    while prediction.get("status") in {
+        "starting",
+        "processing",
+    }:
         if time.monotonic() >= deadline:
-            raise TimeoutError("Replicate prediction timed out.")
+            raise TimeoutError(
+                "Replicate prediction timed out."
+            )
 
         time.sleep(2)
-        poll_url = prediction.get("urls", {}).get("get")
+
+        poll_url = prediction.get(
+            "urls", {}
+        ).get("get")
+
         if not poll_url:
             prediction_id = prediction.get("id")
+
             if not prediction_id:
-                raise ValueError("Replicate returned no prediction ID.")
+                raise ValueError(
+                    "Replicate ने prediction ID नहीं दिया."
+                )
+
             poll_url = (
                 "https://api.replicate.com/v1/predictions/"
                 + str(prediction_id)
@@ -750,48 +1173,87 @@ def generate_replicate(prompt, destination, size, seed):
 
         check = SESSION.get(
             poll_url,
-            headers={"Authorization": f"Bearer {REPLICATE_KEY}"},
+            headers={
+                "Authorization": f"Bearer {REPLICATE_KEY}"
+            },
             timeout=30,
         )
+
         check.raise_for_status()
         prediction = check.json()
 
     if prediction.get("status") != "succeeded":
         raise RuntimeError(
             "Replicate failed: "
-            + str(prediction.get("error") or prediction.get("status"))
+            + str(
+                prediction.get("error")
+                or prediction.get("status")
+            )
         )
 
     output = prediction.get("output")
+
     if isinstance(output, str):
         output = [output]
+
     elif isinstance(output, dict):
         output = list(output.values())
 
-    image_url = next((
-        value for value in (output or [])
-        if isinstance(value, str)
-        and value.startswith(("https://", "http://"))
-    ), None)
+    image_url = next(
+        (
+            value for value in (output or [])
+            if isinstance(value, str)
+            and value.startswith(("https://", "http://"))
+        ),
+        None,
+    )
 
     if not image_url:
-        raise ValueError("Replicate returned no image URL.")
+        raise ValueError(
+            "Replicate ने image URL नहीं दिया."
+        )
 
-    image_response = SESSION.get(image_url, timeout=TIMEOUT)
-    response_image(image_response, destination, size, "Replicate")
+    image_response = SESSION.get(
+        image_url,
+        timeout=TIMEOUT,
+    )
+
+    response_image(
+        image_response,
+        destination,
+        size,
+        "Replicate",
+    )
 
 
-def build_provider_attempts(prompt, destination, size, seed, negative, order):
+def build_provider_attempts(
+    prompt,
+    destination,
+    size,
+    seed,
+    negative,
+    order,
+):
     attempts = []
 
     for provider in order:
         if provider == "huggingface":
-            spaces = HF_SPACES if IMAGE_FALLBACK_ENABLED else HF_SPACES[:1]
+            spaces = (
+                HF_SPACES
+                if IMAGE_FALLBACK_ENABLED
+                else HF_SPACES[:1]
+            )
+
             for space in spaces:
                 attempts.append((
                     f"Hugging Face: {space}",
                     lambda space=space: generate_huggingface(
-                        prompt, destination, size, seed, space, negative
+                        prompt,
+                        destination,
+                        size,
+                        seed,
+                        space,
+                        negative,
                     ),
                     "hf:" + space,
                     False,
@@ -803,11 +1265,16 @@ def build_provider_attempts(prompt, destination, size, seed, negative, order):
                 if IMAGE_FALLBACK_ENABLED
                 else POLLINATIONS_MODELS[:1]
             )
+
             for model in models:
                 attempts.append((
                     f"Pollinations: {model}",
                     lambda model=model: generate_pollinations(
-                        prompt, destination, size, seed, model
+                        prompt,
+                        destination,
+                        size,
+                        seed,
+                        model,
                     ),
                     "pollinations:" + model,
                     False,
@@ -818,7 +1285,9 @@ def build_provider_attempts(prompt, destination, size, seed, negative, order):
                 attempts.append((
                     f"Gemini Image: {GEMINI_MODEL}",
                     lambda: generate_gemini(
-                        prompt, destination, size
+                        prompt,
+                        destination,
+                        size,
                     ),
                     "gemini",
                     True,
@@ -829,7 +1298,10 @@ def build_provider_attempts(prompt, destination, size, seed, negative, order):
                 attempts.append((
                     f"Replicate: {REPLICATE_MODEL}",
                     lambda: generate_replicate(
-                        prompt, destination, size, seed
+                        prompt,
+                        destination,
+                        size,
+                        seed,
                     ),
                     "replicate",
                     True,
@@ -840,19 +1312,32 @@ def build_provider_attempts(prompt, destination, size, seed, negative, order):
 
     return attempts
 
-
 def make_record(item, status, provider=None):
     destination = item["destination"]
-    relative = destination.relative_to(ROOT).as_posix()
-    valid = valid_image(destination, item["size"])
+    valid = valid_image(
+        destination,
+        item["size"],
+    )
+
+    relative = destination.relative_to(
+        ROOT
+    ).as_posix()
+
+    source_job = item["source_job"]
 
     return {
         "scene": item["scene"],
-        "global_scene": item["scene"],
-        "global_scene_number": item["scene"],
+        "global_scene": item["global_scene"],
+        "global_scene_number": item["global_scene"],
         "part": item["part"],
         "local_scene": item["local_scene"],
+        "source_scene_number": source_job.get(
+            "source_scene_number",
+            source_job.get("source_local_scene"),
+        ),
         "scene_id": item["scene_id"],
+        "role": item["role"],
+        "is_extra_scene": item["role"] != "main",
         "file": relative,
         "image": relative,
         "image_path": relative,
@@ -862,7 +1347,16 @@ def make_record(item, status, provider=None):
         "status": status,
         "provider": provider,
         "prompt_sha256": prompt_hash(item),
-        "image_sha256": sha256_file(destination) if valid else None,
+        "prompt_signature": source_job.get(
+            "prompt_signature"
+        ),
+        "source_scene_signature": source_job.get(
+            "source_scene_signature"
+        ),
+        "image_sha256": (
+            sha256_file(destination)
+            if valid else None
+        ),
         "duration": item["duration"],
     }
 
@@ -872,12 +1366,24 @@ def build_image_manifest(records, metadata):
         row["status"] in {"existing", "generated"}
         for row in records
     )
+
     return {
         "version": VERSION,
-        "status": "completed" if ready == len(records) else "in_progress",
-        "source_fingerprint": metadata.get("source_fingerprint"),
-        "config_signature": metadata.get("config_signature"),
-        "format": metadata.get("format", "unknown"),
+        "status": (
+            "completed"
+            if ready == len(records)
+            else "in_progress"
+        ),
+        "source_fingerprint": metadata.get(
+            "source_fingerprint"
+        ),
+        "config_signature": metadata.get(
+            "config_signature"
+        ),
+        "format": metadata.get(
+            "format",
+            "unknown",
+        ),
         "image_size": metadata.get("image_size"),
         "total_scenes": len(records),
         "images_ready": ready,
@@ -886,10 +1392,27 @@ def build_image_manifest(records, metadata):
             {
                 key: row.get(key)
                 for key in (
-                    "scene", "global_scene", "global_scene_number",
-                    "part", "local_scene", "scene_id", "image",
-                    "image_path", "image_sha256", "width", "height",
-                    "duration", "status", "provider", "prompt_sha256",
+                    "scene",
+                    "global_scene",
+                    "global_scene_number",
+                    "part",
+                    "local_scene",
+                    "source_scene_number",
+                    "scene_id",
+                    "role",
+                    "is_extra_scene",
+                    "image",
+                    "image_path",
+                    "image_sha256",
+                    "width",
+                    "height",
+                    "image_size",
+                    "duration",
+                    "status",
+                    "provider",
+                    "prompt_sha256",
+                    "prompt_signature",
+                    "source_scene_signature",
                 )
             }
             for row in records
@@ -898,59 +1421,142 @@ def build_image_manifest(records, metadata):
 
 
 def selected_model_notice(order):
-    selection = read_json(SELECTED_MODEL_FILE, {})
+    selection = read_json(
+        SELECTED_MODEL_FILE,
+        {},
+    )
+
     if not isinstance(selection, dict):
         return
 
-    status = str(selection.get("status", "")).lower()
-    provider = str(selection.get("provider") or "").lower()
-    model = str(selection.get("model") or "").strip()
+    status = str(
+        selection.get("status", "")
+    ).lower()
+
+    provider = str(
+        selection.get("provider") or ""
+    ).lower()
+
+    model = str(
+        selection.get("model") or ""
+    ).strip()
 
     if status == "selected":
-        if provider and provider not in order:
-            log(
-                "Selector provider is outside IMAGE_PROVIDER_ORDER:",
+        if provider:
+            normalized = PROVIDER_ALIASES.get(
+                provider,
                 provider,
             )
-        log("Visual selector record:", provider or "unknown", model or "unknown")
-        log("Generation uses configured IMAGE_PROVIDER_ORDER.")
+
+            if normalized not in order:
+                log(
+                    "Visual selector provider IMAGE_PROVIDER_ORDER "
+                    "में configured नहीं है:",
+                    provider,
+                )
+
+        log(
+            "Visual selector record:",
+            provider or "unknown",
+            model or "unknown",
+        )
+
+        log(
+            "Generation uses Input IMAGE_PROVIDER_ORDER "
+            "without changing its sequence."
+        )
 
 
 def main():
     config = parse_input_settings()
     apply_input_settings(config)
-    order = provider_order(config)
 
-    VISUAL_DIR.mkdir(parents=True, exist_ok=True)
+    order = PROVIDER_ORDER
+
+    VISUAL_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     items, metadata = get_jobs()
-    previous = previous_scene_rows()
+
+    previous_by_id, previous_by_global = (
+        previous_scene_rows()
+    )
 
     records = []
     pending = []
 
     for item in items:
-        old = previous.get(item["scene"], {})
+        old = previous_by_id.get(
+            item["scene_id"]
+        )
+
+        if old is None:
+            possible_old = previous_by_global.get(
+                item["global_scene"]
+            )
+
+            # Global numbering alone is not enough to reuse an image.
+            if (
+                isinstance(possible_old, dict)
+                and possible_old.get("scene_id")
+                == item["scene_id"]
+            ):
+                old = possible_old
+
+        if not isinstance(old, dict):
+            old = {}
+
         destination = item["destination"]
-        image_ok = valid_image(destination, item["size"])
+
+        image_ok = valid_image(
+            destination,
+            item["size"],
+        )
 
         checksum_matches = (
             image_ok
             and (
                 not old.get("image_sha256")
-                or sha256_file(destination) == old.get("image_sha256")
+                or sha256_file(destination)
+                == old.get("image_sha256")
             )
+        )
+
+        prompt_matches = (
+            old.get("prompt_sha256")
+            == prompt_hash(item)
+        )
+
+        scene_identity_matches = (
+            not old.get("scene_id")
+            or old.get("scene_id") == item["scene_id"]
         )
 
         if (
             image_ok
-            and old.get("prompt_sha256") == prompt_hash(item)
             and checksum_matches
+            and prompt_matches
+            and scene_identity_matches
         ):
             record = make_record(
-                item, "existing", old.get("provider") or "previous run"
+                item,
+                "existing",
+                old.get("provider") or "previous run",
             )
+
+            record["attempts"] = old.get(
+                "attempts",
+                [],
+            )
+
         else:
-            record = make_record(item, "pending")
+            record = make_record(
+                item,
+                "pending",
+            )
+
             pending.append((item, record))
 
         records.append(record)
@@ -958,9 +1564,16 @@ def main():
     manifest = {
         "version": VERSION,
         "status": "in_progress",
-        "source_fingerprint": metadata.get("source_fingerprint"),
-        "config_signature": metadata.get("config_signature"),
-        "format": metadata.get("format", "unknown"),
+        "source_fingerprint": metadata.get(
+            "source_fingerprint"
+        ),
+        "config_signature": metadata.get(
+            "config_signature"
+        ),
+        "format": metadata.get(
+            "format",
+            "unknown",
+        ),
         "image_size": metadata.get("image_size"),
         "policy": {
             "billable_providers_enabled": ALLOW_BILLABLE,
@@ -982,45 +1595,71 @@ def main():
             row["status"] in {"existing", "generated"}
             for row in records
         )
-        failed = sum(row["status"] == "failed" for row in records)
-        pending_count = sum(row["status"] == "pending" for row in records)
+
+        failed = sum(
+            row["status"] == "failed"
+            for row in records
+        )
+
+        pending_count = sum(
+            row["status"] == "pending"
+            for row in records
+        )
 
         manifest["completed_count"] = ready
+
         manifest["status"] = (
-            "completed" if ready == len(records) else "in_progress"
+            "completed"
+            if ready == len(records)
+            else "in_progress"
         )
+
         manifest["summary"] = {
             "ready": ready,
             "failed": failed,
             "pending": pending_count,
+            "total": len(records),
         }
 
-        save_json(GENERATION_MANIFEST, manifest)
+        save_json(
+            GENERATION_MANIFEST,
+            manifest,
+        )
+
         save_json(
             IMAGE_MANIFEST,
-            build_image_manifest(records, metadata),
+            build_image_manifest(
+                records,
+                metadata,
+            ),
         )
 
     checkpoint()
 
-    log("=" * 55)
+    log("=" * 60)
     log("KATHA LOK AI — PHOTO MOTION IMAGE GENERATION")
     log("Version:", VERSION)
     log("Format:", metadata.get("format", "unknown"))
-    log("Scenes:", len(items))
-    log("Already valid:", len(items) - len(pending))
+    log("Total image jobs:", len(items))
+    log(
+        "Already valid:",
+        len(items) - len(pending),
+    )
     log("Pending:", len(pending))
     log("Provider order:", " -> ".join(order))
-    log("Hugging Face:", HF_SPACES)
-    log("Pollinations:", POLLINATIONS_MODELS)
-    log("Gemini:", GEMINI_MODEL, "configured:", bool(GEMINI_KEY))
-    log("Replicate:", REPLICATE_MODEL, "configured:", bool(REPLICATE_KEY))
-    log("Billable enabled:", ALLOW_BILLABLE)
+    log("Billable providers allowed:", ALLOW_BILLABLE)
     log("Fallback enabled:", IMAGE_FALLBACK_ENABLED)
+    log("=" * 60)
+
     selected_model_notice(order)
 
     if not pending:
-        log("All images are valid. No provider calls required.")
+        log(
+            "All images are valid and match their saved prompt signatures."
+        )
+        log(
+            "No image provider calls required."
+        )
         return 0
 
     blocked_hf = set()
@@ -1031,102 +1670,216 @@ def main():
         prompt = make_prompt(item)
         destination = item["destination"]
         size = item["size"]
-        seed = BASE_SEED + item["scene"]
+
+        seed = BASE_SEED + item["global_scene"]
+
         negative = build_negative_prompt(item)
 
         attempts = build_provider_attempts(
-            prompt, destination, size, seed, negative, order
+            prompt,
+            destination,
+            size,
+            seed,
+            negative,
+            order,
         )
 
         succeeded = False
-        last_error = "No configured provider was available."
+        last_error = (
+            "कोई configured provider उपलब्ध नहीं है."
+        )
 
-        for name, generate, provider_key, billable in attempts:
+        if not attempts:
+            record["status"] = "failed"
+            record["error"] = (
+                "Configured provider order में कोई provider "
+                "इस run के लिए उपलब्ध नहीं है. "
+                "Keys और billable permission जाँचें."
+            )
+
+            checkpoint()
+
+            log(
+                "No available provider for:",
+                item["scene_id"],
+            )
+
+            continue
+
+        for (
+            provider_name,
+            generate,
+            provider_key,
+            billable,
+        ) in attempts:
+
             if provider_key.startswith("hf:"):
                 if provider_key[3:] in blocked_hf:
                     continue
+
             elif provider_key.startswith("pollinations:"):
-                if provider_key.split(":", 1)[1] in blocked_pollinations:
+                model_key = provider_key.split(
+                    ":",
+                    1,
+                )[1]
+
+                if model_key in blocked_pollinations:
                     continue
+
             elif billable and provider_key in blocked_paid:
                 continue
 
             try:
                 log(
-                    f"Scene {item['scene']} "
-                    f"({item['part']}/{item['local_scene']}): {name}"
+                    "Generating:",
+                    item["scene_id"],
+                    "| Part:",
+                    item["part"],
+                    "| Role:",
+                    item["role"],
+                    "| Provider:",
+                    provider_name,
                 )
-                destination.parent.mkdir(parents=True, exist_ok=True)
+
+                destination.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
                 generate()
 
-                if not valid_image(destination, size):
-                    destination.unlink(missing_ok=True)
-                    raise ValueError(
-                        "Provider output failed format, size or integrity validation."
+                if not valid_image(
+                    destination,
+                    size,
+                ):
+                    destination.unlink(
+                        missing_ok=True
                     )
 
-                record.update(make_record(item, "generated", name))
-                record.setdefault("attempts", []).append({
-                    "provider": name,
+                    raise ValueError(
+                        "Provider output failed image format, "
+                        "dimensions or integrity validation."
+                    )
+
+                record.update(
+                    make_record(
+                        item,
+                        "generated",
+                        provider_name,
+                    )
+                )
+
+                record.setdefault(
+                    "attempts",
+                    [],
+                ).append({
+                    "provider": provider_name,
                     "status": "success",
+                    "timestamp": int(time.time()),
                 })
+
                 succeeded = True
+
+                # Every successful scene is checkpointed immediately.
                 checkpoint()
-                log(f"Scene {item['scene']}: image checkpoint saved.")
+
+                log(
+                    "IMAGE CHECKPOINT SAVED:",
+                    item["scene_id"],
+                )
+
                 break
 
             except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                destination.unlink(missing_ok=True)
+                last_error = (
+                    f"{type(exc).__name__}: {exc}"
+                )
 
-                record.setdefault("attempts", []).append({
-                    "provider": name,
+                destination.unlink(
+                    missing_ok=True
+                )
+
+                record.setdefault(
+                    "attempts",
+                    [],
+                ).append({
+                    "provider": provider_name,
                     "status": "failed",
                     "error": last_error[:500],
+                    "timestamp": int(time.time()),
                 })
 
-                log(f"Provider failed: {name}: {last_error[:300]}")
+                log(
+                    "Provider failed:",
+                    provider_name,
+                    last_error[:300],
+                )
 
                 if access_error(last_error):
                     if provider_key.startswith("hf:"):
-                        blocked_hf.add(provider_key[3:])
-                    elif provider_key.startswith("pollinations:"):
+                        blocked_hf.add(
+                            provider_key[3:]
+                        )
+
+                    elif provider_key.startswith(
+                        "pollinations:"
+                    ):
                         blocked_pollinations.add(
                             provider_key.split(":", 1)[1]
                         )
+
                     elif billable:
-                        blocked_paid.add(provider_key)
+                        blocked_paid.add(
+                            provider_key
+                        )
+
+                # Do not stop the configured fallback sequence
+                # because one provider failed.
+                continue
 
         if not succeeded:
             record["status"] = "failed"
             record["error"] = last_error[:800]
+
             log(
-                f"Scene {item['scene']} failed. "
-                "Other scene checkpoints remain saved."
+                "IMAGE FAILED:",
+                item["scene_id"],
+                "|",
+                last_error[:300],
             )
 
         checkpoint()
 
     failed = [
-        row["scene"] for row in records if row["status"] == "failed"
+        row["scene_id"]
+        for row in records
+        if row["status"] == "failed"
     ]
+
     ready = sum(
         row["status"] in {"existing", "generated"}
         for row in records
     )
 
-    log("=" * 55)
+    log("=" * 60)
     log("IMAGE GENERATION SUMMARY")
     log("Images ready:", f"{ready}/{len(records)}")
-    log("Failed scenes:", failed)
-    log("Image manifest:", IMAGE_MANIFEST.relative_to(ROOT))
-    log("Generation manifest:", GENERATION_MANIFEST.relative_to(ROOT))
-    log("=" * 55)
+    log("Failed scene IDs:", failed)
+    log(
+        "Image manifest:",
+        IMAGE_MANIFEST.relative_to(ROOT),
+    )
+    log(
+        "Generation manifest:",
+        GENERATION_MANIFEST.relative_to(ROOT),
+    )
+    log("=" * 60)
 
     if failed:
         raise RuntimeError(
-            f"Image generation failed for scenes {failed}. "
-            "Successful image checkpoints have been preserved."
+            "Image generation failed for scene IDs: "
+            + ", ".join(failed)
+            + ". Successful scene checkpoints محفوظ हैं."
         )
 
     return 0
@@ -1135,9 +1888,17 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
+
     except KeyboardInterrupt:
-        print("IMAGE GENERATION CANCELLED", flush=True)
+        print(
+            "IMAGE GENERATION CANCELLED",
+            flush=True,
+        )
         sys.exit(130)
+
     except Exception as exc:
-        print(f"IMAGE GENERATION FAILED: {exc}", file=sys.stderr)
+        print(
+            f"IMAGE GENERATION FAILED: {exc}",
+            file=sys.stderr,
+        )
         sys.exit(1)
