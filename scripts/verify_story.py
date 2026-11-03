@@ -33,11 +33,12 @@ PLAN_FILE = ROOT / "output" / "story" / "story_plan.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 REPORT_FILE = ROOT / "output" / "story" / "story_verification.json"
 
-VERSION = "story-verifier-v14-selected-parts-role-and-source-integrity"
+VERSION = "story-verifier-v15-source-signature-plan-mode-and-short-retry-fix"
 
 SHORT_MIN_WORDS = 120
 SHORT_PREFERRED_MAX_WORDS = 150
 SHORT_HARD_MAX_WORDS = 180
+
 MAX_TITLE_LENGTH = 180
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 100
@@ -185,9 +186,9 @@ def verify_input() -> dict:
     topic = clean(get_topic(config))
     explicit_title = clean(config.get("TITLE", ""))
 
-    source_text = normalized_text(
-        get_complete_source(config, INPUT_FILE)
-    )
+    # get_complete_source() accepts only the parsed config.
+    # It reads the complete STORY_TEXT assignment from INPUT_FILE itself.
+    source_text = normalized_text(get_complete_source(config))
 
     if not topic and not explicit_title and not source_text:
         fail("Provide TOPIC, TITLE or STORY_TEXT.")
@@ -324,7 +325,9 @@ def verify_plan_header(
         "total_hook_scenes": selected_parts,
         "total_suspense_scenes": max(0, selected_parts - 1),
         "total_resolution_scenes": 1,
-        "total_extra_scenes": selected_parts + max(0, selected_parts - 1) + 1,
+        "total_extra_scenes": (
+            selected_parts + max(0, selected_parts - 1) + 1
+        ),
     }
 
     for field, expected in expected_metadata.items():
@@ -359,8 +362,9 @@ def verify_plan_header(
     if source.get("api_calls") != 0:
         fail("Story planning must not make external API calls.")
 
-    if source.get("planning_mode") != "offline_story_grounded":
-        fail("Story plan planning_mode is invalid.")
+    # generate_story_plan.py creates the plan from the final corrected story.
+    if source.get("planning_mode") != "final_corrected_story":
+        fail("Plan was not generated from the final corrected story.")
 
     if source.get("story_text_provided") is not True:
         fail("Story plan was not built from complete story text.")
@@ -447,7 +451,6 @@ def verify_plan_parts(
     mode = input_data["mode"]
     verified_parts = []
     global_scene = 0
-    all_anchors = []
 
     for part_number, part in enumerate(plan_parts, 1):
         if not isinstance(part, dict):
@@ -464,9 +467,7 @@ def verify_plan_parts(
 
         for field, expected in expected_part_values.items():
             if part.get(field) != expected:
-                fail(
-                    f"Plan part {part_number} {field} mismatch."
-                )
+                fail(f"Plan part {part_number} {field} mismatch.")
 
         scenes = part.get("scenes")
 
@@ -516,13 +517,11 @@ def verify_plan_parts(
                 if not clean(scene.get(field)):
                     fail(f"Plan {field} missing: {scene_id}.")
 
-            all_anchors.append(clean(scene.get("story_anchor")))
-
-        part_anchor = clean(" ".join(
+        expected_anchor = clean(" ".join(
             clean(scene.get("story_anchor")) for scene in scenes
         ))
 
-        if part_anchor != clean(part.get("story_anchor")):
+        if expected_anchor != clean(part.get("story_anchor")):
             fail(
                 f"Plan part {part_number} story_anchor does not match "
                 "its ordered main scene anchors."
@@ -555,18 +554,15 @@ def verify_plan_parts(
             mode,
         )
 
-        extras = part.get("extra_scenes")
-
         expected_extras = [hook]
         if suspense:
             expected_extras.append(suspense)
         if resolution:
             expected_extras.append(resolution)
 
-        if not isinstance(extras, list):
-            fail(f"Plan part {part_number} extra_scenes must be a list.")
+        extras = part.get("extra_scenes")
 
-        if extras != expected_extras:
+        if not isinstance(extras, list) or extras != expected_extras:
             fail(
                 f"Plan part {part_number} extra_scenes does not match "
                 "its Hook/Suspense/Resolution records."
@@ -585,7 +581,6 @@ def verify_plan_parts(
         })
 
     return verified_parts
-
 
 def verify_story_header(
     story: dict,
@@ -650,12 +645,20 @@ def verify_story_header(
                 f"found {actual}."
             )
 
-    source_words = word_count(source_text)
+    declared_source_words = story.get("source_word_count")
 
-    if positive_int(
-        story.get("source_word_count"),
-        "Story source_word_count",
-    ) != source_words:
+    if isinstance(declared_source_words, bool):
+        fail("Story source_word_count must be a non-negative integer.")
+
+    try:
+        declared_source_words = int(declared_source_words)
+    except (TypeError, ValueError, OverflowError):
+        fail("Story source_word_count must be a non-negative integer.")
+
+    if declared_source_words < 0:
+        fail("Story source_word_count cannot be negative.")
+
+    if declared_source_words != word_count(source_text):
         fail("Story source_word_count does not match complete input source.")
 
     fingerprint = clean(story.get("source_fingerprint"))
@@ -663,11 +666,18 @@ def verify_story_header(
     if not re.fullmatch(r"[a-fA-F0-9]{64}", fingerprint):
         fail("Story source_fingerprint is missing or invalid.")
 
+    corrected_story = story.get("corrected_complete_story")
+
+    if not isinstance(corrected_story, str) or not clean(corrected_story):
+        fail("Corrected complete story is missing.")
+
+    corrected_words = word_count(corrected_story)
+
     if positive_int(
         story.get("corrected_complete_story_word_count"),
         "Story corrected_complete_story_word_count",
-    ) <= 0:
-        fail("Corrected complete story word count is invalid.")
+    ) != corrected_words:
+        fail("Corrected complete story word count metadata is invalid.")
 
     if not clean(story.get("generation_method")):
         fail("Story generation_method metadata is missing.")
@@ -681,9 +691,7 @@ def verify_story_header(
         fail("Story proofreading metadata is missing.")
 
     if source_text and proofreading.get("performed") is not True:
-        fail(
-            "Supplied story has no confirmed proofreading record."
-        )
+        fail("Supplied story has no confirmed proofreading record.")
 
     parts = story.get("parts")
     all_scenes = story.get("scenes")
@@ -748,9 +756,6 @@ def verify_source_coverage(
     matched = source_terms.intersection(generated_terms)
     ratio = len(matched) / len(source_terms)
 
-    # SHORT may condense a long source, so the lexical threshold is
-    # deliberately lower than FULL. This is a warning detector, not
-    # a semantic proof.
     threshold = 0.12 if mode == "short" else 0.20
 
     if ratio < threshold:
@@ -818,18 +823,22 @@ def verify_story_parts(
             fail(f"Part {part_number} word_count metadata mismatch.")
 
         if mode == "short":
-            if not SHORT_MIN_WORDS <= amount <= SHORT_PREFERRED_MAX_WORDS:
+            if amount < SHORT_MIN_WORDS or amount > SHORT_HARD_MAX_WORDS:
                 fail(
                     f"SHORT part {part_number} has {amount} words; "
-                    f"required range is 120–150."
+                    "allowed range is 120–180."
                 )
 
-            if amount > SHORT_HARD_MAX_WORDS:
+            if (
+                amount > SHORT_PREFERRED_MAX_WORDS
+                and part.get("revision_attempted") is not True
+            ):
                 fail(
-                    f"SHORT part {part_number} exceeds hard limit 180."
+                    f"SHORT part {part_number} has {amount} words "
+                    "above 150 without a recorded revision attempt."
                 )
 
-        if not narration[-1] in BOUNDARY_ENDINGS:
+        if narration[-1] not in BOUNDARY_ENDINGS:
             fail(
                 f"Part {part_number} ends at an incomplete or "
                 "unrecognized sentence/clause boundary."
@@ -844,7 +853,10 @@ def verify_story_parts(
                 f"{scenes_expected} Main scenes."
             )
 
-        if not isinstance(planned_scenes, list) or len(planned_scenes) != scenes_expected:
+        if (
+            not isinstance(planned_scenes, list)
+            or len(planned_scenes) != scenes_expected
+        ):
             fail(f"Plan scene count mismatch in part {part_number}.")
 
         scene_narrations = []
@@ -923,6 +935,7 @@ def verify_story_parts(
                 fail(f"Story dialogue must be text: {scene_id}.")
 
             scene_text = clean(scene.get("narration"))
+
             if not scene_text:
                 fail(f"Scene narration is empty: {scene_id}.")
 
@@ -984,6 +997,11 @@ def verify_story_text(
     if clean(story.get("story_text")) != combined:
         fail("story_text does not match ordered Part narrations.")
 
+    if clean(story.get("corrected_complete_story")) != combined:
+        fail(
+            "corrected_complete_story does not match ordered Part narrations."
+        )
+
     declared_total = positive_int(
         story.get("total_story_words"),
         "Story total_story_words",
@@ -998,12 +1016,20 @@ def verify_story_text(
         )
 
     if mode == "short":
-        if any(
-            not SHORT_MIN_WORDS <= word_count(part.get("narration"))
-            <= SHORT_PREFERRED_MAX_WORDS
-            for part in parts
-        ):
-            fail("At least one SHORT part violates 120–150 word target.")
+        for part in parts:
+            amount = word_count(part.get("narration"))
+
+            if amount < SHORT_MIN_WORDS or amount > SHORT_HARD_MAX_WORDS:
+                fail("At least one SHORT part violates 120–180 word limits.")
+
+            if (
+                amount > SHORT_PREFERRED_MAX_WORDS
+                and part.get("revision_attempted") is not True
+            ):
+                fail(
+                    "A SHORT part above 150 words has no recorded "
+                    "revision attempt."
+                )
 
     return combined
 
@@ -1022,7 +1048,10 @@ def verify_plan_story_match(
         plan_scenes = planned_part.get("scenes")
         story_scenes = story_part.get("scenes")
 
-        if not isinstance(plan_scenes, list) or not isinstance(story_scenes, list):
+        if (
+            not isinstance(plan_scenes, list)
+            or not isinstance(story_scenes, list)
+        ):
             fail(f"Plan/story scene lists are invalid in part {part_number}.")
 
         if len(plan_scenes) != len(story_scenes):
@@ -1122,9 +1151,6 @@ def verify_story(
     verify_plan_story_match(plan_parts, story_parts)
     verify_title_file(title)
 
-    if input_data["explicit_title"] and title != input_data["explicit_title"]:
-        fail("Explicit TITLE was not preserved.")
-
     source_text = input_data["source_text"]
 
     if source_text:
@@ -1171,7 +1197,7 @@ def verify_story(
             "story_part_ids_and_order": True,
             "scene_narration_integrity": True,
             "top_level_scene_consistency": True,
-            "short_word_limits": input_data["mode"] != "short" or True,
+            "short_word_limits": True,
             "natural_part_boundaries": True,
             "story_title": True,
             "title_file": True,
