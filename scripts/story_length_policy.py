@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Story word-count, part-selection and narration-length policy."""
+"""Central story-length, corrected-story part-selection and revision policy."""
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import math
+import os
 import re
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
-POLICY_VERSION = "story-length-policy-v6"
+POLICY_VERSION = "story-length-policy-v7"
 
 SHORT_MIN_WORDS_PER_PART = 120
 SHORT_TARGET_WORDS_PER_PART = 135
@@ -26,16 +31,16 @@ DEFAULT_SCENES_PER_MINUTE = 10
 DEFAULT_SCENE_SECONDS = 6
 MIN_SCENE_SECONDS = 3
 MAX_SCENE_SECONDS = 12
-
 MIN_PART_SECONDS = 30
 MAX_AUTOMATIC_PART_SECONDS = 180
 
 MAX_PARTS = 1000
 MAX_STORY_WORDS = 10_000_000
+MAX_REVISION_ATTEMPTS = 3
 
 
 def clean_text(value: Any) -> str:
-    """Normalize whitespace only; never rewrite story wording."""
+    """Normalize whitespace only. Never rewrite or paraphrase story text."""
     if value is None:
         return ""
     return re.sub(r"\s+", " ", str(value).replace("\ufeff", "")).strip()
@@ -43,6 +48,12 @@ def clean_text(value: Any) -> str:
 
 def word_count(value: Any) -> int:
     return len(clean_text(value).split())
+
+
+def sha256_text(value: Any) -> str:
+    return hashlib.sha256(
+        clean_text(value).encode("utf-8")
+    ).hexdigest()
 
 
 def parse_positive_int(
@@ -61,7 +72,7 @@ def parse_positive_int(
 
 
 def parse_parts_range(value: Any) -> tuple[int, int]:
-    """Accept fixed counts and all valid inclusive ranges, e.g. 2-8 or 12-18."""
+    """Parse fixed counts and inclusive ranges such as 2-8 or 12-18."""
     if isinstance(value, bool):
         raise ValueError("PARTS must be a positive integer or valid range.")
 
@@ -141,17 +152,37 @@ def _validate_selected_count(
     return count
 
 
+def _resolve_part_bounds(
+    parts: Any,
+    parts_min: Any = None,
+    parts_max: Any = None,
+) -> tuple[int, int]:
+    if parts_min is not None or parts_max is not None:
+        if parts_min is None or parts_max is None:
+            raise ValueError(
+                "Both parts_min and parts_max must be supplied together."
+            )
+        minimum, maximum = parse_parts_range(
+            f"{parts_min}-{parts_max}"
+        )
+        if parts not in (None, ""):
+            if parse_parts_range(parts) != (minimum, maximum):
+                raise ValueError(
+                    "PARTS and explicit parts_min/parts_max disagree."
+                )
+        return minimum, maximum
+
+    if parts in (None, ""):
+        raise ValueError("A PARTS count or range is required.")
+    return parse_parts_range(parts)
+
+
 def choose_short_parts(
     total_words: Any,
     minimum_parts: Any,
     maximum_parts: Any,
 ) -> int:
-    """
-    Choose final SHORT count using the corrected complete story.
-
-    Every selected part must be able to contain 120-180 words.
-    Prefer a distribution closest to 135 words per part.
-    """
+    """Choose count after correction of the complete story."""
     total = _validate_total_words(total_words)
     minimum, maximum = _resolve_part_bounds(
         None, minimum_parts, maximum_parts
@@ -208,7 +239,7 @@ def choose_full_parts(
     maximum_parts: Any,
     story_length: Any = "auto",
 ) -> int:
-    """Choose a FULL count inside the user's fixed count or configured range."""
+    """Choose a FULL count inside the user's fixed count or range."""
     total = _validate_total_words(total_words)
     minimum, maximum = _resolve_part_bounds(
         None, minimum_parts, maximum_parts
@@ -312,35 +343,6 @@ def parse_scene_seconds(value: Any) -> float:
     return seconds
 
 
-def _resolve_part_bounds(
-    parts: Any,
-    parts_min: Any = None,
-    parts_max: Any = None,
-) -> tuple[int, int]:
-    if parts_min is not None or parts_max is not None:
-        if parts_min is None or parts_max is None:
-            raise ValueError(
-                "Both parts_min and parts_max must be supplied together."
-            )
-
-        minimum, maximum = parse_parts_range(
-            f"{parts_min}-{parts_max}"
-        )
-
-        if parts not in (None, ""):
-            supplied = parse_parts_range(parts)
-            if supplied != (minimum, maximum):
-                raise ValueError(
-                    "PARTS and explicit parts_min/parts_max disagree."
-                )
-        return minimum, maximum
-
-    if parts in (None, ""):
-        raise ValueError("A PARTS count or range is required.")
-
-    return parse_parts_range(parts)
-
-
 def build_length_policy(
     *,
     format_type: Any,
@@ -353,12 +355,11 @@ def build_length_policy(
     source_word_count: Any = 0,
     selected_parts: Any = None,
 ) -> dict[str, Any]:
-    """Build deterministic policy without making model or provider calls."""
+    """Build deterministic policy without making provider/API calls."""
     fmt = normalize_format(format_type)
     minimum_parts, maximum_parts = _resolve_part_bounds(
         parts, parts_min, parts_max
     )
-
     scene_count = parse_positive_int(
         scenes_per_part, DEFAULT_SCENES_PER_MINUTE, 1, 100
     )
@@ -377,7 +378,6 @@ def build_length_policy(
             story_length,
         )
     else:
-        # Provisional only. Recalculate after proofreading the full story.
         part_count = minimum_parts
 
     if fmt == "short":
@@ -409,15 +409,17 @@ def build_length_policy(
     else:
         words_per_minute = FULL_WORDS_PER_MINUTE
         minimum_per_part = None
-        target_minutes = resolve_duration_minutes(
+        target_minutes_for_policy = resolve_duration_minutes(
             story_length, fmt, part_count
         )
-        target_total = round(target_minutes * words_per_minute)
+        target_total = round(
+            target_minutes_for_policy * words_per_minute
+        )
         minimum_total = round(
-            target_minutes * FULL_MIN_WORDS_PER_MINUTE
+            target_minutes_for_policy * FULL_MIN_WORDS_PER_MINUTE
         )
         maximum_total = round(
-            target_minutes * FULL_MAX_WORDS_PER_MINUTE
+            target_minutes_for_policy * FULL_MAX_WORDS_PER_MINUTE
         )
         preferred_total = maximum_total
         target_per_part = max(1, round(target_total / part_count))
@@ -431,7 +433,6 @@ def build_length_policy(
     )
     total_scenes = part_count * scene_count
     visual_seconds = total_scenes * scene_seconds
-
     estimated_source_minutes = (
         source_words / words_per_minute if source_words else None
     )
@@ -439,13 +440,9 @@ def build_length_policy(
     warnings: list[str] = []
     if fmt == "short" and source_words:
         if source_words < minimum_total:
-            warnings.append(
-                "Corrected story is below the minimum capacity."
-            )
+            warnings.append("Corrected story is below the minimum capacity.")
         elif source_words > maximum_total:
-            warnings.append(
-                "Corrected story exceeds the hard maximum capacity."
-            )
+            warnings.append("Corrected story exceeds the hard maximum capacity.")
         elif source_words > preferred_total:
             warnings.append(
                 "Parts above 150 words require revision; 180 is the hard limit."
@@ -508,6 +505,7 @@ def build_length_policy(
         "hard_maximum_words_per_part": hard_max_per_part,
 
         "source_word_count": source_words,
+        "corrected_story_word_count": source_words,
         "estimated_source_narration_minutes": (
             round(estimated_source_minutes, 2)
             if estimated_source_minutes is not None else None
@@ -528,18 +526,25 @@ def build_length_policy(
         "hard_fail_below_120": fmt == "short",
         "hard_fail_above_180": fmt == "short",
         "retry_before_final_validation": True,
+        "maximum_revision_attempts": MAX_REVISION_ATTEMPTS,
+
+        "revision_attempted": False,
+        "revision_outcome": "not_started",
+        "revision_parts": [],
+        "revision_results": [],
 
         "warnings": warnings,
         "api_calls_made": 0,
         "duration_is_estimate": True,
         "note": (
-            "PARTS accepts a fixed count or any valid inclusive range. "
-            "Final selection is based on the complete corrected story. "
-            "SHORT parts target 120-150 words; above 150 requires a revision "
-            "attempt, 180 is the hard maximum, and below 120 or above 180 "
-            "fails. FULL also supports fixed counts and ranges."
+            "The complete story must be corrected before word counting "
+            "and final part selection. SHORT parts target 120-150 words. "
+            "151-180 words are accepted only after a recorded revision "
+            "attempt. Below 120 or above 180 fails. FULL supports fixed "
+            "counts and inclusive ranges."
         ),
     }
+
 
 def validate_story_length(
     narration_text: Any,
@@ -548,12 +553,14 @@ def validate_story_length(
     part_number: int = 1,
     revision_attempted: bool = False,
 ) -> dict[str, Any]:
-    """Validate one narration part against the selected policy."""
-
+    """Validate one main narration part; does not alter its text."""
     text = clean_text(narration_text)
     actual = word_count(text)
     fmt = normalize_format(policy.get("format", "short"))
-    number = parse_positive_int(part_number, 1, 1, MAX_PARTS)
+    number = _validate_selected_count(
+        part_number, 1, MAX_PARTS
+    )
+    attempted = bool(revision_attempted)
 
     if fmt == "short":
         minimum = SHORT_MIN_WORDS_PER_PART
@@ -573,11 +580,11 @@ def validate_story_length(
             status = "above_hard_maximum"
             needs_revision = True
             passed = False
-        elif actual > preferred_maximum and not revision_attempted:
+        elif actual > preferred_maximum and not attempted:
             status = "revision_required_above_150"
             needs_revision = True
             passed = False
-        elif actual > preferred_maximum:
+        elif actual > preferred_maximum and attempted:
             status = "within_hard_limit_after_revision"
             needs_revision = False
             passed = True
@@ -585,7 +592,6 @@ def validate_story_length(
             status = "within_target"
             needs_revision = False
             passed = True
-
     else:
         target = parse_positive_int(
             policy.get("target_words_per_part"),
@@ -631,7 +637,7 @@ def validate_story_length(
         "preferred_maximum_words": preferred_maximum,
         "maximum_words": hard_maximum,
         "hard_maximum_words": hard_maximum,
-        "revision_attempted": bool(revision_attempted),
+        "revision_attempted": attempted,
         "status": status,
         "needs_revision": needs_revision,
         "retry_required": needs_revision,
@@ -647,12 +653,8 @@ def _extract_part_text(part: Any) -> str:
         return str(part or "")
 
     for key in (
-        "narration",
-        "story",
-        "text",
-        "content",
-        "main_story",
-        "main_narration",
+        "narration", "story", "text", "content",
+        "main_story", "main_narration",
     ):
         value = part.get(key)
         if isinstance(value, str) and value.strip():
@@ -696,8 +698,7 @@ def validate_all_parts(
     *,
     revision_attempted: Any = False,
 ) -> dict[str, Any]:
-    """Validate every main narration part and enforce the final part count."""
-
+    """Validate every part and require recorded revision for 151-180 words."""
     if not isinstance(parts, list):
         raise TypeError("Story parts must be supplied as a list.")
 
@@ -774,11 +775,12 @@ def select_final_part_count(
     story_length: Any = "auto",
     config: dict[str, Any] | None = None,
 ) -> int:
-    """Select final count only after the complete story has been corrected."""
-
+    """Select count from the complete corrected story and persist it."""
     minimum, maximum = parse_parts_range(parts_specification)
+    total = _validate_total_words(total_corrected_words)
+
     selected = choose_part_count(
-        total_corrected_words,
+        total,
         format_type,
         f"{minimum}-{maximum}",
         story_length,
@@ -792,8 +794,19 @@ def select_final_part_count(
         )
         config["PARTS_MIN"] = minimum
         config["PARTS_MAX"] = maximum
-        config["PARTS_SELECTED"] = selected
-        config["PARTS"] = selected
+
+        # The resolver record is the shared cross-process source of truth.
+        try:
+            from input_config import set_selected_parts
+        except ImportError:
+            from scripts.input_config import set_selected_parts
+
+        set_selected_parts(
+            config,
+            selected,
+            source="story_length_policy",
+            story_word_count=total,
+        )
 
     return selected
 
@@ -803,10 +816,16 @@ def update_policy_with_corrected_story(
     corrected_story: Any,
     *,
     selected_parts: Any = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Rebuild policy using the corrected complete story's actual word count."""
+    """Rebuild policy from the corrected complete story, not source draft."""
+    corrected_text = clean_text(corrected_story)
+    total_words = word_count(corrected_text)
+    if total_words <= 0:
+        raise ValueError(
+            "Corrected complete story is empty; length policy cannot proceed."
+        )
 
-    total_words = word_count(corrected_story)
     minimum = parse_positive_int(
         policy.get("configured_parts_min"), 1, 1, MAX_PARTS
     )
@@ -817,22 +836,32 @@ def update_policy_with_corrected_story(
         MAX_PARTS,
     )
     fmt = normalize_format(policy.get("format", "short"))
+    story_length = policy.get("story_length_input", "auto")
 
     if selected_parts is None:
         selected_parts = choose_part_count(
             total_words,
             fmt,
             f"{minimum}-{maximum}",
-            policy.get("story_length_input", "auto"),
+            story_length,
         )
     else:
         selected_parts = _validate_selected_count(
             selected_parts, minimum, maximum
         )
 
+    if config is not None:
+        selected_parts = select_final_part_count(
+            total_corrected_words=total_words,
+            format_type=fmt,
+            parts_specification=f"{minimum}-{maximum}",
+            story_length=story_length,
+            config=config,
+        )
+
     updated = build_length_policy(
         format_type=fmt,
-        story_length=policy.get("story_length_input", "auto"),
+        story_length=story_length,
         parts=f"{minimum}-{maximum}",
         scenes_per_part=policy.get(
             "scenes_per_part", DEFAULT_SCENES_PER_MINUTE
@@ -843,9 +872,136 @@ def update_policy_with_corrected_story(
         source_word_count=total_words,
         selected_parts=selected_parts,
     )
+
     updated["corrected_story_word_count"] = total_words
+    updated["corrected_story_sha256"] = sha256_text(corrected_text)
     updated["story_was_corrected_before_counting"] = True
+    updated["selection_persisted"] = config is not None
+    updated["selection_source"] = "corrected_complete_story"
     return updated
+
+
+def record_revision_results(
+    policy: dict[str, Any],
+    original_parts: Any,
+    revised_parts: Any,
+    *,
+    attempted_parts: Any,
+) -> dict[str, Any]:
+    """Record attempted revisions and validate the resulting part records."""
+    if not isinstance(original_parts, list) or not isinstance(revised_parts, list):
+        raise TypeError("Original and revised parts must both be lists.")
+
+    if len(original_parts) != len(revised_parts):
+        raise ValueError(
+            "Revision cannot change the selected number of story parts."
+        )
+
+    if isinstance(attempted_parts, dict):
+        attempted = {
+            int(key) for key, value in attempted_parts.items()
+            if bool(value)
+        }
+    elif isinstance(attempted_parts, (list, tuple, set)):
+        attempted = {int(item) for item in attempted_parts}
+    else:
+        attempted = set()
+
+    expected = int(policy.get("parts_count", 0))
+    if len(revised_parts) != expected:
+        raise ValueError(
+            f"Revision produced {len(revised_parts)} parts; "
+            f"expected {expected}."
+        )
+
+    results: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for index, (original, revised) in enumerate(
+        zip(original_parts, revised_parts), 1
+    ):
+        old_text = _extract_part_text(original)
+        new_text = _extract_part_text(revised)
+        was_attempted = index in attempted
+
+        result = validate_story_length(
+            new_text,
+            policy,
+            part_number=index,
+            revision_attempted=was_attempted,
+        )
+
+        result["original_words"] = word_count(old_text)
+        result["revised_words"] = word_count(new_text)
+        result["revision_attempted"] = was_attempted
+        result["text_changed"] = (
+            clean_text(old_text) != clean_text(new_text)
+        )
+        result["original_sha256"] = sha256_text(old_text)
+        result["revised_sha256"] = sha256_text(new_text)
+
+        if result["needs_revision"]:
+            errors.append(
+                f"Part {index} remains invalid after revision handling: "
+                f"{result['status']} ({result['actual_words']} words)."
+            )
+
+        if (
+            normalize_format(policy.get("format", "short")) == "short"
+            and 150 < result["actual_words"] <= 180
+            and not was_attempted
+        ):
+            errors.append(
+                f"Part {index} has {result['actual_words']} words; "
+                "a revision attempt is mandatory for 151-180 words."
+            )
+
+        results.append(result)
+
+    policy["revision_attempted"] = bool(attempted)
+    policy["revision_parts"] = sorted(attempted)
+    policy["revision_results"] = results
+    policy["revision_outcome"] = (
+        "passed" if not errors else "failed"
+    )
+    policy["revision_errors"] = errors
+    policy["revision_completed_at_utc"] = (
+        datetime.now(timezone.utc).isoformat()
+    )
+    policy["final_part_validation_passed"] = not errors
+
+    if errors:
+        raise ValueError("Story revision validation failed: " + " ".join(errors))
+
+    return {
+        "valid": True,
+        "revision_attempted": bool(attempted),
+        "revision_parts": sorted(attempted),
+        "parts": results,
+        "errors": [],
+    }
+
+
+def validate_corrected_story_parts(
+    parts: Any,
+    policy: dict[str, Any],
+    *,
+    revision_attempted: Any = False,
+) -> dict[str, Any]:
+    """Final validation entry point; incomplete SHORT parts always fail."""
+    result = validate_all_parts(
+        parts,
+        policy,
+        revision_attempted=revision_attempted,
+    )
+
+    if not result["valid"]:
+        raise ValueError(
+            "Final story part validation failed: "
+            + " ".join(result["errors"])
+        )
+
+    return result
 
 
 def write_policy(
@@ -855,25 +1011,55 @@ def write_policy(
     """Write policy JSON atomically."""
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_suffix(
-        destination.suffix + ".tmp"
-    )
 
+    temporary_path: Path | None = None
     try:
-        temporary.write_text(
-            json.dumps(policy, ensure_ascii=False, indent=2) + "\n",
+        with tempfile.NamedTemporaryFile(
+            mode="w",
             encoding="utf-8",
+            dir=str(destination.parent),
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(
+                policy,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary_path, destination)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def read_policy(path: str | Path) -> dict[str, Any]:
+    source = Path(path)
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read story length policy: {exc}") from exc
+
+    if not isinstance(value, dict):
+        raise ValueError("Story length policy JSON must contain an object.")
+    if value.get("policy_version") != POLICY_VERSION:
+        raise ValueError(
+            "Story length policy version mismatch; regenerate the policy."
         )
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
+    return value
 
 
 def main() -> int:
-    import argparse
-
     parser = argparse.ArgumentParser(
-        description="Calculate Katha Lok AI story length and part policy."
+        description="Calculate and validate story length and part policy."
     )
     parser.add_argument(
         "--format",
@@ -884,13 +1070,13 @@ def main() -> int:
     parser.add_argument(
         "--parts",
         default="1",
-        help="Fixed count or inclusive range, e.g. 4, 2-8, 4-6, 12-18.",
+        help="Fixed count or range, e.g. 4, 2-8, 4-6, 12-18.",
     )
     parser.add_argument(
         "--selected-parts",
         type=int,
         default=None,
-        help="Final count already selected after corrected-story counting.",
+        help="Final count selected after corrected-story word counting.",
     )
     parser.add_argument(
         "--scenes",
@@ -905,21 +1091,64 @@ def main() -> int:
         help="Word count of the corrected complete story.",
     )
     parser.add_argument(
+        "--corrected-story-file",
+        default="",
+        help="Optional UTF-8 file containing the corrected complete story.",
+    )
+    parser.add_argument(
         "--output",
         default="output/story/story_length_policy.json",
     )
 
     args = parser.parse_args()
 
+    source_words = args.source_words
+    corrected_text = ""
+
+    if args.corrected_story_file:
+        story_path = Path(args.corrected_story_file)
+        if not story_path.is_file():
+            raise FileNotFoundError(
+                f"Corrected story file not found: {story_path}"
+            )
+        corrected_text = story_path.read_text(encoding="utf-8-sig")
+        measured_words = word_count(corrected_text)
+
+        if source_words and source_words != measured_words:
+            raise ValueError(
+                "--source-words does not match the corrected story file."
+            )
+        source_words = measured_words
+
+    minimum, maximum = parse_parts_range(args.parts)
+
+    if source_words:
+        selected = args.selected_parts
+        if selected is None:
+            selected = choose_part_count(
+                source_words,
+                args.format,
+                f"{minimum}-{maximum}",
+                args.story_length,
+            )
+    else:
+        selected = args.selected_parts
+
     policy = build_length_policy(
         format_type=args.format,
         story_length=args.story_length,
-        parts=args.parts,
+        parts=f"{minimum}-{maximum}",
         scenes_per_part=args.scenes,
         scene_duration=args.scene_duration,
-        source_word_count=args.source_words,
-        selected_parts=args.selected_parts,
+        source_word_count=source_words,
+        selected_parts=selected,
     )
+
+    if corrected_text:
+        policy["corrected_story_sha256"] = sha256_text(corrected_text)
+        policy["story_was_corrected_before_counting"] = True
+
+    policy["selection_persisted"] = False
     write_policy(args.output, policy)
 
     print(json.dumps(policy, ensure_ascii=False, indent=2))
