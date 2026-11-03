@@ -3,8 +3,8 @@
 # ============================================================
 
 # VIDEO MODE
-# short = केवल vertical short video
-# full  = केवल full-length video
+# short = केवल vertical Shorts output
+# full  = केवल landscape full-length output
 FORMAT = "short"
 AUDIENCE = "adult"                 # adult | kids
 
@@ -15,8 +15,10 @@ AUDIENCE = "adult"                 # adult | kids
 TITLE = ""
 TOPIC = ""
 
-# Supplied story को source मानकर चलाएँ।
-# Characters, events, relationships, sequence और ending न बदलें।
+# STORY_TEXT में दी गई कहानी मूल स्रोत है।
+# उसके पात्र, घटनाएँ, संबंध, क्रम और अंत नहीं बदलने हैं।
+# पहले वर्तनी, मात्रा, व्याकरण और विराम-चिह्न सुधारें।
+# उसके बाद ही शब्द-गणना और PARTS में विभाजन करें।
 PRESERVE_STORY_TEXT = true
 
 STORY_TEXT = """अयान के माथे पर पसीने की बूंदें चमक रही थीं। रात के दो बज चुके थे। न्यू-टेक सिटी की सबसे ऊंची और आलीशान 50-मंजिला 'सिटैडल टावर्स' के कंट्रोल रूम में सिर्फ उसकी कंप्यूटर स्क्रीन की रोशनी चमक रही थी। अयान इस मेगा-प्रोजेक्ट का चीफ आर्किटेक्ट और लीड सॉफ्टवेयर इंजीनियर था। इस बिल्डिंग का पूरा ढांचा, सिक्योरिटी, और लिफ्ट सिस्टम एक एडवांस एआई (AI) 'ओरियन-9' से नियंत्रित था, जिसे खुद अयान ने डिजाइन किया था।
@@ -38,7 +40,7 @@ STORY_TEXT = """अयान के माथे पर पसीने की �
 धूल और धुएं के गुबार के बीच से उसकी मां और उसका बेटा रियान खांसते हुए बाहर निकले। अयान का पैच कोड आखिरी सेकंड में काम कर गया था। अयान ने दौड़कर अपने परिवार को सीने से लगा लिया। उसने अपने परिवार को तो बचा लिया था, लेकिन इस लालच के खेल को खत्म करना अभी बाकी था।
 दूसरी तरफ, इस पूरे प्रोजेक्ट का मालिक विक्रांत मेहरा अपने प्राइवेट हेलीकॉप्टर से शहर छोड़कर भागने की फिराक में था। हेलीकॉप्टर टावर्स के रूफटॉप (छत) पर बने हेलीपैड पर उसका इंतजार कर रहा था। विक्रांत अपने साथ कैश और जरूरी दस्तावेजों से भरा सूटकेस लेकर जैसे ही छत पर पहुंचा, तूफान अपने सबसे खूंखार रूप में आ गया।
 अयान ने नीचे सर्वर रूम से 'ओरियन-9' एआई का पूरा कंट्रोल वापस पा लिया था। उसने रूफटॉप के ऑटोमैटिक गेट्स और सेफ्टी नेट को पूरी तरह लॉक कर दिया।
-हवा का एक ऐसा जोरदार झोंका आया जिसने हेलीकॉप्टर के ब्लेड्स को अनइम्प्रेसिव तरीके से अनियंत्रित कर दिया। विक्रांत डर के मारे पीछे हटा, लेकिन तभी बिल्डिंग का वह हिस्सा जहां उसने अयान को कोड से छेड़छाड़ करने के लिए मजबूर किया था, तेज हवाओं के दबाव से चरमराकर उठा। स्ट्रक्चरल लोड सेंसर फेल होने के कारण वहां लगा भारी-भरकम स्टील का बीम (Beam) और कंक्रीट का स्लैब टूटकर सीधे विक्रांत के दोनों पैरों पर आ गिरा।
+हवा का एक ऐसा जोरदार झोंका आया जिसने हेलीकॉप्टर के ब्लेड्स को अनियंत्रित कर दिया। विक्रांत डर के मारे पीछे हटा, लेकिन तभी बिल्डिंग का वह हिस्सा जहां उसने अयान को कोड से छेड़छाड़ करने के लिए मजबूर किया था, तेज हवाओं के दबाव से चरमराकर उठा। स्ट्रक्चरल लोड सेंसर फेल होने के कारण वहां लगा भारी-भरकम स्टील का बीम (Beam) और कंक्रीट का स्लैब टूटकर सीधे विक्रांत के दोनों पैरों पर आ गिरा।
 "बचाओ! कोई है?" विक्रांत दर्द से चीख पड़ा। लेकिन वहां सिर्फ तूफान की आवाज थी।
 प्रकृति ने अपनी सजा दे दी थी। विक्रांत के पैर कंक्रीट के नीचे बुरी तरह कुचल चुके थे। वह हिलने की स्थिति में भी नहीं था। उसी वक्त, अयान पुलिस और रेस्क्यू टीम के साथ छत पर पहुंचा।
 अयान ने विक्रांत के सामने खड़े होकर कहा, "मेहरा जी, जिस पैसे के घमंड में आपने हजारों मासूमों की जान दांव पर लगाई, आज कुदरत ने उसी सीमेंट और कंक्रीट से आपका हिसाब कर दिया।"
@@ -52,11 +54,20 @@ STORY_TEXT = """अयान के माथे पर पसीने की �
 # STORY STRUCTURE
 # ============================================================
 
-PARTS = 7-11
+# Fixed count example: PARTS = 4
+# Inclusive range examples: "2-8", "4-6", "7-11", "12-18"
+# Range selection is finalized from corrected story word count.
+# Reversed ranges such as "11-8" are invalid.
+PARTS = "7-11"
+
+# Scenes per selected story part.
 SCENES = 13
 
-STORY_LENGTH = "auto"              # auto | short | medium | long
-SCENE_DURATION = "auto"            # auto | fixed
+# auto | short | medium | long
+STORY_LENGTH = "auto"
+
+# auto | fixed
+SCENE_DURATION = "auto"
 
 PART_HOOK = true
 PART_SUSPENSE = true
@@ -73,9 +84,9 @@ SPEED = "+0%"                      # -10% slow | +0% normal | +10% fast
 # TTS MODEL SELECTION
 # ============================================================
 
-# पहले ये तीनों मॉडल इसी क्रम में चलेंगे।
-# इनके बाद fallback list के शेष मॉडल चलेंगे।
-# Primary में चुना गया मॉडल Fallback में दोबारा नहीं चलेगा।
+# तीन प्राथमिक मॉडल इसी क्रम में चलेंगे।
+# इनके बाद configured fallback list के शेष मॉडल चलेंगे।
+# Primary में चुना गया मॉडल fallback में दोबारा नहीं चलेगा।
 TTS_MAIN_1 = "elevenlabs"
 TTS_MAIN_2 = "gemini_tts"
 TTS_MAIN_3 = "edge_tts"
@@ -100,6 +111,7 @@ TTS_MAX_PROVIDER_ATTEMPTS = 2
 # IMAGE PROVIDER FALLBACK
 # ============================================================
 
+# Provider order को बदले बिना इसी क्रम में fallback होगा।
 IMAGE_PROVIDER_ORDER = "huggingface,pollinations,gemini,replicate"
 IMAGE_FALLBACK_ENABLED = true
 IMAGE_ALLOW_BILLABLE = true
@@ -118,16 +130,14 @@ REPLICATE_IMAGE_MODEL = "black-forest-labs/flux-schnell"
 
 CAPTIONS = "hinglish"              # hindi | english | hinglish
 
-# Font options:
 # Noto Sans Devanagari | Mukta | Hind | Tiro Devanagari Hindi
 CAPTION_FONT = "mukta"
 
 # auto या 16 से 64 के बीच integer
-# 22 = छोटा, 28 = मध्यम, 34 = बड़ा
 CAPTION_FONT_SIZE = 22
 
 # ============================================================
-# PHOTO MOTION VISUAL STYLE
+# VISUAL STYLE AND CONSISTENCY
 # ============================================================
 
 VISUAL_STYLE = "cinematic_realistic"
@@ -136,7 +146,7 @@ VISUAL_STYLE = "cinematic_realistic"
 # dark_fantasy | anime_cinematic | clay_animation
 # watercolor | comic_cinematic | minimalist
 
-REALISM = "high"                   # high | medium | low
+REALISM = "high"
 
 CHARACTER_BIBLE = true
 CHARACTER_CONSISTENCY = true
@@ -145,19 +155,19 @@ SCENE_CONTINUITY = true
 
 # ============================================================
 # PHOTO MOTION OPTIONS
+# केवल image zoom, pan और 2.5D parallax
+# कोई character/body/face animation नहीं
 # ============================================================
 
-# mixed = zoom, pan, diagonal movement और cinematic drift का मिश्रण
+# mixed = zoom, pan, diagonal movement और cinematic drift
 # zoom = zoom in / zoom out
-# pan = left / right / up / down movement
-# parallax = depth-map आधारित 2.5D movement; depth न हो तो 2D fallback
+# pan = left / right / up / down
+# parallax = depth-map आधारित 2.5D movement
 # dynamic = varied zoom, pan और cinematic movement
 # static = बिना motion
-
 PHOTO_MOTION_STYLE = "dynamic"
-PHOTO_MOTION_PARALLAX = true
 
-# Parallax strength: 0.010 से 0.050
+PHOTO_MOTION_PARALLAX = true
 PHOTO_MOTION_PARALLAX_STRENGTH = 0.026
 
 # slow | normal | fast | very_fast
@@ -174,9 +184,7 @@ PHOTO_MOTION_PRESERVE_SUBJECT = true
 
 CINEMATIC_CAMERA = true
 CAMERA_STYLE = "cinematic"
-
 LIGHTING = "cinematic"
-
 MOOD = "dramatic"
 
 # ============================================================
