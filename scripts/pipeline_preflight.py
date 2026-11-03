@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Strict no-API preflight for the Katha Lok AI Photo Motion pipeline."""
+"""Strict, offline preflight for the Katha Lok AI Photo Motion pipeline."""
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -20,7 +24,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v53-executable-integration-check"
+VERSION = "photo-motion-preflight-v60-offline-integration-verified"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -51,6 +55,7 @@ REQUIRED_SCRIPTS = (
     "generate_youtube_metadata.py",
     "validate_final_output.py",
     "package_output.py",
+    "pipeline_preflight.py",
 )
 
 WORKFLOW_ORDER = (
@@ -81,11 +86,21 @@ WORKFLOW_ORDER = (
 )
 
 TTS_ALLOWED = {
-    "fish_audio", "gemini_tts", "edge_tts", "piper",
-    "elevenlabs", "cartesia", "finevoice", "minimax",
+    "fish_audio",
+    "gemini_tts",
+    "edge_tts",
+    "piper",
+    "elevenlabs",
+    "cartesia",
+    "finevoice",
+    "minimax",
 }
+
 IMAGE_ALLOWED = {
-    "huggingface", "pollinations", "gemini", "replicate",
+    "huggingface",
+    "pollinations",
+    "gemini",
+    "replicate",
 }
 
 PYTHON_MODULES = (
@@ -97,11 +112,18 @@ PYTHON_MODULES = (
     "edge_tts",
 )
 
-RUNTIME_COMMANDS = ("ffmpeg", "ffprobe", "fc-match")
+RUNTIME_COMMANDS = (
+    "ffmpeg",
+    "ffprobe",
+    "fc-match",
+    "zip",
+    "unzip",
+)
 
-EXECUTABLE_INTEGRATION_PATTERN = re.compile(
-    r"\bi2v\b|wan2gp",
-    re.IGNORECASE,
+FONT_FAMILIES = (
+    "Noto Sans Devanagari",
+    "Mukta",
+    "Hind",
 )
 
 STEP_NAME_RE = re.compile(r"^\s{6}-\s+name:\s*(.*?)\s*$")
@@ -111,19 +133,52 @@ PYTHON_SCRIPT_RE = re.compile(
     r"\s+(?:-u\s+)?scripts/([A-Za-z0-9_.-]+\.py)"
 )
 
+LEGACY_EXECUTABLE_PATTERN = re.compile(
+    r"\bi2v\b|wan2gp",
+    re.IGNORECASE,
+)
 
-def log(*items):
+GENERATION_SCRIPTS = set(WORKFLOW_ORDER)
+
+TRUE_VALUES = {"1", "true", "yes", "on"}
+FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def log(*items: Any) -> None:
     print(*items, flush=True)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
 
 
 def atomic_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    temp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temp.replace(path)
+
+    temporary = path.with_name(path.name + ".tmp")
+
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(
+                data,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def check_python_file(path: Path) -> tuple[bool, str]:
@@ -132,14 +187,16 @@ def check_python_file(path: Path) -> tuple[bool, str]:
         ast.parse(source, filename=str(path))
         return True, "Python syntax valid."
     except Exception as exc:
-        return False, str(exc)
+        return False, f"{type(exc).__name__}: {exc}"
 
 
-def normalize_list(value) -> list[str]:
+def normalize_list(value: Any) -> list[str]:
     if isinstance(value, str):
-        value = value.split(",")
+        value = re.split(r"[,;]", value)
+
     if not isinstance(value, (list, tuple)):
         return []
+
     return [
         str(item).strip().lower()
         for item in value
@@ -149,18 +206,16 @@ def normalize_list(value) -> list[str]:
 
 def strip_shell_comment(line: str) -> str:
     stripped = line.strip()
+
     if stripped.startswith("#"):
         return ""
+
     return line
 
 
 def extract_workflow_commands(source: str) -> list[dict]:
-    """
-    Read actual Python script invocations from YAML run sections.
+    """Extract executable Python script commands from YAML run blocks."""
 
-    Does not use REQUIRED_SCRIPTS order or arbitrary filename mentions.
-    Only executable commands inside workflow run steps are considered.
-    """
     commands = []
     current_step = None
     inside_run = False
@@ -181,16 +236,18 @@ def extract_workflow_commands(source: str) -> list[dict]:
 
         if run_match:
             inside_run = True
-            inline_command = run_match.group(1).strip()
+            inline = run_match.group(1).strip()
 
-            if inline_command and inline_command not in {"|", ">", "|-", ">-"}:
-                candidate = strip_shell_comment(inline_command)
+            if inline and inline not in {"|", ">", "|-", ">-"}:
+                candidate = strip_shell_comment(inline)
+
                 for match in PYTHON_SCRIPT_RE.finditer(candidate):
                     commands.append({
                         "script": match.group(1),
                         "line": line_number,
                         "step": current_step or "unnamed",
                     })
+
             continue
 
         if not inside_run:
@@ -214,11 +271,11 @@ def extract_workflow_commands(source: str) -> list[dict]:
     return commands
 
 
-def check_workflow_order(commands: list[dict]) -> tuple[bool, str]:
-    """
-    Verify the required scripts in the order they are actually invoked.
-    Additional setup commands and unrelated commands are allowed.
-    """
+def check_workflow_order(
+    commands: list[dict],
+) -> tuple[bool, str]:
+    """Require the complete generation sequence in actual command order."""
+
     cursor = 0
     matched = []
 
@@ -231,24 +288,533 @@ def check_workflow_order(commands: list[dict]) -> tuple[bool, str]:
                 break
 
         if found is None:
-            observed = [
-                item["script"] for item in commands
-            ]
+            observed = [item["script"] for item in commands]
+
             return False, (
-                f"Missing or out-of-order executable command: {expected}. "
-                f"Commands detected: {' -> '.join(observed)}"
+                f"Missing or out-of-order command: {expected}. "
+                f"Detected: {' -> '.join(observed)}"
             )
 
-        matched.append(commands[found])
+        matched.append(expected)
         cursor = found + 1
 
-    return True, "Verified actual command sequence: " + " -> ".join(
-        item["script"] for item in matched
+    return True, (
+        "Verified generation order: "
+        + " -> ".join(matched)
     )
 
 
-def main() -> int:
+def check_workflow_preflight(
+    commands: list[dict],
+) -> tuple[bool, str]:
+    preflight = [
+        item for item in commands
+        if item["script"] == "pipeline_preflight.py"
+    ]
+
+    first_generation = next(
+        (
+            item for item in commands
+            if item["script"] in GENERATION_SCRIPTS
+        ),
+        None,
+    )
+
+    if not preflight:
+        return False, (
+            "pipeline_preflight.py is not executed by the workflow."
+        )
+
+    if first_generation is None:
+        return False, "No generation command found in workflow."
+
+    if preflight[0]["line"] >= first_generation["line"]:
+        return False, (
+            "Preflight must execute before the first generation command."
+        )
+
+    if len(preflight) != 1:
+        return False, (
+            f"Expected exactly one preflight invocation; found {len(preflight)}."
+        )
+
+    return True, (
+        "Exactly one preflight command executes before generation."
+    )
+
+
+def check_story_gate(
+    commands: list[dict],
+) -> tuple[bool, str]:
+    validation = next(
+        (
+            item for item in commands
+            if item["script"] == "validate_story_length.py"
+        ),
+        None,
+    )
+
+    verification = next(
+        (
+            item for item in commands
+            if item["script"] == "verify_story.py"
+        ),
+        None,
+    )
+
+    story_generation = next(
+        (
+            item for item in commands
+            if item["script"] == "generate_story.py"
+        ),
+        None,
+    )
+
+    if not validation or not verification or not story_generation:
+        return False, "Story generation or validation command is missing."
+
+    if not (
+        story_generation["line"]
+        < validation["line"]
+        < verification["line"]
+    ):
+        return False, (
+            "Required order: generate_story.py, "
+            "validate_story_length.py, verify_story.py."
+        )
+
+    return True, (
+        "Story length validation and verification execute "
+        "after story generation and before AI story generation."
+    )
+
+
+def check_legacy_execution() -> tuple[bool, str]:
+    """Reject actual legacy execution, not comments or ordinary text."""
+
+    violations = []
+    executable_calls = {
+        "run",
+        "Popen",
+        "call",
+        "check_call",
+        "check_output",
+        "system",
+        "exec",
+    }
+
+    for name in REQUIRED_SCRIPTS:
+        path = SCRIPTS / name
+
+        if not path.is_file():
+            continue
+
+        try:
+            source = path.read_text(encoding="utf-8-sig")
+            tree = ast.parse(source, filename=str(path))
+        except Exception as exc:
+            violations.append(
+                f"{name}: cannot inspect Python syntax: {exc}"
+            )
+            continue
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if LEGACY_EXECUTABLE_PATTERN.search(alias.name):
+                        violations.append(
+                            f"{name}:{node.lineno} imports {alias.name}"
+                        )
+
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+
+                if LEGACY_EXECUTABLE_PATTERN.search(module):
+                    violations.append(
+                        f"{name}:{node.lineno} imports {module}"
+                    )
+
+            if not isinstance(node, ast.Call):
+                continue
+
+            function = node.func
+
+            function_name = (
+                function.attr
+                if isinstance(function, ast.Attribute)
+                else function.id
+                if isinstance(function, ast.Name)
+                else ""
+            )
+
+            if function_name not in executable_calls:
+                continue
+
+            string_values = []
+
+            for argument in list(node.args) + [
+                keyword.value for keyword in node.keywords
+            ]:
+                string_values.extend(
+                    child.value
+                    for child in ast.walk(argument)
+                    if isinstance(child, ast.Constant)
+                    and isinstance(child.value, str)
+                )
+
+            for value in string_values:
+                if LEGACY_EXECUTABLE_PATTERN.search(value):
+                    violations.append(
+                        f"{name}:{node.lineno} legacy executable command"
+                    )
+                    break
+
+    if violations:
+        return False, "; ".join(violations[:30])
+
+    return True, (
+        "No executable legacy I2V/Wan2GP integration detected."
+    )
+
+
+def check_module(module: str) -> tuple[bool, str]:
+    try:
+        found = importlib.util.find_spec(module) is not None
+        return (
+            found,
+            "Importable." if found else "Module not installed.",
+        )
+    except (ImportError, ValueError, AttributeError) as exc:
+        return False, f"Module check failed: {exc}"
+
+
+def check_runtime_command(command: str) -> tuple[bool, str]:
+    executable = shutil.which(command)
+
+    if not executable:
+        return False, f"{command} is missing from PATH."
+
+    return True, executable
+
+
+def check_font(family: str) -> tuple[bool, str]:
+    executable = shutil.which("fc-match")
+
+    if not executable:
+        return False, "fc-match is not installed."
+
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-f",
+                "%{file}\n",
+                family,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            return False, result.stderr.strip() or "Font lookup failed."
+
+        font_path = Path(result.stdout.strip().splitlines()[0])
+
+        if not font_path.is_file():
+            return False, f"Font file not found: {font_path}"
+
+        return True, str(font_path)
+
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def check_input_configuration() -> tuple[dict, list[dict]]:
     checks = []
+    config = {}
+
+    def add(name: str, passed: bool, detail: str) -> None:
+        checks.append({
+            "name": name,
+            "passed": bool(passed),
+            "detail": str(detail),
+        })
+
+    if not INPUT_FILE.is_file() or INPUT_FILE.stat().st_size == 0:
+        add(
+            "input_file",
+            False,
+            "Input/topic.txt is missing or empty.",
+        )
+        return config, checks
+
+    add(
+        "input_file",
+        True,
+        "Input/topic.txt exists and is non-empty.",
+    )
+
+    sys.path.insert(0, str(SCRIPTS))
+
+    try:
+        from input_config import (
+            load_and_validate,
+            get_format,
+            get_parts,
+            get_parts_range,
+            get_scenes,
+            get_fps,
+            get_tts_provider_order,
+            get_image_provider_order,
+            get_global_billable_permission,
+            get_story_text,
+        )
+
+        config = load_and_validate(INPUT_FILE)
+
+        mode = get_format(config)
+        minimum, maximum = get_parts_range(config)
+        selected = get_parts(config)
+        scenes = get_scenes(config)
+        fps = get_fps(config)
+
+        tts_order = get_tts_provider_order(config)
+        image_order = get_image_provider_order(config)
+
+        billable = get_global_billable_permission(config)
+
+        add(
+            "format",
+            mode in {"short", "full"},
+            f"FORMAT={mode}",
+        )
+
+        add(
+            "parts_range_and_selection",
+            (
+                minimum >= 1
+                and maximum >= minimum
+                and minimum <= selected <= maximum
+            ),
+            (
+                f"Range={minimum}-{maximum}; "
+                f"selected={selected}; "
+                f"configured scenes={selected * scenes}"
+            ),
+        )
+
+        add(
+            "scenes",
+            isinstance(scenes, int) and 1 <= scenes <= 500,
+            f"SCENES={scenes}",
+        )
+
+        add(
+            "fps",
+            isinstance(fps, int) and 1 <= fps <= 60,
+            f"FPS={fps}",
+        )
+
+        add(
+            "tts_provider_order",
+            (
+                len(tts_order) >= 3
+                and len(tts_order) == len(set(tts_order))
+                and all(item in TTS_ALLOWED for item in tts_order)
+            ),
+            " -> ".join(tts_order),
+        )
+
+        add(
+            "image_provider_order",
+            (
+                bool(image_order)
+                and len(image_order) == len(set(image_order))
+                and all(item in IMAGE_ALLOWED for item in image_order)
+            ),
+            " -> ".join(image_order),
+        )
+
+        add(
+            "billable_permission",
+            billable is True,
+            (
+                "Configured permission is enabled."
+                if billable
+                else "Configured permission blocks billable providers."
+            ),
+        )
+
+        story_text = get_story_text(config).strip()
+        preserve = config.get("PRESERVE_STORY_TEXT") is True
+
+        add(
+            "pasted_story_preservation",
+            not story_text or preserve,
+            (
+                "Supplied story preservation is enabled."
+                if story_text and preserve
+                else "No pasted story supplied."
+                if not story_text
+                else "PRESERVE_STORY_TEXT must be true."
+            ),
+        )
+
+        photo_settings = (
+            "PHOTO_MOTION_STYLE",
+            "PHOTO_MOTION_SPEED",
+            "PHOTO_MOTION_VARIATION",
+            "PHOTO_MOTION_PARALLAX",
+            "PHOTO_MOTION_PARALLAX_STRENGTH",
+            "PHOTO_MOTION_PRESERVE_SUBJECT",
+        )
+
+        missing_settings = [
+            key for key in photo_settings
+            if key not in config
+        ]
+
+        add(
+            "photo_motion_settings",
+            not missing_settings,
+            (
+                "All photo-motion settings are present."
+                if not missing_settings
+                else "Missing: " + ", ".join(missing_settings)
+            ),
+        )
+
+        add(
+            "resume_and_checkpoint",
+            (
+                config.get("RESUME_ENABLED") is True
+                and config.get("SAVE_CHECKPOINT_AFTER_EACH_SCENE") is True
+                and config.get("SKIP_COMPLETED_SCENES") is True
+            ),
+            (
+                "Resume, per-scene checkpoint and completed-scene reuse "
+                "must all be enabled."
+            ),
+        )
+
+    except Exception as exc:
+        add(
+            "input_configuration",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+
+    return config, checks
+
+
+def check_workflow_structure(source: str) -> list[dict]:
+    checks = []
+
+    def add(name: str, passed: bool, detail: str) -> None:
+        checks.append({
+            "name": name,
+            "passed": bool(passed),
+            "detail": str(detail),
+        })
+
+    if not source.strip():
+        add(
+            "workflow_readable",
+            False,
+            "Workflow file is empty.",
+        )
+        return checks
+
+    add(
+        "workflow_readable",
+        True,
+        "Workflow file is readable.",
+    )
+
+    patterns = {
+        "manual_dispatch": (
+            r"(?m)^\s{2}workflow_dispatch:\s*(?:#.*)?$"
+        ),
+        "ubuntu_runner": (
+            r"(?m)^\s{4}runs-on:\s*ubuntu-latest\s*$"
+        ),
+        "python_311": (
+            r"(?m)^\s{10}python-version:\s*[\"']?3\.11[\"']?\s*$"
+        ),
+        "billable_environment": (
+            r"(?m)^\s{6}ALLOW_BILLABLE_PROVIDERS:\s*[\"']?true[\"']?\s*$"
+        ),
+        "checkout_action": (
+            r"(?m)^\s{8}uses:\s*actions/checkout@v4\s*$"
+        ),
+        "python_setup_action": (
+            r"(?m)^\s{8}uses:\s*actions/setup-python@v5\s*$"
+        ),
+        "artifact_upload_action": (
+            r"(?m)^\s{8}uses:\s*actions/upload-artifact@v4\s*$"
+        ),
+        "checkpoint_upload": (
+            r"(?m)^\s{10}name:\s*katha-photo-motion-checkpoint-\$\{\{\s*github\.run_id\s*\}\}\s*$"
+        ),
+        "final_output_upload": (
+            r"(?m)^\s{10}name:\s*katha-lok-ai-photo-motion-output-\$\{\{\s*github\.run_id\s*\}\}\s*$"
+        ),
+    }
+
+    for name, pattern in patterns.items():
+        passed = bool(re.search(pattern, source))
+
+        add(
+            "workflow_structure:" + name,
+            passed,
+            "Present." if passed else "Missing or incorrect.",
+        )
+
+    return checks
+
+
+def check_report_integrity(report: dict) -> tuple[bool, str]:
+    checks = report.get("checks")
+
+    if not isinstance(checks, list) or not checks:
+        return False, "Preflight report has no checks."
+
+    names = [
+        item.get("name")
+        for item in checks
+        if isinstance(item, dict)
+    ]
+
+    if len(names) != len(checks):
+        return False, "Preflight report contains invalid check records."
+
+    if len(names) != len(set(names)):
+        return False, "Preflight report contains duplicate check names."
+
+    failures = [
+        item for item in checks
+        if item.get("passed") is not True
+    ]
+
+    if len(failures) != report.get("checks_failed"):
+        return False, "Preflight failure count does not match its checks."
+
+    if report.get("checks_total") != len(checks):
+        return False, "Preflight total check count mismatch."
+
+    if report.get("checks_passed") != len(checks) - len(failures):
+        return False, "Preflight passed check count mismatch."
+
+    if report.get("ready_to_run") is not (len(failures) == 0):
+        return False, "Preflight readiness flag mismatch."
+
+    return True, "Report counts and readiness verified."
+
+
+def main() -> int:
+    checks: list[dict] = []
 
     def record(name: str, passed: bool, detail: str) -> None:
         checks.append({
@@ -256,256 +822,87 @@ def main() -> int:
             "passed": bool(passed),
             "detail": str(detail),
         })
-        log("PASS" if passed else "FAIL", name, "-", detail)
 
-    log("=" * 64)
+        log(
+            "PASS" if passed else "FAIL",
+            name,
+            "-",
+            detail,
+        )
+
+    log("=" * 68)
     log("KATHA LOK AI — PHOTO MOTION PREFLIGHT")
     log("VERSION:", VERSION)
-    log("NO GENERATION API CALLS")
-    log("=" * 64)
+    log("OFFLINE VALIDATION — NO GENERATION API CALLS")
+    log("=" * 68)
 
-    config = {}
-    mode = None
+    config, input_checks = check_input_configuration()
 
-    # 1. Input and configuration.
-    try:
-        if not INPUT_FILE.is_file() or INPUT_FILE.stat().st_size == 0:
-            raise RuntimeError("Input/topic.txt is missing or empty.")
-
-        sys.path.insert(0, str(SCRIPTS))
-
-        from input_config import (
-            load_and_validate,
-            get_format,
-            get_parts,
-            get_scenes,
-            get_fps,
-            get_tts_provider_order,
-            get_image_provider_order,
-            get_global_billable_permission,
+    for item in input_checks:
+        record(
+            item["name"],
+            item["passed"],
+            item["detail"],
         )
 
-        config = load_and_validate(INPUT_FILE)
+    # Required source files and Python syntax.
+    for name in REQUIRED_SCRIPTS:
+        path = SCRIPTS / name
 
-        mode = get_format(config)
-        parts = get_parts(config)
-        scenes = get_scenes(config)
-        fps = get_fps(config)
-        tts_order = get_tts_provider_order(config)
-        image_order = get_image_provider_order(config)
-
-        config_billable = get_global_billable_permission(config)
-        environment_billable = (
-            os.environ.get("ALLOW_BILLABLE_PROVIDERS", "")
-            .strip().lower() in {"1", "true", "yes", "on"}
-        )
-
-        effective_billable = (
-            config_billable is True or environment_billable
+        exists = (
+            path.is_file()
+            and path.stat().st_size > 0
         )
 
         record(
-            "input_file",
-            True,
-            "Input/topic.txt exists and is readable.",
-        )
-
-        record(
-            "format",
-            mode in {"short", "full"},
-            f"FORMAT={mode}",
-        )
-
-        record(
-            "parts_and_scenes",
-            isinstance(parts, int)
-            and isinstance(scenes, int)
-            and parts >= 1
-            and scenes >= 1,
-            f"PARTS={parts}; SCENES={scenes}; total={parts * scenes}",
-        )
-
-        record(
-            "fps",
-            isinstance(fps, (int, float)) and 1 <= fps <= 60,
-            f"FPS={fps}",
-        )
-
-        record(
-            "tts_provider_order",
-            len(tts_order) >= 3
-            and len(tts_order) == len(set(tts_order))
-            and all(item in TTS_ALLOWED for item in tts_order),
-            " -> ".join(tts_order),
-        )
-
-        record(
-            "image_provider_order",
-            bool(image_order)
-            and len(image_order) == len(set(image_order))
-            and all(item in IMAGE_ALLOWED for item in image_order),
-            " -> ".join(image_order),
-        )
-
-        record(
-            "billable_permission",
-            effective_billable,
-            (
-                f"Config={config_billable}; "
-                f"ALLOW_BILLABLE_PROVIDERS="
-                f"{environment_billable}; effective={effective_billable}"
-            ),
-        )
-
-        story_text = str(config.get("STORY_TEXT", "")).strip()
-        preserve = config.get("PRESERVE_STORY_TEXT", True)
-
-        record(
-            "pasted_story_preservation",
-            not story_text or preserve is True,
-            (
-                "Supplied story preservation is enabled."
-                if story_text and preserve is True
-                else "No pasted story supplied."
-                if not story_text
-                else "PRESERVE_STORY_TEXT must be true."
-            ),
-        )
-
-    except Exception as exc:
-        record("input_configuration", False, str(exc))
-
-    # 2. Required files and syntax.
-    required_paths = [SCRIPTS / name for name in REQUIRED_SCRIPTS]
-
-    for path in required_paths:
-        exists = path.is_file() and path.stat().st_size > 0
-
-        record(
-            "required_file:" + path.name,
+            "required_file:" + name,
             exists,
-            "Present." if exists else "Missing or empty.",
+            (
+                "Present and non-empty."
+                if exists
+                else "Missing or empty."
+            ),
         )
 
         if exists:
             valid, detail = check_python_file(path)
-            record("syntax:" + path.name, valid, detail)
 
-    # 3. Reject only executable legacy integrations.
-    # Plain text, comments, configuration-key validation and log messages
-    # are not pipeline execution and must not block Photo Motion.
-    executable_legacy = []
-    executable_calls = {
-        "run", "Popen", "call", "check_call", "check_output", "system"
-    }
-
-    for path in required_paths:
-        if not path.is_file():
-            continue
-        try:
-            tree = ast.parse(
-                path.read_text(encoding="utf-8-sig"),
-                filename=str(path),
+            record(
+                "syntax:" + name,
+                valid,
+                detail,
             )
-        except (OSError, UnicodeError, SyntaxError) as exc:
-            executable_legacy.append(
-                f"{path.relative_to(ROOT)}: unable to inspect executable syntax ({exc})"
-            )
-            continue
 
-        imported_modules = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_modules.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported_modules.add(node.module)
-
-        for module in imported_modules:
-            if EXECUTABLE_INTEGRATION_PATTERN.search(module):
-                executable_legacy.append(
-                    f"{path.relative_to(ROOT)} import {module}"
-                )
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-
-            function = node.func
-            function_name = (
-                function.attr if isinstance(function, ast.Attribute)
-                else function.id if isinstance(function, ast.Name)
-                else ""
-            )
-            if function_name not in executable_calls:
-                continue
-
-            values = []
-            for argument in list(node.args) + [
-                keyword.value for keyword in node.keywords
-            ]:
-                values.extend(
-                    child.value
-                    for child in ast.walk(argument)
-                    if isinstance(child, ast.Constant)
-                    and isinstance(child.value, str)
-                )
-
-            for value in values:
-                if EXECUTABLE_INTEGRATION_PATTERN.search(value):
-                    executable_legacy.append(
-                        f"{path.relative_to(ROOT)}:{node.lineno} executable command"
-                    )
-                    break
+    # Confirm that the pipeline does not execute the removed legacy path.
+    legacy_ok, legacy_detail = check_legacy_execution()
 
     record(
-        "photo_motion_only",
-        not executable_legacy,
-        (
-            "No executable legacy visual-generation integration detected."
-            if not executable_legacy
-            else "; ".join(executable_legacy[:30])
-        ),
+        "photo_motion_execution_path",
+        legacy_ok,
+        legacy_detail,
     )
 
-    # 4. Workflow readability and structural checks.
+    # Actual workflow file.
     workflow = ""
 
     try:
-        workflow = WORKFLOW_FILE.read_text(encoding="utf-8-sig")
-        record(
-            "workflow_file",
-            bool(workflow.strip()),
-            "Workflow is readable.",
+        workflow = WORKFLOW_FILE.read_text(
+            encoding="utf-8-sig"
         )
     except Exception as exc:
-        record("workflow_file", False, str(exc))
-
-    structure_checks = {
-        "workflow_dispatch": "workflow_dispatch:" in workflow,
-        "ubuntu_runner": "runs-on: ubuntu-latest" in workflow,
-        "python_311": bool(
-            re.search(
-                r"python-version:\s*[\"']?3\.11[\"']?",
-                workflow,
-            )
-        ),
-        "billable_true": bool(
-            re.search(
-                r"ALLOW_BILLABLE_PROVIDERS:\s*[\"']?true[\"']?",
-                workflow,
-                re.IGNORECASE,
-            )
-        ),
-    }
-
-    for name, passed in structure_checks.items():
         record(
-            "workflow_structure:" + name,
-            passed,
-            "Present." if passed else "Missing or incorrect.",
+            "workflow_file",
+            False,
+            f"{type(exc).__name__}: {exc}",
         )
 
-    # 5. Parse executable commands from actual YAML run sections.
+    for item in check_workflow_structure(workflow):
+        record(
+            item["name"],
+            item["passed"],
+            item["detail"],
+        )
+
     commands = extract_workflow_commands(workflow)
 
     record(
@@ -518,108 +915,171 @@ def main() -> int:
         ),
     )
 
-    ordered, order_detail = check_workflow_order(commands)
-    record("workflow_step_order", ordered, order_detail)
+    order_ok, order_detail = check_workflow_order(commands)
 
-    # The preflight must execute before generation begins.
-    preflight_positions = [
-        item for item in commands
-        if item["script"] == "pipeline_preflight.py"
+    record(
+        "workflow_generation_order",
+        order_ok,
+        order_detail,
+    )
+
+    preflight_ok, preflight_detail = check_workflow_preflight(
+        commands
+    )
+
+    record(
+        "preflight_before_generation",
+        preflight_ok,
+        preflight_detail,
+    )
+
+    story_gate_ok, story_gate_detail = check_story_gate(commands)
+
+    record(
+        "story_length_hard_gate",
+        story_gate_ok,
+        story_gate_detail,
+    )
+
+    # The workflow must invoke every required generation script.
+    observed = {
+        item["script"]
+        for item in commands
+    }
+
+    missing_commands = [
+        name for name in WORKFLOW_ORDER
+        if name not in observed
     ]
 
-    first_generation = next(
-        (
-            item for item in commands
-            if item["script"] == WORKFLOW_ORDER[0]
-        ),
-        None,
-    )
-
-    preflight_before_generation = (
-        bool(preflight_positions)
-        and first_generation is not None
-        and preflight_positions[0]["line"] < first_generation["line"]
-    )
-
     record(
-        "preflight_workflow_integration",
-        preflight_before_generation,
+        "all_generation_scripts_invoked",
+        not missing_commands,
         (
-            "Preflight is invoked before generation."
-            if preflight_before_generation
-            else "Preflight command is missing or occurs after generation."
+            "All required generation commands are invoked."
+            if not missing_commands
+            else "Missing commands: " + ", ".join(missing_commands)
         ),
     )
 
-    # Ensure the story-length hard gate is not just a filename mention.
-    validation_command = next(
-        (
-            item for item in commands
-            if item["script"] == "validate_story_length.py"
-        ),
-        None,
-    )
-
-    verify_command = next(
-        (
-            item for item in commands
-            if item["script"] == "verify_story.py"
-        ),
-        None,
-    )
-
-    story_gate_order = (
-        validation_command is not None
-        and verify_command is not None
-        and validation_command["line"] < verify_command["line"]
-    )
-
-    record(
-        "story_length_gate_order",
-        story_gate_order,
-        (
-            "Story-length validation executes before verify_story.py."
-            if story_gate_order
-            else "Story-length validation is missing or out of order."
-        ),
-    )
-
-    # 6. Dependencies installed by the workflow.
+    # Verify dependencies available in the current runtime.
     for module in PYTHON_MODULES:
-        try:
-            found = importlib.util.find_spec(module) is not None
-        except (ImportError, ValueError):
-            found = False
+        passed, detail = check_module(module)
 
         record(
             "python_dependency:" + module,
-            found,
-            "Importable." if found else "Not installed or not importable.",
+            passed,
+            detail,
         )
 
     for command in RUNTIME_COMMANDS:
-        found = shutil.which(command) is not None
+        passed, detail = check_runtime_command(command)
 
         record(
             "runtime_command:" + command,
-            found,
-            "Available." if found else "Missing from PATH.",
+            passed,
+            detail,
         )
 
-    # 7. Save an auditable report.
+    for family in FONT_FAMILIES:
+        passed, detail = check_font(family)
+
+        record(
+            "caption_font:" + family,
+            passed,
+            detail,
+        )
+
+    # Validate output directory is writable without modifying deliverables.
+    try:
+        OUT.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=OUT,
+            prefix=".preflight-write-test-",
+            delete=True,
+        ) as handle:
+            handle.write("preflight")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        record(
+            "output_directory_writable",
+            True,
+            "Output directory is writable.",
+        )
+
+    except Exception as exc:
+        record(
+            "output_directory_writable",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+
+    # Record source fingerprints for diagnosis; no network access.
+    fingerprints = {}
+
+    for path in (
+        INPUT_FILE,
+        WORKFLOW_FILE,
+        ROOT / "requirements.txt",
+    ):
+        if path.is_file():
+            fingerprints[path.relative_to(ROOT).as_posix()] = (
+                sha256_file(path)
+            )
+
+    for path in sorted(SCRIPTS.glob("*.py")):
+        if path.is_file():
+            fingerprints[path.relative_to(ROOT).as_posix()] = (
+                sha256_file(path)
+            )
+
     failed = [
         item for item in checks
-        if not item["passed"]
+        if item["passed"] is not True
     ]
 
     report = {
         "version": VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "format": mode,
+        "repository_root": ".",
+        "format": config.get("FORMAT") if config else None,
+        "parts_range": (
+            [
+                config.get("PARTS_MIN"),
+                config.get("PARTS_MAX"),
+            ]
+            if config else None
+        ),
+        "selected_parts": (
+            config.get("PARTS_SELECTED")
+            if config else None
+        ),
+        "scenes_per_part": (
+            config.get("SCENES")
+            if config else None
+        ),
+        "fps": config.get("FPS") if config else None,
+        "tts_provider_order": (
+            config.get("TTS_PROVIDER_ORDER")
+            if config else None
+        ),
+        "image_provider_order": (
+            config.get("IMAGE_PROVIDER_ORDER")
+            if config else None
+        ),
+        "billable_providers_allowed": (
+            config.get("ALLOW_BILLABLE_PROVIDERS")
+            if config else None
+        ),
         "api_calls_made": 0,
         "generation_performed": False,
         "workflow_commands_detected": commands,
         "workflow_order_expected": list(WORKFLOW_ORDER),
+        "source_fingerprints": fingerprints,
         "ready_to_run": not failed,
         "checks_total": len(checks),
         "checks_passed": len(checks) - len(failed),
@@ -638,30 +1098,85 @@ def main() -> int:
         if saved.get("version") != VERSION:
             raise RuntimeError("Preflight report version mismatch.")
 
-        if saved.get("ready_to_run") is not report["ready_to_run"]:
-            raise RuntimeError("Preflight report status mismatch.")
+        integrity_ok, integrity_detail = check_report_integrity(
+            saved
+        )
 
-        if saved.get("checks_total") != len(checks):
-            raise RuntimeError("Preflight report check count mismatch.")
+        if not integrity_ok:
+            raise RuntimeError(integrity_detail)
+
+        if saved.get("api_calls_made") != 0:
+            raise RuntimeError("Preflight report API-call count mismatch.")
+
+        if saved.get("generation_performed") is not False:
+            raise RuntimeError("Preflight must not perform generation.")
+
+        record(
+            "report_integrity",
+            True,
+            integrity_detail,
+        )
+
+        # Update report with its own integrity check.
+        failed = [
+            item for item in checks
+            if item["passed"] is not True
+        ]
+
+        report.update({
+            "ready_to_run": not failed,
+            "checks_total": len(checks),
+            "checks_passed": len(checks) - len(failed),
+            "checks_failed": len(failed),
+            "failures": failed,
+            "checks": checks,
+        })
+
+        atomic_json(REPORT_FILE, report)
+
+        final_saved = json.loads(
+            REPORT_FILE.read_text(encoding="utf-8")
+        )
+
+        final_ok, final_detail = check_report_integrity(
+            final_saved
+        )
+
+        if not final_ok:
+            raise RuntimeError(final_detail)
 
     except Exception as exc:
-        log("PREFLIGHT REPORT ERROR:", exc)
+        log(
+            "PREFLIGHT REPORT ERROR:",
+            f"{type(exc).__name__}: {exc}",
+        )
         return 1
 
-    log("-" * 64)
-    log("CHECKS:", len(checks))
+    log("-" * 68)
+    log("CHECKS:", report["checks_total"])
     log("PASSED:", report["checks_passed"])
     log("FAILED:", report["checks_failed"])
     log("REPORT:", REPORT_FILE.relative_to(ROOT))
 
     if failed:
         log("PREFLIGHT FAILED — generation must not start.")
+
+        for item in failed:
+            log(
+                "BLOCKER:",
+                item["name"],
+                "-",
+                item["detail"],
+            )
+
         return 1
 
     log(
-        "PREFLIGHT PASSED — local checks only; "
-        "external providers are not tested."
+        "PREFLIGHT PASSED — local checks only. "
+        "External provider credentials, quotas and availability "
+        "are not tested."
     )
+
     return 0
 
 
@@ -672,5 +1187,8 @@ if __name__ == "__main__":
         log("PREFLIGHT CANCELLED")
         raise SystemExit(130)
     except Exception as exc:
-        log("PREFLIGHT INTERNAL ERROR:", exc)
+        log(
+            "PREFLIGHT INTERNAL ERROR:",
+            f"{type(exc).__name__}: {exc}",
+        )
         raise SystemExit(1)
