@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Role-aware, resumable TTS with configured provider order and verified audio."""
+"""Role-aware, resumable multi-provider TTS with verified audio output."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 10
+VERSION = 11
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -68,9 +68,7 @@ def log(*values: Any) -> None:
 
 
 def text_value(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    return str(value).strip()
+    return default if value is None else str(value).strip()
 
 
 def cfg_text(config: dict, key: str, default: str = "") -> str:
@@ -79,15 +77,13 @@ def cfg_text(config: dict, key: str, default: str = "") -> str:
 
 def cfg_bool(config: dict, key: str, default: bool = False) -> bool:
     value = config.get(key, default)
-
     if isinstance(value, bool):
         return value
 
     normalized = str(value).strip().lower()
-
-    if normalized in {"1", "true", "yes", "on"}:
+    if normalized in {"1", "true", "yes", "on", "enabled"}:
         return True
-    if normalized in {"0", "false", "no", "off"}:
+    if normalized in {"0", "false", "no", "off", "disabled"}:
         return False
 
     raise RuntimeError(f"{key} must be a valid boolean.")
@@ -100,7 +96,6 @@ def cfg_int(
     minimum: int = 1,
 ) -> int:
     value = config.get(key, default)
-
     if isinstance(value, bool):
         raise RuntimeError(f"{key} must be an integer.")
 
@@ -128,17 +123,14 @@ def stable_hash(value: Any) -> str:
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-
     return digest.hexdigest()
 
 
 def load_json(path: Path, required: bool = True) -> Any:
     path = Path(path)
-
     if not path.is_file():
         if required:
             raise RuntimeError(f"Required file missing: {path}")
@@ -161,28 +153,27 @@ def save_json_atomic(path: Path, data: Any) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-
         os.replace(temporary, path)
-
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def safe_relative_path(value: Any, label: str) -> Path:
     raw = text_value(value)
-
     if not raw:
         raise RuntimeError(f"{label}: path is missing.")
 
     path = Path(raw)
-
     if not path.is_absolute():
         path = ROOT / path
 
     path = path.resolve()
-
-    if not path.is_relative_to(ROOT.resolve()):
-        raise RuntimeError(f"{label}: path escapes repository root.")
+    try:
+        path.relative_to(ROOT.resolve())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{label}: path escapes repository root."
+        ) from exc
 
     return path
 
@@ -204,10 +195,8 @@ def run_command(
 
     if result.returncode:
         detail = result.stderr or result.stdout or ""
-
         if isinstance(detail, bytes):
             detail = detail.decode("utf-8", errors="replace")
-
         raise RuntimeError(
             f"Command failed ({result.returncode}): "
             f"{str(detail)[-1800:]}"
@@ -247,16 +236,11 @@ def request_bytes(
     )
 
     try:
-        with urllib.request.urlopen(
-            request,
-            timeout=timeout,
-        ) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             data = response.read()
             content_type = response.headers.get("Content-Type", "")
-
             if not data:
                 raise RuntimeError("Provider returned an empty response.")
-
             return data, content_type
 
     except urllib.error.HTTPError as exc:
@@ -264,20 +248,14 @@ def request_bytes(
         raise RuntimeError(
             f"Provider HTTP {exc.code}: {detail[:1500]}"
         ) from exc
-
     except urllib.error.URLError as exc:
         raise RuntimeError(
             f"Provider network error: {exc}"
         ) from exc
 
 
-def request_json(
-    url: str,
-    headers: dict,
-    payload: dict,
-) -> dict:
+def request_json(url: str, headers: dict, payload: dict) -> dict:
     data, _ = request_bytes(url, headers, payload)
-
     try:
         result = json.loads(data.decode("utf-8"))
     except Exception as exc:
@@ -286,23 +264,21 @@ def request_json(
         ) from exc
 
     if not isinstance(result, dict):
-        raise RuntimeError(
-            "Provider response is not a JSON object."
-        )
+        raise RuntimeError("Provider response is not a JSON object.")
 
     return result
 
 
 def audio_duration(path: Path) -> float:
     path = Path(path)
-
     if not path.is_file() or path.stat().st_size < MIN_AUDIO_BYTES:
         raise RuntimeError(f"Audio missing or too small: {path}")
 
     ffprobe = shutil.which("ffprobe")
-
     if not ffprobe:
-        raise RuntimeError("ffprobe is required to measure audio duration.")
+        raise RuntimeError(
+            "ffprobe is required to measure actual audio duration."
+        )
 
     result = run_command([
         ffprobe,
@@ -333,12 +309,7 @@ def audio_duration(path: Path) -> float:
 
 def validate_audio(path: Path) -> dict:
     path = Path(path)
-
-    if not path.is_file():
-        raise RuntimeError(f"Audio file not found: {path}")
-
     duration = audio_duration(path)
-
     return {
         "duration": duration,
         "size_bytes": path.stat().st_size,
@@ -348,10 +319,8 @@ def validate_audio(path: Path) -> dict:
 
 def normalize_speed(value: Any) -> str:
     value = str(value or "+0%").strip()
-
     if value.lower() in {"normal", "default", ""}:
         return "+0%"
-
     if not value.endswith("%"):
         value += "%"
 
@@ -375,21 +344,17 @@ def resolve_voice(provider: str, voice: str) -> str:
                 "EDGE_TTS_VOICE",
                 "hi-IN-SwaraNeural",
             )
-
         if voice.lower() in {"male", "man", "m"}:
             return os.getenv(
                 "EDGE_TTS_VOICE",
                 "hi-IN-MadhurNeural",
             )
-
         return voice
 
     if provider == "gemini_tts":
         configured = os.getenv("GEMINI_TTS_VOICE", "").strip()
-
         if configured:
             return configured
-
         return "Kore" if voice.lower() == "female" else "Puck"
 
     return voice
@@ -397,26 +362,31 @@ def resolve_voice(provider: str, voice: str) -> str:
 
 def provider_order(config: dict) -> list[str]:
     order = get_tts_provider_order(config)
-
     if not order:
         raise RuntimeError("Configured TTS provider order is empty.")
 
-    # input_config returns the three primary providers first,
-    # followed by the configured fallback providers in their given order.
     normalized = []
-
     for provider in order:
         value = str(provider).strip().lower()
-
         if value == "elevenlab":
             value = "elevenlabs"
-
         if value and value not in normalized:
             normalized.append(value)
 
     if len(normalized) < 3:
         raise RuntimeError(
             "All three configured primary TTS providers are required."
+        )
+
+    supported = {
+        "fish_audio", "gemini_tts", "edge_tts", "piper",
+        "elevenlabs", "cartesia", "finevoice", "minimax",
+    }
+    unknown = [item for item in normalized if item not in supported]
+    if unknown:
+        raise RuntimeError(
+            "Unsupported configured TTS providers: "
+            + ", ".join(unknown)
         )
 
     return normalized
@@ -430,26 +400,24 @@ def billable_allowed(config: dict) -> bool:
     )
 
     env_value = os.getenv("ALLOW_BILLABLE_PROVIDERS")
-
     if env_value is not None:
         normalized = env_value.strip().lower()
-
-        if normalized not in {"true", "1", "yes", "on", "false", "0", "no", "off"}:
+        if normalized not in {
+            "true", "1", "yes", "on",
+            "false", "0", "no", "off",
+        }:
             raise RuntimeError(
                 "ALLOW_BILLABLE_PROVIDERS environment value is invalid."
             )
-
         global_allowed = global_allowed and normalized in {
-            "true", "1", "yes", "on"
+            "true", "1", "yes", "on",
         }
 
-    tts_allowed = cfg_bool(
+    return global_allowed and cfg_bool(
         config,
         "TTS_ALLOW_PAID",
         True,
     )
-
-    return global_allowed and tts_allowed
 
 
 def provider_available(
@@ -494,19 +462,42 @@ def provider_available(
             "PIPER_MODEL",
         )
         executable = (
-            command_exists("piper")
-            or command_exists("piper-tts")
+            shutil.which("piper")
+            or shutil.which("piper-tts")
         )
+        model_path = Path(model).expanduser() if model else None
         checks["piper"] = bool(
-            model and Path(model).is_file() and executable
+            executable and model_path and model_path.is_file()
         )
 
     if provider not in checks:
         return False, f"Unsupported configured provider: {provider}"
 
     if not checks[provider]:
-        return False, (
-            "Required API key, executable, voice ID or model is unavailable."
+        missing = {
+            "elevenlabs": (
+                "ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID secrets "
+                "are both required."
+            ),
+            "piper": (
+                "Piper executable and a valid PIPER_MODEL file are required."
+            ),
+            "edge_tts": "edge-tts executable is not installed.",
+            "cartesia": (
+                "CARTESIA_API_KEY and CARTESIA_VOICE_ID are required."
+            ),
+            "finevoice": (
+                "FINEVOICE_API_KEY and FINEVOICE_TTS_URL are required."
+            ),
+            "minimax": (
+                "MINIMAX_API_KEY and MINIMAX_TTS_VOICE_ID are required."
+            ),
+            "fish_audio": "FISH_AUDIO_API_KEY or FISH_API_KEY is required.",
+            "gemini_tts": "GEMINI_API_KEY or GOOGLE_API_KEY is required.",
+        }
+        return False, missing.get(
+            provider,
+            "Provider credentials or runtime are unavailable.",
         )
 
     return True, "available"
@@ -517,12 +508,10 @@ def split_text(
     max_chars: int,
     min_chars: int,
 ) -> list[str]:
-    """Preserve all text and punctuation; split at sentences, clauses, then words."""
+    """Split at sentence/clause boundaries and preserve exact narration."""
     source = str(value).strip()
-
     if not source:
         raise RuntimeError("Cannot synthesize empty narration.")
-
     if len(source) > MAX_TEXT_CHARS:
         raise RuntimeError("Narration exceeds maximum supported text length.")
 
@@ -535,49 +524,37 @@ def split_text(
     sentence_pattern = re.compile(
         r"""[.!?।॥]+["'”’)\]}»]*(?=\s|$)"""
     )
-
     sentences = []
     start = 0
 
     for match in sentence_pattern.finditer(source):
         end = match.end()
         unit = source[start:end].strip()
-
         if unit:
             sentences.append(unit)
-
         start = end
 
     tail = source[start:].strip()
-
     if tail:
         sentences.append(tail)
-
     if not sentences:
         sentences = [source]
 
     units = []
-
     for sentence in sentences:
         if len(sentence) <= max_chars:
             units.append(sentence)
             continue
 
-        # Long sentence: split at natural clause boundaries while retaining
-        # the comma/semicolon/colon on the preceding clause.
         clause_start = 0
-
         for match in re.finditer(r"[,;:，；：](?:\s+|$)", sentence):
             clause_end = match.end()
             clause = sentence[clause_start:clause_end].strip()
-
             if clause:
                 units.append(clause)
-
             clause_start = clause_end
 
         remainder = sentence[clause_start:].strip()
-
         if remainder:
             units.append(remainder)
 
@@ -596,12 +573,10 @@ def split_text(
             for word in words:
                 if len(word) > max_chars:
                     raise RuntimeError(
-                        "A single unbroken narration token exceeds "
+                        "A single narration token exceeds "
                         "TTS_CHUNK_MAX_CHARS."
                     )
-
                 candidate = f"{word_chunk} {word}".strip()
-
                 if word_chunk and len(candidate) > max_chars:
                     chunks.append(word_chunk)
                     word_chunk = word
@@ -610,11 +585,9 @@ def split_text(
 
             if word_chunk:
                 chunks.append(word_chunk)
-
             continue
 
         candidate = f"{current} {unit}".strip()
-
         if current and len(candidate) > max_chars:
             chunks.append(current)
             current = unit
@@ -625,7 +598,6 @@ def split_text(
         chunks.append(current)
 
     merged = []
-
     for chunk in chunks:
         if (
             merged
@@ -639,36 +611,27 @@ def split_text(
     if not merged or any(not item for item in merged):
         raise RuntimeError("TTS chunking produced an empty chunk.")
 
-    # Exact reconstruction check: only whitespace normalization is allowed.
-    reconstructed = " ".join(merged)
-
-    if re.sub(r"\s+", " ", reconstructed).strip() != re.sub(
-        r"\s+", " ", source
-    ).strip():
-        raise RuntimeError("TTS chunking changed or omitted narration text.")
+    normalize = lambda text: re.sub(r"\s+", " ", text).strip()
+    if normalize(" ".join(merged)) != normalize(source):
+        raise RuntimeError(
+            "TTS chunking changed or omitted narration text."
+        )
 
     return merged
 
 
-def write_audio_bytes(path: Path, data: bytes) -> None:
+def write_audio_bytes(path: Path, data: bytes) -> dict:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    temporary = path.with_name(
-        path.stem + ".partial" + path.suffix
-    )
+    temporary = path.with_name(path.stem + ".partial" + path.suffix)
 
     try:
         temporary.write_bytes(data)
-
         if temporary.stat().st_size < MIN_AUDIO_BYTES:
-            raise RuntimeError(
-                "Provider audio response is too small."
-            )
-
-        validate_audio(temporary)
+            raise RuntimeError("Provider audio response is too small.")
+        info = validate_audio(temporary)
         os.replace(temporary, path)
-
+        return info
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -697,17 +660,13 @@ def pcm_to_mp3(
             "-q:a", "3",
             output_path,
         ])
-
     finally:
         wav_path.unlink(missing_ok=True)
 
     return validate_audio(output_path)
 
 
-def concat_chunks(
-    paths: list[Path],
-    output_path: Path,
-) -> dict:
+def concat_chunks(paths: list[Path], output_path: Path) -> dict:
     if not paths:
         raise RuntimeError("No TTS chunks available.")
 
@@ -719,14 +678,11 @@ def concat_chunks(
         return validate_audio(output_path)
 
     list_file = output_path.with_suffix(".concat.txt")
-
     try:
         lines = []
-
         for path in paths:
             escaped = str(Path(path).resolve()).replace("'", "'\\''")
             lines.append(f"file '{escaped}'")
-
         list_file.write_text(
             "\n".join(lines) + "\n",
             encoding="utf-8",
@@ -742,7 +698,6 @@ def concat_chunks(
             "-q:a", "3",
             output_path,
         ])
-
     finally:
         list_file.unlink(missing_ok=True)
 
@@ -764,7 +719,6 @@ def synthesize_provider(
         temporary = output_path.with_name(
             output_path.stem + ".edge.partial.mp3"
         )
-
         try:
             run_command([
                 shutil.which("edge-tts") or "edge-tts",
@@ -773,14 +727,11 @@ def synthesize_provider(
                 "--text", text,
                 "--write-media", temporary,
             ])
-
-            validate_audio(temporary)
+            info = validate_audio(temporary)
             os.replace(temporary, output_path)
-
+            return info
         finally:
             temporary.unlink(missing_ok=True)
-
-        return validate_audio(output_path)
 
     if provider == "piper":
         model = os.getenv("PIPER_MODEL") or cfg_text(
@@ -791,12 +742,12 @@ def synthesize_provider(
             shutil.which("piper")
             or shutil.which("piper-tts")
         )
-
-        if not model or not executable:
-            raise RuntimeError("Piper executable or model is missing.")
+        if not executable or not model or not Path(model).is_file():
+            raise RuntimeError(
+                "Piper executable or model is unavailable."
+            )
 
         wav_path = output_path.with_suffix(".piper.wav")
-
         try:
             subprocess.run(
                 [
@@ -810,7 +761,6 @@ def synthesize_provider(
                 check=True,
                 timeout=REQUEST_TIMEOUT,
             )
-
             run_command([
                 shutil.which("ffmpeg") or "ffmpeg",
                 "-y", "-v", "error",
@@ -819,7 +769,6 @@ def synthesize_provider(
                 "-q:a", "3",
                 output_path,
             ])
-
         finally:
             wav_path.unlink(missing_ok=True)
 
@@ -830,7 +779,6 @@ def synthesize_provider(
             os.getenv("FISH_AUDIO_API_KEY")
             or os.getenv("FISH_API_KEY")
         )
-
         payload = {
             "text": text,
             "format": "mp3",
@@ -838,13 +786,10 @@ def synthesize_provider(
             "latency": "normal",
             "normalize": True,
         }
-
         reference = os.getenv("FISH_REFERENCE_ID", "").strip()
         model = os.getenv("FISH_TTS_MODEL", "s1")
-
         if reference:
             payload["reference_id"] = reference
-
         if model:
             payload["model"] = model
 
@@ -853,46 +798,41 @@ def synthesize_provider(
             {"Authorization": f"Bearer {key}"},
             payload,
         )
-
-        write_audio_bytes(output_path, data)
-        return validate_audio(output_path)
+        return write_audio_bytes(output_path, data)
 
     if provider == "gemini_tts":
         key = (
             os.getenv("GEMINI_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
         )
-
         model = os.getenv(
             "GEMINI_TTS_MODEL",
             "gemini-2.5-flash-preview-tts",
         )
-
-        voice_name = resolve_voice(provider, voice)
-
         payload = {
             "contents": [{
-                "parts": [{"text": text}]
+                "parts": [{"text": text}],
             }],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
                 "speechConfig": {
                     "voiceConfig": {
                         "prebuiltVoiceConfig": {
-                            "voiceName": voice_name
-                        }
-                    }
+                            "voiceName": resolve_voice(
+                                provider,
+                                voice,
+                            ),
+                        },
+                    },
                 },
             },
         }
-
         result = request_json(
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{model}:generateContent?key={key}",
             {},
             payload,
         )
-
         try:
             parts = result["candidates"][0]["content"]["parts"]
             audio_item = next(
@@ -900,12 +840,10 @@ def synthesize_provider(
                 if isinstance(item, dict)
                 and isinstance(item.get("inlineData"), dict)
             )
-
             pcm = base64.b64decode(
                 audio_item["inlineData"]["data"],
                 validate=True,
             )
-
         except Exception as exc:
             raise RuntimeError(
                 "Gemini TTS returned no valid audio."
@@ -914,13 +852,18 @@ def synthesize_provider(
         return pcm_to_mp3(pcm, output_path, 24000)
 
     if provider == "elevenlabs":
-        key = os.getenv("ELEVENLABS_API_KEY")
-        voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+        key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+        voice_id = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+        if not key or not voice_id:
+            raise RuntimeError(
+                "ElevenLabs requires both ELEVENLABS_API_KEY "
+                "and ELEVENLABS_VOICE_ID."
+            )
+
         model = os.getenv(
             "ELEVENLABS_MODEL_ID",
             "eleven_multilingual_v2",
         )
-
         payload = {
             "text": text,
             "model_id": model,
@@ -931,7 +874,6 @@ def synthesize_provider(
                 "use_speaker_boost": True,
             },
         }
-
         data, _ = request_bytes(
             f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
             "?output_format=mp3_44100_128",
@@ -941,16 +883,11 @@ def synthesize_provider(
             },
             payload,
         )
-
-        write_audio_bytes(output_path, data)
-        return validate_audio(output_path)
+        return write_audio_bytes(output_path, data)
 
     if provider == "cartesia":
         payload = {
-            "model_id": os.getenv(
-                "CARTESIA_TTS_MODEL",
-                "sonic-2",
-            ),
+            "model_id": os.getenv("CARTESIA_TTS_MODEL", "sonic-2"),
             "transcript": text,
             "voice": {
                 "mode": "id",
@@ -963,7 +900,6 @@ def synthesize_provider(
             },
             "language": "hi",
         }
-
         data, _ = request_bytes(
             "https://api.cartesia.ai/tts/bytes",
             {
@@ -976,9 +912,7 @@ def synthesize_provider(
             },
             payload,
         )
-
-        write_audio_bytes(output_path, data)
-        return validate_audio(output_path)
+        return write_audio_bytes(output_path, data)
 
     if provider == "minimax":
         payload = {
@@ -1001,7 +935,6 @@ def synthesize_provider(
                 "channel": 1,
             },
         }
-
         result = request_json(
             os.getenv(
                 "MINIMAX_TTS_URL",
@@ -1010,20 +943,17 @@ def synthesize_provider(
             {
                 "Authorization": (
                     f"Bearer {os.getenv('MINIMAX_API_KEY')}"
-                )
+                ),
             },
             payload,
         )
-
         try:
             audio = bytes.fromhex(result["data"]["audio"])
         except Exception as exc:
             raise RuntimeError(
                 "MiniMax returned no usable audio."
             ) from exc
-
-        write_audio_bytes(output_path, audio)
-        return validate_audio(output_path)
+        return write_audio_bytes(output_path, audio)
 
     if provider == "finevoice":
         payload = {
@@ -1031,7 +961,6 @@ def synthesize_provider(
             "voice_id": os.getenv("FINEVOICE_VOICE_ID", ""),
             "format": "mp3",
         }
-
         data, content_type = request_bytes(
             os.getenv("FINEVOICE_TTS_URL", ""),
             {
@@ -1042,7 +971,6 @@ def synthesize_provider(
             },
             payload,
         )
-
         if "json" in content_type.lower():
             try:
                 result = json.loads(data.decode("utf-8"))
@@ -1051,28 +979,19 @@ def synthesize_provider(
                     or result.get("audio_base64")
                     or result.get("data")
                 )
-
                 if isinstance(encoded, dict):
                     encoded = (
                         encoded.get("audio")
                         or encoded.get("audio_base64")
                     )
-
                 if not encoded:
                     raise ValueError("Missing audio field.")
-
-                data = base64.b64decode(
-                    encoded,
-                    validate=True,
-                )
-
+                data = base64.b64decode(encoded, validate=True)
             except Exception as exc:
                 raise RuntimeError(
                     "FineVoice JSON response has no valid audio."
                 ) from exc
-
-        write_audio_bytes(output_path, data)
-        return validate_audio(output_path)
+        return write_audio_bytes(output_path, data)
 
     raise RuntimeError(
         f"Unsupported configured TTS provider: {provider}"
@@ -1090,12 +1009,10 @@ def safe_id(value: Any) -> str:
 
 def story_slug(title: str) -> str:
     slug = safe_id(title).strip("_-")
-
     if not slug:
         raise RuntimeError(
             "Story title cannot produce a valid output filename."
         )
-
     return slug[:90]
 
 
@@ -1152,31 +1069,29 @@ def record_identity(row: dict) -> tuple[str, int, str, int | None]:
 
 def narration_text(row: dict) -> str:
     value = row.get("text")
-
     if value is None:
         value = row.get("narration")
 
     value = str(value or "").strip()
-
     if not value:
         raise RuntimeError(
             f"Empty narration text for {row.get('scene_id', 'unknown')}."
         )
-
     if len(value) > MAX_TEXT_CHARS:
         raise RuntimeError(
             f"Narration exceeds maximum length for {row.get('scene_id')}."
         )
-
     return value
 
 
 def output_path_for(row: dict, slug: str) -> Path:
-    scene_id, part, role, scene = record_identity(row)
+    _, part, role, scene = record_identity(row)
     folder = OUTPUT_DIR / slug / f"part_{part:02d}"
 
     if role == "main":
-        filename = f"{slug}_part_{part:02d}_scene_{scene:02d}.mp3"
+        filename = (
+            f"{slug}_part_{part:02d}_scene_{scene:02d}.mp3"
+        )
     else:
         filename = f"{slug}_part_{part:02d}_{role}.mp3"
 
@@ -1188,7 +1103,7 @@ def chunk_path_for(
     slug: str,
     chunk_index: int,
 ) -> Path:
-    scene_id, part, role, scene = record_identity(row)
+    _, part, role, scene = record_identity(row)
     folder = (
         OUTPUT_DIR
         / slug
@@ -1210,7 +1125,6 @@ def scene_fingerprint(
     order: list[str],
 ) -> str:
     scene_id, part, role, scene = record_identity(row)
-
     return stable_hash({
         "version": VERSION,
         "scene_id": scene_id,
@@ -1232,18 +1146,15 @@ def validate_narration_records(
         raise RuntimeError(
             "Narration manifest must be a JSON object."
         )
-
     if data.get("status") != "completed":
         raise RuntimeError(
             "Narration text preparation is not completed."
         )
-
-    if data.get("total_parts") != parts:
+    if int(data.get("total_parts", 0)) != parts:
         raise RuntimeError(
-            "Narration PARTS do not match the selected PARTS."
+            "Narration PARTS do not match selected PARTS."
         )
-
-    if data.get("scenes_per_part") != scenes_per_part:
+    if int(data.get("scenes_per_part", 0)) != scenes_per_part:
         raise RuntimeError(
             "Narration SCENES do not match configured SCENES."
         )
@@ -1262,8 +1173,7 @@ def validate_narration_records(
         for scene in range(1, scenes_per_part + 1)
     ]
 
-    main_map: dict[tuple[int, int], dict] = {}
-
+    main_map = {}
     for index, row in enumerate(main_rows, 1):
         if not isinstance(row, dict):
             raise RuntimeError(
@@ -1271,19 +1181,16 @@ def validate_narration_records(
             )
 
         scene_id, part, role, scene = record_identity(row)
-
         if role != "main":
             raise RuntimeError(
-                f"{scene_id}: main narration list contains another role."
+                f"{scene_id}: main list contains another role."
             )
-
         if not 1 <= part <= parts or not 1 <= scene <= scenes_per_part:
             raise RuntimeError(
                 f"{scene_id}: record is outside selected PARTS/SCENES."
             )
 
         key = (part, scene)
-
         if key in main_map:
             raise RuntimeError(
                 f"Duplicate main narration mapping: {key}."
@@ -1295,32 +1202,27 @@ def validate_narration_records(
     if set(main_map) != set(expected_main):
         missing = sorted(set(expected_main) - set(main_map))
         extra = sorted(set(main_map) - set(expected_main))
-
         raise RuntimeError(
-            f"Main narration mapping mismatch. "
+            "Main narration mapping mismatch. "
             f"Missing={missing[:20]}, unexpected={extra[:20]}."
         )
 
-    extra_map: dict[str, dict] = {}
-
+    extra_map = {}
     for index, row in enumerate(extra_rows, 1):
         if not isinstance(row, dict):
             raise RuntimeError(
                 f"Invalid extra narration record {index}."
             )
 
-        scene_id, part, role, scene = record_identity(row)
-
+        scene_id, part, role, _ = record_identity(row)
         if role == "main":
             raise RuntimeError(
                 f"{scene_id}: main role cannot be an extra record."
             )
-
         if not 1 <= part <= parts:
             raise RuntimeError(
                 f"{scene_id}: extra narration part is out of range."
             )
-
         if scene_id in extra_map:
             raise RuntimeError(
                 f"Duplicate extra narration ID: {scene_id}."
@@ -1330,20 +1232,15 @@ def validate_narration_records(
         extra_map[scene_id] = dict(row)
 
     expected_roles = []
-
     for part in range(1, parts + 1):
         expected_roles.append((part, "hook"))
-
         if part < parts:
             expected_roles.append((part, "suspense"))
         else:
             expected_roles.append((part, "resolution"))
 
     actual_roles = sorted(
-        (
-            int(row["part"]),
-            str(row["role"]).lower(),
-        )
+        (int(row["part"]), str(row["role"]).lower())
         for row in extra_map.values()
     )
 
@@ -1356,14 +1253,12 @@ def validate_narration_records(
     ordered_main = [
         main_map[key] for key in expected_main
     ]
-
     ordered_extras = []
 
     for part in range(1, parts + 1):
         ordered_extras.append(
             extra_map[f"part_{part:02d}_hook"]
         )
-
         if part < parts:
             ordered_extras.append(
                 extra_map[f"part_{part:02d}_suspense"]
@@ -1386,38 +1281,33 @@ def validate_narration_records(
 
 def load_manifest() -> dict:
     data = load_json(MANIFEST_FILE, required=False)
-
     if data is None:
         return {"jobs": []}
-
     if not isinstance(data, dict):
-        raise RuntimeError("Existing TTS manifest must be an object.")
-
+        raise RuntimeError(
+            "Existing TTS manifest must be an object."
+        )
     if not isinstance(data.get("jobs", []), list):
-        raise RuntimeError("Existing TTS manifest jobs must be a list.")
-
+        raise RuntimeError(
+            "Existing TTS manifest jobs must be a list."
+        )
     return data
 
 
 def manifest_map(manifest: dict) -> dict[str, dict]:
     result = {}
-
     for row in manifest.get("jobs", []):
         if not isinstance(row, dict):
             continue
 
         scene_id = str(row.get("scene_id") or "").strip()
-
         if not scene_id:
             continue
-
         if scene_id in result:
             raise RuntimeError(
                 f"Duplicate scene ID in previous TTS manifest: {scene_id}."
             )
-
         result[scene_id] = dict(row)
-
     return result
 
 
@@ -1452,7 +1342,6 @@ def save_manifest(
         ),
         "updated_at": utc_now(),
     })
-
     save_json_atomic(MANIFEST_FILE, manifest)
 
 
@@ -1463,10 +1352,8 @@ def reusable_audio(
 ) -> bool:
     if not isinstance(job, dict):
         return False
-
     if job.get("status") != "completed":
         return False
-
     if job.get("fingerprint") != fingerprint:
         return False
 
@@ -1475,36 +1362,22 @@ def reusable_audio(
             job.get("output"),
             "cached TTS output",
         )
-
         if stored_path != expected_path.resolve():
             return False
 
         actual = validate_audio(stored_path)
         expected_duration = float(job.get("duration", 0))
 
-        if not math.isfinite(expected_duration) or expected_duration <= 0:
-            return False
-
-        if job.get("sha256") != actual["sha256"]:
-            return False
-
-        if abs(expected_duration - actual["duration"]) >= 0.15:
-            return False
-
-        if job.get("duration_source") != "ffprobe_measured":
-            return False
-
-        if job.get("size_bytes") != actual["size_bytes"]:
-            return False
-
-        if not job.get("provider"):
-            return False
-
-        if not isinstance(job.get("chunk_files"), list):
-            return False
-
-        return True
-
+        return bool(
+            math.isfinite(expected_duration)
+            and expected_duration > 0
+            and job.get("sha256") == actual["sha256"]
+            and abs(expected_duration - actual["duration"]) < 0.15
+            and job.get("duration_source") == "ffprobe_measured"
+            and job.get("size_bytes") == actual["size_bytes"]
+            and job.get("provider")
+            and isinstance(job.get("chunk_files"), list)
+        )
     except (OSError, TypeError, ValueError, RuntimeError):
         return False
 
@@ -1516,30 +1389,24 @@ def valid_chunk_cache(
     provider: str,
 ) -> bool:
     meta = load_json(meta_path, required=False)
-
     if not isinstance(meta, dict):
         return False
-
     if meta.get("status") != "completed":
         return False
-
     if meta.get("fingerprint") != chunk_fingerprint:
         return False
-
     if meta.get("provider") != provider:
         return False
 
     try:
         actual = validate_audio(chunk_path)
-
-        return (
+        return bool(
             meta.get("sha256") == actual["sha256"]
             and meta.get("size_bytes") == actual["size_bytes"]
             and abs(
                 float(meta.get("duration", 0)) - actual["duration"]
             ) < 0.15
         )
-
     except (OSError, TypeError, ValueError, RuntimeError):
         return False
 
@@ -1548,10 +1415,8 @@ def update_narration_audio(
     narration: dict,
     jobs: dict[str, dict],
 ) -> None:
-    """Attach verified, measured TTS results to every narration role."""
     for field in ("scenes", "extra_scenes"):
         rows = narration.get(field, [])
-
         if not isinstance(rows, list):
             raise RuntimeError(
                 f"Narration field {field} is not a list."
@@ -1572,7 +1437,6 @@ def update_narration_audio(
                 job.get("output"),
                 f"{scene_id} audio output",
             )
-
             actual = validate_audio(output)
 
             if actual["sha256"] != job.get("sha256"):
@@ -1581,11 +1445,12 @@ def update_narration_audio(
                 )
 
             duration = actual["duration"]
+            relative = output.relative_to(ROOT).as_posix()
 
             row.update({
-                "audio": output.relative_to(ROOT).as_posix(),
-                "audio_path": output.relative_to(ROOT).as_posix(),
-                "audio_file": output.relative_to(ROOT).as_posix(),
+                "audio": relative,
+                "audio_path": relative,
+                "audio_file": relative,
                 "audio_sha256": actual["sha256"],
                 "audio_hash": actual["sha256"],
                 "audio_duration": duration,
@@ -1620,7 +1485,6 @@ def update_narration_audio(
         )
         else "in_progress"
     )
-
     narration["tts_updated_at"] = utc_now()
     save_json_atomic(NARRATION_FILE, narration)
 
@@ -1645,7 +1509,6 @@ def synthesize_record(
 
     if reusable_audio(old_job, output_file, fingerprint):
         log(f"REUSED {scene_id}")
-
         result = dict(old_job)
         result["cache_reused"] = True
         return result, True
@@ -1655,7 +1518,6 @@ def synthesize_record(
         max_chars,
         min_chars,
     )
-
     errors = []
 
     for provider in available:
@@ -1663,6 +1525,9 @@ def synthesize_record(
 
         for attempt in range(1, max_attempts + 1):
             chunk_paths = []
+            temporary = output_file.with_name(
+                output_file.stem + f".{provider}.partial.mp3"
+            )
 
             try:
                 for chunk_index, chunk_text in enumerate(chunks, 1):
@@ -1671,12 +1536,10 @@ def synthesize_record(
                         slug,
                         chunk_index,
                     )
-
                     chunk_path.parent.mkdir(
                         parents=True,
                         exist_ok=True,
                     )
-
                     meta_path = chunk_path.with_suffix(".json")
 
                     chunk_fingerprint = stable_hash({
@@ -1722,20 +1585,12 @@ def synthesize_record(
 
                     chunk_paths.append(chunk_path)
 
-                temporary = output_file.with_name(
-                    output_file.stem
-                    + f".{provider}.partial.mp3"
-                )
-
                 temporary.unlink(missing_ok=True)
-
                 audio_info = concat_chunks(
                     chunk_paths,
                     temporary,
                 )
-
                 os.replace(temporary, output_file)
-
                 final_info = validate_audio(output_file)
 
                 if final_info["sha256"] != audio_info["sha256"]:
@@ -1781,14 +1636,8 @@ def synthesize_record(
                     "error": str(exc)[:1500],
                     "at": utc_now(),
                 })
-
                 log(
                     f"{provider} attempt {attempt} failed: {exc}"
-                )
-
-                temporary = output_file.with_name(
-                    output_file.stem
-                    + f".{provider}.partial.mp3"
                 )
                 temporary.unlink(missing_ok=True)
                 output_file.unlink(missing_ok=True)
@@ -1832,17 +1681,15 @@ def main() -> int:
             "Invalid selected PARTS or SCENES configuration."
         )
 
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError("Both ffmpeg and ffprobe are required.")
+
     narration = load_json(NARRATION_FILE)
-
-    if not isinstance(narration, dict):
-        raise RuntimeError("Narration file must contain a JSON object.")
-
     main_rows, extra_rows = validate_narration_records(
         narration,
         parts,
         scenes_per_part,
     )
-
     records = main_rows + extra_rows
 
     title = str(
@@ -1855,11 +1702,10 @@ def main() -> int:
 
     if not title:
         raise RuntimeError(
-            "Story title is missing; TTS filenames cannot be story-based."
+            "Story title is missing; TTS filenames must be story-based."
         )
 
     slug = story_slug(title)
-
     order = provider_order(config)
     allow_paid = billable_allowed(config)
 
@@ -1872,7 +1718,6 @@ def main() -> int:
         1,
         minimum=1,
     )
-
     if max_attempts > 3:
         raise RuntimeError(
             "TTS_MAX_PROVIDER_ATTEMPTS cannot exceed 3."
@@ -1884,14 +1729,12 @@ def main() -> int:
         500,
         minimum=100,
     )
-
     min_chars = cfg_int(
         config,
         "TTS_CHUNK_MIN_CHARS",
         150,
         minimum=1,
     )
-
     if min_chars > max_chars:
         raise RuntimeError(
             "TTS_CHUNK_MIN_CHARS cannot exceed TTS_CHUNK_MAX_CHARS."
@@ -1902,19 +1745,16 @@ def main() -> int:
         "TTS_CHUNK_CHECKPOINT",
         True,
     )
-
     resume_enabled = cfg_bool(
         config,
         "RESUME_ENABLED",
         True,
     )
-
     skip_completed = cfg_bool(
         config,
         "SKIP_COMPLETED_SCENES",
         True,
     )
-
     save_each = cfg_bool(
         config,
         "SAVE_CHECKPOINT_AFTER_EACH_SCENE",
@@ -1939,6 +1779,7 @@ def main() -> int:
         )
 
     available = []
+    unavailable = []
 
     for provider in order:
         ok, reason = provider_available(
@@ -1946,15 +1787,19 @@ def main() -> int:
             config,
             allow_paid,
         )
-
         if ok:
             available.append(provider)
         else:
+            unavailable.append({
+                "provider": provider,
+                "reason": reason,
+            })
             log(f"PROVIDER SKIP: {provider}: {reason}")
 
     if not available:
         raise RuntimeError(
-            "None of the configured TTS providers is available."
+            "None of the configured TTS providers is available. "
+            "Check the configured provider credentials and runtime."
         )
 
     log("FORMAT             :", fmt)
@@ -1974,6 +1819,7 @@ def main() -> int:
     log("CHUNK CHECKPOINT   :", chunk_checkpoint)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     manifest = load_manifest()
     old_jobs = manifest_map(manifest)
@@ -2022,6 +1868,7 @@ def main() -> int:
         "extra_record_count": len(extra_rows),
         "provider_order": order,
         "available_providers": available,
+        "unavailable_providers": unavailable,
         "billable_allowed": allow_paid,
         "voice": voice,
         "speed": speed,
@@ -2030,7 +1877,6 @@ def main() -> int:
     })
 
     save_manifest(manifest, jobs, "in_progress")
-
     save_json_atomic(CHECKPOINT_FILE, {
         "status": "in_progress",
         "script_version": VERSION,
@@ -2107,7 +1953,6 @@ def main() -> int:
 
             if save_each or job["status"] == "failed":
                 update_narration_audio(narration, jobs)
-
                 save_json_atomic(CHECKPOINT_FILE, {
                     "status": (
                         "incomplete" if failures else "in_progress"
@@ -2125,13 +1970,11 @@ def main() -> int:
 
             if job["status"] == "failed":
                 log(f"FAILED {scene_id} ({role})")
-
                 if failure_policy != "skip":
                     raise RuntimeError(
                         f"TTS failed for {scene_id}; checkpoint saved. "
                         "Previously verified audio remains reusable."
                     )
-
             else:
                 log(
                     f"[{index}/{len(records)}] COMPLETE {scene_id} "
@@ -2141,7 +1984,6 @@ def main() -> int:
                 )
 
         missing = []
-
         for row in records:
             scene_id = record_identity(row)[0]
             job = jobs.get(scene_id)
@@ -2157,7 +1999,6 @@ def main() -> int:
         if missing:
             save_manifest(manifest, jobs, "incomplete")
             update_narration_audio(narration, jobs)
-
             raise RuntimeError(
                 f"TTS incomplete: {len(missing)} records missing "
                 f"or invalid: {missing[:30]}"
@@ -2165,7 +2006,6 @@ def main() -> int:
 
         update_narration_audio(narration, jobs)
 
-        # Verify every narration record now points to its actual audio.
         for row in records:
             scene_id = record_identity(row)[0]
             job = jobs[scene_id]
@@ -2195,7 +2035,6 @@ def main() -> int:
             "reused_count": reused,
             "completed_at": utc_now(),
         })
-
         save_manifest(manifest, jobs, "completed")
 
         save_json_atomic(CHECKPOINT_FILE, {
@@ -2208,7 +2047,6 @@ def main() -> int:
         })
 
         saved_manifest = load_json(MANIFEST_FILE)
-
         if (
             not isinstance(saved_manifest, dict)
             or saved_manifest.get("status") != "completed"
@@ -2220,7 +2058,6 @@ def main() -> int:
             )
 
         saved_narration = load_json(NARRATION_FILE)
-
         if saved_narration.get("tts_status") != "completed":
             raise RuntimeError(
                 "Narration file did not record completed TTS status."
@@ -2228,9 +2065,7 @@ def main() -> int:
 
     except Exception as exc:
         save_manifest(manifest, jobs, "incomplete")
-
         update_narration_audio(narration, jobs)
-
         save_json_atomic(CHECKPOINT_FILE, {
             "status": "incomplete",
             "script_version": VERSION,
@@ -2243,7 +2078,6 @@ def main() -> int:
             "last_error": str(exc)[:2000],
             "updated_at": utc_now(),
         })
-
         raise
 
     log("=" * 64)
@@ -2261,7 +2095,6 @@ def main() -> int:
     log("Manifest          :", MANIFEST_FILE.relative_to(ROOT))
     log("Checkpoint        :", CHECKPOINT_FILE.relative_to(ROOT))
     log("=" * 64)
-
     return 0
 
 
