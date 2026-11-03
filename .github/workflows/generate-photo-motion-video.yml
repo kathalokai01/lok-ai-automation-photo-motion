@@ -223,10 +223,13 @@ jobs:
               --workflow generate-photo-motion-video.yml \
               --branch "$GITHUB_REF_NAME" \
               --limit 30 \
-              --json databaseId,status \
+              --json databaseId,status,conclusion \
               --jq '
                 .[]
-                | select(.status == "completed")
+                | select(
+                    .status == "completed"
+                    and .conclusion == "success"
+                  )
                 | .databaseId
               ' 2>/dev/null || true
           )"
@@ -356,7 +359,7 @@ jobs:
             fi
 
             cp -a "$SAVED_OUTPUT/." output/
-            echo "Matching checkpoint restored from run $RUN_ID."
+            echo "Matching successful checkpoint restored from run $RUN_ID."
             break
           done
 
@@ -639,6 +642,7 @@ jobs:
           test -s output/package_archive_name.txt
 
           ARCHIVE="$(tr -d '\r\n' < output/package_archive_name.txt)"
+
           if [[ ! "$ARCHIVE" =~ ^katha-lok-[[:alnum:]_-]+-(short|full)-output\.zip$ ]]; then
             echo "::error::Package archive name is not story/FORMAT-specific: $ARCHIVE"
             exit 1
@@ -672,7 +676,7 @@ jobs:
               raise SystemExit("Archive name and package manifest disagree.")
           if archive.name != f"katha-lok-{slug}-{mode}-output.zip":
               raise SystemExit("Archive name is not story-specific.")
-          if not isinstance(parts, int) or parts < 1:
+          if not isinstance(parts, int) or isinstance(parts, bool) or parts < 1:
               raise SystemExit("Invalid actual PARTS.")
           if manifest.get("configured_parts") != parts:
               raise SystemExit("Actual PARTS and configured PARTS disagree.")
@@ -714,10 +718,12 @@ jobs:
 
               embedded_path = f"{root}/package_manifest.json"
               render_path = f"{root}/scene_renders/render_manifest.json"
+
               if embedded_path not in names or render_path not in names:
                   raise SystemExit("Embedded package/render manifest is missing.")
 
               embedded = json.loads(zf.read(embedded_path).decode("utf-8"))
+
               if embedded.get("status") != "completed":
                   raise SystemExit("Embedded package manifest is incomplete.")
               if embedded.get("format") != mode or embedded.get("parts") != parts:
@@ -727,12 +733,15 @@ jobs:
 
               videos = {
                   name for name in names
-                  if PurePosixPath(name).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+                  if PurePosixPath(name).suffix.lower()
+                  in {".mp4", ".mov", ".mkv", ".webm"}
               }
+
               expected = {
                   f"{root}/parts/{slug}-part-{number:02d}.mp4"
                   for number in range(1, parts + 1)
               }
+
               if videos != expected:
                   raise SystemExit(
                       f"Story Part videos mismatch: expected={sorted(expected)}, found={sorted(videos)}"
@@ -786,7 +795,7 @@ jobs:
               raise SystemExit("Final ZIP name does not match story and FORMAT.")
           if archive.name != manifest.get("archive"):
               raise SystemExit("Final ZIP and manifest archive names disagree.")
-          if not isinstance(parts, int) or parts < 1:
+          if not isinstance(parts, int) or isinstance(parts, bool) or parts < 1:
               raise SystemExit("Invalid actual PARTS.")
           if parts != manifest.get("configured_parts"):
               raise SystemExit("Actual PARTS mismatch.")
@@ -807,6 +816,7 @@ jobs:
           with archive.open("rb") as handle:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
+
           if digest.hexdigest() != manifest.get("archive_sha256"):
               raise SystemExit("Final ZIP SHA256 mismatch.")
           if archive.stat().st_size != manifest.get("archive_bytes"):
@@ -816,6 +826,7 @@ jobs:
               bad = zf.testzip()
               if bad:
                   raise SystemExit(f"Corrupt ZIP member: {bad}")
+
               names = zf.namelist()
               if not names or len(names) != len(set(names)):
                   raise SystemExit("ZIP is empty or contains duplicate entries.")
@@ -824,10 +835,12 @@ jobs:
 
               embedded_name = f"{root}/package_manifest.json"
               render_name = f"{root}/scene_renders/render_manifest.json"
+
               if embedded_name not in names or render_name not in names:
                   raise SystemExit("Required embedded manifests are missing.")
 
               embedded = json.loads(zf.read(embedded_name).decode("utf-8"))
+
               if (
                   embedded.get("status") != "completed"
                   or embedded.get("format") != mode
@@ -839,12 +852,15 @@ jobs:
 
               videos = {
                   name for name in names
-                  if PurePosixPath(name).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+                  if PurePosixPath(name).suffix.lower()
+                  in {".mp4", ".mov", ".mkv", ".webm"}
               }
+
               expected = {
                   f"{root}/parts/{slug}-part-{number:02d}.mp4"
                   for number in range(1, parts + 1)
               }
+
               if videos != expected:
                   raise SystemExit("ZIP contains missing, extra or wrongly named Part videos.")
 
