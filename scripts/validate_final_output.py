@@ -54,7 +54,7 @@ METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 METADATA_TAGS = OUT / "publish" / "youtube_tags.txt"
 REPORT = OUT / "validation_report.json"
 
-VERSION = "final-validator-v91-role-aware-dynamic-parts"
+VERSION = "final-validator-v92-story-root-package-verification"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -467,6 +467,7 @@ def validate_story(parts: int, scenes: int, mode: str) -> dict:
                 "allowed range is 120–180"
             )
         if narration[-1] not in "।॥.!?…,:;—–":
+
             fail(
                 f"Part {part_number} does not end at a sentence/clause boundary"
             )
@@ -919,6 +920,7 @@ def validate_sound(
         "sfx_validation_sha256": digest_file(SFX_VALIDATION),
     }
 
+
 def srt_seconds(value: str) -> float:
     match = SRT_TIMESTAMP.fullmatch(value.strip())
     if not match:
@@ -1044,7 +1046,7 @@ def validate_captions(parts: int, scenes: int, mode: str) -> dict:
         if row.get("caption_sha256"):
             expected_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             if clean(row["caption_sha256"]).lower() != expected_hash:
-                fail(f"Extra caption SHA256 mismatch: {key}")
+                fail(f"Extra caption text SHA256 mismatch: {key}")
         found_extras.add(key)
 
     if found_extras != expected_extras:
@@ -1611,88 +1613,333 @@ def validate_mode_separation(mode: str) -> dict:
         "part_outputs_only": True,
     }
 
-
 def validate_existing_archives(mode: str, parts: int) -> dict:
     archives = sorted(
         path for path in ROOT.glob("katha-lok-*-output.zip")
         if path.is_file()
+        and path.name.lower().endswith(f"-{mode}-output.zip")
     )
-    matching = [
-        path for path in archives
-        if path.name.lower().endswith(f"-{mode}-output.zip")
-    ]
 
-    if not matching:
+    if not archives:
         return {
             "status": "deferred",
             "reason": "The packaging stage creates the story-named ZIP.",
         }
-    if len(matching) > 1:
-        fail(f"Multiple selected-format story ZIPs exist: {[p.name for p in matching]}")
 
-    archive_path = matching[0]
-    if archive_path.stat().st_size < MIN_VIDEO_BYTES:
+    if len(archives) != 1:
+        fail(
+            "Exactly one selected-format story ZIP is required; "
+            f"found {[path.name for path in archives]}"
+        )
+
+    archive_path = archives[0]
+    archive_bytes = archive_path.stat().st_size
+    if archive_bytes < MIN_VIDEO_BYTES:
         fail("Existing story ZIP is too small")
 
     with zipfile.ZipFile(archive_path, "r") as archive:
-        bad = archive.testzip()
-        if bad:
-            fail(f"ZIP CRC verification failed: {bad}")
+        bad_member = archive.testzip()
+        if bad_member:
+            fail(f"ZIP CRC verification failed: {bad_member}")
 
-        names = archive.namelist()
+        infos = archive.infolist()
+        names = [item.filename for item in infos]
+
         if not names or len(names) != len(set(names)):
             fail("ZIP is empty or contains duplicate entries")
 
-        for name in names:
+        file_infos = {}
+        roots = set()
+
+        for info in infos:
+            name = info.filename
             member = PurePosixPath(name)
+
             if (
-                member.is_absolute()
+                not name
                 or "\\" in name
                 or ":" in name
+                or member.is_absolute()
                 or any(piece in {"", ".", ".."} for piece in member.parts)
             ):
-                fail(f"Unsafe ZIP member path: {name}")
+                fail(f"Unsafe ZIP member path: {name!r}")
 
-        videos = [
-            name for name in names
-            if PurePosixPath(name).suffix.lower() in VIDEO_EXTENSIONS
-        ]
-        expected = {
-            f"output/parts/part_{number:02d}.mp4"
+            if len(member.parts) < 2:
+                fail(f"ZIP member is outside the story root: {name}")
+
+            roots.add(member.parts[0])
+
+            if info.flag_bits & 0x1:
+                fail(f"Encrypted ZIP member is forbidden: {name}")
+
+            unix_mode = (info.external_attr >> 16) & 0xFFFF
+            if unix_mode and (unix_mode & 0o170000) == 0o120000:
+                fail(f"Symbolic link inside ZIP is forbidden: {name}")
+
+            if info.is_dir():
+                continue
+
+            if info.file_size <= 0:
+                fail(f"Empty ZIP member: {name}")
+
+            if PurePosixPath(name).suffix.lower() == ".zip":
+                fail(f"Nested ZIP archive is forbidden: {name}")
+
+            file_infos[name] = info
+
+        if len(roots) != 1:
+            fail(f"ZIP must contain exactly one story root; found {sorted(roots)}")
+
+        package_root = next(iter(roots))
+        expected_suffix = f"-{mode}"
+        if not package_root.endswith(expected_suffix):
+            fail(f"Story root does not match selected FORMAT: {package_root}")
+
+        slug = package_root[:-len(expected_suffix)]
+        if not slug or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+            fail(f"Invalid story slug in ZIP root: {package_root}")
+
+        expected_archive_name = f"katha-lok-{slug}-{mode}-output.zip"
+        if archive_path.name != expected_archive_name:
+            fail(
+                "ZIP filename does not match story root: "
+                f"expected {expected_archive_name}, found {archive_path.name}"
+            )
+
+        package_manifest_path = f"{package_root}/package_manifest.json"
+        validation_path = f"{package_root}/validation_report.json"
+        render_path = f"{package_root}/scene_renders/render_manifest.json"
+        thumbnail_path = f"{package_root}/{slug}-thumbnail.jpg"
+
+        required_paths = {
+            package_manifest_path,
+            validation_path,
+            render_path,
+            thumbnail_path,
+            f"{package_root}/thumbnail/thumbnail_manifest.json",
+            f"{package_root}/youtube_metadata.txt",
+            f"{package_root}/publish/youtube_metadata.json",
+            f"{package_root}/publish/youtube_tags.txt",
+            f"{package_root}/captions/final_captions.srt",
+            f"{package_root}/captions/captions.json",
+            f"{package_root}/photo_motion/photo_motion_manifest.json",
+            f"{package_root}/narration/audio_jobs.json",
+            f"{package_root}/sound_design/sound_design_manifest.json",
+            f"{package_root}/sound_design/sfx_timing_validation.json",
+        }
+
+        missing = sorted(required_paths - set(file_infos))
+        if missing:
+            fail(f"Story ZIP is missing required package files: {missing}")
+
+        part_prefix = f"{package_root}/parts/"
+        part_video_paths = {
+            name for name in file_infos
+            if name.startswith(part_prefix)
+            and PurePosixPath(name).suffix.lower() in VIDEO_EXTENSIONS
+        }
+        expected_part_paths = {
+            f"{part_prefix}{slug}-part-{number:02d}.mp4"
             for number in range(1, parts + 1)
         }
-        if set(videos) != expected:
-            fail("Existing ZIP Part video paths do not match selected PARTS")
-        if "output/package_manifest.json" not in names:
-            fail("Existing ZIP package manifest is missing")
-        if "output/validation_report.json" not in names:
-            fail("Existing ZIP validation report is missing")
 
-        try:
-            embedded = json.loads(
-                archive.read("output/package_manifest.json").decode("utf-8")
+        if part_video_paths != expected_part_paths:
+            fail(
+                "Story ZIP Part videos do not match selected PARTS: "
+                f"expected={sorted(expected_part_paths)}, "
+                f"found={sorted(part_video_paths)}"
             )
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            fail(f"Existing ZIP package manifest is invalid: {exc}")
 
-        if embedded.get("status") != "completed":
-            fail("Existing ZIP package manifest is incomplete")
-        if clean(embedded.get("format")).lower() != mode:
-            fail("Existing ZIP package FORMAT mismatch")
-        if positive_int(embedded.get("parts"), "ZIP package PARTS") != parts:
-            fail("Existing ZIP package PARTS mismatch")
-        if embedded.get("part_videos_only") is not True:
-            fail("Existing ZIP does not confirm Part-only output")
+        all_video_paths = {
+            name for name in file_infos
+            if PurePosixPath(name).suffix.lower() in VIDEO_EXTENSIONS
+        }
+        if all_video_paths != expected_part_paths:
+            fail(
+                "ZIP must contain only the selected story-named Part videos; "
+                f"found extra or missing videos: {sorted(all_video_paths)}"
+            )
 
-    return {
-        "status": "valid",
-        "archive": relative(archive_path),
-        "archive_bytes": archive_path.stat().st_size,
-        "archive_sha256": digest_file(archive_path),
-        "entry_count": len(names),
-        "part_video_count": len(videos),
-        "crc": "valid",
-    }
+        def read_embedded_json(path: str, label: str) -> dict:
+            try:
+                value = json.loads(archive.read(path).decode("utf-8-sig"))
+            except (KeyError, UnicodeError, json.JSONDecodeError) as exc:
+                fail(f"{label} is missing or invalid: {exc}")
+            if not isinstance(value, dict):
+                fail(f"{label} must contain a JSON object")
+            return value
+
+        package = read_embedded_json(
+            package_manifest_path, "Embedded package manifest"
+        )
+        validation = read_embedded_json(
+            validation_path, "Embedded validation report"
+        )
+        render = read_embedded_json(
+            render_path, "Embedded render manifest"
+        )
+
+        if clean(package.get("status")).lower() not in SUCCESS:
+            fail("Embedded package manifest is incomplete")
+        if clean(package.get("format")).lower() != mode:
+            fail("Embedded package FORMAT mismatch")
+        if positive_int(package.get("parts"), "ZIP package PARTS") != parts:
+            fail("Embedded package PARTS mismatch")
+        if package.get("part_videos_only") is not True:
+            fail("ZIP package does not confirm Part-only output")
+        if package.get("combined_video_included") is not False:
+            fail("ZIP package must explicitly exclude combined video")
+        if package.get("format_alias_included") is not False:
+            fail("ZIP package must explicitly exclude format alias")
+
+        if clean(package.get("story_slug")) != slug:
+            fail("Embedded package story slug differs from ZIP root")
+        if clean(package.get("package_root")) != package_root:
+            fail("Embedded package root differs from ZIP root")
+        if clean(package.get("archive")) != archive_path.name:
+            fail("Embedded package archive name mismatch")
+
+        story_title = clean(package.get("story_title"))
+        if not story_title:
+            fail("Embedded package story title is missing")
+
+        package_parts = package.get("part_numbers")
+        if package_parts != list(range(1, parts + 1)):
+            fail("Embedded package Part number list mismatch")
+
+        if package.get("manifest_zip_consistency") is not True:
+            fail("Package manifest does not confirm ZIP consistency")
+
+        package_part_files = package.get("part_files")
+        if not isinstance(package_part_files, list) or len(package_part_files) != parts:
+            fail("Embedded package Part file records are incomplete")
+
+        verified_parts = []
+
+        for index, row in enumerate(package_part_files, 1):
+            if not isinstance(row, dict):
+                fail(f"Invalid embedded package Part record: {index}")
+
+            if positive_int(row.get("part"), "ZIP manifest Part") != index:
+                fail("Embedded package Part order mismatch")
+
+            expected_path = (
+                f"{package_root}/parts/{slug}-part-{index:02d}.mp4"
+            )
+            if clean(row.get("path")) != expected_path:
+                fail(f"Embedded package Part path mismatch: {expected_path}")
+
+            info = file_infos.get(expected_path)
+            if info is None:
+                fail(f"Packaged Part video is missing: {expected_path}")
+
+            declared_hash = clean(row.get("sha256")).lower()
+            declared_bytes = positive_int(row.get("bytes"), "ZIP Part bytes")
+
+            if not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
+                fail(f"Invalid SHA256 in package Part record: {index}")
+            if declared_bytes != info.file_size:
+                fail(f"Packaged Part byte count mismatch: {index}")
+
+            digest = hashlib.sha256()
+            with archive.open(info, "r") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            actual_hash = digest.hexdigest()
+
+            if actual_hash != declared_hash:
+                fail(f"Packaged Part SHA256 mismatch: {index}")
+
+            verified_parts.append({
+                "part": index,
+                "path": expected_path,
+                "bytes": info.file_size,
+                "sha256": actual_hash,
+            })
+
+        if clean(validation.get("status")).lower() not in SUCCESS:
+            fail("Embedded validation report is incomplete")
+        if clean(validation.get("format")).lower() != mode:
+            fail("Embedded validation report FORMAT mismatch")
+        if positive_int(
+            validation.get("parts"), "Embedded validation PARTS"
+        ) != parts:
+            fail("Embedded validation report PARTS mismatch")
+        if validation.get("part_outputs_only") is not True:
+            fail("Embedded validation report is not Part-only")
+
+        validation_checks = validation.get("checks")
+        if not isinstance(validation_checks, dict):
+            fail("Embedded validation report checks are missing")
+
+        for check_name in REQUIRED_CHECKS:
+            check = validation_checks.get(check_name)
+            if not isinstance(check, dict) or clean(
+                check.get("status")
+            ).lower() != "valid":
+                fail(f"Embedded validation check failed: {check_name}")
+
+        if clean(render.get("status")).lower() not in SUCCESS:
+            fail("Embedded render manifest is incomplete")
+        if clean(render.get("format")).lower() != mode:
+            fail("Embedded render manifest FORMAT mismatch")
+        if render.get("part_outputs_only") is not True:
+            fail("Embedded render manifest is not Part-only")
+        if render.get("captions_burned") is not True:
+            fail("Embedded render manifest does not confirm burned captions")
+
+        render_parts = render.get("parts")
+        if not isinstance(render_parts, list) or len(render_parts) != parts:
+            fail("Embedded render manifest Part list is incomplete")
+
+        for index, row in enumerate(render_parts, 1):
+            if not isinstance(row, dict):
+                fail(f"Invalid embedded render Part record: {index}")
+            if positive_int(row.get("part"), "Render manifest Part") != index:
+                fail("Embedded render manifest Part order mismatch")
+
+            expected_path = (
+                f"{package_root}/parts/{slug}-part-{index:02d}.mp4"
+            )
+            if clean(row.get("path")) != expected_path:
+                fail(f"Embedded render Part path mismatch: {expected_path}")
+
+            package_row = package_part_files[index - 1]
+            if clean(row.get("sha256")).lower() != clean(
+                package_row.get("sha256")
+            ).lower():
+                fail(f"Render/package Part SHA256 mismatch: {index}")
+
+            if positive_int(
+                row.get("bytes"), "Render manifest Part bytes"
+            ) != positive_int(
+                package_row.get("bytes"), "Package manifest Part bytes"
+            ):
+                fail(f"Render/package Part byte count mismatch: {index}")
+
+        thumbnail_info = file_infos.get(thumbnail_path)
+        if thumbnail_info is None:
+            fail("Story-named thumbnail is missing from ZIP")
+
+        if package.get("thumbnail") != thumbnail_path:
+            fail("Embedded package thumbnail path mismatch")
+
+        return {
+            "status": "valid",
+            "archive": relative(archive_path),
+            "archive_bytes": archive_bytes,
+            "archive_sha256": digest_file(archive_path),
+            "entry_count": len(file_infos),
+            "part_video_count": len(verified_parts),
+            "part_videos_only": True,
+            "package_root": package_root,
+            "story_slug": slug,
+            "story_title": story_title,
+            "thumbnail": thumbnail_path,
+            "verified_parts": verified_parts,
+            "crc": "valid",
+            "manifest_consistency": "valid",
+        }
 
 
 def cleanup_stale_opposite_aliases(mode: str) -> list[str]:
@@ -1831,7 +2078,7 @@ def main() -> int:
             "Caption cue numbering, timestamps, order, overlap and nonempty text are checked.",
             "SRT timing is validated; word-level speech alignment is not independently re-proven.",
             "Story meaning preservation and subjective story quality cannot be proven by file integrity checks alone.",
-            "ZIP integrity is checked when a selected-format story archive already exists; packaging creates it otherwise.",
+            "ZIP integrity, story-root structure, story-named Part videos, thumbnail, embedded manifests and SHA256 consistency are checked when a selected-format story archive already exists; packaging creates it otherwise.",
         ],
     }
 
