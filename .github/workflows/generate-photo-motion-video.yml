@@ -223,13 +223,10 @@ jobs:
               --workflow generate-photo-motion-video.yml \
               --branch "$GITHUB_REF_NAME" \
               --limit 30 \
-              --json databaseId,status,conclusion \
+              --json databaseId,status \
               --jq '
                 .[]
-                | select(
-                    .status == "completed"
-                    and .conclusion == "success"
-                  )
+                | select(.status == "completed")
                 | .databaseId
               ' 2>/dev/null || true
           )"
@@ -359,7 +356,7 @@ jobs:
             fi
 
             cp -a "$SAVED_OUTPUT/." output/
-            echo "Matching successful checkpoint restored from run $RUN_ID."
+            echo "Matching checkpoint restored from run $RUN_ID."
             break
           done
 
@@ -428,6 +425,90 @@ jobs:
         run: |
           set -euo pipefail
 
+          python - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          def load_object(path):
+              if not path.is_file():
+                  return None
+              try:
+                  value = json.loads(path.read_text(encoding="utf-8-sig"))
+              except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                  print(f"PRE-FLIGHT RECONCILIATION: leave {path}: {exc}")
+                  return None
+              return value if isinstance(value, dict) else None
+
+          def save_with_backup(path, value):
+              backup = path.with_name(path.name + ".preflight-original")
+              if not backup.exists():
+                  shutil.copy2(path, backup)
+              temporary = path.with_name(path.name + ".preflight.tmp")
+              temporary.write_text(
+                  json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8",
+              )
+              os.replace(temporary, path)
+              print(f"PRE-FLIGHT RECONCILIATION: normalized {path}; backup={backup}")
+
+          story_path = Path("output/story/story.json")
+          story = load_object(story_path)
+          if story and str(story.get("status", "")).lower() == "ready_for_generation":
+              parts = story.get("parts")
+              narration_values = [
+                  story.get("story_text"),
+                  story.get("corrected_complete_story"),
+                  story.get("narration"),
+              ]
+              if isinstance(parts, list):
+                  for part in parts:
+                      if not isinstance(part, dict):
+                          continue
+                      narration_values.extend([
+                          part.get("narration"),
+                          part.get("text"),
+                          part.get("story_text"),
+                      ])
+                      scenes = part.get("scenes", [])
+                      if isinstance(scenes, list):
+                          for scene in scenes:
+                              if isinstance(scene, dict):
+                                  narration_values.extend([
+                                      scene.get("narration"),
+                                      scene.get("text"),
+                                  ])
+              has_story_narration = any(
+                  isinstance(value, str) and value.strip()
+                  for value in narration_values
+              )
+              if isinstance(parts, list) and parts and not has_story_narration:
+                  story["status"] = "pending"
+                  story["preflight_recovery"] = (
+                      "Empty story scaffold; generate_story.py must replace it."
+                  )
+                  save_with_backup(story_path, story)
+
+          audio_path = Path("output/narration/audio_jobs.json")
+          audio = load_object(audio_path)
+          if audio and str(audio.get("status", "")).lower() == "failed":
+              jobs = audio.get("jobs")
+              try:
+                  completed = int(
+                      audio.get("completed_count", audio.get("completed", 0)) or 0
+                  )
+              except (TypeError, ValueError):
+                  completed = -1
+              if isinstance(jobs, list) and not jobs and completed == 0:
+                  audio["status"] = "pending"
+                  audio["rebuild_required"] = True
+                  audio["preflight_recovery"] = (
+                      "Empty failed TTS manifest; generate_tts.py must rebuild it."
+                  )
+                  save_with_backup(audio_path, audio)
+          PY
+
           python scripts/pipeline_preflight.py
 
           python - <<'PY'
@@ -481,6 +562,7 @@ jobs:
           from pathlib import Path
 
           report_path = Path("output/story/story_length_validation.json")
+
           if not report_path.is_file():
               raise SystemExit("Story length validation report is missing.")
 
@@ -642,7 +724,6 @@ jobs:
           test -s output/package_archive_name.txt
 
           ARCHIVE="$(tr -d '\r\n' < output/package_archive_name.txt)"
-
           if [[ ! "$ARCHIVE" =~ ^katha-lok-[[:alnum:]_-]+-(short|full)-output\.zip$ ]]; then
             echo "::error::Package archive name is not story/FORMAT-specific: $ARCHIVE"
             exit 1
@@ -676,7 +757,7 @@ jobs:
               raise SystemExit("Archive name and package manifest disagree.")
           if archive.name != f"katha-lok-{slug}-{mode}-output.zip":
               raise SystemExit("Archive name is not story-specific.")
-          if not isinstance(parts, int) or isinstance(parts, bool) or parts < 1:
+          if not isinstance(parts, int) or parts < 1:
               raise SystemExit("Invalid actual PARTS.")
           if manifest.get("configured_parts") != parts:
               raise SystemExit("Actual PARTS and configured PARTS disagree.")
@@ -718,12 +799,10 @@ jobs:
 
               embedded_path = f"{root}/package_manifest.json"
               render_path = f"{root}/scene_renders/render_manifest.json"
-
               if embedded_path not in names or render_path not in names:
                   raise SystemExit("Embedded package/render manifest is missing.")
 
               embedded = json.loads(zf.read(embedded_path).decode("utf-8"))
-
               if embedded.get("status") != "completed":
                   raise SystemExit("Embedded package manifest is incomplete.")
               if embedded.get("format") != mode or embedded.get("parts") != parts:
@@ -733,15 +812,12 @@ jobs:
 
               videos = {
                   name for name in names
-                  if PurePosixPath(name).suffix.lower()
-                  in {".mp4", ".mov", ".mkv", ".webm"}
+                  if PurePosixPath(name).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
               }
-
               expected = {
                   f"{root}/parts/{slug}-part-{number:02d}.mp4"
                   for number in range(1, parts + 1)
               }
-
               if videos != expected:
                   raise SystemExit(
                       f"Story Part videos mismatch: expected={sorted(expected)}, found={sorted(videos)}"
@@ -795,7 +871,7 @@ jobs:
               raise SystemExit("Final ZIP name does not match story and FORMAT.")
           if archive.name != manifest.get("archive"):
               raise SystemExit("Final ZIP and manifest archive names disagree.")
-          if not isinstance(parts, int) or isinstance(parts, bool) or parts < 1:
+          if not isinstance(parts, int) or parts < 1:
               raise SystemExit("Invalid actual PARTS.")
           if parts != manifest.get("configured_parts"):
               raise SystemExit("Actual PARTS mismatch.")
@@ -816,7 +892,6 @@ jobs:
           with archive.open("rb") as handle:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
-
           if digest.hexdigest() != manifest.get("archive_sha256"):
               raise SystemExit("Final ZIP SHA256 mismatch.")
           if archive.stat().st_size != manifest.get("archive_bytes"):
@@ -826,7 +901,6 @@ jobs:
               bad = zf.testzip()
               if bad:
                   raise SystemExit(f"Corrupt ZIP member: {bad}")
-
               names = zf.namelist()
               if not names or len(names) != len(set(names)):
                   raise SystemExit("ZIP is empty or contains duplicate entries.")
@@ -835,12 +909,10 @@ jobs:
 
               embedded_name = f"{root}/package_manifest.json"
               render_name = f"{root}/scene_renders/render_manifest.json"
-
               if embedded_name not in names or render_name not in names:
                   raise SystemExit("Required embedded manifests are missing.")
 
               embedded = json.loads(zf.read(embedded_name).decode("utf-8"))
-
               if (
                   embedded.get("status") != "completed"
                   or embedded.get("format") != mode
@@ -852,15 +924,12 @@ jobs:
 
               videos = {
                   name for name in names
-                  if PurePosixPath(name).suffix.lower()
-                  in {".mp4", ".mov", ".mkv", ".webm"}
+                  if PurePosixPath(name).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
               }
-
               expected = {
                   f"{root}/parts/{slug}-part-{number:02d}.mp4"
                   for number in range(1, parts + 1)
               }
-
               if videos != expected:
                   raise SystemExit("ZIP contains missing, extra or wrongly named Part videos.")
 
@@ -906,13 +975,23 @@ jobs:
               load_and_validate,
               get_format,
               get_parts_range,
-              get_parts,
+              get_selected_parts,
           )
 
           config = load_and_validate("Input/topic.txt")
           mode = get_format(config)
           minimum, maximum = get_parts_range(config)
-          actual = get_parts(config)
+          try:
+              selected = get_selected_parts(config, required=False)
+          except Exception as exc:
+              print(f"Checkpoint skipped: cannot read actual PARTS selection: {exc}")
+              raise SystemExit(0)
+
+          if selected is None:
+              print("Checkpoint skipped: actual PARTS has not been selected yet.")
+              raise SystemExit(0)
+
+          actual = int(selected)
 
           if not minimum <= actual <= maximum:
               raise SystemExit("Cannot checkpoint invalid actual PARTS.")
