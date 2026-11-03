@@ -12,8 +12,8 @@ AUDIENCE = "adult"                 # adult | kids
 # TITLE AND STORY INPUT
 # ============================================================
 
-TITLE = ""                         # Optional; खाली होने पर पूरी कहानी से title बनेगा
-TOPIC = ""                         # Topic/title देकर नई कहानी बनवाएँ
+TITLE = ""
+TOPIC = ""
 
 # Supplied story को source मानकर चलाएँ।
 # Characters, events, relationships, sequence और ending न बदलें।
@@ -75,9 +75,8 @@ SPEED = "+0%"                      # -10% slow | +0% normal | +10% fast
 
 # पहले ये तीनों मॉडल इसी क्रम में चलेंगे।
 # इनके बाद fallback list के शेष मॉडल चलेंगे।
-# चुने हुए मॉडल fallback में दोबारा नहीं चलेंगे।
-
-TTS_MAIN_1 = "elevenlab"
+# Primary में चुना गया मॉडल Fallback में दोबारा नहीं चलेगा।
+TTS_MAIN_1 = "elevenlabs"
 TTS_MAIN_2 = "gemini_tts"
 TTS_MAIN_3 = "edge_tts"
 
@@ -95,7 +94,7 @@ TTS_CHUNK_MAX_CHARS = 500
 TTS_CHUNK_MIN_CHARS = 150
 TTS_CHUNK_CHECKPOINT = true
 TTS_VALIDATE_AUDIO = true
-TTS_MAX_PROVIDER_ATTEMPTS = 1
+TTS_MAX_PROVIDER_ATTEMPTS = 2
 
 # ============================================================
 # IMAGE PROVIDER FALLBACK
@@ -148,34 +147,25 @@ SCENE_CONTINUITY = true
 # PHOTO MOTION OPTIONS
 # ============================================================
 
-# उपलब्ध motion styles:
 # mixed = zoom, pan, diagonal movement और cinematic drift का मिश्रण
 # zoom = zoom in / zoom out
 # pan = left / right / up / down movement
-# parallax = depth-map आधारित 2.5D movement; depth उपलब्ध न हो तो 2D fallback
+# parallax = depth-map आधारित 2.5D movement; depth न हो तो 2D fallback
 # dynamic = varied zoom, pan और cinematic movement
-# static = बिना motion (केवल विशेष आवश्यकता पर)
+# static = बिना motion
 
 PHOTO_MOTION_STYLE = "dynamic"
-
-# Depth map उपलब्ध और valid होने पर वास्तविक 2.5D parallax इस्तेमाल करें।
-# Depth map अनुपलब्ध/अमान्य होने पर configured 2D motion fallback होगा।
 PHOTO_MOTION_PARALLAX = true
 
 # Parallax strength: 0.010 से 0.050
-# अधिक मान परallax movement बढ़ाता है।
 PHOTO_MOTION_PARALLAX_STRENGTH = 0.026
 
-# उपलब्ध speed: slow | normal | fast | very_fast
+# slow | normal | fast | very_fast
 PHOTO_MOTION_SPEED = "fast"
 
-# उपलब्ध motion variation:
-# low = कम variation
-# medium = सामान्य variation
-# high = अधिक अलग-अलग movement
+# low | medium | high
 PHOTO_MOTION_VARIATION = "high"
 
-# Motion के दौरान character/object identity और frame boundaries सुरक्षित रखें।
 PHOTO_MOTION_PRESERVE_SUBJECT = true
 
 # ============================================================
@@ -183,18 +173,17 @@ PHOTO_MOTION_PRESERVE_SUBJECT = true
 # ============================================================
 
 CINEMATIC_CAMERA = true
-CAMERA_STYLE = "cinematic"         # cinematic | dynamic | slow | documentary | static
+CAMERA_STYLE = "cinematic"
 
-LIGHTING = "cinematic"             # cinematic | natural | warm | dark | dramatic | soft | night
+LIGHTING = "cinematic"
 
-MOOD = "dramatic"                  # dramatic | emotional | mysterious | suspense
-                                   # horror | joyful | inspirational | peaceful
+MOOD = "dramatic"
 
 # ============================================================
 # VISUAL QUALITY
 # ============================================================
 
-QUALITY = "high"                   # draft | standard | high
+QUALITY = "high"
 FPS = 24
 
 NEGATIVE_PROMPT = true
@@ -209,8 +198,7 @@ REALISTIC_LIGHTING = true
 # ============================================================
 
 MUSIC = true
-MUSIC_STYLE = "cinematic"          # cinematic | emotional | suspense | devotional
-                                   # folk | fantasy | none
+MUSIC_STYLE = "cinematic"
 
 SFX = true
 AMBIENT_SOUND = true
@@ -219,7 +207,7 @@ AMBIENT_SOUND = true
 # EDITING
 # ============================================================
 
-TRANSITIONS = "cinematic"          # cinematic | clean | none
+TRANSITIONS = "cinematic"
 
 # ============================================================
 # BRANDING
@@ -240,4 +228,3 @@ SKIP_COMPLETED_SCENES = true
 
 FAILURE_POLICY = "retry_then_checkpoint"
 # retry_then_checkpoint | skip | stop
-
