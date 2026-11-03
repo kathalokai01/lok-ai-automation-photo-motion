@@ -19,6 +19,8 @@ from input_config import (
     get_format,
     get_parts_range,
     get_scenes,
+    get_selected_parts,
+    get_selected_parts_record,
     load_and_validate,
 )
 from story_length_policy import (
@@ -26,7 +28,6 @@ from story_length_policy import (
     build_length_policy,
     clean_text,
     normalize_format as normalize_policy_format,
-    parse_parts_range,
     validate_story_length,
     word_count,
 )
@@ -36,7 +37,7 @@ STORY_FILE = STORY_DIR / "story.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 REPORT_FILE = STORY_DIR / "story_length_validation.json"
 
-REPORT_VERSION = "story-length-validation-v9-selected-parts-and-natural-boundaries"
+REPORT_VERSION = "story-length-validation-v10-strict-selection-and-exit-gate"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_WORDS = 135
@@ -51,6 +52,7 @@ BOUNDARY_ENDINGS = (
     "।", "॥", ".", "!", "?", "…", "...",
     ",", "，", ";", "؛", ":", "—", "–",
 )
+CLOSING_MARKS = "\"'”’»)]}）】」』"
 
 
 def log(*values: Any) -> None:
@@ -100,7 +102,7 @@ def as_int(value: Any, default: int = 0) -> int:
 def normalize_format(value: Any) -> str:
     try:
         return normalize_policy_format(value)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         fail(str(exc))
 
 
@@ -114,13 +116,8 @@ def normalize_narration(value: Any) -> str:
 
 
 def extract_scene_text(scene: dict) -> str:
-    """Read narration only; never count prompts, titles or metadata."""
-    for key in (
-        "narration",
-        "narration_text",
-        "voiceover",
-        "text",
-    ):
+    """Extract narration only; prompts and metadata are never counted."""
+    for key in ("narration", "narration_text", "voiceover", "text"):
         value = scene.get(key)
 
         if isinstance(value, str) and normalize_narration(value):
@@ -162,14 +159,14 @@ def extract_part_text(part: dict) -> str:
 def get_story_parts(story: dict) -> list[dict]:
     parts = story.get("parts")
 
-    if not isinstance(parts, list):
-        fail("story.json must contain a parts list.")
-
-    if not parts:
-        fail("story.json contains no story parts.")
+    if not isinstance(parts, list) or not parts:
+        fail("story.json must contain a non-empty parts list.")
 
     if any(not isinstance(item, dict) for item in parts):
         fail("story.json contains an invalid Part record.")
+
+    if len(parts) > MAX_PARTS:
+        fail(f"Story exceeds the maximum of {MAX_PARTS} parts.")
 
     return parts
 
@@ -212,7 +209,7 @@ def validate_part_selection(
     config: dict,
     story: dict,
     actual_parts: int,
-) -> tuple[int, int, list[str]]:
+) -> tuple[int, int, list[str], dict | None]:
     errors = []
 
     try:
@@ -229,28 +226,58 @@ def validate_part_selection(
             f"{minimum}-{maximum}; story contains {actual_parts}."
         )
 
-    declared_parts = story.get(
-        "total_parts",
-        story.get("parts_count"),
+    declared_counts = (
+        ("total_parts", story.get("total_parts")),
+        ("parts_count", story.get("parts_count")),
+        ("selected_parts", story.get("selected_parts")),
+        ("selected_parts_count", story.get("selected_parts_count")),
     )
 
-    if declared_parts is not None:
-        if as_int(declared_parts, -1) != actual_parts:
+    for field, declared in declared_counts:
+        if declared is not None and as_int(declared, -1) != actual_parts:
             errors.append(
-                f"Story metadata part count mismatch: "
-                f"declared {declared_parts}; actual {actual_parts}."
+                f"Story metadata mismatch: {field}={declared}; "
+                f"actual PARTS={actual_parts}."
             )
 
-    selected_metadata = story.get("selected_parts")
+    record = get_selected_parts_record(config)
 
-    if selected_metadata is not None:
-        if as_int(selected_metadata, -1) != actual_parts:
+    if minimum != maximum and record is None:
+        errors.append(
+            "PARTS is a range, but no valid persisted selection record "
+            "matches the current Input/topic.txt."
+        )
+
+    if record is not None:
+        recorded_count = as_int(record.get("selected_parts"), -1)
+
+        if recorded_count != actual_parts:
             errors.append(
-                "Story selected_parts metadata does not match "
-                "the actual number of story parts."
+                "Persisted PARTS selection does not match story.json: "
+                f"record={recorded_count}; story={actual_parts}."
             )
 
-    return minimum, maximum, errors
+        if as_int(record.get("minimum_parts"), -1) != minimum:
+            errors.append("Persisted PARTS minimum does not match Input.")
+
+        if as_int(record.get("maximum_parts"), -1) != maximum:
+            errors.append("Persisted PARTS maximum does not match Input.")
+
+    try:
+        configured_selection = get_selected_parts(config, required=False)
+    except (TypeError, ValueError) as exc:
+        errors.append(f"Invalid persisted PARTS selection: {exc}")
+        configured_selection = None
+
+    if configured_selection is not None:
+        if configured_selection != actual_parts:
+            errors.append(
+                "Input configuration selected PARTS does not match "
+                f"story.json: configured={configured_selection}; "
+                f"story={actual_parts}."
+            )
+
+    return minimum, maximum, errors, record
 
 
 def validate_part_numbering(
@@ -270,10 +297,10 @@ def validate_part_numbering(
                 f"found {part.get('part')!r}."
             )
 
-        if actual_id and actual_id != expected_id:
+        if actual_id != expected_id:
             errors.append(
                 f"Part ID mismatch: expected {expected_id}; "
-                f"found {actual_id}."
+                f"found {actual_id or '(missing)'}."
             )
 
         numbers.append(number)
@@ -317,7 +344,7 @@ def validate_part_scene_records(
                 f"found {len(scenes)}."
             )
 
-        seen_scene_numbers = set()
+        seen_numbers = set()
         scene_word_total = 0
         missing_narration = []
         scene_ids = []
@@ -336,13 +363,13 @@ def validate_part_scene_records(
                     f"found {scene_number}."
                 )
 
-            if scene_number in seen_scene_numbers:
+            if scene_number in seen_numbers:
                 errors.append(
                     f"Part {part_index}: duplicate scene number "
                     f"{scene_number}."
                 )
 
-            seen_scene_numbers.add(scene_number)
+            seen_numbers.add(scene_number)
 
             expected_id = (
                 f"part_{part_index:02d}_scene_{scene_index:02d}"
@@ -357,18 +384,16 @@ def validate_part_scene_records(
 
             scene_ids.append(actual_id)
 
-            declared_part = scene.get("part")
-
-            if declared_part is not None:
-                if as_int(declared_part, -1) != part_index:
+            if scene.get("part") is not None:
+                if as_int(scene.get("part"), -1) != part_index:
                     errors.append(
                         f"{expected_id}: scene part metadata mismatch."
                     )
 
-            declared_global = scene.get("global_scene_number")
-
-            if declared_global is not None:
-                if as_int(declared_global, -1) != global_scene_number:
+            if scene.get("global_scene_number") is not None:
+                if as_int(
+                    scene.get("global_scene_number"), -1
+                ) != global_scene_number:
                     errors.append(
                         f"{expected_id}: global scene number mismatch."
                     )
@@ -392,36 +417,38 @@ def validate_part_scene_records(
         if part_word_total <= 0:
             errors.append(f"Part {part_index} narration is empty.")
 
-        if scene_word_total and part_word_total != scene_word_total:
+        if scene_word_total != part_word_total:
             errors.append(
                 f"Part {part_index}: part narration has "
-                f"{part_word_total} words but its scene narration "
-                f"has {scene_word_total} words."
+                f"{part_word_total} words but scene narration has "
+                f"{scene_word_total} words."
             )
 
         if scenes and not missing_narration:
-            combined_scene_text = " ".join(
-                extract_scene_text(scene) for scene in scenes
+            combined = normalize_narration(
+                " ".join(extract_scene_text(scene) for scene in scenes)
             )
 
-            if normalize_narration(combined_scene_text) != part_text:
+            if combined != part_text:
                 errors.append(
-                    f"Part {part_index}: scene narration does not "
-                    "exactly match the ordered Part narration."
+                    f"Part {part_index}: ordered scene narration does "
+                    "not exactly reconstruct Part narration."
                 )
 
         declared_words = part.get("word_count")
 
-        if declared_words is not None:
-            if as_int(declared_words, -1) != part_word_total:
-                errors.append(
-                    f"Part {part_index}: word_count metadata mismatch."
-                )
+        if declared_words is None:
+            errors.append(
+                f"Part {part_index}: word_count metadata is missing."
+            )
+        elif as_int(declared_words, -1) != part_word_total:
+            errors.append(
+                f"Part {part_index}: word_count metadata mismatch."
+            )
 
         results.append({
             "part_number": part_index,
-            "part_id": clean_text(part.get("part_id"))
-            or f"part_{part_index:02d}",
+            "part_id": clean_text(part.get("part_id")),
             "scene_count": len(scenes),
             "expected_scene_count": expected_scenes,
             "narration_words": part_word_total,
@@ -431,12 +458,12 @@ def validate_part_scene_records(
             "structure_valid": (
                 len(scenes) == expected_scenes
                 and not missing_narration
-                and len(seen_scene_numbers) == expected_scenes
+                and len(seen_numbers) == expected_scenes
+                and scene_word_total == part_word_total
             ),
         })
 
     return results, errors
-
 
 def validate_flat_scene_index(
     story: dict,
@@ -447,8 +474,7 @@ def validate_flat_scene_index(
     flat_scenes = story.get("scenes")
 
     if not isinstance(flat_scenes, list):
-        errors.append("story.json has no flat scenes list.")
-        return errors
+        return ["story.json has no flat scenes list."]
 
     expected_total = len(parts) * expected_scenes
 
@@ -458,13 +484,11 @@ def validate_flat_scene_index(
             f"found {len(flat_scenes)}."
         )
 
-    expected_ids = []
-
-    for part_index in range(1, len(parts) + 1):
-        for scene_index in range(1, expected_scenes + 1):
-            expected_ids.append(
-                f"part_{part_index:02d}_scene_{scene_index:02d}"
-            )
+    expected_ids = [
+        f"part_{part_index:02d}_scene_{scene_index:02d}"
+        for part_index in range(1, len(parts) + 1)
+        for scene_index in range(1, expected_scenes + 1)
+    ]
 
     actual_ids = []
 
@@ -476,8 +500,14 @@ def validate_flat_scene_index(
         scene_id = clean_text(scene.get("scene_id"))
         actual_ids.append(scene_id)
 
+        if index > len(expected_ids):
+            errors.append(
+                f"Unexpected extra flat scene at index {index}."
+            )
+            continue
+
         expected_part = ((index - 1) // expected_scenes) + 1
-        expected_local_scene = ((index - 1) % expected_scenes) + 1
+        expected_local = ((index - 1) % expected_scenes) + 1
 
         if scene_id != expected_ids[index - 1]:
             errors.append(
@@ -491,13 +521,21 @@ def validate_flat_scene_index(
                 f"{scene_id}: flat scene part number mismatch."
             )
 
-        if as_int(scene.get("scene"), -1) != expected_local_scene:
+        if as_int(scene.get("scene"), -1) != expected_local:
             errors.append(
                 f"{scene_id}: flat scene local number mismatch."
             )
 
     if len(actual_ids) != len(set(actual_ids)):
         errors.append("Flat scenes contain duplicate scene IDs.")
+
+    expected_set = set(expected_ids)
+
+    if set(actual_ids) != expected_set:
+        errors.append(
+            "Flat scene index does not contain every expected scene ID "
+            "exactly once."
+        )
 
     return errors
 
@@ -509,41 +547,34 @@ def validate_story_metadata(
     total_words: int,
 ) -> list[str]:
     errors = []
-
     expected_parts = len(parts)
-    expected_total_scenes = expected_parts * scenes_per_part
+    expected_scenes = expected_parts * scenes_per_part
 
-    metadata_scenes = story.get("total_scenes")
+    required_counts = {
+        "total_parts": expected_parts,
+        "parts_count": expected_parts,
+        "selected_parts": expected_parts,
+        "selected_parts_count": expected_parts,
+        "total_scenes": expected_scenes,
+        "scenes_per_part": scenes_per_part,
+        "total_story_words": total_words,
+    }
 
-    if metadata_scenes is not None:
-        if as_int(metadata_scenes, -1) != expected_total_scenes:
+    for field, expected in required_counts.items():
+        if field not in story:
             errors.append(
-                f"Story total_scenes mismatch: expected "
-                f"{expected_total_scenes}; found {metadata_scenes}."
+                f"Story metadata field {field} is missing."
             )
-
-    declared_scenes_per_part = story.get("scenes_per_part")
-
-    if declared_scenes_per_part is not None:
-        if as_int(declared_scenes_per_part, -1) != scenes_per_part:
+        elif as_int(story.get(field), -1) != expected:
             errors.append(
-                "Story scenes_per_part does not match Input/topic.txt."
-            )
-
-    declared_words = story.get("total_story_words")
-
-    if declared_words is not None:
-        if as_int(declared_words, -1) != total_words:
-            errors.append(
-                f"Story total_story_words mismatch: declared "
-                f"{declared_words}; actual {total_words}."
+                f"Story metadata {field} mismatch: expected "
+                f"{expected}; found {story.get(field)}."
             )
 
     source_count = story.get("source_word_count")
 
-    if source_count is not None:
-        if as_int(source_count, -1) < 0:
-            errors.append("Story source_word_count metadata is invalid.")
+    if source_count is not None and as_int(source_count, -1) < 0:
+        errors.append("Story source_word_count metadata is invalid.")
 
     if not clean_text(story.get("title")):
         errors.append("Generated story title is missing.")
@@ -557,7 +588,6 @@ def validate_story_text_consistency(
     story_text: str,
 ) -> list[str]:
     errors = []
-
     part_texts = [extract_part_text(part) for part in parts]
 
     if any(not item for item in part_texts):
@@ -567,7 +597,7 @@ def validate_story_text_consistency(
 
     if normalize_narration(story_text) != combined_parts:
         errors.append(
-            "Complete story_text does not match the ordered Part narration."
+            "Complete story_text does not match ordered Part narration."
         )
 
     flattened = []
@@ -591,13 +621,22 @@ def validate_story_text_consistency(
                 "Part narration."
             )
 
+    corrected = story.get("corrected_complete_story")
+
+    if isinstance(corrected, str) and corrected.strip():
+        if normalize_narration(corrected) != combined_parts:
+            errors.append(
+                "corrected_complete_story does not match ordered "
+                "Part narration."
+            )
+
     return errors
 
 
 def validate_natural_part_boundaries(
     parts: list[dict],
 ) -> tuple[list[dict], list[str]]:
-    """Reject arbitrary mid-thought Part endings without rewriting text."""
+    """Reject part endings that cut off an unfinished sentence or thought."""
     results = []
     errors = []
 
@@ -609,31 +648,58 @@ def validate_natural_part_boundaries(
                 "part_number": index,
                 "boundary_valid": False,
                 "ending": "",
+                "boundary_type": "empty",
             })
+            errors.append(f"Part {index} has no ending boundary.")
             continue
 
-        ending = narration[-1]
-        valid = ending in BOUNDARY_ENDINGS
+        ending_text = narration
 
-        if not valid:
+        while ending_text and ending_text[-1] in CLOSING_MARKS:
+            ending_text = ending_text[:-1].rstrip()
+
+        valid = bool(
+            ending_text
+            and any(
+                ending_text.endswith(mark)
+                for mark in BOUNDARY_ENDINGS
+            )
+        )
+
+        if valid:
+            boundary_type = "sentence_or_clause"
+        else:
+            boundary_type = "incomplete_or_mid_sentence"
             errors.append(
-                f"Part {index} ends without a recognized sentence or "
-                "natural clause boundary. Arbitrary mid-sentence splits "
-                "are not accepted."
+                f"Part {index} ends without a recognized sentence "
+                "or natural clause boundary. Arbitrary mid-sentence "
+                "splits are not accepted."
             )
 
         results.append({
             "part_number": index,
             "boundary_valid": valid,
-            "ending": ending,
-            "boundary_type": (
-                "sentence_or_clause"
-                if valid
-                else "unrecognized_or_incomplete"
-            ),
+            "ending": narration[-1],
+            "boundary_type": boundary_type,
         })
 
     return results, errors
+
+
+def get_revision_attempted(part: dict) -> bool:
+    revision = part.get("revision")
+
+    if isinstance(revision, dict):
+        return bool(
+            part.get("revision_attempted")
+            or part.get("word_count_revision_attempted")
+            or revision.get("attempted")
+        )
+
+    return bool(
+        part.get("revision_attempted")
+        or part.get("word_count_revision_attempted")
+    )
 
 
 def validate_part_word_counts(
@@ -646,14 +712,7 @@ def validate_part_word_counts(
     for index, part in enumerate(parts, 1):
         narration = extract_part_text(part)
         amount = word_count(narration)
-
-        revision_attempted = bool(
-            part.get("revision_attempted")
-            or part.get("word_count_revision_attempted")
-            or part.get("revision", {}).get("attempted")
-            if isinstance(part.get("revision", {}), dict)
-            else part.get("revision_attempted")
-        )
+        revision_attempted = get_revision_attempted(part)
 
         result = validate_story_length(
             narration,
@@ -679,6 +738,24 @@ def validate_part_word_counts(
             )
             preferred_maximum = hard_maximum
 
+        passed = bool(
+            result.get("passed")
+            or result.get("final_validation_passed")
+        )
+
+        needs_revision = bool(result.get("needs_revision"))
+
+        if format_type == "short":
+            if amount < SHORT_MIN_WORDS or amount > SHORT_HARD_MAX_WORDS:
+                passed = False
+                needs_revision = True
+            elif amount > SHORT_PREFERRED_MAX_WORDS:
+                passed = revision_attempted
+                needs_revision = not revision_attempted
+            else:
+                passed = True
+                needs_revision = False
+
         results.append({
             "part_number": index,
             "word_count": amount,
@@ -687,8 +764,9 @@ def validate_part_word_counts(
             "preferred_maximum_words": preferred_maximum,
             "hard_maximum_words": hard_maximum,
             "status": result.get("status"),
-            "passed": bool(result.get("passed")),
-            "needs_revision": bool(result.get("needs_revision")),
+            "passed": passed,
+            "final_validation_passed": passed,
+            "needs_revision": needs_revision,
             "revision_attempted": revision_attempted,
         })
 
@@ -722,10 +800,6 @@ def build_policy(
             "parts_count": selected_parts,
             "configured_parts_count": selected_parts,
             "selected_parts": selected_parts,
-            "parts_count_is_dynamic": (
-                parse_parts_range(parts_specification)[0]
-                != parse_parts_range(parts_specification)[1]
-            ),
             "total_scenes": selected_parts * scenes_per_part,
             "target_words_per_part": SHORT_TARGET_WORDS,
             "minimum_words_per_part": SHORT_MIN_WORDS,
@@ -738,17 +812,11 @@ def build_policy(
                 selected_parts * SHORT_PREFERRED_MAX_WORDS
             ),
             "maximum_total_words": selected_parts * SHORT_HARD_MAX_WORDS,
-            "source_word_count_within_hard_limit": (
-                selected_parts * SHORT_MIN_WORDS
-                <= total_words
-                <= selected_parts * SHORT_HARD_MAX_WORDS
-            ),
             "revise_parts_above_150": True,
             "hard_fail_below_120": True,
             "hard_fail_above_180": True,
             "api_calls_made": 0,
         })
-
     else:
         policy["parts_count"] = selected_parts
         policy["configured_parts_count"] = selected_parts
@@ -758,6 +826,7 @@ def build_policy(
     policy["configured_parts_specification"] = parts_specification
     policy["selected_parts_are_authoritative"] = True
     policy["story_word_count"] = total_words
+    policy["actual_parts"] = selected_parts
 
     return policy
 
@@ -813,7 +882,6 @@ def main() -> int:
         fail("Input/topic.txt is missing.")
 
     config = load_and_validate(str(input_file))
-
     format_type = normalize_format(get_format(config))
 
     try:
@@ -829,6 +897,7 @@ def main() -> int:
     if (
         maximum_parts > MAX_PARTS
         or scenes_per_part > MAX_SCENES_PER_PART
+        or maximum_parts * scenes_per_part > MAX_PARTS * MAX_SCENES_PER_PART
     ):
         fail("PARTS or SCENES exceeds the supported safety limit.")
 
@@ -851,7 +920,12 @@ def main() -> int:
     parts = get_story_parts(story)
     actual_parts = len(parts)
 
-    _, _, part_selection_errors = validate_part_selection(
+    (
+        _,
+        _,
+        part_selection_errors,
+        selection_record,
+    ) = validate_part_selection(
         config,
         story,
         actual_parts,
@@ -954,12 +1028,13 @@ def main() -> int:
     for row in failed_parts:
         all_errors.append(
             f"Part {row['part_number']} has {row['word_count']} words; "
-            f"status={row['status']}."
+            f"status={row['status']}; "
+            f"revision_attempted={row['revision_attempted']}."
         )
 
     valid = not all_errors
-
     expected_scenes = actual_parts * scenes_per_part
+
     actual_scenes = sum(
         len(part.get("scenes", []))
         for part in parts
@@ -977,6 +1052,7 @@ def main() -> int:
         "validation_mode": "read_only",
         "story_fingerprint": fingerprint,
         "policy": policy,
+        "selection_record": selection_record,
         "source_comparison": source_report,
         "summary": {
             "configured_parts_min": minimum_parts,
@@ -997,9 +1073,16 @@ def main() -> int:
             "structure_errors": all_errors,
             "warnings": warnings,
             "valid": valid,
+            "passed": valid,
+            "final_validation_passed": valid,
             "api_calls_made": 0,
             "story_text_modified": False,
             "natural_part_boundaries_valid": not boundary_errors,
+            "selection_record_valid": (
+                selection_record is not None
+                if minimum_parts != maximum_parts
+                else True
+            ),
         },
         "part_numbering": numbering,
         "structure_results": structure_results,
@@ -1007,8 +1090,6 @@ def main() -> int:
         "boundary_results": boundary_results,
     }
 
-    # Write the report even when validation fails, so the workflow can
-    # show the exact failure rather than treating incomplete output as valid.
     write_json(POLICY_FILE, policy)
     write_json(REPORT_FILE, report)
 
@@ -1050,6 +1131,10 @@ def main() -> int:
             row["word_count"],
             "STATUS:",
             row["status"],
+            "REVISION ATTEMPTED:",
+            row["revision_attempted"],
+            "PASSED:",
+            row["passed"],
         )
 
     log("API CALLS: 0")
@@ -1057,8 +1142,11 @@ def main() -> int:
     log("REPORT:", REPORT_FILE.relative_to(ROOT))
     log("=" * 60)
 
-    # Preserve the workflow contract: this stage writes a diagnostic
-    # report. The workflow's summary.valid check is the hard gate.
+    if not valid:
+        log("STORY LENGTH VALIDATION: FAILED")
+        return 1
+
+    log("STORY LENGTH VALIDATION: SUCCESS")
     return 0
 
 
