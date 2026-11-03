@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import os
 import re
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,13 +69,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "STORY_TEXT": "",
     "PRESERVE_STORY_TEXT": True,
 
-    # None means no final count has been selected yet.
-    # This prevents a default value of 1 from invalidating ranges such as 7-11.
     "PARTS_SPEC": "1",
     "PARTS": 1,
     "PARTS_MIN": None,
     "PARTS_MAX": None,
     "PARTS_SELECTED": None,
+    "PARTS_SELECTION_FILE": "output/parts_selection.json",
 
     "SCENES": 1,
     "STORY_LENGTH": "auto",
@@ -129,7 +132,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "NATURAL_MOTION": True,
     "REALISTIC_LIGHTING": True,
 
-    # Photo motion: image zoom/pan/2.5D parallax only.
     "PHOTO_MOTION_STYLE": "dynamic",
     "PHOTO_MOTION_PARALLAX": True,
     "PHOTO_MOTION_PARALLAX_STRENGTH": 0.026,
@@ -345,11 +347,10 @@ def load_input_config(
         assigned.add(key)
         index += 1
 
-    # Never let the default PARTS value overwrite an explicitly supplied
-    # PARTS_SPEC. Preserve the user's original fixed count or range.
     if "PARTS" in assigned and "PARTS_SPEC" not in assigned:
         config["PARTS_SPEC"] = str(config["PARTS"]).strip()
 
+    config["_INPUT_CONFIG_PATH"] = str(file_path.resolve())
     return config
 
 
@@ -432,7 +433,9 @@ def get_parts_range(config: dict[str, Any]) -> tuple[int, int]:
         try:
             supplied = (int(explicit_min), int(explicit_max))
         except (TypeError, ValueError) as exc:
-            raise ValueError("PARTS_MIN and PARTS_MAX must be integers.") from exc
+            raise ValueError(
+                "PARTS_MIN and PARTS_MAX must be integers."
+            ) from exc
 
         if supplied != (minimum, maximum):
             raise ValueError(
@@ -444,38 +447,143 @@ def get_parts_range(config: dict[str, Any]) -> tuple[int, int]:
     return minimum, maximum
 
 
-def get_parts(config: dict[str, Any]) -> int:
-    """Return selected count, or the lower bound until selection occurs."""
+def _parts_fingerprint(config: dict[str, Any]) -> str:
+    minimum, maximum = get_parts_range(config)
+    payload = {
+        "format": normalize_format(config),
+        "parts_spec": [minimum, maximum],
+        "topic": str(config.get("TOPIC", "")).strip(),
+        "title": str(config.get("TITLE", "")).strip(),
+        "story_text": get_story_text(config).strip(),
+        "input_path": str(config.get("_INPUT_CONFIG_PATH", "")),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _selection_file(config: dict[str, Any]) -> Path:
+    raw = str(
+        config.get("PARTS_SELECTION_FILE")
+        or DEFAULT_CONFIG["PARTS_SELECTION_FILE"]
+    ).strip()
+    if not raw:
+        raise ValueError("PARTS_SELECTION_FILE cannot be empty.")
+
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path
+
+
+def _read_selection_record(
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    path = _selection_file(config)
+    if not path.is_file():
+        return None
+
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(record, dict):
+        return None
+
+    if record.get("schema_version") != 1:
+        return None
+
+    if record.get("input_fingerprint") != _parts_fingerprint(config):
+        return None
 
     minimum, maximum = get_parts_range(config)
-    raw_selected = config.get("PARTS_SELECTED")
+    try:
+        selected = int(record.get("selected_parts"))
+    except (TypeError, ValueError):
+        return None
 
+    if not minimum <= selected <= maximum:
+        return None
+
+    if record.get("format") != normalize_format(config):
+        return None
+
+    return record
+
+
+def get_selected_parts_record(
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the matching persisted selection record, if one exists."""
+    record = _read_selection_record(config)
+    return dict(record) if record else None
+
+
+def get_selected_parts(
+    config: dict[str, Any],
+    required: bool = False,
+) -> int | None:
+    minimum, maximum = get_parts_range(config)
+
+    if minimum == maximum:
+        return minimum
+
+    record = _read_selection_record(config)
+    if record is not None:
+        selected = int(record["selected_parts"])
+        config["PARTS_SELECTED"] = selected
+        config["PARTS"] = selected
+        return selected
+
+    raw_selected = config.get("PARTS_SELECTED")
     if raw_selected not in (None, ""):
-        if isinstance(raw_selected, bool):
-            raise ValueError("PARTS_SELECTED must be a positive integer.")
         try:
             selected = int(raw_selected)
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "PARTS_SELECTED must be a positive integer."
             ) from exc
-
         if not minimum <= selected <= maximum:
             raise ValueError(
                 f"PARTS_SELECTED={selected} is outside "
                 f"the configured PARTS range {minimum}-{maximum}."
             )
-        return selected
+        if required:
+            raise ValueError(
+                "PARTS_SELECTED exists only in memory and has no matching "
+                "persisted selection record. Call set_selected_parts()."
+            )
 
-    # Do not trust stale PARTS values as a final selection.
-    return minimum
+    if required:
+        raise RuntimeError(
+            "The actual PARTS count has not been selected. "
+            "Choose a count within the configured range and persist it "
+            "with set_selected_parts() before downstream generation."
+        )
+    return None
+
+
+def get_parts(config: dict[str, Any]) -> int:
+    """Return only the actual count; never substitute the range minimum."""
+    selected = get_selected_parts(config, required=True)
+    if selected is None:
+        raise RuntimeError("Actual PARTS count is not available.")
+    return selected
 
 
 def set_selected_parts(
     config: dict[str, Any],
     count: int,
+    *,
+    source: str = "story_length_policy",
+    story_word_count: int | None = None,
 ) -> int:
-    """Persist the selected count while retaining the original allowed range."""
+    """Validate and atomically persist the selected count for later processes."""
 
     minimum, maximum = get_parts_range(config)
 
@@ -495,6 +603,58 @@ def set_selected_parts(
             f"the allowed range {minimum}-{maximum}."
         )
 
+    if story_word_count is not None:
+        if isinstance(story_word_count, bool) or int(story_word_count) < 0:
+            raise ValueError("story_word_count must be a non-negative integer.")
+        story_word_count = int(story_word_count)
+
+    fingerprint = _parts_fingerprint(config)
+    path = _selection_file(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    record = {
+        "schema_version": 1,
+        "input_fingerprint": fingerprint,
+        "format": normalize_format(config),
+        "parts_spec": (
+            f"{minimum}-{maximum}" if minimum != maximum else str(minimum)
+        ),
+        "minimum_parts": minimum,
+        "maximum_parts": maximum,
+        "selected_parts": selected,
+        "selection_source": str(source).strip() or "unspecified",
+        "story_word_count": story_word_count,
+        "selected_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(
+                record,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary_path, path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
     config["PARTS_SPEC"] = (
         f"{minimum}-{maximum}" if minimum != maximum else str(minimum)
     )
@@ -502,7 +662,19 @@ def set_selected_parts(
     config["PARTS_MAX"] = maximum
     config["PARTS_SELECTED"] = selected
     config["PARTS"] = selected
+    config["PARTS_SELECTION_RECORD"] = record
     return selected
+
+
+def clear_selected_parts(config: dict[str, Any]) -> None:
+    """Remove a selection record only when it belongs to the current input."""
+    path = _selection_file(config)
+    record = _read_selection_record(config)
+    if record is not None:
+        path.unlink(missing_ok=True)
+    config["PARTS_SELECTED"] = None
+    minimum, _ = get_parts_range(config)
+    config["PARTS"] = minimum
 
 
 def get_scenes(config: dict[str, Any]) -> int:
@@ -570,7 +742,6 @@ def get_story_text(config: dict[str, Any]) -> str:
 
 
 def get_title_source(config: dict[str, Any]) -> str:
-    """Return explicit TITLE or TOPIC, never the first line of STORY_TEXT."""
     title = str(config.get("TITLE", "")).strip()
     return title or get_topic(config)
 
@@ -593,8 +764,6 @@ def normalize_image_provider(value: Any) -> str:
 
 
 def _split_provider_list(raw: Any) -> list[str]:
-    """Parse comma/semicolon strings and serialized Python provider lists."""
-
     if raw is None:
         return []
     if isinstance(raw, (list, tuple, set)):
@@ -629,8 +798,7 @@ def _split_provider_list(raw: Any) -> list[str]:
 
 
 def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
-    """Preserve the three selected providers first, then configured fallback."""
-
+    """Keep all three configured primary providers before configured fallback."""
     main = [
         normalize_provider(config.get("TTS_MAIN_1", "")),
         normalize_provider(config.get("TTS_MAIN_2", "")),
@@ -710,17 +878,13 @@ def fallback_enabled_value(config: dict[str, Any]) -> bool:
 
 
 def get_global_billable_permission(config: dict[str, Any]) -> bool:
-    """Combine Input permission with the workflow environment permission."""
-
     configured = parse_bool(
         config.get("ALLOW_BILLABLE_PROVIDERS", True),
         "ALLOW_BILLABLE_PROVIDERS",
     )
     environment_value = os.environ.get("ALLOW_BILLABLE_PROVIDERS")
-
     if environment_value is None:
         return configured
-
     return configured and parse_bool(
         environment_value,
         "ALLOW_BILLABLE_PROVIDERS environment variable",
@@ -866,7 +1030,6 @@ def _validate_tts_settings(config: dict[str, Any]) -> None:
         "TTS_ALLOW_PAID",
     )
 
-    # Main provider priority and configured fallback order remain unchanged.
     config["TTS_PROVIDER_ORDER"] = get_tts_provider_order(config)
     config["TTS_BILLABLE_ALLOWED"] = (
         get_global_billable_permission(config)
@@ -885,8 +1048,6 @@ def _validate_caption_settings(config: dict[str, Any]) -> None:
 
 
 def _validate_photo_motion_settings(config: dict[str, Any]) -> None:
-    """Validate image-based zoom, pan and 2.5D parallax configuration."""
-
     style = str(
         config.get("PHOTO_MOTION_STYLE", "dynamic")
     ).strip().lower()
@@ -986,12 +1147,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise TypeError("Configuration must be a dictionary.")
 
-    # Fill missing defaults without replacing explicit caller values.
     for key, value in DEFAULT_CONFIG.items():
         config.setdefault(key, value)
 
-    # Preserve the original PARTS expression before changing PARTS to
-    # the currently selected integer.
     if config.get("PARTS_SPEC") in (None, ""):
         config["PARTS_SPEC"] = str(config.get("PARTS", 1)).strip()
 
@@ -1007,11 +1165,11 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     config["PARTS_MAX"] = maximum_parts
 
     raw_selected = config.get("PARTS_SELECTED")
+    selected_parts: int | None = None
+
     if raw_selected not in (None, ""):
         if isinstance(raw_selected, bool):
-            raise ValueError(
-                "PARTS_SELECTED must be a positive integer."
-            )
+            raise ValueError("PARTS_SELECTED must be a positive integer.")
         try:
             selected_parts = int(raw_selected)
         except (TypeError, ValueError) as exc:
@@ -1025,11 +1183,22 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 f"the configured PARTS range "
                 f"{minimum_parts}-{maximum_parts}."
             )
-    else:
+
+    # A fixed count is already the actual count. A range is unresolved
+    # until a matching, fingerprinted selection record exists.
+    if minimum_parts == maximum_parts:
         selected_parts = minimum_parts
+    else:
+        record = _read_selection_record(config)
+        if record is not None:
+            selected_parts = int(record["selected_parts"])
+        else:
+            selected_parts = None
 
     config["PARTS_SELECTED"] = selected_parts
-    config["PARTS"] = selected_parts
+    config["PARTS"] = (
+        selected_parts if selected_parts is not None else minimum_parts
+    )
 
     config["SCENES"] = get_scenes(config)
     config["FPS"] = get_fps(config)
@@ -1061,6 +1230,7 @@ def load_and_validate(
 def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
     image_settings = get_image_provider_settings(config)
     minimum_parts, maximum_parts = get_parts_range(config)
+    selected_parts = get_selected_parts(config, required=False)
 
     return {
         "FORMAT": get_format(config),
@@ -1074,10 +1244,14 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "TITLE_SOURCE_AVAILABLE": bool(get_title_source(config)),
 
         "PARTS_SPEC": str(config.get("PARTS_SPEC", "")),
-        "PARTS": get_parts(config),
+        "PARTS": selected_parts,
         "PARTS_MIN": minimum_parts,
         "PARTS_MAX": maximum_parts,
-        "PARTS_SELECTED": get_parts(config),
+        "PARTS_SELECTED": selected_parts,
+        "PARTS_SELECTION_PERSISTED": (
+            get_selected_parts_record(config) is not None
+            or minimum_parts == maximum_parts
+        ),
 
         "SCENES": get_scenes(config),
         "FPS": get_fps(config),
@@ -1179,6 +1353,12 @@ if __name__ == "__main__":
     try:
         parsed = load_and_validate(config_path)
         print_config_summary(parsed)
+        if get_parts_range(parsed)[0] != get_parts_range(parsed)[1]:
+            if get_selected_parts_record(parsed) is None:
+                print(
+                    "PARTS SELECTION: pending; actual count must be "
+                    "selected and persisted before downstream generation."
+                )
         print("INPUT CONFIG VALIDATION: OK")
     except Exception as exc:
         print(f"INPUT CONFIG VALIDATION: FAILED: {exc}")
