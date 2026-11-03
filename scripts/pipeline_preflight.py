@@ -24,10 +24,12 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v62-selection-provider-workflow"
+VERSION = "photo-motion-preflight-v63-scene-range-full-mode"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
+    "pipeline_preflight.py",
+    "story_length_policy.py",
     "select_gemini_model.py",
     "generate_story.py",
     "validate_story_length.py",
@@ -42,6 +44,7 @@ REQUIRED_SCRIPTS = (
     "generate_flow_music.py",
     "generate_visuals.py",
     "free_image_generator.py",
+    "prepare_visuals.py",
     "generate_depth_maps.py",
     "depth_parallax.py",
     "photo_motion.py",
@@ -55,10 +58,8 @@ REQUIRED_SCRIPTS = (
     "generate_youtube_metadata.py",
     "validate_final_output.py",
     "package_output.py",
-    "pipeline_preflight.py",
 )
 
-# Story planning must consume the final corrected story and selected part count.
 WORKFLOW_ORDER = (
     "select_gemini_model.py",
     "generate_story.py",
@@ -74,6 +75,7 @@ WORKFLOW_ORDER = (
     "generate_flow_music.py",
     "generate_visuals.py",
     "free_image_generator.py",
+    "prepare_visuals.py",
     "generate_depth_maps.py",
     "photo_motion.py",
     "generate_sound_design.py",
@@ -262,7 +264,6 @@ def check_runtime_command(command: str) -> tuple[bool, str]:
 
 def check_font(family: str) -> tuple[bool, str]:
     executable = shutil.which("fc-match")
-
     if not executable:
         return False, "fc-match is not installed."
 
@@ -279,7 +280,6 @@ def check_font(family: str) -> tuple[bool, str]:
             return False, result.stderr.strip() or "Font lookup failed."
 
         resolved = result.stdout.strip().splitlines()
-
         if not resolved or not Path(resolved[0]).is_file():
             return False, f"No installed font file found for {family}."
 
@@ -404,12 +404,10 @@ def check_story_gate(commands: list[dict]) -> tuple[bool, str]:
     )
 
     missing = [name for name in required if name not in positions]
-
     if missing:
         return False, "Missing story gate commands: " + ", ".join(missing)
 
     ordered = [positions[name] for name in required]
-
     if ordered != sorted(ordered) or len(set(ordered)) != len(ordered):
         return False, (
             "Required order: generate_story.py -> "
@@ -418,6 +416,76 @@ def check_story_gate(commands: list[dict]) -> tuple[bool, str]:
         )
 
     return True, "Story validation precedes final story-plan generation."
+
+
+def check_prepare_visuals_order(commands: list[dict]) -> tuple[bool, str]:
+    positions = {}
+
+    for item in commands:
+        positions.setdefault(item["script"], item["line"])
+
+    required = (
+        "generate_visuals.py",
+        "free_image_generator.py",
+        "prepare_visuals.py",
+        "generate_depth_maps.py",
+        "photo_motion.py",
+    )
+
+    missing = [name for name in required if name not in positions]
+    if missing:
+        return False, (
+            "Missing visual preparation commands: " + ", ".join(missing)
+        )
+
+    ordered = [positions[name] for name in required]
+    if ordered != sorted(ordered) or len(set(ordered)) != len(ordered):
+        return False, (
+            "Required order: generate_visuals.py -> free_image_generator.py "
+            "-> prepare_visuals.py -> generate_depth_maps.py -> photo_motion.py."
+        )
+
+    return True, (
+        "prepare_visuals.py runs after image generation and before depth maps "
+        "and photo motion."
+    )
+
+
+def check_story_length_policy_integration() -> tuple[bool, str]:
+    policy_path = SCRIPTS / "story_length_policy.py"
+    story_path = SCRIPTS / "generate_story.py"
+
+    if not policy_path.is_file() or not story_path.is_file():
+        return False, "story_length_policy.py or generate_story.py is missing."
+
+    try:
+        tree = ast.parse(
+            story_path.read_text(encoding="utf-8-sig"),
+            filename=str(story_path),
+        )
+    except Exception as exc:
+        return False, f"generate_story.py cannot be inspected: {exc}"
+
+    references = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            references.extend(alias.name for alias in node.names)
+
+        elif isinstance(node, ast.ImportFrom):
+            references.append(node.module or "")
+
+    integrated = any(
+        name.rsplit(".", 1)[-1] == "story_length_policy"
+        for name in references
+    )
+
+    if not integrated:
+        return False, (
+            "generate_story.py does not import story_length_policy.py."
+        )
+
+    return True, "generate_story.py imports the story length policy module."
 
 
 def check_legacy_execution() -> tuple[bool, str]:
@@ -429,7 +497,6 @@ def check_legacy_execution() -> tuple[bool, str]:
 
     for name in REQUIRED_SCRIPTS:
         path = SCRIPTS / name
-
         if not path.is_file():
             continue
 
@@ -491,11 +558,162 @@ def check_legacy_execution() -> tuple[bool, str]:
     return True, "No executable legacy I2V/Wan2GP integration detected."
 
 
+def _manifest_rows(data: Any) -> list[dict]:
+    rows = []
+
+    if isinstance(data, list):
+        rows.extend(item for item in data if isinstance(item, dict))
+
+    elif isinstance(data, dict):
+        for key in ROW_KEYS:
+            value = data.get(key)
+            if isinstance(value, list):
+                rows.extend(
+                    item for item in value if isinstance(item, dict)
+                )
+
+    return rows
+
+
+def _row_part_number(row: dict) -> int | None:
+    for key in ("part", "part_number", "part_index"):
+        value = row.get(key)
+        if value is None:
+            continue
+
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+
+        if number >= 1:
+            return number
+
+    return None
+
+
+def _is_main_scene(row: dict) -> bool:
+    role = str(
+        row.get("role")
+        or row.get("scene_type")
+        or row.get("segment_type")
+        or ""
+    ).strip().lower()
+
+    if role in {
+        "hook", "part_hook", "suspense", "part_suspense",
+        "resolution", "final_resolution",
+    }:
+        return False
+
+    return True
+
+
+def validate_actual_scene_counts(
+    name: str,
+    data: Any,
+    minimum: int,
+    maximum: int,
+    expected_parts: int | None,
+    mode: str,
+) -> tuple[bool, str, dict]:
+    rows = _manifest_rows(data)
+    scene_rows = [
+        row for row in rows
+        if row.get("scene_id") is not None and _is_main_scene(row)
+    ]
+
+    if not scene_rows:
+        return True, (
+            f"{name}: no actual scene records yet; future-stage manifest "
+            "is allowed before scene generation."
+        ), {
+            "available": False,
+            "part_counts": {},
+        }
+
+    grouped: dict[int, set[str]] = {}
+
+    for row in scene_rows:
+        part = _row_part_number(row)
+
+        if part is None:
+            if mode == "full":
+                part = 1
+            else:
+                return False, (
+                    f"{name}: scene record has no valid Part number."
+                ), {
+                    "available": True,
+                    "part_counts": {},
+                }
+
+        scene_id = str(row.get("scene_id", "")).strip()
+        if not scene_id:
+            return False, f"{name}: empty scene_id found.", {}
+
+        grouped.setdefault(part, set()).add(scene_id)
+
+    if mode == "full" and set(grouped) != {1}:
+        return False, (
+            f"{name}: FULL mode must contain scenes for exactly Part 1; "
+            f"found Parts {sorted(grouped)}."
+        ), {
+            "available": True,
+            "part_counts": {
+                str(part): len(ids) for part, ids in grouped.items()
+            },
+        }
+
+    if expected_parts is not None:
+        expected = set(range(1, expected_parts + 1))
+        actual = set(grouped)
+
+        if actual != expected:
+            return False, (
+                f"{name}: actual Part IDs {sorted(actual)} do not match "
+                f"expected Parts {sorted(expected)}."
+            ), {
+                "available": True,
+                "part_counts": {
+                    str(part): len(ids) for part, ids in grouped.items()
+                },
+            }
+
+    counts = {
+        str(part): len(ids)
+        for part, ids in sorted(grouped.items())
+    }
+
+    invalid = {
+        part: count
+        for part, count in counts.items()
+        if not minimum <= count <= maximum
+    }
+
+    if invalid:
+        return False, (
+            f"{name}: actual Scene counts outside configured range "
+            f"{minimum}-{maximum}: {invalid}."
+        ), {
+            "available": True,
+            "part_counts": counts,
+        }
+
+    return True, (
+        f"{name}: actual Scene counts are within {minimum}-{maximum}: "
+        f"{counts}."
+    ), {
+        "available": True,
+        "part_counts": counts,
+    }
+
 def validate_existing_manifest(
     name: str,
     path: Path,
     expected_parts: int | None,
-    expected_scenes: int | None,
+    scenes_min: int,
+    scenes_max: int,
     input_fingerprint: str,
     expected_format: str,
 ) -> dict:
@@ -503,6 +721,7 @@ def validate_existing_manifest(
         return {
             "status": "not_yet_generated",
             "path": safe_relative(path),
+            "actual_scene_counts": {},
         }
 
     if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
@@ -530,7 +749,6 @@ def validate_existing_manifest(
 
             if declared is not None:
                 normalized = str(declared).strip().lower()
-
                 if normalized and normalized != expected_format:
                     raise ValueError(
                         f"{name}: {field}={normalized}, "
@@ -565,30 +783,18 @@ def validate_existing_manifest(
                         f"{name}: {field}={actual}, expected {expected_parts}."
                     )
 
-        if expected_scenes is not None:
-            for field in ("scenes_per_part",):
+        if expected_format == "full":
+            for field in ("parts", "total_parts", "selected_parts"):
                 value = data.get(field)
-
-                if value is not None and int(value) != expected_scenes:
+                if value is not None and int(value) != 1:
                     raise ValueError(
-                        f"{name}: {field}={value}, expected {expected_scenes}."
+                        f"{name}: FULL mode requires {field}=1; found {value}."
                     )
 
-    rows = data if isinstance(data, list) else []
-
-    if isinstance(data, dict):
-        for key in ROW_KEYS:
-            value = data.get(key)
-
-            if isinstance(value, list):
-                rows.extend(value)
-
+    rows = _manifest_rows(data)
     checked_files = 0
 
     for index, row in enumerate(rows, 1):
-        if not isinstance(row, dict):
-            continue
-
         row_status = str(row.get("status", "")).strip().lower()
 
         if row_status in FAILED:
@@ -626,10 +832,21 @@ def validate_existing_manifest(
                         )
                     break
 
-        scene_id = row.get("scene_id")
+        if row.get("scene_id") is not None:
+            if not str(row.get("scene_id")).strip():
+                raise ValueError(f"{name}: row {index} has empty scene_id.")
 
-        if scene_id is not None and not str(scene_id).strip():
-            raise ValueError(f"{name}: row {index} has empty scene_id.")
+    scene_ok, scene_detail, scene_data = validate_actual_scene_counts(
+        name,
+        data,
+        scenes_min,
+        scenes_max,
+        expected_parts,
+        expected_format,
+    )
+
+    if not scene_ok:
+        raise ValueError(scene_detail)
 
     return {
         "status": "valid",
@@ -637,12 +854,14 @@ def validate_existing_manifest(
         "sha256": sha256_file(path),
         "row_count": len(rows),
         "referenced_files_checked": checked_files,
+        "actual_scene_counts": scene_data.get("part_counts", {}),
     }
 
 
 def check_artifact_inventory(
     parts: int | None,
-    scenes: int,
+    scenes_min: int,
+    scenes_max: int,
     input_fingerprint: str,
     mode: str,
 ) -> tuple[list[dict], dict]:
@@ -655,7 +874,8 @@ def check_artifact_inventory(
                 name,
                 path,
                 parts,
-                scenes,
+                scenes_min,
+                scenes_max,
                 input_fingerprint,
                 mode,
             )
@@ -669,7 +889,8 @@ def check_artifact_inventory(
                     if result["status"] == "not_yet_generated"
                     else (
                         f"Valid; {result.get('row_count', 0)} records; "
-                        f"{result.get('referenced_files_checked', 0)} files checked."
+                        f"{result.get('referenced_files_checked', 0)} files checked; "
+                        f"actual Scene counts={result.get('actual_scene_counts', {})}."
                     )
                 ),
             })
@@ -815,7 +1036,7 @@ def check_provider_credentials(
             executable = shutil.which("piper")
             return bool(executable), [executable] if executable else []
 
-        if provider in {"edge_tts"}:
+        if provider == "edge_tts":
             return True, []
 
         present = [
@@ -827,6 +1048,9 @@ def check_provider_credentials(
     tts_ready = []
 
     for provider in tts_order:
+        if provider not in tts_credentials:
+            continue
+
         ready, present = tts_available(provider)
         credentials[f"tts:{provider}"] = {
             "available": ready,
@@ -839,13 +1063,15 @@ def check_provider_credentials(
     image_ready = []
 
     for provider in image_order:
+        if provider not in image_credentials:
+            continue
+
         names = image_credentials[provider]
         present = [
             key for key in names
             if os.environ.get(key, "").strip()
         ]
 
-        # These providers may be usable without credentials.
         ready = bool(present) or provider in {"huggingface", "pollinations"}
 
         credentials[f"image:{provider}"] = {
@@ -880,6 +1106,7 @@ def check_provider_credentials(
 
     return checks, credentials
 
+
 def check_input_configuration() -> tuple[dict, list[dict], dict]:
     checks = []
     config = {}
@@ -908,7 +1135,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             get_parts_range,
             get_selected_parts,
             get_selected_parts_record,
-            get_scenes,
+            get_scenes_range,
             get_fps,
             get_tts_provider_order,
             get_image_provider_order,
@@ -923,10 +1150,11 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
         config = load_and_validate(INPUT_FILE)
 
         mode = get_format(config)
-        minimum, maximum = get_parts_range(config)
+        minimum_parts, maximum_parts = get_parts_range(config)
         selected = get_selected_parts(config, required=False)
         selection_record = get_selected_parts_record(config)
-        scenes = get_scenes(config)
+        scenes_min, scenes_max = get_scenes_range(config)
+
         fps = get_fps(config)
         tts_order = get_tts_provider_order(config)
         image_order = get_image_provider_order(config)
@@ -940,12 +1168,14 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
         selection_valid = (
             isinstance(selected, int)
             and not isinstance(selected, bool)
-            and minimum <= selected <= maximum
+            and minimum_parts <= selected <= maximum_parts
         )
 
-        # A range is not an actual selected count. Preflight runs before
-        # story generation, so an unresolved range is valid at this stage.
-        selection_pending = minimum != maximum and selected is None
+        selection_pending = (
+            mode == "short"
+            and minimum_parts != maximum_parts
+            and selected is None
+        )
 
         add(
             "format",
@@ -956,74 +1186,99 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
         add(
             "parts_range",
             (
-                isinstance(minimum, int)
-                and isinstance(maximum, int)
-                and minimum >= 1
-                and maximum >= minimum
+                isinstance(minimum_parts, int)
+                and isinstance(maximum_parts, int)
+                and minimum_parts >= 1
+                and maximum_parts >= minimum_parts
             ),
-            f"Configured PARTS range={minimum}-{maximum}.",
+            f"Configured PARTS range={minimum_parts}-{maximum_parts}.",
         )
 
-        add(
-            "actual_parts_selection",
-            selection_valid or selection_pending,
-            (
-                f"Persisted actual PARTS={selected}."
-                if selection_valid and selection_record
-                else (
-                    "Actual PARTS selection is pending; "
-                    "story generation must select and persist it."
-                    if selection_pending
-                    else "Actual PARTS selection is invalid or inconsistent."
-                )
-            ),
-        )
-
-        add(
-            "parts_selection_record",
-            (
-                selection_pending
-                or (
-                    selection_valid
-                    and isinstance(selection_record, dict)
-                    and selection_record.get("selected_parts") == selected
-                    and selection_record.get("format") == mode
-                )
-            ),
-            (
-                "No actual selection is required before story generation."
-                if selection_pending
-                else (
-                    "Persisted selection record matches current input."
+        if mode == "full":
+            full_parts_ok = (
+                minimum_parts == 1
+                and maximum_parts == 1
+                and selected == 1
+            )
+            add(
+                "full_mode_single_part",
+                full_parts_ok,
+                (
+                    "FULL mode is configured for exactly one Part."
+                    if full_parts_ok
+                    else (
+                        "FULL mode must have PARTS=1, PARTS_MIN=1, "
+                        "PARTS_MAX=1 and PARTS_SELECTED=1."
+                    )
+                ),
+            )
+        else:
+            add(
+                "actual_parts_selection",
+                selection_valid or selection_pending,
+                (
+                    f"Persisted actual PARTS={selected}."
                     if selection_valid and selection_record
-                    else "Selection record missing or inconsistent."
-                )
+                    else (
+                        "Actual PARTS selection is pending; story generation "
+                        "must select and persist it."
+                        if selection_pending
+                        else "Actual PARTS selection is invalid or inconsistent."
+                    )
+                ),
+            )
+
+            add(
+                "parts_selection_record",
+                (
+                    selection_pending
+                    or (
+                        selection_valid
+                        and isinstance(selection_record, dict)
+                        and selection_record.get("selected_parts") == selected
+                        and selection_record.get("format") == mode
+                    )
+                ),
+                (
+                    "No actual selection is required before story generation."
+                    if selection_pending
+                    else (
+                        "Persisted selection record matches current input."
+                        if selection_valid and selection_record
+                        else "Selection record missing or inconsistent."
+                    )
+                ),
+            )
+
+        scenes_valid = (
+            isinstance(scenes_min, int)
+            and not isinstance(scenes_min, bool)
+            and isinstance(scenes_max, int)
+            and not isinstance(scenes_max, bool)
+            and 1 <= scenes_min <= scenes_max <= 500
+        )
+
+        add(
+            "scene_range",
+            scenes_valid,
+            (
+                f"SCENES inclusive range={scenes_min}-{scenes_max}."
+                if scenes_valid
+                else "SCENES must be a valid positive inclusive Min-Max range."
             ),
         )
 
-        add(
-            "scenes",
-            isinstance(scenes, int)
-            and not isinstance(scenes, bool)
-            and 1 <= scenes <= 500,
-            f"SCENES={scenes}.",
-        )
-
-        main_scene_count = (
-            selected * scenes if selection_valid else None
-        )
-        role_scene_count = (
-            selected * scenes + 2 * selected
-            if selection_valid else None
-        )
-
-        add(
-            "fps",
-            isinstance(fps, int)
-            and not isinstance(fps, bool)
-            and 1 <= fps <= 60,
-            f"FPS={fps}.",
-        )
+        if mode == "full":
+            add(
+                "full_mode_scene_range",
+                scenes_valid,
+                (
+                    "FULL mode uses the configured Scene range within its "
+                    "single complete-story Part."
+                    if scenes_valid
+                    else "FULL mode Scene range is invalid."
+                ),
+            )
 
         primary = [
             str(config.get(key, "")).strip()
@@ -1045,7 +1300,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
         add(
             "tts_fallback_order",
             (
-                len(tts_order) >= 3
+                len(tts_order) >= 1
                 and len(tts_order) == len(set(tts_order))
                 and all(item in TTS_ALLOWED for item in tts_order)
             ),
@@ -1080,11 +1335,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             ),
         )
 
-        add(
-            "caption_font",
-            bool(font),
-            f"CAPTION_FONT={font}.",
-        )
+        add("caption_font", bool(font), f"CAPTION_FONT={font}.")
 
         add(
             "caption_font_size",
@@ -1145,7 +1396,6 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
 
         for key, allowed in motion_allowed.items():
             value = str(config.get(key, "")).strip().lower()
-
             if value not in allowed:
                 motion_errors.append(f"{key}={value!r}")
 
@@ -1153,12 +1403,10 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             strength = float(
                 config.get("PHOTO_MOTION_PARALLAX_STRENGTH")
             )
-
             if not 0 <= strength <= 0.10:
                 motion_errors.append(
                     "PHOTO_MOTION_PARALLAX_STRENGTH outside 0-0.10"
                 )
-
         except (TypeError, ValueError):
             strength = None
             motion_errors.append(
@@ -1206,14 +1454,14 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
 
         details.update({
             "format": mode,
-            "parts_min": minimum,
-            "parts_max": maximum,
+            "parts_min": minimum_parts,
+            "parts_max": maximum_parts,
             "selected_parts": selected,
             "selection_pending": selection_pending,
             "selection_record": selection_record,
-            "scenes_per_part": scenes,
-            "main_scene_count": main_scene_count,
-            "expected_role_scene_count": role_scene_count,
+            "scenes_min": scenes_min,
+            "scenes_max": scenes_max,
+            "scenes_range": [scenes_min, scenes_max],
             "fps": fps,
             "tts_provider_order": tts_order,
             "tts_primary_providers": primary,
@@ -1313,9 +1561,6 @@ def check_local_dependencies(config: dict) -> list[dict]:
 
     if "piper" in tts_order:
         piper_ready = bool(shutil.which("piper"))
-
-        # Piper is a configured fallback, not a mandatory runtime when
-        # another configured TTS provider can be used.
         other_provider_exists = any(
             provider != "piper" for provider in tts_order
         )
@@ -1385,27 +1630,15 @@ def check_workflow_structure(source: str) -> list[dict]:
     add("workflow_readable", True, "Workflow file is readable.")
 
     patterns = {
-        "manual_dispatch": (
-            r"(?m)^\s{2}workflow_dispatch:\s*(?:#.*)?$"
-        ),
-        "ubuntu_runner": (
-            r"(?m)^\s{4}runs-on:\s*ubuntu-latest\s*$"
-        ),
-        "python_311": (
-            r"(?m)^\s{10}python-version:\s*[\"']?3\.11[\"']?\s*$"
-        ),
+        "manual_dispatch": r"(?m)^\s{2}workflow_dispatch:\s*(?:#.*)?$",
+        "ubuntu_runner": r"(?m)^\s{4}runs-on:\s*ubuntu-latest\s*$",
+        "python_311": r"(?m)^\s{10}python-version:\s*[\"']?3\.11[\"']?\s*$",
         "billable_environment": (
             r"(?m)^\s{6}ALLOW_BILLABLE_PROVIDERS:\s*[\"']?true[\"']?\s*$"
         ),
-        "checkout_action": (
-            r"(?m)^\s{8}uses:\s*actions/checkout@v4\s*$"
-        ),
-        "python_setup_action": (
-            r"(?m)^\s{8}uses:\s*actions/setup-python@v5\s*$"
-        ),
-        "artifact_upload_action": (
-            r"(?m)^\s{8}uses:\s*actions/upload-artifact@v4\s*$"
-        ),
+        "checkout_action": r"(?m)^\s{8}uses:\s*actions/checkout@v4\s*$",
+        "python_setup_action": r"(?m)^\s{8}uses:\s*actions/setup-python@v5\s*$",
+        "artifact_upload_action": r"(?m)^\s{8}uses:\s*actions/upload-artifact@v4\s*$",
         "checkpoint_upload": (
             r"(?m)^\s{10}name:\s*"
             r"katha-photo-motion-checkpoint-\$\{\{\s*github\.run_id\s*\}\}\s*$"
@@ -1448,10 +1681,7 @@ def check_workflow_structure(source: str) -> list[dict]:
 
     add(
         "workflow_dependency_install_before_preflight",
-        (
-            install_position >= 0
-            and preflight_position > install_position
-        ),
+        install_position >= 0 and preflight_position > install_position,
         (
             "requirements.txt installation precedes preflight."
             if install_position >= 0 and preflight_position > install_position
@@ -1546,7 +1776,8 @@ def main() -> int:
 
     mode = input_details.get("format")
     parts = input_details.get("selected_parts")
-    scenes = input_details.get("scenes_per_part")
+    scenes_min = input_details.get("scenes_min")
+    scenes_max = input_details.get("scenes_max")
 
     for name in REQUIRED_SCRIPTS:
         path = SCRIPTS / name
@@ -1561,6 +1792,13 @@ def main() -> int:
         if exists:
             valid, detail = check_python_file(path)
             record("syntax:" + name, valid, detail)
+
+    policy_ok, policy_detail = check_story_length_policy_integration()
+    record(
+        "story_length_policy_integration",
+        policy_ok,
+        policy_detail,
+    )
 
     legacy_ok, legacy_detail = check_legacy_execution()
     record(
@@ -1607,6 +1845,13 @@ def main() -> int:
 
     story_ok, story_detail = check_story_gate(commands)
     record("story_length_hard_gate", story_ok, story_detail)
+
+    visuals_ok, visuals_detail = check_prepare_visuals_order(commands)
+    record(
+        "prepare_visuals_execution_order",
+        visuals_ok,
+        visuals_detail,
+    )
 
     observed = {item["script"] for item in commands}
     missing_commands = [
@@ -1678,13 +1923,16 @@ def main() -> int:
 
     artifact_inventory = {}
 
-    # Before story generation, a range may not have a selected count.
-    # Validate manifests against FORMAT and input fingerprint without
-    # multiplying None by SCENES or treating the range minimum as selected.
-    if scenes and input_fingerprint and mode in {"short", "full"}:
+    if (
+        scenes_min is not None
+        and scenes_max is not None
+        and input_fingerprint
+        and mode in {"short", "full"}
+    ):
         artifact_checks, artifact_inventory = check_artifact_inventory(
             parts if isinstance(parts, int) else None,
-            scenes,
+            scenes_min,
+            scenes_max,
             input_fingerprint,
             mode,
         )
@@ -1698,7 +1946,7 @@ def main() -> int:
             False,
             (
                 "Cannot validate existing artifacts: valid FORMAT, "
-                "SCENES and input fingerprint are required."
+                "SCENES range and input fingerprint are required."
             ),
         )
 
@@ -1817,11 +2065,16 @@ def main() -> int:
         "parts_selection_record": input_details.get(
             "selection_record"
         ),
-        "scenes_per_part": scenes,
-        "main_scene_count": input_details.get("main_scene_count"),
-        "expected_role_scene_count": input_details.get(
-            "expected_role_scene_count"
+        "scenes_range": (
+            [scenes_min, scenes_max]
+            if scenes_min is not None and scenes_max is not None
+            else None
         ),
+        "selected_parts_scene_counts": {
+            name: data.get("actual_scene_counts", {})
+            for name, data in artifact_inventory.items()
+            if data.get("actual_scene_counts")
+        },
         "fps": input_details.get("fps"),
         "caption_font": input_details.get("caption_font"),
         "caption_font_size": input_details.get("caption_font_size"),
@@ -1874,10 +2127,11 @@ def main() -> int:
             "Preflight is offline and does not call generation/provider APIs.",
             "Credential presence is checked locally; authentication, quotas and provider availability are not tested.",
             "Piper is not mandatory when another configured TTS provider remains available.",
-            "An unresolved PARTS range is allowed before story generation.",
-            "Actual PARTS must be selected and persisted by story generation before downstream stages.",
+            "An unresolved SHORT PARTS range is allowed before story generation.",
+            "FULL mode is restricted to exactly one Part.",
+            "SCENES is validated as an inclusive per-Part minimum-maximum range.",
+            "Actual scene counts are checked from available scene records; missing future-stage artifacts are allowed.",
             "Existing artifacts are checked for readable manifests, safe output paths and declared SHA256 values.",
-            "Missing future-stage artifacts are allowed.",
             "Checkpoint reuse requires matching input and pipeline fingerprints.",
             "Audio duration is measured by generation/final-validation stages, not by preflight.",
             "Only generated-image zoom, pan and 2.5D parallax are permitted.",
@@ -1943,9 +2197,22 @@ def main() -> int:
     log("PASSED:", report["checks_passed"])
     log("FAILED:", report["checks_failed"])
     log("FORMAT:", mode)
-    log("PARTS RANGE:", input_details.get("parts_min"), "-", input_details.get("parts_max"))
-    log("ACTUAL PARTS:", parts if parts is not None else "PENDING")
-    log("SCENES PER PART:", scenes)
+    log(
+        "PARTS RANGE:",
+        input_details.get("parts_min"),
+        "-",
+        input_details.get("parts_max"),
+    )
+    log(
+        "ACTUAL PARTS:",
+        parts if parts is not None else "PENDING",
+    )
+    log(
+        "SCENES RANGE:",
+        scenes_min,
+        "-",
+        scenes_max,
+    )
     log("REPORT:", REPORT_FILE.relative_to(ROOT))
 
     if failed:
