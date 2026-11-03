@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and package the selected-format Katha Lok AI Photo Motion output."""
+"""Validate and package only the selected-format, story-named Part videos."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -25,13 +26,19 @@ from input_config import (
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "output"
-ARCHIVE = ROOT / "katha-lok-ai-photo-motion-output.zip"
+INPUT_FILE = ROOT / "Input" / "topic.txt"
+
 REPORT = OUT / "package_manifest.json"
 VALIDATION = OUT / "validation_report.json"
 RENDER = OUT / "scene_renders" / "render_manifest.json"
-INPUT_FILE = ROOT / "Input" / "topic.txt"
+THUMBNAIL = OUT / "thumbnail.jpg"
+METADATA_TEXT = OUT / "youtube_metadata.txt"
+METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
+TAGS = OUT / "publish" / "youtube_tags.txt"
+FINAL_SRT = OUT / "captions" / "final_captions.srt"
 
-VERSION = "output-packager-v60-role-aware-portable-integrity"
+VERSION = "output-packager-v61-story-named-part-only-integrity"
+
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -41,38 +48,80 @@ PROBE_TIMEOUT = 120
 ZIP_COMPRESSION_LEVEL = 6
 
 EXCLUDED_DIRS = {
-    ".git", "__pycache__", ".pytest_cache", ".mypy_cache",
-    ".ruff_cache", "node_modules",
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
 }
 
 EXCLUDED_SUFFIXES = {
-    ".zip", ".tmp", ".lock", ".pyc", ".part",
-    ".download", ".rendering", ".joining", ".building",
+    ".zip",
+    ".tmp",
+    ".lock",
+    ".pyc",
+    ".part",
+    ".download",
+    ".rendering",
+    ".joining",
+    ".building",
 }
 
-# These source-only fields are deliberately removed from the portable
-# render manifest. The final captioned video and scene clips remain.
-SOURCE_ONLY_PATH_FIELDS = {
-    "source_rendered_video",
-    "source_photo_motion_video",
-}
+VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 
 PATH_FIELDS = {
-    "video", "output", "path", "final_video", "alias",
-    "pre_caption_video", "caption_manifest", "final_srt",
-    "source_video", "source_photo_motion_video",
-    "source_rendered_video", "source_audio",
-    "narration", "audio", "image", "image_path",
-    "depth_map", "depth_map_path", "thumbnail",
-    "thumbnail_path", "source_photo_manifest",
-    "source_audio_manifest", "source_sound_manifest",
-    "source_sfx_validation", "file", "audio_path",
-    "source_image", "source_manifest", "video_path",
-    "audio_file", "image_file", "font_path",
-    "caption_font_file", "srt", "manifest",
+    "video",
+    "output",
+    "path",
+    "final_video",
+    "alias",
+    "pre_caption_video",
+    "caption_manifest",
+    "final_srt",
+    "source_video",
+    "source_photo_motion_video",
+    "source_rendered_video",
+    "source_audio",
+    "narration",
+    "audio",
+    "image",
+    "image_path",
+    "depth_map",
+    "depth_map_path",
+    "thumbnail",
+    "thumbnail_path",
+    "source_photo_manifest",
+    "source_audio_manifest",
+    "source_sound_manifest",
+    "source_sfx_validation",
+    "file",
+    "audio_path",
+    "source_image",
+    "source_manifest",
+    "video_path",
+    "audio_file",
+    "image_file",
+    "font_path",
+    "caption_font_file",
+    "srt",
+    "manifest",
 }
 
-REQUIRED_PACKAGE_MEMBERS = {
+SOURCE_ONLY_FIELDS = {
+    "source_rendered_video",
+    "source_photo_motion_video",
+    "source_video",
+    "source_audio",
+    "source_image",
+    "depth_map",
+    "depth_map_path",
+    "pre_caption_video",
+    "final_video",
+    "alias",
+}
+
+REQUIRED_MEMBERS = {
     "output/thumbnail.jpg",
     "output/youtube_metadata.txt",
     "output/publish/youtube_metadata.json",
@@ -80,6 +129,7 @@ REQUIRED_PACKAGE_MEMBERS = {
     "output/captions/final_captions.srt",
     "output/validation_report.json",
     "output/scene_renders/render_manifest.json",
+    "output/package_manifest.json",
 }
 
 
@@ -129,18 +179,7 @@ def write_json(path: Path, value: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def inside_output(path: Path) -> Path:
-    resolved = Path(path).resolve()
-
-    try:
-        resolved.relative_to(OUT.resolve())
-    except ValueError:
-        fail(f"Path escapes output directory: {resolved}")
-
-    return resolved
-
-
-def output_path(value: Any, label: str, minimum: int = 1) -> Path:
+def safe_output_path(value: Any, label: str, minimum: int = 1) -> Path:
     if not isinstance(value, str) or not value.strip():
         fail(f"{label}: file path is missing.")
 
@@ -149,22 +188,32 @@ def output_path(value: Any, label: str, minimum: int = 1) -> Path:
     if not candidate.is_absolute():
         candidate = ROOT / candidate
 
-    resolved = inside_output(candidate)
+    resolved = candidate.resolve()
+
+    try:
+        resolved.relative_to(OUT.resolve())
+    except ValueError:
+        fail(f"{label}: path escapes output directory.")
 
     if not resolved.is_file():
         fail(f"{label}: file not found: {resolved}")
 
     if resolved.stat().st_size < minimum:
-        fail(f"{label}: file is empty or too small: {resolved}")
+        fail(f"{label}: file is empty or too small.")
 
     return resolved
 
 
 def relative_output(path: Path) -> str:
-    return inside_output(path).relative_to(OUT.resolve()).as_posix()
+    resolved = Path(path).resolve()
+
+    try:
+        return resolved.relative_to(OUT.resolve()).as_posix()
+    except ValueError:
+        fail(f"Path is outside output/: {resolved}")
 
 
-def archive_name(path: Path) -> str:
+def archive_member(path: Path) -> str:
     return "output/" + relative_output(path)
 
 
@@ -172,10 +221,10 @@ def parse_rate(value: Any, label: str) -> float:
     try:
         result = float(Fraction(str(value)))
     except (ValueError, TypeError, ZeroDivisionError):
-        fail(f"{label}: invalid frame rate {value!r}")
+        fail(f"{label}: invalid frame rate.")
 
     if not math.isfinite(result) or result <= 0:
-        fail(f"{label}: invalid frame rate {value!r}")
+        fail(f"{label}: invalid frame rate.")
 
     return result
 
@@ -184,19 +233,25 @@ def probe_media(
     path: Path,
     expected_size: tuple[int, int] | None = None,
     expected_fps: float | None = None,
+    require_audio: bool = True,
 ) -> dict:
     executable = shutil.which("ffprobe")
+
     if not executable:
         fail("ffprobe is required but was not found.")
 
     try:
         result = subprocess.run(
             [
-                executable, "-v", "error",
+                executable,
+                "-v",
+                "error",
                 "-show_entries",
                 "format=duration:"
                 "stream=codec_type,width,height,avg_frame_rate,r_frame_rate",
-                "-of", "json", str(path),
+                "-of",
+                "json",
+                str(path),
             ],
             capture_output=True,
             text=True,
@@ -209,7 +264,7 @@ def probe_media(
     if result.returncode != 0:
         fail(
             f"ffprobe failed for {path.name}: "
-            f"{result.stderr[-700:]}"
+            f"{(result.stderr or '')[-700:]}"
         )
 
     try:
@@ -222,6 +277,7 @@ def probe_media(
         fail(f"Invalid media duration: {path.name}")
 
     streams = data.get("streams")
+
     if not isinstance(streams, list):
         fail(f"Invalid media streams: {path.name}")
 
@@ -229,13 +285,17 @@ def probe_media(
         (item for item in streams if item.get("codec_type") == "video"),
         None,
     )
+
     audio = next(
         (item for item in streams if item.get("codec_type") == "audio"),
         None,
     )
 
-    if video is None or audio is None:
-        fail(f"Audio or video stream missing: {path.name}")
+    if video is None:
+        fail(f"Video stream missing: {path.name}")
+
+    if require_audio and audio is None:
+        fail(f"Audio stream missing: {path.name}")
 
     dimensions = (
         int(video.get("width") or 0),
@@ -249,6 +309,7 @@ def probe_media(
         )
 
     rate_value = video.get("avg_frame_rate")
+
     if not rate_value or rate_value in {"0/0", "N/A"}:
         rate_value = video.get("r_frame_rate")
 
@@ -267,8 +328,80 @@ def probe_media(
         "height": dimensions[1],
         "fps": actual_fps,
         "has_video": True,
-        "has_audio": True,
+        "has_audio": audio is not None,
     }
+
+
+def normalize_role(row: dict) -> str:
+    value = str(
+        row.get("role")
+        or row.get("scene_type")
+        or row.get("type")
+        or "main"
+    ).strip().lower()
+
+    aliases = {
+        "opening": "hook",
+        "intro": "hook",
+        "part_hook": "hook",
+        "story": "main",
+        "main_scene": "main",
+        "cliffhanger": "suspense",
+        "ending": "resolution",
+        "final": "resolution",
+    }
+
+    value = aliases.get(value, value)
+
+    if value not in {"main", "hook", "suspense", "resolution"}:
+        fail(f"Unknown scene role: {value!r}")
+
+    return value
+
+
+def get_part_numbers(
+    render: dict,
+    validation: dict,
+    configured_parts: int,
+    actual_parts: int,
+) -> list[int]:
+    candidates = [
+        render.get("part_numbers"),
+        validation.get("part_numbers"),
+    ]
+
+    for candidate in candidates:
+        if isinstance(candidate, list) and candidate:
+            try:
+                numbers = [int(item) for item in candidate]
+            except (TypeError, ValueError):
+                fail("Invalid part_numbers metadata.")
+
+            if (
+                len(numbers) != actual_parts
+                or numbers != sorted(set(numbers))
+            ):
+                fail("Part numbers are duplicated, unordered or incomplete.")
+
+            return numbers
+
+    first = (
+        render.get("first_part")
+        or render.get("start_part")
+        or validation.get("first_part")
+        or validation.get("start_part")
+        or 1
+    )
+
+    try:
+        first = int(first)
+    except (TypeError, ValueError):
+        fail("Invalid first part number.")
+
+    if first < 1:
+        fail("Part numbers must be positive.")
+
+    return list(range(first, first + actual_parts))
 
 
 def validate_validation_report(
@@ -285,12 +418,15 @@ def validate_validation_report(
         fail("Validation report FORMAT mismatch.")
 
     try:
-        reported_parts = int(data["parts"])
+        actual_parts = int(data["parts"])
     except (KeyError, TypeError, ValueError):
         fail("Validation report part count is invalid.")
 
-    if reported_parts < 1:
+    if actual_parts < 1:
         fail("Validation report part count must be positive.")
+
+    if mode == "full" and actual_parts != configured_parts:
+        fail("FULL part count differs from configured PARTS.")
 
     if mode == "short":
         declared = data.get("configured_parts")
@@ -302,16 +438,10 @@ def validate_validation_report(
                 fail("Validation report configured_parts is invalid.")
 
             if declared != configured_parts:
-                fail("Validation report configured_parts mismatch.")
+                fail("SHORT configured PARTS mismatch.")
 
         if data.get("dynamic_short_parts") is not True:
-            fail("SHORT report does not confirm dynamic part count.")
-
-        actual_parts = reported_parts
-    else:
-        if reported_parts != configured_parts:
-            fail("FULL validation report part count mismatch.")
-        actual_parts = configured_parts
+            fail("SHORT report does not confirm dynamic part selection.")
 
     expected_fields = {
         "parts": actual_parts,
@@ -321,21 +451,22 @@ def validate_validation_report(
 
     for key, expected in expected_fields.items():
         try:
-            actual = int(data.get(key, -1))
+            found = int(data.get(key, -1))
         except (TypeError, ValueError):
             fail(f"Invalid validation report field: {key}")
 
-        if actual != expected:
+        if found != expected:
             fail(
                 f"Validation report {key} mismatch: "
-                f"expected {expected}, found {actual}"
+                f"expected {expected}, found {found}"
             )
 
     checks = data.get("checks")
+
     if not isinstance(checks, dict):
         fail("Validation report checks are missing.")
 
-    required = (
+    required_checks = (
         "photo_motion",
         "narration",
         "sound_design",
@@ -345,8 +476,9 @@ def validate_validation_report(
         "metadata",
     )
 
-    for name in required:
+    for name in required_checks:
         item = checks.get(name)
+
         if not isinstance(item, dict) or item.get("status") != "valid":
             fail(f"Validation check missing or invalid: {name}")
 
@@ -357,42 +489,142 @@ def normalize_render_rows(data: dict) -> list[dict]:
     rows = data.get("all_completed_scenes")
 
     if not isinstance(rows, list):
-        main_rows = data.get("completed_scenes", [])
-        extra_rows = data.get("extra_scenes", [])
+        main_rows = data.get("completed_scenes") or data.get("scenes") or []
+        extra_rows = data.get("extra_scenes") or []
 
         if not isinstance(main_rows, list):
-            fail("Render completed_scenes must be a list.")
+            fail("Render scene records are invalid.")
+
         if not isinstance(extra_rows, list):
-            fail("Render extra_scenes must be a list.")
+            fail("Render extra scene records are invalid.")
 
         rows = list(main_rows) + list(extra_rows)
 
     if not rows:
-        fail("Render manifest contains no completed scene rows.")
+        fail("Render manifest contains no scene records.")
 
     result = []
-    seen_ids = set()
+    seen = set()
 
     for index, row in enumerate(rows, 1):
         if not isinstance(row, dict):
             fail(f"Invalid render scene row: {index}")
 
-        scene_id = str(row.get("scene_id", "")).strip()
+        scene_id = str(row.get("scene_id") or row.get("id") or "").strip()
+
         if not scene_id:
             fail(f"Render scene {index} has no scene_id.")
 
-        if scene_id in seen_ids:
+        if scene_id in seen:
             fail(f"Duplicate render scene_id: {scene_id}")
 
-        seen_ids.add(scene_id)
+        seen.add(scene_id)
         result.append(row)
 
     return result
 
 
+def validate_role_records(
+    rows: list[dict],
+    part_numbers: list[int],
+    scenes_per_part: int,
+) -> dict:
+    expected_main = {
+        (part, scene)
+        for part in part_numbers
+        for scene in range(1, scenes_per_part + 1)
+    }
+
+    actual_main = set()
+    role_counts: dict[str, dict[int, int]] = {}
+
+    for row in rows:
+        role = normalize_role(row)
+
+        try:
+            part = int(row.get("part"))
+        except (TypeError, ValueError):
+            fail(f"Invalid part number in {row.get('scene_id')}.")
+
+        if part not in part_numbers:
+            fail(f"Scene belongs to an unselected part: {part}")
+
+        if role == "main":
+            try:
+                scene = int(
+                    row.get("local_scene")
+                    or row.get("scene")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                fail(f"Invalid Main scene number: {row.get('scene_id')}")
+
+            key = (part, scene)
+
+            if key in actual_main:
+                fail(f"Duplicate Main scene: {key}")
+
+            actual_main.add(key)
+
+        else:
+            role_counts.setdefault(role, {})
+            role_counts[role][part] = (
+                role_counts[role].get(part, 0) + 1
+            )
+
+    if actual_main != expected_main:
+        fail(
+            "Main scene mapping mismatch: "
+            f"missing={sorted(expected_main - actual_main)}, "
+            f"extra={sorted(actual_main - expected_main)}"
+        )
+
+    for part in part_numbers:
+        if role_counts.get("hook", {}).get(part, 0) != 1:
+            fail(f"Part {part} must contain exactly one Hook.")
+
+    for part in part_numbers[:-1]:
+        if role_counts.get("suspense", {}).get(part, 0) != 1:
+            fail(f"Non-final part {part} must contain exactly one Suspense.")
+
+    final_part = part_numbers[-1]
+
+    if role_counts.get("suspense", {}).get(final_part, 0) != 0:
+        fail("Final part must not contain a Suspense scene.")
+
+    if role_counts.get("resolution", {}).get(final_part, 0) != 1:
+        fail("Final part must contain exactly one Resolution.")
+
+    for role, counts in role_counts.items():
+        for part, count in counts.items():
+            if role in {"hook", "resolution"} and count != 1:
+                fail(f"Duplicate {role} record in part {part}.")
+
+            if role == "suspense" and count != 1:
+                fail(f"Duplicate Suspense record in part {part}.")
+
+    expected_extra_count = len(part_numbers) * 2
+
+    actual_extra_count = sum(
+        1 for row in rows if normalize_role(row) != "main"
+    )
+
+    if actual_extra_count != expected_extra_count:
+        fail(
+            "Hook/Suspense/Resolution record count mismatch: "
+            f"{actual_extra_count}/{expected_extra_count}"
+        )
+
+    return {
+        "main_scene_count": len(actual_main),
+        "extra_role_scene_count": actual_extra_count,
+        "role_counts": role_counts,
+    }
+
+
 def validate_render_manifest(
     mode: str,
-    parts: int,
+    part_numbers: list[int],
     scenes: int,
     expected_size: tuple[int, int],
     expected_fps: float,
@@ -405,174 +637,93 @@ def validate_render_manifest(
     if str(data.get("format", "")).strip().lower() != mode:
         fail("Render manifest FORMAT mismatch.")
 
-    if data.get("captions_burned") is not True:
-        fail("Render manifest does not confirm burned captions.")
-
     try:
+        width = int(data.get("width", expected_size[0]))
+        height = int(data.get("height", expected_size[1]))
         manifest_fps = float(data.get("fps"))
     except (TypeError, ValueError):
-        fail("Render manifest FPS is missing or invalid.")
+        fail("Render dimensions or FPS are invalid.")
+
+    if (width, height) != expected_size:
+        fail("Render dimensions do not match selected format.")
 
     if (
         not math.isfinite(manifest_fps)
         or abs(manifest_fps - expected_fps) > FPS_TOLERANCE
     ):
-        fail("Render manifest FPS does not match Input/topic.txt.")
+        fail("Render FPS does not match Input/topic.txt.")
 
-    all_rows = normalize_render_rows(data)
-    main_rows = [row for row in all_rows if row.get("role") == "main"]
-    extra_rows = [row for row in all_rows if row.get("role") != "main"]
+    rows = normalize_render_rows(data)
+    role_report = validate_role_records(rows, part_numbers, scenes)
 
-    expected_main_count = parts * scenes
-    if len(main_rows) != expected_main_count:
-        fail(
-            f"Main scene count mismatch: "
-            f"{len(main_rows)}/{expected_main_count}"
+    checked_rows = []
+    total_scene_duration = 0.0
+
+    for index, row in enumerate(rows, 1):
+        if row.get("status") != "completed":
+            fail(f"Render scene is incomplete: {row.get('scene_id')}")
+
+        role = normalize_role(row)
+
+        value = (
+            row.get("video")
+            or row.get("output")
+            or row.get("path")
         )
 
-    declared_count = data.get("completed_count")
-    if declared_count is not None:
-        try:
-            if int(declared_count) != expected_main_count:
-                fail("Render completed_count does not match main scenes.")
-        except (TypeError, ValueError):
-            fail("Render completed_count is invalid.")
-
-    declared_all_count = data.get("all_completed_scene_count")
-    if declared_all_count is not None:
-        try:
-            if int(declared_all_count) != len(all_rows):
-                fail("Render all_completed_scene_count mismatch.")
-        except (TypeError, ValueError):
-            fail("Render all_completed_scene_count is invalid.")
-
-    scene_files = []
-    scene_records = []
-    extra_records = []
-    scene_duration_total = 0.0
-
-    for index, row in enumerate(main_rows, 1):
-        expected_part = (index - 1) // scenes + 1
-        expected_local = (index - 1) % scenes + 1
-
-        try:
-            mapping = (
-                int(row.get("part", 0)),
-                int(row.get("local_scene", row.get("scene", 0))),
-                int(row.get("global_scene", index)),
-            )
-        except (TypeError, ValueError):
-            fail(f"Invalid main scene mapping: {index}")
-
-        if mapping != (expected_part, expected_local, index):
-            fail(f"Main scene order mismatch: {index}")
-
-    role_counts: dict[str, dict[int, int]] = {}
-
-    for index, row in enumerate(all_rows, 1):
-        role = str(row.get("role") or row.get("scene_type") or "").lower()
-        if role not in {"main", "hook", "suspense", "resolution"}:
-            fail(f"Unknown scene role in render manifest: {role!r}")
-
-        try:
-            part_number = int(row.get("part", 0))
-        except (TypeError, ValueError):
-            fail(f"Invalid part number in render row {index}.")
-
-        if not 1 <= part_number <= parts:
-            fail(f"Scene role part is outside selected range: {part_number}")
-
-        if role != "main":
-            role_counts.setdefault(role, {})
-            role_counts[role][part_number] = (
-                role_counts[role].get(part_number, 0) + 1
-            )
-
-        if row.get("status") != "completed":
-            fail(f"Render scene is not completed: {row.get('scene_id')}")
-
-        if row.get("captions_burned") is not True:
-            fail(
-                f"Captions are not confirmed for scene "
-                f"{row.get('scene_id')}."
-            )
-
-        video_value = row.get("video") or row.get("output")
-        path = output_path(
-            video_value,
+        path = safe_output_path(
+            value,
             f"Rendered scene {row.get('scene_id')}",
             MIN_VIDEO_BYTES,
         )
+
         info = probe_media(path, expected_size, expected_fps)
-        checksum = sha256_file(path)
+        digest = sha256_file(path)
 
         declared_hash = row.get("sha256") or row.get("video_sha256")
-        if declared_hash and declared_hash != checksum:
+
+        if declared_hash and declared_hash != digest:
             fail(f"Rendered scene SHA256 mismatch: {row.get('scene_id')}")
 
-        record = {
+        checked_rows.append({
             "scene_id": row["scene_id"],
             "role": role,
-            "part": part_number,
-            "path": relative_output(path),
+            "part": int(row["part"]),
+            "local_scene": (
+                int(row.get("local_scene") or row.get("scene") or 0)
+                if role == "main"
+                else None
+            ),
             "duration": round(info["duration"], 3),
-            "fps": round(info["fps"], 4),
-            "bytes": path.stat().st_size,
-            "sha256": checksum,
-        }
+            "sha256": digest,
+            "captions_burned": row.get("captions_burned"),
+        })
 
-        if role == "main":
-            scene_files.append(path)
-            scene_records.append(record)
-        else:
-            extra_records.append(record)
-
-        scene_duration_total += info["duration"]
-
-    for part_number in range(1, parts + 1):
-        if role_counts.get("hook", {}).get(part_number, 0) != 1:
-            fail(f"Part {part_number} must have exactly one Hook scene.")
-
-    for part_number in range(1, parts):
-        if role_counts.get("suspense", {}).get(part_number, 0) != 1:
-            fail(
-                f"Non-final part {part_number} must have exactly one "
-                "Suspense scene."
-            )
-
-    if any(role_counts.get("suspense", {}).get(parts, 0) for _ in [0]):
-        fail("The final part must not contain a Suspense scene.")
-
-    if role_counts.get("resolution", {}).get(parts, 0) != 1:
-        fail("The final part must have exactly one Resolution scene.")
-
-    for role, counts in role_counts.items():
-        for part_number, count in counts.items():
-            if role in {"hook", "resolution"} and count != 1:
-                fail(f"Duplicate {role} scene in part {part_number}.")
-            if role == "suspense" and count != 1:
-                fail(f"Duplicate Suspense scene in part {part_number}.")
+        total_scene_duration += info["duration"]
 
     part_rows = data.get("parts")
-    if not isinstance(part_rows, list) or len(part_rows) != parts:
-        fail(f"Expected exactly {parts} rendered part videos.")
 
-    part_files = []
-    part_records = []
-    part_duration_total = 0.0
+    if not isinstance(part_rows, list) or len(part_rows) != len(part_numbers):
+        fail("Render manifest does not contain exactly the selected Part videos.")
 
-    for index, row in enumerate(part_rows, 1):
+    checked_parts = []
+    total_part_duration = 0.0
+    part_paths = []
+
+    for index, row in enumerate(part_rows):
+        expected_part = part_numbers[index]
+
         if isinstance(row, dict):
             try:
-                part_number = int(row.get("part", index))
+                part = int(row.get("part", expected_part))
             except (TypeError, ValueError):
-                fail(f"Invalid rendered part number: {index}")
+                fail(f"Invalid rendered Part number: {index + 1}")
 
-            if part_number != index:
-                fail(f"Rendered part order mismatch: {index}")
+            if part != expected_part:
+                fail(f"Rendered Part order mismatch: expected {expected_part}.")
 
             if row.get("status") not in (None, "completed"):
-                fail(f"Rendered part is incomplete: {index}")
+                fail(f"Rendered Part {part} is incomplete.")
 
             value = row.get("path") or row.get("video") or row.get("output")
             declared_hash = row.get("sha256")
@@ -580,82 +731,72 @@ def validate_render_manifest(
             value = row
             declared_hash = None
 
-        path = output_path(value, f"Rendered part {index}", MIN_VIDEO_BYTES)
+        path = safe_output_path(
+            value,
+            f"Rendered Part {expected_part}",
+            MIN_VIDEO_BYTES,
+        )
+
+        if path.suffix.lower() != ".mp4":
+            fail(f"Part {expected_part} is not an MP4 file.")
+
+        if path.parent.resolve() != (OUT / "parts").resolve():
+            fail(f"Part {expected_part} is not stored in output/parts/.")
+
+        expected_filename = f"part_{expected_part:02d}.mp4"
+
+        if path.name != expected_filename:
+            fail(
+                f"Part filename mismatch: expected {expected_filename}, "
+                f"found {path.name}"
+            )
+
         info = probe_media(path, expected_size, expected_fps)
-        checksum = sha256_file(path)
+        digest = sha256_file(path)
 
-        if declared_hash and declared_hash != checksum:
-            fail(f"Rendered part SHA256 mismatch: {index}")
+        if declared_hash and declared_hash != digest:
+            fail(f"Part {expected_part} SHA256 mismatch.")
 
-        part_files.append(path)
-        part_duration_total += info["duration"]
-        part_records.append({
-            "part": index,
+        checked_parts.append({
+            "part": expected_part,
             "path": relative_output(path),
             "duration": round(info["duration"], 3),
+            "width": info["width"],
+            "height": info["height"],
             "fps": round(info["fps"], 4),
             "bytes": path.stat().st_size,
-            "sha256": checksum,
+            "sha256": digest,
         })
 
-    final_video = output_path(
-        data.get("final_video"), "Final video", MIN_VIDEO_BYTES
-    )
-    alias = output_path(data.get("alias"), "Format alias", MIN_VIDEO_BYTES)
+        part_paths.append(path)
+        total_part_duration += info["duration"]
 
-    expected_alias = (
-        "katha_lok_ai_short.mp4"
-        if mode == "short"
-        else "katha_lok_ai_full.mp4"
-    )
-
-    if alias.name != expected_alias:
-        fail(f"Wrong format alias: expected {expected_alias}")
-
-    if final_video.resolve() == alias.resolve():
-        fail("Final video and format alias must be separate files.")
-
-    final_info = probe_media(final_video, expected_size, expected_fps)
-    alias_info = probe_media(alias, expected_size, expected_fps)
-    final_hash = sha256_file(final_video)
-    alias_hash = sha256_file(alias)
-
-    if final_hash != alias_hash:
-        fail("Final video and format alias contents differ.")
-
-    if abs(final_info["duration"] - alias_info["duration"]) > 0.25:
-        fail("Final video and alias durations differ.")
-
-    if abs(final_info["duration"] - part_duration_total) > max(
-        DURATION_TOLERANCE, float(parts)
+    if abs(total_part_duration - total_scene_duration) > max(
+        DURATION_TOLERANCE,
+        float(len(rows)),
     ):
-        fail("Final video duration differs from combined part duration.")
-
-    if abs(final_info["duration"] - scene_duration_total) > max(
-        DURATION_TOLERANCE, float(len(all_rows))
-    ):
-        fail("Final video duration differs from all rendered scene durations.")
+        fail("Part video duration differs significantly from scene durations.")
 
     return {
-        "data": data,
-        "all_rows": all_rows,
-        "scene_files": scene_files,
-        "scene_records": scene_records,
-        "extra_records": extra_records,
-        "part_files": part_files,
-        "part_records": part_records,
-        "final_video": final_video,
-        "alias": alias,
-        "final_duration": round(final_info["duration"], 3),
-        "final_hash": final_hash,
-        "alias_hash": alias_hash,
-        "same_content": final_hash == alias_hash,
+        "source": data,
+        "scene_rows": rows,
+        "checked_scene_rows": checked_rows,
+        "parts": checked_parts,
+        "part_paths": part_paths,
+        "part_duration_total": round(total_part_duration, 3),
+        "scene_duration_total": round(total_scene_duration, 3),
+        **role_report,
     }
 
 
-def validate_thumbnail(mode: str) -> Path:
-    path = output_path(
-        "output/thumbnail.jpg", "Thumbnail", MIN_IMAGE_BYTES
+def validate_thumbnail(
+    mode: str,
+    expected_size: tuple[int, int],
+) -> tuple[Path, dict]:
+    path = safe_output_path(
+        "output/thumbnail.jpg",
+        "Thumbnail",
+        MIN_IMAGE_BYTES,
     )
 
     try:
@@ -670,13 +811,17 @@ def validate_thumbnail(mode: str) -> Path:
     except Exception as exc:
         fail(f"Thumbnail image is invalid: {exc}")
 
-    if image_format != "JPEG" or dimensions != (1280, 720):
+    if image_format != "JPEG":
+        fail(f"Thumbnail must be JPEG; found {image_format}.")
+
+    if dimensions != expected_size:
         fail(
-            f"Thumbnail must be a 1280x720 JPEG; "
-            f"found {image_format} {dimensions}"
+            f"{mode.upper()} thumbnail must be {expected_size[0]}x"
+            f"{expected_size[1]}; found {dimensions}."
         )
 
     manifest_path = OUT / "thumbnail" / "thumbnail_manifest.json"
+
     if not manifest_path.is_file():
         fail("Thumbnail manifest is missing.")
 
@@ -685,7 +830,7 @@ def validate_thumbnail(mode: str) -> Path:
     if manifest.get("status") != "completed":
         fail("Thumbnail manifest is not completed.")
 
-    if str(manifest.get("format", "")).strip().lower() != mode:
+    if str(manifest.get("format", "")).lower() != mode:
         fail("Thumbnail manifest FORMAT mismatch.")
 
     declared = (
@@ -695,33 +840,43 @@ def validate_thumbnail(mode: str) -> Path:
     )
 
     if declared:
-        declared_path = output_path(
-            declared, "Thumbnail manifest output", MIN_IMAGE_BYTES
+        declared_path = safe_output_path(
+            declared,
+            "Thumbnail manifest image",
+            MIN_IMAGE_BYTES,
         )
-        if declared_path.resolve() != path.resolve():
-            fail("Thumbnail manifest points to a different thumbnail.")
 
-    declared_hash = None
-    items = manifest.get("thumbnails", [])
-    if isinstance(items, list):
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            if item.get("file") in {
-                "output/thumbnail.jpg", "thumbnail.jpg"
-            }:
-                declared_hash = item.get("sha256")
-                break
+        if declared_path.resolve() != path.resolve():
+            fail("Thumbnail manifest points to another image.")
 
     actual_hash = sha256_file(path)
-    if declared_hash and declared_hash != actual_hash:
-        fail("Thumbnail SHA256 does not match its manifest.")
 
-    return path
+    for item in manifest.get("thumbnails", []):
+        if not isinstance(item, dict):
+            continue
+
+        filename = str(item.get("file") or "").strip()
+
+        if filename in {
+            "output/thumbnail.jpg",
+            "thumbnail.jpg",
+        }:
+            declared_hash = item.get("sha256")
+
+            if declared_hash and declared_hash != actual_hash:
+                fail("Thumbnail SHA256 mismatch.")
+
+    return path, {
+        "path": relative_output(path),
+        "format": image_format,
+        "dimensions": list(dimensions),
+        "sha256": actual_hash,
+    }
 
 
-def parse_text_tags(value: str) -> list[str]:
+def parse_tags(value: str) -> list[str]:
     value = value.strip()
+
     if not value:
         return []
 
@@ -736,9 +891,12 @@ def parse_text_tags(value: str) -> list[str]:
 
     for item in raw:
         tag = " ".join(item.split()).strip(" ,#")
+
         if not tag:
             continue
+
         key = tag.casefold()
+
         if key not in seen:
             seen.add(key)
             result.append(tag)
@@ -746,28 +904,33 @@ def parse_text_tags(value: str) -> list[str]:
     return result
 
 
-def validate_metadata(mode: str) -> tuple[Path, Path, Path]:
-    text_path = output_path(
-        "output/youtube_metadata.txt", "YouTube metadata text", 10
-    )
-    json_path = output_path(
-        "output/publish/youtube_metadata.json",
-        "YouTube metadata JSON", 10,
-    )
-    tags_path = output_path(
-        "output/publish/youtube_tags.txt", "YouTube tags text", 5
+def validate_metadata(mode: str) -> tuple[Path, Path, Path, dict]:
+    text_path = safe_output_path(
+        "output/youtube_metadata.txt",
+        "YouTube metadata text",
+        10,
     )
 
-    try:
-        content = text_path.read_text(encoding="utf-8-sig").strip()
-    except (OSError, UnicodeError) as exc:
-        fail(f"Cannot read YouTube metadata text: {exc}")
+    json_path = safe_output_path(
+        "output/publish/youtube_metadata.json",
+        "YouTube metadata JSON",
+        10,
+    )
+
+    tags_path = safe_output_path(
+        "output/publish/youtube_tags.txt",
+        "YouTube tags",
+        5,
+    )
+
+    content = text_path.read_text(encoding="utf-8-sig").strip()
 
     sections: dict[str, list[str]] = {}
     current = None
 
     for line in content.splitlines():
         label = line.strip().strip("[]").rstrip(":").strip().upper()
+
         if label in {"TITLE", "DESCRIPTION", "TAGS"}:
             current = label
             sections.setdefault(current, [])
@@ -776,9 +939,11 @@ def validate_metadata(mode: str) -> tuple[Path, Path, Path]:
 
     title = " ".join(sections.get("TITLE", [])).strip()
     description = "\n".join(sections.get("DESCRIPTION", [])).strip()
-    tags_text = " ".join(sections.get("TAGS", [])).strip()
+    text_tags = parse_tags(
+        " ".join(sections.get("TAGS", [])).strip()
+    )
 
-    if not title or not description or not tags_text:
+    if not title or not description or not text_tags:
         fail("Metadata text must contain TITLE, DESCRIPTION and TAGS.")
 
     if len(title) > 100:
@@ -790,10 +955,10 @@ def validate_metadata(mode: str) -> tuple[Path, Path, Path]:
     metadata = read_json(json_path)
 
     if metadata.get("status") != "completed":
-        fail("Structured metadata status is not completed.")
+        fail("Structured metadata is not completed.")
 
-    if str(metadata.get("format", "")).strip().lower() != mode:
-        fail("Structured metadata FORMAT mismatch.")
+    if str(metadata.get("format", "")).lower() != mode:
+        fail("Metadata FORMAT mismatch.")
 
     json_title = metadata.get("title")
     json_description = metadata.get("description")
@@ -806,10 +971,10 @@ def validate_metadata(mode: str) -> tuple[Path, Path, Path]:
         fail("Structured metadata description is missing.")
 
     if len(json_title) > 100 or len(json_description) > 5000:
-        fail("Structured metadata exceeds YouTube text limits.")
+        fail("Structured metadata exceeds YouTube limits.")
 
-    if not isinstance(tags, list) or not 8 <= len(tags) <= 20:
-        fail("Metadata must contain 8–20 tags.")
+    if not isinstance(tags, list) or not 5 <= len(tags) <= 20:
+        fail("Metadata must contain 5–20 tags.")
 
     normalized_tags = []
     seen = set()
@@ -819,19 +984,18 @@ def validate_metadata(mode: str) -> tuple[Path, Path, Path]:
             fail("Metadata contains an invalid tag.")
 
         normalized = " ".join(tag.split()).strip(" ,#")
-        if not normalized:
-            fail("Metadata contains an empty tag.")
 
-        if len(normalized) > 100:
-            fail("Metadata tag exceeds 100 characters.")
+        if not normalized or len(normalized) > 100:
+            fail("Metadata contains an invalid tag.")
 
         key = normalized.casefold()
+
         if key not in seen:
             seen.add(key)
             normalized_tags.append(normalized)
 
-    if not 8 <= len(normalized_tags) <= 20:
-        fail("Metadata must contain 8–20 unique tags.")
+    if not 5 <= len(normalized_tags) <= 20:
+        fail("Metadata must contain 5–20 unique tags.")
 
     if json_title.strip() != title:
         fail("Metadata text and JSON titles differ.")
@@ -839,88 +1003,280 @@ def validate_metadata(mode: str) -> tuple[Path, Path, Path]:
     if json_description.strip() != description:
         fail("Metadata text and JSON descriptions differ.")
 
-    combined_tags = parse_text_tags(tags_text)
-    dedicated_tags = parse_text_tags(
+    expected = {item.casefold() for item in normalized_tags}
+
+    dedicated_tags = parse_tags(
         tags_path.read_text(encoding="utf-8-sig")
     )
-    expected_tags = {item.casefold() for item in normalized_tags}
 
-    if {item.casefold() for item in combined_tags} != expected_tags:
-        fail("Combined metadata text tags and JSON tags differ.")
+    if {item.casefold() for item in text_tags} != expected:
+        fail("Metadata text tags differ from structured tags.")
 
-    if {item.casefold() for item in dedicated_tags} != expected_tags:
-        fail("Dedicated tags file and JSON tags differ.")
+    if {item.casefold() for item in dedicated_tags} != expected:
+        fail("Dedicated tags differ from structured tags.")
 
-    if len(combined_tags) != len(normalized_tags):
-        fail("Combined metadata contains duplicate or missing tags.")
+    return text_path, json_path, tags_path, {
+        "title": title,
+        "description_sha256": hashlib.sha256(
+            description.encode("utf-8")
+        ).hexdigest(),
+        "tags": normalized_tags,
+    }
 
-    if len(dedicated_tags) != len(normalized_tags):
-        fail("Dedicated tags file contains duplicate or missing tags.")
 
-    return text_path, json_path, tags_path
-
-
-def validate_captions() -> Path:
-    path = output_path(
+def validate_srt() -> tuple[Path, dict]:
+    path = safe_output_path(
         "output/captions/final_captions.srt",
         "Final captions SRT",
         10,
     )
 
-    try:
-        content = path.read_text(encoding="utf-8-sig").strip()
-    except (OSError, UnicodeError) as exc:
-        fail(f"Cannot read final SRT: {exc}")
+    content = path.read_text(encoding="utf-8-sig")
+    content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
 
     if "-->" not in content:
         fail("Final SRT contains no timing cues.")
 
     blocks = [
         block.strip()
-        for block in content.replace("\r\n", "\n").split("\n\n")
+        for block in re.split(r"\n[ \t]*\n", content)
         if block.strip()
     ]
 
+    previous_end = -1.0
     cue_count = 0
-    previous_start = -1.0
+    maximum_end = 0.0
 
-    for block in blocks:
+    def to_seconds(value: str) -> float:
+        match = re.fullmatch(
+            r"(\d{2,}):([0-5]\d):([0-5]\d)[,.](\d{3})",
+            value.strip(),
+        )
+
+        if not match:
+            fail(f"Invalid SRT timestamp: {value}")
+
+        hours, minutes, seconds, millis = map(int, match.groups())
+
+        return (
+            hours * 3600
+            + minutes * 60
+            + seconds
+            + millis / 1000
+        )
+
+    for index, block in enumerate(blocks, 1):
         lines = block.splitlines()
-        if len(lines) < 2 or "-->" not in lines[1]:
-            continue
 
-        left, right = [item.strip() for item in lines[1].split("-->", 1)]
+        if len(lines) < 3 or not lines[0].strip().isdigit():
+            fail(f"SRT cue {index} is incomplete.")
 
-        def to_seconds(value: str) -> float:
-            value = value.replace(",", ".")
-            hh, mm, ss = value.split(":")
-            return int(hh) * 3600 + int(mm) * 60 + float(ss)
+        if int(lines[0].strip()) != index:
+            fail(f"SRT cue numbering is not continuous at {index}.")
 
-        try:
-            start = to_seconds(left)
-            end = to_seconds(right)
-        except (ValueError, TypeError):
-            fail("Final SRT contains an invalid timestamp.")
+        if lines[1].count("-->") != 1:
+            fail(f"SRT cue {index} has invalid timing.")
+
+        left, right = [
+            value.strip() for value in lines[1].split("-->")
+        ]
+
+        start = to_seconds(left)
+        end = to_seconds(right)
 
         if start < 0 or end <= start:
-            fail("Final SRT contains an invalid cue duration.")
+            fail(f"SRT cue {index} has invalid duration.")
 
-        if start + 0.001 < previous_start:
-            fail("Final SRT cues are not in chronological order.")
+        if start < previous_end - 0.001:
+            fail(f"SRT cue {index} overlaps or is out of order.")
 
-        if not any(line.strip() for line in lines[2:]):
-            fail("Final SRT contains an empty caption cue.")
+        caption = "\n".join(lines[2:]).strip()
 
-        previous_start = start
+        if not caption:
+            fail(f"SRT cue {index} has no caption text.")
+
+        previous_end = end
+        maximum_end = max(maximum_end, end)
         cue_count += 1
 
-    if cue_count < 1:
-        fail("Final SRT contains no valid caption cues.")
+    if cue_count == 0:
+        fail("Final SRT contains no valid captions.")
 
-    return path
+    return path, {
+        "path": relative_output(path),
+        "cue_count": cue_count,
+        "last_cue_end": round(maximum_end, 3),
+        "sha256": sha256_file(path),
+    }
 
 
-def collect_output_files(
+def read_story_title() -> str:
+    candidates = [
+        OUT / "story" / "story.json",
+        OUT / "story" / "ai_story.json",
+    ]
+
+    title = ""
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+
+        data = read_json(path)
+
+        for key in (
+            "final_title",
+            "generated_title",
+            "story_title",
+            "title",
+        ):
+            value = data.get(key)
+
+            if isinstance(value, str) and value.strip():
+                title = value.strip()
+                break
+
+        if title:
+            break
+
+        nested = data.get("story")
+
+        if isinstance(nested, dict):
+            for key in (
+                "final_title",
+                "generated_title",
+                "story_title",
+                "title",
+            ):
+                value = nested.get(key)
+
+                if isinstance(value, str) and value.strip():
+                    title = value.strip()
+                    break
+
+        if title:
+            break
+
+    if not title:
+        title_file = OUT / "story" / "final_title.txt"
+
+        if title_file.is_file():
+            title = title_file.read_text(
+                encoding="utf-8-sig"
+            ).strip()
+
+    if not title:
+        fail("Story title is missing; generic ZIP names are prohibited.")
+
+    return title
+
+
+def safe_slug(title: str) -> str:
+    slug = re.sub(
+        r"[^\w]+",
+        "-",
+        title,
+        flags=re.UNICODE,
+    ).strip("-_")
+
+    slug = slug[:90].strip("-_")
+
+    if not slug:
+        fail("Story title cannot form a safe ZIP filename.")
+
+    return slug
+
+
+def portable_render_manifest(
+    render: dict,
+    package_file_names: set[str],
+) -> dict:
+    data = json.loads(json.dumps(render["source"]))
+
+    # The package contains Part videos only. Source scene clips and
+    # combined/alias videos are deliberately not included.
+    for key in (
+        "scenes",
+        "completed_scenes",
+        "all_completed_scenes",
+        "extra_scenes",
+        "completed_count",
+        "all_completed_scene_count",
+        "final_video",
+        "alias",
+        "combined_video",
+        "combined_output",
+        "pre_caption_video",
+    ):
+        data.pop(key, None)
+
+    portable_parts = []
+
+    for item in render["parts"]:
+        member = "output/" + item["path"]
+
+        if member not in package_file_names:
+            fail(f"Part video missing from package: {member}")
+
+        portable_parts.append({
+            "part": item["part"],
+            "path": member,
+            "status": "completed",
+            "duration": item["duration"],
+            "width": item["width"],
+            "height": item["height"],
+            "fps": item["fps"],
+            "bytes": item["bytes"],
+            "sha256": item["sha256"],
+        })
+
+    data["parts"] = portable_parts
+    data["part_numbers"] = [item["part"] for item in portable_parts]
+    data["part_videos_only"] = True
+    data["combined_video_included"] = False
+    data["format_alias_included"] = False
+    data["package_manifest_view"] = True
+    data["package_manifest_version"] = VERSION
+
+    data["package_integrity"] = {
+        "part_count": len(portable_parts),
+        "part_sha256": {
+            str(item["part"]): item["sha256"]
+            for item in portable_parts
+        },
+    }
+
+    return data
+
+
+def should_exclude_file(path: Path) -> bool:
+    if not path.is_file():
+        return True
+
+    if path.is_symlink():
+        fail(f"Output symlink is not allowed: {path}")
+
+    if not path.resolve().is_relative_to(OUT.resolve()):
+        fail(f"Output path escapes output/: {path}")
+
+    pieces = path.relative_to(OUT).parts
+
+    if any(piece in EXCLUDED_DIRS for piece in pieces):
+        return True
+
+    if path.suffix.lower() in EXCLUDED_SUFFIXES:
+        return True
+
+    if path.name.startswith(".resume-"):
+        return True
+
+    if path.name.endswith(".tmp"):
+        return True
+
+    return False
+
+
+def collect_package_files(
     render: dict,
     thumbnail: Path,
     metadata: Path,
@@ -931,192 +1287,106 @@ def collect_output_files(
     required = {
         RENDER.resolve(),
         VALIDATION.resolve(),
-        render["final_video"].resolve(),
-        render["alias"].resolve(),
+        REPORT.resolve(),
         thumbnail.resolve(),
         metadata.resolve(),
         metadata_json.resolve(),
         tags.resolve(),
         captions.resolve(),
-        *(path.resolve() for path in render["scene_files"]),
-        *(path.resolve() for path in render["part_files"]),
+        *(path.resolve() for path in render["part_paths"]),
     }
-
-    for row in render["extra_records"]:
-        required.add((OUT / row["path"]).resolve())
 
     selected = set(required)
-    allowed_videos = {
-        path.resolve()
-        for path in (
-            render["scene_files"]
-            + render["part_files"]
-            + [render["final_video"], render["alias"]]
-        )
-    }
-    expected_alias = (
-        "katha_lok_ai_short.mp4"
-        if render["data"]["format"] == "short"
-        else "katha_lok_ai_full.mp4"
-    )
-    opposite_alias = (
-        "katha_lok_ai_full.mp4"
-        if render["data"]["format"] == "short"
-        else "katha_lok_ai_short.mp4"
-    )
 
+    # Include the selected format's supporting output files, but never
+    # include scene-level video clips or combined/alias videos.
     for path in OUT.rglob("*"):
-        if not path.is_file():
+        if should_exclude_file(path):
             continue
 
         resolved = path.resolve()
 
-        if not resolved.is_relative_to(OUT.resolve()):
-            fail(f"Output symlink escapes output directory: {path}")
-
-        pieces = resolved.relative_to(OUT.resolve()).parts
-        if any(piece in EXCLUDED_DIRS for piece in pieces):
+        if resolved in required:
             continue
 
-        if resolved.suffix.lower() in EXCLUDED_SUFFIXES:
+        if path.suffix.lower() in VIDEO_SUFFIXES:
             continue
 
-        if resolved == REPORT.resolve():
+        if path.suffix.lower() == ".zip":
             continue
 
-        if resolved.name.startswith(".resume-"):
-            continue
-
-        # Do not ship stale or wrong-format video files.
-        if resolved.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}:
-            if resolved not in allowed_videos:
-                continue
-
-        if resolved.name == opposite_alias:
+        if path.name in {
+            "katha_lok_ai_final.mp4",
+            "katha_lok_ai_short.mp4",
+            "katha_lok_ai_full.mp4",
+            "final_video.mp4",
+            "combined_video.mp4",
+            "pre_caption_render.mp4",
+        }:
             continue
 
         selected.add(resolved)
 
     missing = [path for path in required if not path.is_file()]
+
     if missing:
         fail(f"Required package files are missing: {missing}")
 
     files = sorted(selected, key=lambda item: item.as_posix())
-    names = [archive_name(path) for path in files]
+
+    names = ["output/" + relative_output(path) for path in files]
 
     if len(names) != len(set(names)):
-        fail("Duplicate paths detected while collecting package files.")
+        fail("Duplicate package paths detected.")
+
+    for path in files:
+        if path.suffix.lower() in VIDEO_SUFFIXES:
+            if path not in {
+                item.resolve() for item in render["part_paths"]
+            }:
+                fail(f"Non-Part video found in package selection: {path}")
 
     return files
 
 
-def remap_manifest_paths(
-    value: Any,
-    packaged_names: set[str],
-    context: str,
-) -> None:
-    if isinstance(value, dict):
-        for key, item in list(value.items()):
-            if key in SOURCE_ONLY_PATH_FIELDS:
-                value.pop(key, None)
-                continue
-
-            if key in PATH_FIELDS and isinstance(item, str):
-                if item.startswith(("http://", "https://")):
-                    continue
-
-                if not item.strip():
-                    continue
-
-                candidate = Path(item.strip())
-                if not candidate.is_absolute():
-                    candidate = ROOT / candidate
-
-                try:
-                    resolved = inside_output(candidate)
-                except RuntimeError:
-                    if item.startswith("output/"):
-                        fail(f"{context}: unsafe packaged path: {item}")
-                    continue
-
-                if not resolved.exists():
-                    fail(f"{context}: referenced file is missing: {item}")
-
-                if not resolved.is_file():
-                    fail(f"{context}: referenced path is not a file: {item}")
-
-                member = archive_name(resolved)
-                if member not in packaged_names:
-                    fail(f"{context}: referenced file not included: {member}")
-
-                value[key] = member
-
-            elif isinstance(item, (dict, list)):
-                remap_manifest_paths(item, packaged_names, context)
-
-    elif isinstance(value, list):
-        for item in value:
-            if isinstance(item, (dict, list)):
-                remap_manifest_paths(item, packaged_names, context)
-
-
-def portable_render_manifest(
-    render: dict,
-    packaged_names: set[str],
-) -> dict:
-    data = json.loads(json.dumps(render["data"]))
-
-    remap_manifest_paths(data, packaged_names, "render manifest")
-
-    final_member = archive_name(render["final_video"])
-    alias_member = archive_name(render["alias"])
-
-    if final_member not in packaged_names:
-        fail("Final video is not included in ZIP.")
-
-    if alias_member not in packaged_names:
-        fail("Format alias is not included in ZIP.")
-
-    data["final_video"] = final_member
-    data["alias"] = alias_member
-    data["package_manifest_view"] = True
-    data["package_manifest_version"] = VERSION
-    data["package_video_integrity"] = {
-        "sha256": render["final_hash"],
-        "alias_sha256": render["alias_hash"],
-        "same_content": render["same_content"],
-    }
-
-    return data
-
-
 def validate_zip_structure(archive: zipfile.ZipFile) -> list[str]:
     bad_member = archive.testzip()
+
     if bad_member:
         fail(f"ZIP CRC verification failed: {bad_member}")
 
-    members = archive.namelist()
-    if len(members) != len(set(members)):
-        fail("ZIP contains duplicate file paths.")
+    names = archive.namelist()
 
-    for name in members:
+    if len(names) != len(set(names)):
+        fail("ZIP contains duplicate paths.")
+
+    for name in names:
         pure = PurePosixPath(name)
+
         if (
             name.startswith("/")
             or "\\" in name
             or ".." in pure.parts
             or not pure.parts
         ):
-            fail(f"ZIP contains an unsafe path: {name}")
+            fail(f"Unsafe ZIP member: {name}")
 
-    return members
+    return names
 
 
-def build_archive(files: list[Path], render: dict) -> list[dict]:
-    temporary = ARCHIVE.with_name(ARCHIVE.name + ".tmp")
+def build_archive(
+    archive_path: Path,
+    files: list[Path],
+    render: dict,
+) -> list[dict]:
+    temporary = archive_path.with_name(archive_path.name + ".tmp")
     temporary.unlink(missing_ok=True)
 
-    packaged_names = {archive_name(path) for path in files}
+    package_names = {
+        "output/" + relative_output(path)
+        for path in files
+    }
+
     records = []
 
     try:
@@ -1128,20 +1398,25 @@ def build_archive(files: list[Path], render: dict) -> list[dict]:
             allowZip64=True,
         ) as archive:
             for path in files:
-                member = archive_name(path)
+                member = "output/" + relative_output(path)
 
                 if path.resolve() == RENDER.resolve():
                     payload = (
                         json.dumps(
-                            portable_render_manifest(render, packaged_names),
+                            portable_render_manifest(
+                                render,
+                                package_names,
+                            ),
                             ensure_ascii=False,
                             indent=2,
-                        ) + "\n"
+                        )
+                        + "\n"
                     ).encode("utf-8")
                 else:
                     payload = path.read_bytes()
 
                 archive.writestr(member, payload)
+
                 records.append({
                     "path": member,
                     "bytes": len(payload),
@@ -1149,15 +1424,21 @@ def build_archive(files: list[Path], render: dict) -> list[dict]:
                 })
 
         with zipfile.ZipFile(temporary, "r") as archive:
-            validate_zip_structure(archive)
+            names = validate_zip_structure(archive)
+
+            if set(names) != package_names:
+                fail("ZIP members differ from the package file list.")
 
             for record in records:
                 payload = archive.read(record["path"])
-                if len(payload) != record["bytes"]:
-                    fail(f"ZIP size verification failed: {record['path']}")
-                if sha256_bytes(payload) != record["sha256"]:
-                    fail(f"ZIP hash verification failed: {record['path']}")
 
+                if len(payload) != record["bytes"]:
+                    fail(f"ZIP size mismatch: {record['path']}")
+
+                if sha256_bytes(payload) != record["sha256"]:
+                    fail(f"ZIP SHA256 mismatch: {record['path']}")
+
+        os.replace(temporary, archive_path)
         return records
 
     except Exception:
@@ -1165,302 +1446,135 @@ def build_archive(files: list[Path], render: dict) -> list[dict]:
         raise
 
 
-def verify_zip_video(
-    archive: zipfile.ZipFile,
-    member: str,
-    label: str,
-    expected_size: tuple[int, int],
-    expected_fps: float,
-    temporary_directory: str,
-) -> dict:
-    names = set(archive.namelist())
-
-    if not isinstance(member, str) or member not in names:
-        fail(f"{label}: video missing from ZIP: {member}")
-
-    suffix = PurePosixPath(member).suffix or ".mp4"
-    temporary_path = Path(temporary_directory) / (
-        hashlib.sha256(member.encode("utf-8")).hexdigest() + suffix
-    )
-
-    try:
-        with archive.open(member, "r") as source:
-            with temporary_path.open("wb") as target:
-                shutil.copyfileobj(source, target)
-
-        if temporary_path.stat().st_size < MIN_VIDEO_BYTES:
-            fail(f"{label}: packaged video is too small.")
-
-        info = probe_media(temporary_path, expected_size, expected_fps)
-
-        return {
-            "duration": round(info["duration"], 3),
-            "fps": round(info["fps"], 4),
-            "bytes": temporary_path.stat().st_size,
-            "sha256": sha256_file(temporary_path),
-        }
-    finally:
-        temporary_path.unlink(missing_ok=True)
-
-
 def verify_packaged_archive(
     archive_path: Path,
     mode: str,
-    parts: int,
-    scenes: int,
+    part_numbers: list[int],
     expected_size: tuple[int, int],
     expected_fps: float,
 ) -> dict:
-    if (
-        not archive_path.is_file()
-        or archive_path.stat().st_size < MIN_VIDEO_BYTES
-    ):
+    if not archive_path.is_file() or archive_path.stat().st_size < 1000:
         fail("Final ZIP is missing or too small.")
 
     with zipfile.ZipFile(archive_path, "r") as archive:
-        members = validate_zip_structure(archive)
-        names = set(members)
+        names = validate_zip_structure(archive)
+        name_set = set(names)
 
-        missing = REQUIRED_PACKAGE_MEMBERS - names
+        missing = REQUIRED_MEMBERS - name_set
+
         if missing:
-            fail(f"Required deliverables missing from ZIP: {sorted(missing)}")
+            fail(f"Required ZIP files are missing: {sorted(missing)}")
 
-        render_member = "output/scene_renders/render_manifest.json"
+        part_members = [
+            item for item in names
+            if re.fullmatch(r"output/parts/part_\d+\.mp4", item)
+        ]
 
-        try:
-            data = json.loads(archive.read(render_member).decode("utf-8"))
-        except (UnicodeError, ValueError) as exc:
-            fail(f"Packaged render manifest is invalid: {exc}")
+        expected_part_members = [
+            f"output/parts/part_{part:02d}.mp4"
+            for part in part_numbers
+        ]
 
-        if not isinstance(data, dict):
-            fail("Packaged render manifest must be a JSON object.")
+        if sorted(part_members) != sorted(expected_part_members):
+            fail("ZIP does not contain exactly the selected Part videos.")
 
-        if data.get("status") != "completed":
-            fail("Packaged render status mismatch.")
+        for name in names:
+            if PurePosixPath(name).suffix.lower() in VIDEO_SUFFIXES:
+                if name not in expected_part_members:
+                    fail(f"Non-Part video found in ZIP: {name}")
 
-        if str(data.get("format", "")).lower() != mode:
-            fail("Packaged render FORMAT mismatch.")
+        for name in names:
+            if name.lower().endswith(".zip"):
+                fail(f"Nested ZIP is not allowed: {name}")
 
-        if data.get("captions_burned") is not True:
-            fail("Packaged render manifest does not confirm captions.")
-
-        try:
-            manifest_fps = float(data.get("fps"))
-        except (TypeError, ValueError):
-            fail("Packaged render FPS is missing.")
-
-        if (
-            not math.isfinite(manifest_fps)
-            or abs(manifest_fps - expected_fps) > FPS_TOLERANCE
-        ):
-            fail("Packaged render FPS mismatch.")
-
-        rows = normalize_render_rows(data)
-        main_rows = [row for row in rows if row.get("role") == "main"]
-        extra_rows = [row for row in rows if row.get("role") != "main"]
-
-        expected_count = parts * scenes
-        if len(main_rows) != expected_count:
-            fail("Packaged main scene count mismatch.")
-
-        if len(extra_rows) != (2 * parts):
-            fail("Packaged Hook/Suspense/Resolution scene count mismatch.")
-
-        with tempfile.TemporaryDirectory(
-            prefix="katha-lok-package-verify-"
-        ) as temporary_directory:
-            all_scene_durations = []
-            role_counts: dict[str, dict[int, int]] = {}
-
-            for index, row in enumerate(rows, 1):
-                role = str(row.get("role") or row.get("scene_type") or "").lower()
-
-                if role not in {"main", "hook", "suspense", "resolution"}:
-                    fail(f"Unknown packaged scene role: {role!r}")
-
-                try:
-                    part_number = int(row.get("part", 0))
-                except (TypeError, ValueError):
-                    fail(f"Invalid packaged scene part: {index}")
-
-                if not 1 <= part_number <= parts:
-                    fail(f"Packaged scene part out of range: {index}")
-
-                if role != "main":
-                    role_counts.setdefault(role, {})
-                    role_counts[role][part_number] = (
-                        role_counts[role].get(part_number, 0) + 1
-                    )
-
-                if row.get("status") != "completed":
-                    fail(f"Packaged scene is incomplete: {index}")
-
-                if row.get("captions_burned") is not True:
-                    fail(f"Packaged scene captions missing: {index}")
-
-                member = row.get("video") or row.get("output")
-                info = verify_zip_video(
-                    archive,
-                    member,
-                    f"Packaged scene {index}",
-                    expected_size,
-                    expected_fps,
-                    temporary_directory,
-                )
-
-                declared_hash = row.get("sha256")
-                if declared_hash and declared_hash != info["sha256"]:
-                    fail(f"Packaged scene SHA256 mismatch: {index}")
-
-                all_scene_durations.append(info["duration"])
-
-            for part_number in range(1, parts + 1):
-                if role_counts.get("hook", {}).get(part_number, 0) != 1:
-                    fail(f"Packaged part {part_number} Hook scene missing.")
-
-            for part_number in range(1, parts):
-                if role_counts.get("suspense", {}).get(part_number, 0) != 1:
-                    fail(
-                        f"Packaged part {part_number} Suspense scene missing."
-                    )
-
-            if role_counts.get("suspense", {}).get(parts, 0):
-                fail("Final part contains a packaged Suspense scene.")
-
-            if role_counts.get("resolution", {}).get(parts, 0) != 1:
-                fail("Final part Resolution scene missing.")
-
-            part_rows = data.get("parts")
-            if not isinstance(part_rows, list) or len(part_rows) != parts:
-                fail("Packaged part count mismatch.")
-
-            part_durations = []
-
-            for index, row in enumerate(part_rows, 1):
-                if isinstance(row, dict):
-                    try:
-                        part_number = int(row.get("part", index))
-                    except (TypeError, ValueError):
-                        fail(f"Invalid packaged part number: {index}")
-
-                    if part_number != index:
-                        fail(f"Packaged part order mismatch: {index}")
-
-                    if row.get("status") not in (None, "completed"):
-                        fail(f"Packaged part incomplete: {index}")
-
-                    member = (
-                        row.get("path")
-                        or row.get("video")
-                        or row.get("output")
-                    )
-                    declared_hash = row.get("sha256")
-                else:
-                    member = row
-                    declared_hash = None
-
-                info = verify_zip_video(
-                    archive,
-                    member,
-                    f"Packaged part {index}",
-                    expected_size,
-                    expected_fps,
-                    temporary_directory,
-                )
-
-                if declared_hash and declared_hash != info["sha256"]:
-                    fail(f"Packaged part SHA256 mismatch: {index}")
-
-                part_durations.append(info["duration"])
-
-            final_member = data.get("final_video")
-            alias_member = data.get("alias")
-
-            if final_member == alias_member:
-                fail("Packaged final video and alias must be separate ZIP entries.")
-
-            final_info = verify_zip_video(
-                archive, final_member, "Packaged final video",
-                expected_size, expected_fps, temporary_directory,
-            )
-            alias_info = verify_zip_video(
-                archive, alias_member, "Packaged format alias",
-                expected_size, expected_fps, temporary_directory,
-            )
-
-            expected_alias = (
-                "katha_lok_ai_short.mp4"
-                if mode == "short"
-                else "katha_lok_ai_full.mp4"
-            )
-
-            if PurePosixPath(alias_member).name != expected_alias:
-                fail(f"Packaged alias mismatch: expected {expected_alias}")
-
-            if final_info["sha256"] != alias_info["sha256"]:
-                fail("Packaged final video and alias content differ.")
-
-            if abs(final_info["duration"] - alias_info["duration"]) > 0.25:
-                fail("Packaged final video and alias durations differ.")
-
-            if abs(
-                final_info["duration"] - sum(part_durations)
-            ) > max(DURATION_TOLERANCE, float(parts)):
-                fail("Packaged final duration differs from part durations.")
-
-            if abs(
-                final_info["duration"] - sum(all_scene_durations)
-            ) > max(DURATION_TOLERANCE, float(len(rows))):
-                fail("Packaged final duration differs from scene durations.")
-
-        opposite = (
-            "katha_lok_ai_full.mp4"
-            if mode == "short"
-            else "katha_lok_ai_short.mp4"
+        manifest = json.loads(
+            archive.read("output/scene_renders/render_manifest.json")
+            .decode("utf-8")
         )
 
-        if any(PurePosixPath(name).name == opposite for name in names):
-            fail(f"Opposite-format video included in ZIP: {opposite}")
+        if manifest.get("status") != "completed":
+            fail("Packaged render manifest is incomplete.")
 
-        if any(name.lower().endswith(".zip") for name in names):
-            fail("Nested ZIP files are not allowed.")
+        if str(manifest.get("format", "")).lower() != mode:
+            fail("Packaged render manifest FORMAT mismatch.")
 
-        def check_references(value: Any) -> None:
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    if (
-                        key in PATH_FIELDS
-                        and isinstance(item, str)
-                        and item.startswith("output/")
-                        and item not in names
-                    ):
-                        fail(f"Dangling packaged reference: {item}")
-                    check_references(item)
-            elif isinstance(value, list):
-                for item in value:
-                    check_references(item)
+        if manifest.get("part_videos_only") is not True:
+            fail("Packaged render manifest does not confirm Part-only output.")
 
-        check_references(data)
+        rows = manifest.get("parts")
+
+        if not isinstance(rows, list) or len(rows) != len(part_numbers):
+            fail("Packaged render manifest Part list is invalid.")
+
+        verified_parts = []
+
+        with tempfile.TemporaryDirectory(
+            prefix="katha-package-check-"
+        ) as temporary_directory:
+            for index, row in enumerate(rows):
+                expected_part = part_numbers[index]
+
+                if int(row.get("part", -1)) != expected_part:
+                    fail("Packaged Part ordering is incorrect.")
+
+                member = row.get("path")
+
+                if member not in name_set:
+                    fail(f"Packaged Part reference is missing: {member}")
+
+                suffix = PurePosixPath(member).suffix or ".mp4"
+
+                temporary_path = (
+                    Path(temporary_directory)
+                    / f"part_{expected_part:02d}{suffix}"
+                )
+
+                with archive.open(member) as source:
+                    with temporary_path.open("wb") as target:
+                        shutil.copyfileobj(source, target)
+
+                if temporary_path.stat().st_size < MIN_VIDEO_BYTES:
+                    fail(f"Packaged Part {expected_part} is too small.")
+
+                info = probe_media(
+                    temporary_path,
+                    expected_size,
+                    expected_fps,
+                )
+
+                digest = sha256_file(temporary_path)
+
+                if digest != row.get("sha256"):
+                    fail(f"Packaged Part {expected_part} hash mismatch.")
+
+                verified_parts.append({
+                    "part": expected_part,
+                    "path": member,
+                    "duration": round(info["duration"], 3),
+                    "sha256": digest,
+                    "bytes": temporary_path.stat().st_size,
+                })
+
+        if "output/katha_lok_ai_final.mp4" in name_set:
+            fail("Combined final video must not be packaged.")
+
+        if (
+            "output/katha_lok_ai_short.mp4" in name_set
+            or "output/katha_lok_ai_full.mp4" in name_set
+        ):
+            fail("Format alias video must not be packaged.")
 
         return {
             "status": "valid",
-            "entry_count": len(names),
             "crc": "valid",
-            "manifest_references": "valid",
-            "scene_videos": len(main_rows),
-            "extra_scene_videos": len(extra_rows),
-            "part_videos": parts,
-            "final_video": final_member,
-            "alias": alias_member,
-            "final_video_sha256": final_info["sha256"],
-            "alias_sha256": alias_info["sha256"],
-            "final_video_duration": final_info["duration"],
-            "part_duration_total": round(sum(part_durations), 3),
-            "all_scene_duration_total": round(sum(all_scene_durations), 3),
+            "entry_count": len(names),
+            "part_count": len(verified_parts),
+            "part_videos_only": True,
+            "verified_parts": verified_parts,
         }
 
 
-def verify_package_report(report: dict, archive: Path) -> None:
+def verify_package_report(report: dict, archive_path: Path) -> None:
     saved = read_json(REPORT)
 
     if saved.get("status") != "completed":
@@ -1472,28 +1586,29 @@ def verify_package_report(report: dict, archive: Path) -> None:
     if saved.get("format") != report.get("format"):
         fail("Package report FORMAT verification failed.")
 
-    if int(saved.get("file_count", 0)) != int(report.get("file_count", -1)):
-        fail("Package report file_count verification failed.")
+    if saved.get("archive") != archive_path.name:
+        fail("Package report archive name mismatch.")
+
+    if saved.get("archive_sha256") != sha256_file(archive_path):
+        fail("Package report archive SHA256 mismatch.")
+
+    if saved.get("archive_bytes") != archive_path.stat().st_size:
+        fail("Package report archive size mismatch.")
 
     if saved.get("zip_integrity") != "valid":
-        fail("Package report ZIP integrity verification failed.")
-
-    if saved.get("archive_sha256") != sha256_file(archive):
-        fail("Package report archive hash verification failed.")
-
-    if saved.get("archive_bytes") != archive.stat().st_size:
-        fail("Package report archive size verification failed.")
+        fail("Package report ZIP integrity is invalid.")
 
     if saved.get("zip_validation", {}).get("status") != "valid":
-        fail("Package report ZIP validation status is invalid.")
+        fail("Package ZIP validation report is invalid.")
 
-    for key in (
-        "parts", "configured_parts", "scenes_per_part",
-        "expected_scenes", "scene_count", "extra_scene_count",
-        "part_count",
-    ):
-        if saved.get(key) != report.get(key):
-            fail(f"Package report field mismatch: {key}")
+    if saved.get("part_videos_only") is not True:
+        fail("Package report does not confirm Part-only videos.")
+
+    if saved.get("combined_video_included") is not False:
+        fail("Package report incorrectly includes a combined video.")
+
+    if saved.get("format_alias_included") is not False:
+        fail("Package report incorrectly includes a format alias.")
 
 
 def main() -> None:
@@ -1507,6 +1622,7 @@ def main() -> None:
         fail("Input/topic.txt is missing.")
 
     config = load_and_validate(INPUT_FILE)
+
     mode = str(get_format(config)).strip().lower()
     configured_parts = int(get_parts(config))
     scenes = int(get_scenes(config))
@@ -1523,134 +1639,169 @@ def main() -> None:
         or expected_fps <= 0
         or expected_fps > 60
     ):
-        fail("Invalid expected FPS.")
+        fail("Invalid FPS configuration.")
 
     expected_size = (
-        (720, 1280) if mode == "short" else (1280, 720)
+        (720, 1280)
+        if mode == "short"
+        else (1280, 720)
     )
 
     log("=" * 65)
-    log("KATHA LOK AI — FINAL OUTPUT PACKAGER")
+    log("KATHA LOK AI — PART-ONLY OUTPUT PACKAGER")
     log("VERSION:", VERSION)
     log("FORMAT:", mode)
     log("CONFIGURED PARTS:", configured_parts)
     log("SCENES PER PART:", scenes)
-    log("EXPECTED FPS:", expected_fps)
+    log("FPS:", expected_fps)
 
     validation, actual_parts = validate_validation_report(
-        mode, configured_parts, scenes
+        mode,
+        configured_parts,
+        scenes,
     )
 
-    expected_count = actual_parts * scenes
+    render_source = read_json(RENDER)
 
-    log("ACTUAL PARTS:", actual_parts)
-    log("EXPECTED MAIN SCENES:", expected_count)
+    part_numbers = get_part_numbers(
+        render_source,
+        validation,
+        configured_parts,
+        actual_parts,
+    )
+
+    if len(part_numbers) != actual_parts:
+        fail("Selected part numbering does not match actual part count.")
 
     render = validate_render_manifest(
-        mode, actual_parts, scenes, expected_size, expected_fps
+        mode,
+        part_numbers,
+        scenes,
+        expected_size,
+        expected_fps,
     )
 
-    thumbnail = validate_thumbnail(mode)
-    metadata, metadata_json, tags = validate_metadata(mode)
-    captions = validate_captions()
-
-    files = collect_output_files(
-        render, thumbnail, metadata, metadata_json, tags, captions
+    thumbnail, thumbnail_info = validate_thumbnail(
+        mode,
+        expected_size,
     )
 
-    log("FILES TO PACKAGE:", len(files))
+    metadata, metadata_json, tags, metadata_info = validate_metadata(mode)
+    captions, caption_info = validate_srt()
 
-    temporary_archive = ARCHIVE.with_name(
-        ARCHIVE.name + ".verified.tmp"
+    title = read_story_title()
+    slug = safe_slug(title)
+
+    archive_path = ROOT / f"katha-lok-{slug}-{mode}-output.zip"
+
+    files = collect_package_files(
+        render,
+        thumbnail,
+        metadata,
+        metadata_json,
+        tags,
+        captions,
     )
+
+    log("STORY TITLE:", title)
+    log("ACTUAL PARTS:", actual_parts)
+    log("PART NUMBERS:", part_numbers)
+    log("MAIN SCENES:", render["main_scene_count"])
+    log("EXTRA ROLE SCENES:", render["extra_role_scene_count"])
+    log("PART VIDEOS:", len(render["parts"]))
+    log("PACKAGE FILES:", len(files))
+
+    # Preserve the previous valid archive until the replacement is verified.
+    temporary_archive = archive_path.with_name(
+        archive_path.name + ".verified.tmp"
+    )
+
     temporary_archive.unlink(missing_ok=True)
 
     try:
-        records = build_archive(files, render)
-
-        generated_archive = ARCHIVE.with_name(ARCHIVE.name + ".tmp")
-        if not generated_archive.is_file():
-            fail("Temporary ZIP was not created.")
-
-        os.replace(generated_archive, temporary_archive)
+        records = build_archive(
+            temporary_archive,
+            files,
+            render,
+        )
 
         zip_validation = verify_packaged_archive(
             temporary_archive,
             mode,
-            actual_parts,
-            scenes,
+            part_numbers,
             expected_size,
             expected_fps,
         )
 
-        # Keep the previous successful ZIP until the new ZIP passes
-        # CRC, file hash, media stream, FPS, role, and reference checks.
-        os.replace(temporary_archive, ARCHIVE)
+        os.replace(temporary_archive, archive_path)
 
     finally:
         temporary_archive.unlink(missing_ok=True)
-        ARCHIVE.with_name(ARCHIVE.name + ".tmp").unlink(missing_ok=True)
+
+    archive_hash = sha256_file(archive_path)
 
     report = {
         "status": "completed",
         "version": VERSION,
         "format": mode,
+        "story_title": title,
+        "story_slug": slug,
         "parts": actual_parts,
+        "part_numbers": part_numbers,
         "configured_parts": configured_parts,
         "dynamic_short_parts": mode == "short",
         "scenes_per_part": scenes,
-        "expected_scenes": expected_count,
-        "extra_scene_count": len(render["extra_records"]),
-        "all_scene_count": (
-            len(render["scene_records"]) + len(render["extra_records"])
-        ),
+        "expected_scenes": actual_parts * scenes,
+        "main_scene_count": render["main_scene_count"],
+        "extra_scene_count": render["extra_role_scene_count"],
+        "part_count": len(render["parts"]),
+        "part_videos_only": True,
+        "combined_video_included": False,
+        "format_alias_included": False,
         "video_dimensions": list(expected_size),
         "expected_fps": expected_fps,
-        "thumbnail_dimensions": [1280, 720],
-        "archive": ARCHIVE.name,
-        "archive_bytes": ARCHIVE.stat().st_size,
-        "archive_sha256": sha256_file(ARCHIVE),
-        "file_count": len(records),
-        "scene_count": len(render["scene_records"]),
-        "part_count": len(render["part_records"]),
-        "final_video": relative_output(render["final_video"]),
-        "format_alias": relative_output(render["alias"]),
-        "final_video_sha256": render["final_hash"],
-        "format_alias_sha256": render["alias_hash"],
-        "thumbnail": relative_output(thumbnail),
-        "metadata": relative_output(metadata),
-        "metadata_json": relative_output(metadata_json),
-        "tags": relative_output(tags),
-        "captions": relative_output(captions),
+        "thumbnail_dimensions": thumbnail_info["dimensions"],
+        "thumbnail": thumbnail_info,
+        "metadata": {
+            "text": relative_output(metadata),
+            "json": relative_output(metadata_json),
+            "tags": relative_output(tags),
+            **metadata_info,
+        },
+        "captions": caption_info,
         "validation_report": relative_output(VALIDATION),
         "render_manifest": relative_output(RENDER),
-        "scene_files": render["scene_records"],
-        "extra_scene_files": render["extra_records"],
-        "part_files": render["part_records"],
+        "part_files": render["parts"],
+        "part_duration_total": render["part_duration_total"],
+        "scene_duration_total": render["scene_duration_total"],
+        "archive": archive_path.name,
+        "archive_bytes": archive_path.stat().st_size,
+        "archive_sha256": archive_hash,
+        "file_count": len(records),
         "files": records,
         "zip_integrity": "valid",
         "manifest_zip_consistency": "valid",
-        "zip_video_fps_validation": "valid",
         "zip_validation": zip_validation,
         "validation_checks": validation["checks"],
     }
 
     write_json(REPORT, report)
-    verify_package_report(report, ARCHIVE)
+    verify_package_report(report, archive_path)
 
     log("-" * 65)
     log("PACKAGE STATUS: completed")
     log("FORMAT:", mode)
+    log("STORY:", title)
     log("PARTS:", actual_parts)
-    log("MAIN SCENES:", expected_count)
-    log("EXTRA ROLE SCENES:", len(render["extra_records"]))
-    log("ZIP:", ARCHIVE.name)
-    log("ZIP SIZE:", ARCHIVE.stat().st_size)
+    log("PART VIDEOS ONLY: yes")
+    log("COMBINED VIDEO: excluded")
+    log("FORMAT ALIAS: excluded")
+    log("ZIP:", archive_path.name)
+    log("ZIP SIZE:", archive_path.stat().st_size)
     log("FILES:", len(records))
     log("ZIP CRC: valid")
-    log("VIDEO FPS: valid")
-    log("MANIFEST REFERENCES: valid")
-    log("PACKAGED VIDEO HASHES: valid")
+    log("PART VIDEO HASHES: valid")
+    log("THUMBNAIL:", thumbnail_info["dimensions"])
     log("REPORT:", REPORT.relative_to(ROOT))
     log("=" * 65)
 
