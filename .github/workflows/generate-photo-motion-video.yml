@@ -223,11 +223,10 @@ jobs:
               --workflow generate-photo-motion-video.yml \
               --branch "$GITHUB_REF_NAME" \
               --limit 30 \
-              --json databaseId,status,conclusion \
+              --json databaseId,status \
               --jq '
                 .[]
                 | select(.status == "completed")
-                | select(.conclusion == "success")
                 | .databaseId
               ' 2>/dev/null || true
           )"
@@ -636,76 +635,69 @@ jobs:
 
           python scripts/package_output.py
 
-          python - <<'PY'
+          test -s output/package_manifest.json
+          test -s output/package_archive_name.txt
+
+          ARCHIVE="$(tr -d '\r\n' < output/package_archive_name.txt)"
+          if [[ ! "$ARCHIVE" =~ ^katha-lok-[[:alnum:]_-]+-(short|full)-output\.zip$ ]]; then
+            echo "::error::Package archive name is not story/FORMAT-specific: $ARCHIVE"
+            exit 1
+          fi
+
+          test -s "$ARCHIVE"
+
+          python - "$ARCHIVE" <<'PY'
           import hashlib
           import json
-          import re
+          import sys
           import zipfile
-          from pathlib import Path
+          from pathlib import Path, PurePosixPath
 
+          archive = Path(sys.argv[1])
           manifest_path = Path("output/package_manifest.json")
-          if not manifest_path.is_file():
-              raise SystemExit("Package manifest is missing.")
-
           manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
+          mode = manifest.get("format")
+          slug = manifest.get("story_slug")
+          root = manifest.get("package_root")
+          parts = manifest.get("parts")
+
+          if mode not in {"short", "full"}:
+              raise SystemExit("Invalid package FORMAT.")
+          if not isinstance(slug, str) or not slug:
+              raise SystemExit("Story slug is missing.")
+          if root != f"{slug}-{mode}":
+              raise SystemExit("Package root does not match story and FORMAT.")
+          if archive.name != manifest.get("archive"):
+              raise SystemExit("Archive name and package manifest disagree.")
+          if archive.name != f"katha-lok-{slug}-{mode}-output.zip":
+              raise SystemExit("Archive name is not story-specific.")
+          if not isinstance(parts, int) or parts < 1:
+              raise SystemExit("Invalid actual PARTS.")
+          if manifest.get("configured_parts") != parts:
+              raise SystemExit("Actual PARTS and configured PARTS disagree.")
           if manifest.get("status") != "completed":
               raise SystemExit("Package status is not completed.")
-
-          mode = manifest.get("format")
-          if mode not in {"short", "full"}:
-              raise SystemExit("Package FORMAT is invalid.")
-
-          archive_name = str(manifest.get("archive", "")).strip()
-          if not archive_name:
-              raise SystemExit("Package archive name is missing.")
-
-          archive = Path(archive_name)
-          if archive.is_absolute() or ".." in archive.parts:
-              raise SystemExit("Unsafe package archive path.")
-
-          if not re.fullmatch(
-              r"katha-lok-[\w-]+-" + re.escape(mode) + r"-output\.zip",
-              archive.name,
-              flags=re.UNICODE,
-          ):
-              raise SystemExit("ZIP filename must contain story title and FORMAT.")
-
-          if not archive.is_file() or archive.stat().st_size == 0:
-              raise SystemExit("Story ZIP is missing or empty.")
+          if manifest.get("part_videos_only") is not True:
+              raise SystemExit("Package must contain Part videos only.")
+          if manifest.get("combined_video_included") is not False:
+              raise SystemExit("Combined video must not be included.")
+          if manifest.get("format_alias_included") is not False:
+              raise SystemExit("Format alias must not be included.")
 
           digest = hashlib.sha256()
           with archive.open("rb") as handle:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
 
-          if manifest.get("archive_sha256") != digest.hexdigest():
+          if digest.hexdigest() != manifest.get("archive_sha256"):
               raise SystemExit("Archive SHA256 mismatch.")
-
-          if manifest.get("archive_bytes") != archive.stat().st_size:
+          if archive.stat().st_size != manifest.get("archive_bytes"):
               raise SystemExit("Archive byte count mismatch.")
-
           if manifest.get("zip_integrity") != "valid":
-              raise SystemExit("ZIP integrity is invalid.")
-
+              raise SystemExit("Package ZIP integrity is not valid.")
           if manifest.get("manifest_zip_consistency") != "valid":
-              raise SystemExit("ZIP and manifest consistency failed.")
-
-          if manifest.get("part_videos_only") is not True:
-              raise SystemExit("Package must contain Part videos only.")
-
-          if manifest.get("combined_video_included") is not False:
-              raise SystemExit("Combined video is forbidden.")
-
-          if manifest.get("format_alias_included") is not False:
-              raise SystemExit("Format-alias video is forbidden.")
-
-          if manifest.get("parts") != manifest.get("configured_parts"):
-              raise SystemExit("Package actual PARTS mismatch.")
-
-          expected_parts = int(manifest["parts"])
-          if expected_parts < 1:
-              raise SystemExit("Package PARTS must be positive.")
+              raise SystemExit("Package manifest/ZIP consistency is not valid.")
 
           with zipfile.ZipFile(archive, "r") as zf:
               bad = zf.testzip()
@@ -716,43 +708,46 @@ jobs:
               if not names or len(names) != len(set(names)):
                   raise SystemExit("ZIP is empty or contains duplicate members.")
 
+              prefix = root + "/"
+              if any(not name.startswith(prefix) for name in names):
+                  raise SystemExit("Every ZIP member must be inside the story root.")
+
+              embedded_path = f"{root}/package_manifest.json"
+              render_path = f"{root}/scene_renders/render_manifest.json"
+              if embedded_path not in names or render_path not in names:
+                  raise SystemExit("Embedded package/render manifest is missing.")
+
+              embedded = json.loads(zf.read(embedded_path).decode("utf-8"))
+              if embedded.get("status") != "completed":
+                  raise SystemExit("Embedded package manifest is incomplete.")
+              if embedded.get("format") != mode or embedded.get("parts") != parts:
+                  raise SystemExit("Embedded package FORMAT/PARTS mismatch.")
+              if embedded.get("story_slug") != slug or embedded.get("package_root") != root:
+                  raise SystemExit("Embedded package story identity mismatch.")
+
               videos = {
                   name for name in names
-                  if name.lower().endswith((".mp4", ".mov", ".mkv", ".webm"))
+                  if PurePosixPath(name).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
               }
-
-              expected_videos = {
-                  f"output/parts/part_{number:02d}.mp4"
-                  for number in range(1, expected_parts + 1)
+              expected = {
+                  f"{root}/parts/{slug}-part-{number:02d}.mp4"
+                  for number in range(1, parts + 1)
               }
-
-              if videos != expected_videos:
+              if videos != expected:
                   raise SystemExit(
-                      f"Unexpected Part videos: {sorted(videos)}"
+                      f"Story Part videos mismatch: expected={sorted(expected)}, found={sorted(videos)}"
                   )
 
-              forbidden = {
-                  "output/katha_lok_ai_final.mp4",
-                  "output/katha_lok_ai_short.mp4",
-                  "output/katha_lok_ai_full.mp4",
-              }
+              if f"{root}/{slug}-thumbnail.jpg" not in names:
+                  raise SystemExit("Story-named thumbnail is missing.")
 
-              if forbidden.intersection(names):
-                  raise SystemExit("Generic or combined video found in ZIP.")
-
-          Path("output/package_archive_name.txt").write_text(
-              archive.name + "\n",
-              encoding="utf-8",
-          )
-
+          print("PACKAGE VERIFIED")
           print("FORMAT:", mode)
-          print("ACTUAL PARTS:", expected_parts)
-          print("STORY ZIP:", archive.name)
-          print("ZIP integrity: valid")
+          print("STORY:", manifest.get("story_title"))
+          print("PARTS:", parts)
+          print("ZIP:", archive.name)
           PY
 
-          ARCHIVE="$(cat output/package_archive_name.txt)"
-          test -s "$ARCHIVE"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           ls -lh "$ARCHIVE"
 
@@ -761,97 +756,106 @@ jobs:
         run: |
           set -euo pipefail
 
-          ARCHIVE="$(cat output/package_archive_name.txt)"
+          ARCHIVE="${{ steps.package.outputs.archive }}"
+          test -n "$ARCHIVE"
           test -s "$ARCHIVE"
+          test -s output/package_manifest.json
 
           python - "$ARCHIVE" <<'PY'
           import hashlib
           import json
-          import re
           import sys
           import zipfile
-          from pathlib import Path
+          from pathlib import Path, PurePosixPath
 
           archive = Path(sys.argv[1])
-          manifest_path = Path("output/package_manifest.json")
+          manifest = json.loads(
+              Path("output/package_manifest.json").read_text(encoding="utf-8")
+          )
 
-          if not archive.is_file() or archive.stat().st_size == 0:
-              raise SystemExit("Final story ZIP is missing.")
-
-          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          slug = manifest.get("story_slug")
           mode = manifest.get("format")
+          root = manifest.get("package_root")
+          parts = manifest.get("parts")
 
-          if manifest.get("status") != "completed":
-              raise SystemExit("Package status is not completed.")
-
-          if mode not in {"short", "full"}:
-              raise SystemExit("Invalid package FORMAT.")
-
+          if not isinstance(slug, str) or not slug:
+              raise SystemExit("Missing story slug.")
+          if mode not in {"short", "full"} or root != f"{slug}-{mode}":
+              raise SystemExit("Invalid package root/FORMAT.")
+          if archive.name != f"katha-lok-{slug}-{mode}-output.zip":
+              raise SystemExit("Final ZIP name does not match story and FORMAT.")
           if archive.name != manifest.get("archive"):
-              raise SystemExit("ZIP filename and manifest disagree.")
-
-          if not re.fullmatch(
-              r"katha-lok-[\w-]+-" + re.escape(mode) + r"-output\.zip",
-              archive.name,
-              flags=re.UNICODE,
-          ):
-              raise SystemExit("ZIP name does not match story and FORMAT.")
-
-          if manifest.get("parts") != manifest.get("configured_parts"):
+              raise SystemExit("Final ZIP and manifest archive names disagree.")
+          if not isinstance(parts, int) or parts < 1:
+              raise SystemExit("Invalid actual PARTS.")
+          if parts != manifest.get("configured_parts"):
               raise SystemExit("Actual PARTS mismatch.")
-
-          if manifest.get("zip_integrity") != "valid":
-              raise SystemExit("ZIP integrity is invalid.")
-
-          if manifest.get("manifest_zip_consistency") != "valid":
-              raise SystemExit("ZIP/manifest consistency failed.")
-
+          if manifest.get("status") != "completed":
+              raise SystemExit("Package is incomplete.")
           if manifest.get("part_videos_only") is not True:
-              raise SystemExit("Package is not Part-video-only.")
-
+              raise SystemExit("Part-only package guarantee failed.")
           if manifest.get("combined_video_included") is not False:
               raise SystemExit("Combined video is forbidden.")
-
           if manifest.get("format_alias_included") is not False:
               raise SystemExit("Format alias is forbidden.")
+          if manifest.get("zip_integrity") != "valid":
+              raise SystemExit("ZIP integrity is invalid.")
+          if manifest.get("manifest_zip_consistency") != "valid":
+              raise SystemExit("Manifest/ZIP consistency is invalid.")
 
           digest = hashlib.sha256()
           with archive.open("rb") as handle:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
-
           if digest.hexdigest() != manifest.get("archive_sha256"):
               raise SystemExit("Final ZIP SHA256 mismatch.")
-
           if archive.stat().st_size != manifest.get("archive_bytes"):
-              raise SystemExit("Final ZIP byte count mismatch.")
+              raise SystemExit("Final ZIP size mismatch.")
 
           with zipfile.ZipFile(archive, "r") as zf:
               bad = zf.testzip()
               if bad:
                   raise SystemExit(f"Corrupt ZIP member: {bad}")
-
               names = zf.namelist()
               if not names or len(names) != len(set(names)):
-                  raise SystemExit("ZIP is empty or contains duplicate members.")
+                  raise SystemExit("ZIP is empty or contains duplicate entries.")
+              if any(not name.startswith(root + "/") for name in names):
+                  raise SystemExit("ZIP contains a file outside the story root.")
+
+              embedded_name = f"{root}/package_manifest.json"
+              render_name = f"{root}/scene_renders/render_manifest.json"
+              if embedded_name not in names or render_name not in names:
+                  raise SystemExit("Required embedded manifests are missing.")
+
+              embedded = json.loads(zf.read(embedded_name).decode("utf-8"))
+              if (
+                  embedded.get("status") != "completed"
+                  or embedded.get("format") != mode
+                  or embedded.get("parts") != parts
+                  or embedded.get("story_slug") != slug
+                  or embedded.get("package_root") != root
+              ):
+                  raise SystemExit("Embedded manifest identity is inconsistent.")
 
               videos = {
                   name for name in names
-                  if name.lower().endswith((".mp4", ".mov", ".mkv", ".webm"))
+                  if PurePosixPath(name).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
               }
-
               expected = {
-                  f"output/parts/part_{number:02d}.mp4"
-                  for number in range(1, int(manifest["parts"]) + 1)
+                  f"{root}/parts/{slug}-part-{number:02d}.mp4"
+                  for number in range(1, parts + 1)
               }
-
               if videos != expected:
-                  raise SystemExit("ZIP contains missing or extra Part videos.")
+                  raise SystemExit("ZIP contains missing, extra or wrongly named Part videos.")
 
-          print("Final ZIP integrity: valid")
+              if f"{root}/{slug}-thumbnail.jpg" not in names:
+                  raise SystemExit("Story-named thumbnail is missing.")
+
+          print("FINAL PACKAGE VERIFIED")
           print("FORMAT:", mode)
-          print("ACTUAL PARTS:", manifest["parts"])
-          print("STORY ZIP:", archive.name)
+          print("PARTS:", parts)
+          print("STORY:", manifest.get("story_title"))
+          print("ZIP:", archive.name)
           PY
 
       - name: Upload final story-named ZIP only
