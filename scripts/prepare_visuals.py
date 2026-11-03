@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Validate generated images and prepare measured, role-aware Photo Motion jobs."""
+"""Strictly validate image, story, character and measured-audio records
+before creating resumable Photo Motion jobs.
+"""
 
 from __future__ import annotations
 
@@ -18,27 +20,23 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from input_config import load_and_validate, get_format, get_parts, get_scenes
 
 OUTPUT = ROOT / "output"
-VISUALS_DIR = OUTPUT / "visuals"
-CHECKPOINT_DIR = OUTPUT / "checkpoints"
+VISUALS = OUTPUT / "visuals"
+CHECKPOINTS = OUTPUT / "checkpoints"
 
 SCENES_FILE = OUTPUT / "scenes" / "scenes.json"
-CHARACTER_BIBLE_FILE = OUTPUT / "story" / "character_bible.json"
+BIBLE_FILE = OUTPUT / "story" / "character_bible.json"
 NARRATION_FILE = OUTPUT / "narration" / "narration.json"
 
-VISUAL_JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
-IMAGE_MANIFEST_FILE = VISUALS_DIR / "image_manifest.json"
-GENERATION_MANIFEST_FILE = VISUALS_DIR / "image_generation_manifest.json"
+VISUAL_JOBS_FILE = VISUALS / "visual_jobs.json"
+VISUAL_JOBS_MANIFEST = VISUALS / "visual_jobs_manifest.json"
+IMAGE_MANIFEST = VISUALS / "image_manifest.json"
+GENERATION_MANIFEST = VISUALS / "image_generation_manifest.json"
 
-PHOTO_MOTION_JOBS_FILE = VISUALS_DIR / "photo_motion_jobs.json"
-PHOTO_MOTION_MANIFEST_FILE = VISUALS_DIR / "photo_motion_manifest.json"
-CHECKPOINT_FILE = CHECKPOINT_DIR / "prepare_visuals_progress.json"
+PHOTO_JOBS_FILE = VISUALS / "photo_motion_jobs.json"
+PHOTO_MANIFEST_FILE = VISUALS / "photo_motion_manifest.json"
+CHECKPOINT_FILE = CHECKPOINTS / "prepare_visuals_progress.json"
 
-VERSION = "prepare-visuals-v12-measured-role-safe-sha-verified"
-MIN_IMAGE_BYTES = 1000
-MIN_IMAGE_DIMENSION = 256
-MAX_IMAGE_DIMENSION = 4096
-MIN_DURATION = 0.5
-MAX_DURATION = 3600.0
+VERSION = "prepare-visuals-v13-strict-measured-audio-role-integrity"
 
 ROLE_ORDER = {
     "hook": 0,
@@ -46,12 +44,18 @@ ROLE_ORDER = {
     "suspense": 2,
     "resolution": 3,
 }
-ALLOWED_ROLES = set(ROLE_ORDER)
 
 IMAGE_SIZES = {
     "short": (720, 1280),
     "full": (1280, 720),
 }
+
+MIN_IMAGE_BYTES = 1000
+MIN_AUDIO_BYTES = 100
+MIN_IMAGE_DIMENSION = 256
+MAX_IMAGE_DIMENSION = 4096
+MIN_DURATION = 0.5
+MAX_DURATION = 3600.0
 
 
 def log(*values: Any) -> None:
@@ -79,13 +83,17 @@ def as_bool(value: Any, default: bool = False) -> bool:
 
 
 def positive_int(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise RuntimeError(f"{label}: boolean is not a valid number.")
+
     try:
         number = int(value)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"{label}: invalid number {value!r}") from exc
+        raise RuntimeError(f"{label}: invalid number {value!r}.") from exc
 
     if number < 1:
         raise RuntimeError(f"{label}: value must be at least 1.")
+
     return number
 
 
@@ -102,9 +110,11 @@ def stable_hash(value: Any) -> str:
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
+
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
+
     return digest.hexdigest()
 
 
@@ -113,7 +123,9 @@ def read_json(path: Path, required: bool = False) -> Any:
 
     if not path.is_file():
         if required:
-            raise RuntimeError(f"Required file missing: {path.relative_to(ROOT)}")
+            raise RuntimeError(
+                f"Required file missing: {path.relative_to(ROOT)}"
+            )
         return None
 
     try:
@@ -140,56 +152,24 @@ def atomic_json(path: Path, data: Any) -> None:
 
 
 def safe_project_path(value: Any, label: str) -> Path:
-    text = clean(value)
-    if not text:
-        raise RuntimeError(f"{label}: image path missing.")
+    raw = clean(value)
 
-    path = Path(text)
+    if not raw:
+        raise RuntimeError(f"{label}: file path is missing.")
+
+    path = Path(raw)
+
     if not path.is_absolute():
         path = ROOT / path
 
     path = path.resolve()
+
     if not path.is_relative_to(ROOT.resolve()):
-        raise RuntimeError(f"{label}: path outside project directory is forbidden.")
+        raise RuntimeError(
+            f"{label}: path outside the project directory is forbidden."
+        )
 
     return path
-
-
-def validate_image(path: Path, label: str) -> dict:
-    if not path.is_file():
-        raise RuntimeError(f"{label}: image missing: {path}")
-
-    if path.stat().st_size < MIN_IMAGE_BYTES:
-        raise RuntimeError(f"{label}: image is too small or incomplete.")
-
-    try:
-        from PIL import Image
-
-        with Image.open(path) as image:
-            image.verify()
-
-        with Image.open(path) as image:
-            width, height = image.size
-            image_format = image.format
-
-        if not (
-            MIN_IMAGE_DIMENSION <= width <= MAX_IMAGE_DIMENSION
-            and MIN_IMAGE_DIMENSION <= height <= MAX_IMAGE_DIMENSION
-        ):
-            raise RuntimeError(f"Invalid image dimensions: {width}x{height}")
-
-        if image_format not in {"PNG", "JPEG", "WEBP"}:
-            raise RuntimeError(f"Unsupported image format: {image_format}")
-
-        return {
-            "width": width,
-            "height": height,
-            "format": image_format,
-            "size_bytes": path.stat().st_size,
-            "sha256": sha256_file(path),
-        }
-    except Exception as exc:
-        raise RuntimeError(f"{label}: image validation failed: {exc}") from exc
 
 
 def normalize_role(row: dict) -> str:
@@ -212,10 +192,12 @@ def normalize_role(row: dict) -> str:
     }
 
     role = aliases.get(raw, raw)
-    if role not in ALLOWED_ROLES:
+
+    if role not in ROLE_ORDER:
         raise RuntimeError(
-            f"Unsupported scene role {raw!r} for {row.get('scene_id')!r}."
+            f"Unsupported role {raw!r} for scene {row.get('scene_id')!r}."
         )
+
     return role
 
 
@@ -223,7 +205,7 @@ def normalize_scene_id(
     row: dict,
     part: int,
     role: str,
-    source_scene_number: int | None,
+    scene_number: int | None,
 ) -> str:
     scene_id = clean(
         row.get("scene_id")
@@ -231,112 +213,188 @@ def normalize_scene_id(
         or row.get("source_scene_id")
     )
 
+    expected = (
+        f"part_{part:02d}_scene_{scene_number:02d}"
+        if role == "main"
+        else f"part_{part:02d}_{role}"
+    )
+
     if not scene_id:
-        if role == "main":
-            scene_id = f"part_{part:02d}_scene_{source_scene_number:02d}"
-        else:
-            scene_id = f"part_{part:02d}_{role}"
+        scene_id = expected
 
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", scene_id):
-        raise RuntimeError(f"Invalid scene ID: {scene_id!r}")
+        raise RuntimeError(f"Invalid scene ID: {scene_id!r}.")
+
+    if scene_id != expected:
+        raise RuntimeError(
+            f"Scene ID mismatch: expected {expected}, received {scene_id}."
+        )
 
     return scene_id
 
 
-def resolve_part_numbers(rows: list[dict], expected_parts: int) -> list[int]:
-    found = sorted({
-        positive_int(row.get("part"), "scene part")
-        for row in rows
-        if isinstance(row, dict)
-    })
+def validate_image(path: Path, scene_id: str) -> dict:
+    if not path.is_file():
+        raise RuntimeError(f"{scene_id}: image file missing: {path}")
 
-    if len(found) != expected_parts:
+    if path.stat().st_size < MIN_IMAGE_BYTES:
+        raise RuntimeError(f"{scene_id}: image is too small or incomplete.")
+
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+
+        with Image.open(path) as image:
+            width, height = image.size
+            image_format = (image.format or "").upper()
+
+        if not (
+            MIN_IMAGE_DIMENSION <= width <= MAX_IMAGE_DIMENSION
+            and MIN_IMAGE_DIMENSION <= height <= MAX_IMAGE_DIMENSION
+        ):
+            raise RuntimeError(
+                f"Invalid image dimensions: {width}x{height}."
+            )
+
+        if image_format not in {"PNG", "JPEG", "WEBP"}:
+            raise RuntimeError(
+                f"Unsupported image format: {image_format}."
+            )
+
+    except Exception as exc:
         raise RuntimeError(
-            f"Selected PARTS mismatch: expected {expected_parts}, "
-            f"found part numbers {found}."
-        )
+            f"{scene_id}: image integrity validation failed: {exc}"
+        ) from exc
 
-    if found != list(range(found[0], found[0] + expected_parts)):
+    return {
+        "width": width,
+        "height": height,
+        "format": image_format,
+        "size_bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+    }
+
+
+def validate_image_dimensions(
+    image_info: dict,
+    format_name: str,
+    scene_id: str,
+) -> None:
+    expected = IMAGE_SIZES[format_name]
+    actual = (image_info["width"], image_info["height"])
+
+    if actual != expected:
         raise RuntimeError(
-            f"Part numbering must be continuous: {found}."
+            f"{scene_id}: {format_name.upper()} image must be "
+            f"{expected[0]}x{expected[1]}, found "
+            f"{actual[0]}x{actual[1]}."
         )
-
-    return found
 
 
 def normalize_source_scenes(
-    document: dict,
+    document: Any,
     expected_parts: int,
     scenes_per_part: int,
 ) -> tuple[list[dict], list[int]]:
     if not isinstance(document, dict):
-        raise RuntimeError("scenes.json root must be a JSON object.")
+        raise RuntimeError("scenes.json root must be an object.")
 
     rows = document.get("scenes")
-    if not isinstance(rows, list) or not rows:
-        raise RuntimeError("scenes.json has no scenes array.")
 
-    part_numbers = resolve_part_numbers(rows, expected_parts)
-    part_set = set(part_numbers)
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("scenes.json has no scenes list.")
 
     prepared = []
     seen_ids = set()
     seen_main = set()
+    part_numbers = set()
 
-    counts = {
-        role: {part: 0 for part in part_numbers}
-        for role in ROLE_ORDER
-    }
+    counts: dict[int, dict[str, int]] = {}
 
     for index, original in enumerate(rows, 1):
         if not isinstance(original, dict):
             raise RuntimeError(f"Scene record #{index} is not an object.")
 
         part = positive_int(original.get("part"), f"Scene #{index} part")
-        if part not in part_set:
-            raise RuntimeError(
-                f"Scene #{index}: part {part} is outside selected parts {part_numbers}."
-            )
+        part_numbers.add(part)
 
         role = normalize_role(original)
-        raw_scene = original.get("scene", original.get("local_scene"))
+        raw_scene = original.get(
+            "scene",
+            original.get("local_scene"),
+        )
 
         if role == "main":
-            source_number = positive_int(raw_scene, f"Part {part} main scene")
+            scene_number = positive_int(
+                raw_scene,
+                f"Part {part} main scene number",
+            )
 
-            if source_number > scenes_per_part:
+            if scene_number > scenes_per_part:
                 raise RuntimeError(
-                    f"Part {part}: main scene {source_number} exceeds "
+                    f"Part {part}: scene {scene_number} exceeds "
                     f"SCENES={scenes_per_part}."
                 )
 
-            pair = (part, source_number)
+            pair = (part, scene_number)
+
             if pair in seen_main:
                 raise RuntimeError(f"Duplicate main scene: {pair}.")
+
             seen_main.add(pair)
+
         else:
-            source_number = None
+            scene_number = None
+
             if raw_scene not in (None, ""):
                 raise RuntimeError(
-                    f"Extra scene {original.get('scene_id')} must not "
-                    "use a main scene number."
+                    f"{original.get('scene_id')}: extra role {role} "
+                    "must not use a main scene number."
                 )
 
-        scene_id = normalize_scene_id(original, part, role, source_number)
+        scene_id = normalize_scene_id(
+            original,
+            part,
+            role,
+            scene_number,
+        )
+
         if scene_id in seen_ids:
-            raise RuntimeError(f"Duplicate scene_id: {scene_id}")
+            raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
 
         seen_ids.add(scene_id)
-        counts[role][part] += 1
+
+        counts.setdefault(
+            part,
+            {name: 0 for name in ROLE_ORDER},
+        )
+        counts[part][role] += 1
 
         prepared.append({
             **dict(original),
             "part": part,
             "role": role,
             "scene_id": scene_id,
-            "source_scene_number": source_number,
+            "source_scene_number": scene_number,
             "is_extra_scene": role != "main",
         })
+
+    part_numbers = sorted(part_numbers)
+
+    if len(part_numbers) != expected_parts:
+        raise RuntimeError(
+            f"Selected PARTS mismatch: expected {expected_parts}, "
+            f"found {part_numbers}."
+        )
+
+    if part_numbers != list(
+        range(part_numbers[0], part_numbers[0] + expected_parts)
+    ):
+        raise RuntimeError(
+            f"Part numbering must be continuous: {part_numbers}."
+        )
 
     expected_main = {
         (part, scene)
@@ -349,35 +407,42 @@ def normalize_source_scenes(
 
     if missing or extra:
         raise RuntimeError(
-            f"Main scene mapping mismatch. Missing={missing[:20]}, extra={extra[:20]}."
+            f"Main scene mapping mismatch. "
+            f"Missing={missing[:20]}, extra={extra[:20]}."
         )
 
     for position, part in enumerate(part_numbers):
-        if counts["hook"][part] != 1:
-            raise RuntimeError(f"Part {part} requires exactly one Hook.")
+        role_counts = counts.get(part, {})
 
-        if counts["main"][part] != scenes_per_part:
+        if role_counts.get("hook", 0) != 1:
+            raise RuntimeError(
+                f"Part {part} requires exactly one Hook scene."
+            )
+
+        if role_counts.get("main", 0) != scenes_per_part:
             raise RuntimeError(
                 f"Part {part} requires exactly {scenes_per_part} Main scenes."
             )
 
         if position < len(part_numbers) - 1:
-            if counts["suspense"][part] != 1:
+            if role_counts.get("suspense", 0) != 1:
                 raise RuntimeError(
                     f"Non-final part {part} requires exactly one Suspense."
                 )
-            if counts["resolution"][part]:
+
+            if role_counts.get("resolution", 0) != 0:
                 raise RuntimeError(
                     f"Non-final part {part} cannot contain Resolution."
                 )
         else:
-            if counts["resolution"][part] != 1:
+            if role_counts.get("resolution", 0) != 1:
                 raise RuntimeError(
                     f"Final part {part} requires exactly one Resolution."
                 )
-            if counts["suspense"][part]:
+
+            if role_counts.get("suspense", 0) != 0:
                 raise RuntimeError(
-                    f"Final part {part} cannot contain Suspense."
+                    "Final part cannot contain Suspense."
                 )
 
     prepared.sort(
@@ -392,37 +457,27 @@ def normalize_source_scenes(
     return prepared, part_numbers
 
 
-def extract_job_rows(document: Any) -> tuple[list[dict], dict]:
-    if isinstance(document, list):
-        return document, {}
-
-    if not isinstance(document, dict):
-        raise RuntimeError("visual_jobs.json root must be an object or list.")
-
-    rows = (
-        document.get("jobs")
-        or document.get("visual_jobs")
-        or document.get("scenes")
-    )
-
-    if not isinstance(rows, list) or not rows:
-        raise RuntimeError("visual_jobs.json has no valid jobs list.")
-
-    return rows, document
-
-
-def extract_manifest_rows(document: Any, label: str) -> list[dict]:
+def extract_rows(document: Any, label: str) -> tuple[list[dict], dict]:
     if isinstance(document, list):
         rows = document
+        metadata = {}
     elif isinstance(document, dict):
-        rows = document.get("scenes", [])
+        rows = (
+            document.get("jobs")
+            or document.get("visual_jobs")
+            or document.get("scenes")
+        )
+        metadata = document
     else:
-        rows = []
+        raise RuntimeError(f"{label}: unsupported JSON structure.")
 
-    if not isinstance(rows, list):
-        raise RuntimeError(f"{label} scenes must be a list.")
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError(f"{label}: records list is missing or empty.")
 
-    return [row for row in rows if isinstance(row, dict)]
+    if any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError(f"{label}: every record must be an object.")
+
+    return rows, metadata
 
 
 def index_by_scene_id(rows: list[dict], label: str) -> dict[str, dict]:
@@ -430,29 +485,34 @@ def index_by_scene_id(rows: list[dict], label: str) -> dict[str, dict]:
 
     for index, row in enumerate(rows, 1):
         scene_id = clean(row.get("scene_id"))
+
         if not scene_id:
-            raise RuntimeError(f"{label} record #{index} has no scene_id.")
+            raise RuntimeError(
+                f"{label} record #{index} has no scene_id."
+            )
 
         if scene_id in result:
-            raise RuntimeError(f"{label} has duplicate scene_id: {scene_id}")
+            raise RuntimeError(
+                f"{label} contains duplicate scene ID: {scene_id}."
+            )
 
         result[scene_id] = row
 
     return result
 
 
-def verify_job_source_mapping(
+def verify_visual_jobs(
     source_scenes: list[dict],
-    job_rows: list[dict],
+    visual_rows: list[dict],
 ) -> dict[str, dict]:
-    jobs = index_by_scene_id(job_rows, "visual_jobs")
+    jobs = index_by_scene_id(visual_rows, "visual_jobs")
 
     expected = {row["scene_id"] for row in source_scenes}
     actual = set(jobs)
 
     if expected != actual:
         raise RuntimeError(
-            "Visual job mapping mismatch. "
+            "Visual jobs do not match scenes.json. "
             f"Missing={sorted(expected - actual)[:20]}, "
             f"extra={sorted(actual - expected)[:20]}."
         )
@@ -461,131 +521,175 @@ def verify_job_source_mapping(
         scene_id = source["scene_id"]
         job = jobs[scene_id]
 
-        try:
-            part = int(job.get("part"))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"{scene_id}: visual job part invalid.") from exc
-
-        if part != source["part"]:
+        if positive_int(job.get("part"), scene_id + " visual part") != source["part"]:
             raise RuntimeError(f"{scene_id}: visual job part mismatch.")
 
         if normalize_role(job) != source["role"]:
             raise RuntimeError(f"{scene_id}: visual job role mismatch.")
 
         if source["role"] == "main":
-            number = job.get(
+            value = job.get(
                 "source_scene_number",
                 job.get("source_local_scene", job.get("scene")),
             )
-            try:
-                number = int(number)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    f"{scene_id}: source main scene number missing."
-                ) from exc
 
-            if number != source["source_scene_number"]:
-                raise RuntimeError(f"{scene_id}: main scene number changed.")
+            if positive_int(value, scene_id + " visual scene number") != (
+                source["source_scene_number"]
+            ):
+                raise RuntimeError(
+                    f"{scene_id}: visual job scene number mismatch."
+                )
+
+        if not clean(job.get("prompt") or job.get("image_prompt")):
+            raise RuntimeError(f"{scene_id}: visual prompt is missing.")
+
+        if not clean(job.get("source_scene_signature")):
+            raise RuntimeError(
+                f"{scene_id}: source scene signature is missing."
+            )
+
+        if not clean(job.get("prompt_signature")):
+            raise RuntimeError(
+                f"{scene_id}: prompt signature is missing."
+            )
 
     return jobs
 
 
-def normalize_duration_value(value: Any) -> float | None:
-    if value is None or clean(value).lower() in {
-        "", "auto", "dynamic", "variable", "unknown"
-    }:
-        return None
-
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-
-    if not math.isfinite(number) or not MIN_DURATION <= number <= MAX_DURATION:
-        return None
-
-    return round(number, 4)
-
-
-def narration_record_map(document: Any) -> dict[str, dict]:
+def validate_manifest_status(document: Any, label: str) -> None:
     if not isinstance(document, dict):
-        return {}
+        raise RuntimeError(f"{label}: manifest root must be an object.")
 
-    result = {}
+    status = clean(document.get("status")).lower()
 
-    for field in ("scenes", "extra_scenes"):
-        rows = document.get(field, [])
-        if not isinstance(rows, list):
-            raise RuntimeError(f"narration.json {field} must be a list.")
-
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-
-            scene_id = clean(row.get("scene_id"))
-            if not scene_id:
-                continue
-
-            if scene_id in result:
-                raise RuntimeError(f"Duplicate narration scene_id: {scene_id}")
-
-            result[scene_id] = row
-
-    return result
+    if status not in {"completed", "complete", "success"}:
+        raise RuntimeError(
+            f"{label}: manifest is not completed "
+            f"(status={status or 'missing'})."
+        )
 
 
-def measured_audio_record(
-    scene_id: str,
-    narration_row: dict | None,
-) -> dict | None:
-    if not isinstance(narration_row, dict):
-        return None
-
-    if clean(narration_row.get("status")).lower() != "completed":
-        return None
-
-    duration = None
-    for key in (
-        "actual_audio_duration_seconds",
-        "audio_duration",
-        "duration",
-    ):
-        duration = normalize_duration_value(narration_row.get(key))
-        if duration is not None:
-            break
-
-    audio_path_value = (
-        narration_row.get("audio_path")
-        or narration_row.get("audio_file")
-        or narration_row.get("audio")
-        or narration_row.get("output")
+def validate_manifest_count(
+    document: dict,
+    expected: int,
+    label: str,
+) -> None:
+    values = (
+        document.get("images_required"),
+        document.get("total_scenes"),
+        document.get("total_jobs"),
     )
 
-    if duration is None or not audio_path_value:
-        return None
+    declared = []
 
-    audio_path = safe_project_path(audio_path_value, f"{scene_id} narration audio")
-    if not audio_path.is_file():
-        return None
+    for value in values:
+        if value is None:
+            continue
 
-    expected_hash = clean(
-        narration_row.get("audio_sha256")
-        or narration_row.get("audio_hash")
-        or narration_row.get("sha256")
+        try:
+            declared.append(int(value))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"{label}: invalid record count {value!r}."
+            ) from exc
+
+    if declared and any(value != expected for value in declared):
+        raise RuntimeError(
+            f"{label}: expected {expected} records, "
+            f"manifest declares {declared}."
+        )
+
+
+def manifest_rows(document: Any, label: str) -> list[dict]:
+    if isinstance(document, list):
+        rows = document
+    elif isinstance(document, dict):
+        rows = document.get("scenes")
+    else:
+        rows = None
+
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError(f"{label}: scenes list is missing or empty.")
+
+    if any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError(f"{label}: invalid scene record.")
+
+    return rows
+
+
+def validate_image_manifests(
+    image_document: dict,
+    generation_document: dict,
+    expected_ids: set[str],
+) -> dict[str, dict]:
+    image_rows = manifest_rows(image_document, "image_manifest")
+    generation_rows = manifest_rows(
+        generation_document,
+        "image_generation_manifest",
     )
 
-    actual_hash = sha256_file(audio_path)
-    if expected_hash and actual_hash != expected_hash:
-        raise RuntimeError(f"{scene_id}: narration audio SHA256 mismatch.")
+    image_by_id = index_by_scene_id(image_rows, "image_manifest")
+    generation_by_id = index_by_scene_id(
+        generation_rows,
+        "image_generation_manifest",
+    )
 
-    return {
-        "duration": duration,
-        "audio_path": audio_path.relative_to(ROOT).as_posix(),
-        "audio_sha256": actual_hash,
-        "duration_source": "ffprobe_measured",
-        "audio_provider": narration_row.get("tts_provider") or narration_row.get("provider"),
-        "audio_model": narration_row.get("tts_model") or narration_row.get("model"),
-    }
+    if set(image_by_id) != expected_ids:
+        raise RuntimeError(
+            "image_manifest scene IDs do not match scenes.json. "
+            f"Missing={sorted(expected_ids - set(image_by_id))[:20]}, "
+            f"extra={sorted(set(image_by_id) - expected_ids)[:20]}."
+        )
+
+    if set(generation_by_id) != expected_ids:
+        raise RuntimeError(
+            "image_generation_manifest scene IDs do not match scenes.json. "
+            f"Missing={sorted(expected_ids - set(generation_by_id))[:20]}, "
+            f"extra={sorted(set(generation_by_id) - expected_ids)[:20]}."
+        )
+
+    for scene_id in expected_ids:
+        image_row = image_by_id[scene_id]
+        generation_row = generation_by_id[scene_id]
+
+        image_hash = clean(image_row.get("image_sha256")).lower()
+        generation_hash = clean(
+            generation_row.get("image_sha256")
+        ).lower()
+
+        if not re.fullmatch(r"[a-f0-9]{64}", image_hash):
+            raise RuntimeError(
+                f"{scene_id}: image manifest SHA256 is invalid."
+            )
+
+        if image_hash != generation_hash:
+            raise RuntimeError(
+                f"{scene_id}: image manifest and generation manifest "
+                "SHA256 values do not match."
+            )
+
+        for row, label in (
+            (image_row, "image_manifest"),
+            (generation_row, "image_generation_manifest"),
+        ):
+            status = clean(row.get("status")).lower()
+
+            if status not in {"generated", "existing", "completed"}:
+                raise RuntimeError(
+                    f"{scene_id}: {label} status is not ready: {status!r}."
+                )
+
+            declared_prompt = clean(row.get("prompt_sha256"))
+
+            if declared_prompt and not re.fullmatch(
+                r"[a-fA-F0-9]{64}",
+                declared_prompt,
+            ):
+                raise RuntimeError(
+                    f"{scene_id}: invalid prompt SHA256 in {label}."
+                )
+
+    return image_by_id
 
 
 def validate_character_bible(config: dict) -> dict:
@@ -599,25 +703,28 @@ def validate_character_bible(config: dict) -> dict:
             "world": {},
         }
 
-    document = read_json(CHARACTER_BIBLE_FILE, required=True)
+    document = read_json(BIBLE_FILE, required=True)
 
     if not isinstance(document, dict):
-        raise RuntimeError("Character Bible root must be a JSON object.")
+        raise RuntimeError("Character Bible root must be an object.")
 
-    status = clean(document.get("status")).lower()
-    if status != "completed":
+    if clean(document.get("status")).lower() != "completed":
         raise RuntimeError(
-            f"Character Bible is not completed: {status or 'missing'}."
+            "Character Bible must have status=completed."
         )
 
-    characters = document.get("characters", [])
-    scene_map = document.get("scene_character_map", [])
+    characters = document.get("characters")
+    scene_map = document.get("scene_character_map")
     world = document.get("world", {})
 
     if not isinstance(characters, list):
         raise RuntimeError("Character Bible characters must be a list.")
+
     if not isinstance(scene_map, list):
-        raise RuntimeError("Character Bible scene_character_map must be a list.")
+        raise RuntimeError(
+            "Character Bible scene_character_map must be a list."
+        )
+
     if not isinstance(world, dict):
         raise RuntimeError("Character Bible world must be an object.")
 
@@ -626,7 +733,9 @@ def validate_character_bible(config: dict) -> dict:
 
     for index, character in enumerate(characters, 1):
         if not isinstance(character, dict):
-            raise RuntimeError(f"Invalid Character Bible character #{index}.")
+            raise RuntimeError(
+                f"Invalid Character Bible character #{index}."
+            )
 
         character_id = clean(
             character.get("id") or character.get("character_id")
@@ -635,192 +744,98 @@ def validate_character_bible(config: dict) -> dict:
 
         if not character_id or not name:
             raise RuntimeError(
-                f"Character Bible record #{index} needs ID and name."
+                f"Character Bible character #{index} needs ID and name."
             )
 
         if character_id.casefold() in known_ids:
-            raise RuntimeError(f"Duplicate Character ID: {character_id}")
+            raise RuntimeError(
+                f"Duplicate Character ID: {character_id}."
+            )
+
         if name.casefold() in known_names:
-            raise RuntimeError(f"Duplicate Character name: {name}")
+            raise RuntimeError(
+                f"Duplicate Character name: {name}."
+            )
 
         known_ids.add(character_id.casefold())
         known_names.add(name.casefold())
 
-    seen = set()
+    mapping = {}
+
     for index, row in enumerate(scene_map, 1):
         if not isinstance(row, dict):
-            raise RuntimeError(f"Invalid Character Bible scene map #{index}.")
+            raise RuntimeError(
+                f"Invalid Character Bible scene map record #{index}."
+            )
 
         scene_id = clean(row.get("scene_id"))
-        if not scene_id or scene_id in seen:
+
+        if not scene_id or scene_id in mapping:
             raise RuntimeError(
-                f"Missing or duplicate Character Bible scene map ID: {scene_id!r}"
+                f"Missing or duplicate Character Bible scene ID: {scene_id!r}."
             )
-        seen.add(scene_id)
 
-        values = row.get("character_ids", [])
-        if not isinstance(values, list):
-            raise RuntimeError(f"{scene_id}: character_ids must be a list.")
+        references = row.get("character_ids", [])
 
-        unknown = [
-            clean(value) for value in values
-            if clean(value).casefold() not in known_ids
-            and clean(value).casefold() not in known_names
-        ]
-        if unknown:
-            raise RuntimeError(f"{scene_id}: unknown Character IDs {unknown[:10]}.")
+        if not isinstance(references, list):
+            raise RuntimeError(
+                f"{scene_id}: character_ids must be a list."
+            )
 
-    return document
+        for reference in references:
+            key = clean(reference).casefold()
+
+            if key not in known_ids and key not in known_names:
+                raise RuntimeError(
+                    f"{scene_id}: unknown Character Bible reference "
+                    f"{reference!r}."
+                )
+
+        mapping[scene_id] = row
+
+    return {
+        **document,
+        "_character_ids": known_ids,
+        "_character_names": known_names,
+        "_scene_map": mapping,
+    }
 
 
-def validate_scene_character_links(
+def validate_character_mapping(
     source_scenes: list[dict],
     bible: dict,
 ) -> dict[str, dict]:
     if bible.get("status") == "disabled":
         return {}
 
-    character_ids = {
-        clean(row.get("id") or row.get("character_id")).casefold()
-        for row in bible.get("characters", [])
-        if isinstance(row, dict)
-    }
-    character_ids.discard("")
+    mapping = bible.get("_scene_map", {})
+    expected_ids = {row["scene_id"] for row in source_scenes}
+    actual_ids = set(mapping)
 
-    mapping = {}
-    for row in bible.get("scene_character_map", []):
-        scene_id = clean(row.get("scene_id"))
-        if scene_id:
-            mapping[scene_id] = row
-
-    source_ids = {row["scene_id"] for row in source_scenes}
-    extra_ids = set(mapping) - source_ids
-
-    if extra_ids:
+    if expected_ids != actual_ids:
         raise RuntimeError(
-            "Character Bible contains unmapped scene IDs: "
-            + ", ".join(sorted(extra_ids)[:20])
+            "Character Bible scene map mismatch. "
+            f"Missing={sorted(expected_ids - actual_ids)[:20]}, "
+            f"extra={sorted(actual_ids - expected_ids)[:20]}."
         )
+
+    known_ids = bible.get("_character_ids", set())
+    known_names = bible.get("_character_names", set())
 
     for scene in source_scenes:
         scene_id = scene["scene_id"]
-        mapped = mapping.get(scene_id)
+        row = mapping[scene_id]
+        references = row.get("character_ids", [])
 
-        if mapped is None:
-            raise RuntimeError(
-                f"Character Bible mapping missing for scene {scene_id}."
-            )
+        for reference in references:
+            key = clean(reference).casefold()
 
-        references = mapped.get("character_ids", [])
-        if not isinstance(references, list):
-            raise RuntimeError(f"{scene_id}: invalid character_ids mapping.")
-
-        unknown = [
-            clean(value) for value in references
-            if clean(value).casefold() not in character_ids
-        ]
-        if unknown:
-            raise RuntimeError(f"{scene_id}: unknown character IDs {unknown[:10]}.")
+            if key not in known_ids and key not in known_names:
+                raise RuntimeError(
+                    f"{scene_id}: invalid character mapping {reference!r}."
+                )
 
     return mapping
-
-def scene_order_key(row: dict) -> tuple:
-    return (
-        int(row["part"]),
-        ROLE_ORDER[row["role"]],
-        int(row.get("source_scene_number") or 0),
-        str(row["scene_id"]),
-    )
-
-
-def verify_image_record(
-    source: dict,
-    visual_job: dict,
-    image_record: dict,
-    format_name: str,
-) -> tuple[Path, dict]:
-    scene_id = source["scene_id"]
-
-    status = clean(image_record.get("status")).lower()
-    if status not in {"generated", "existing", "completed"}:
-        raise RuntimeError(
-            f"{scene_id}: image is not completed; status={status!r}."
-        )
-
-    path_value = (
-        visual_job.get("image_path")
-        or visual_job.get("output_path")
-        or visual_job.get("image")
-        or image_record.get("image_path")
-        or image_record.get("image")
-        or image_record.get("file")
-    )
-
-    image_path = safe_project_path(path_value, scene_id)
-    info = validate_image(image_path, scene_id)
-
-    expected_hash = clean(
-        image_record.get("image_sha256")
-        or image_record.get("sha256")
-    )
-
-    if not expected_hash:
-        raise RuntimeError(f"{scene_id}: image manifest SHA256 missing.")
-
-    if info["sha256"] != expected_hash:
-        raise RuntimeError(f"{scene_id}: image SHA256 mismatch.")
-
-    job_hash = clean(
-        visual_job.get("image_sha256")
-        or visual_job.get("sha256")
-    )
-
-    if job_hash and job_hash != info["sha256"]:
-        raise RuntimeError(f"{scene_id}: visual job image SHA256 mismatch.")
-
-    expected_size = IMAGE_SIZES[format_name]
-    actual_size = (info["width"], info["height"])
-
-    # The image generator may store the target dimensions directly.
-    # Any different dimensions must be explicitly rejected here.
-    if actual_size != expected_size:
-        raise RuntimeError(
-            f"{scene_id}: {format_name.upper()} image must be "
-            f"{expected_size[0]}x{expected_size[1]}, "
-            f"found {info['width']}x{info['height']}."
-        )
-
-    manifest_prompt_hash = clean(
-        image_record.get("prompt_sha256")
-    )
-    job_prompt_hash = clean(
-        visual_job.get("prompt_sha256")
-    )
-
-    if (
-        manifest_prompt_hash
-        and job_prompt_hash
-        and manifest_prompt_hash != job_prompt_hash
-    ):
-        raise RuntimeError(f"{scene_id}: prompt SHA256 mismatch.")
-
-    manifest_signature = clean(
-        image_record.get("prompt_signature")
-        or image_record.get("job_signature")
-    )
-    job_signature = clean(
-        visual_job.get("prompt_signature")
-        or visual_job.get("job_signature")
-    )
-
-    if (
-        manifest_signature
-        and job_signature
-        and manifest_signature != job_signature
-    ):
-        raise RuntimeError(f"{scene_id}: image job signature mismatch.")
-
-    return image_path, info
 
 
 def character_context(
@@ -828,10 +843,17 @@ def character_context(
     character_map: dict[str, dict],
     bible: dict,
 ) -> dict:
-    mapping = character_map.get(scene["scene_id"], {})
-    ids = mapping.get("character_ids", [])
+    if bible.get("status") == "disabled":
+        return {
+            "character_ids": [],
+            "characters": [],
+            "world": {},
+        }
 
-    wanted = {clean(value).casefold() for value in ids}
+    mapping = character_map[scene["scene_id"]]
+    references = mapping.get("character_ids", [])
+    wanted = {clean(value).casefold() for value in references}
+
     selected = []
 
     for character in bible.get("characters", []):
@@ -845,55 +867,347 @@ def character_context(
         }
 
         aliases = character.get("aliases", [])
+
         if isinstance(aliases, list):
-            candidates.update(clean(value).casefold() for value in aliases)
+            candidates.update(
+                clean(value).casefold()
+                for value in aliases
+                if clean(value)
+            )
 
         if wanted.intersection(candidates):
             selected.append(character)
 
     return {
-        "character_ids": ids,
+        "character_ids": references,
         "characters": selected,
         "world": bible.get("world", {}),
     }
 
 
-def prepare_photo_motion_jobs(
+def valid_duration(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+
+    if clean(value).lower() in {
+        "", "auto", "dynamic", "variable", "unknown"
+    }:
+        return None
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not math.isfinite(number):
+        return None
+
+    if not MIN_DURATION <= number <= MAX_DURATION:
+        return None
+
+    return round(number, 4)
+
+
+def narration_map(document: Any) -> dict[str, dict]:
+    if not isinstance(document, dict):
+        raise RuntimeError("narration.json root must be an object.")
+
+    status = clean(document.get("status")).lower()
+
+    if status not in {"completed", "complete", "success"}:
+        raise RuntimeError(
+            "Narration preparation must be completed before visual preparation."
+        )
+
+    result = {}
+
+    for field in ("scenes", "extra_scenes"):
+        rows = document.get(field, [])
+
+        if not isinstance(rows, list):
+            raise RuntimeError(
+                f"narration.json {field} must be a list."
+            )
+
+        for index, row in enumerate(rows, 1):
+            if not isinstance(row, dict):
+                raise RuntimeError(
+                    f"Invalid narration record {field}[{index - 1}]."
+                )
+
+            scene_id = clean(row.get("scene_id"))
+
+            if not scene_id:
+                raise RuntimeError(
+                    f"Narration record {field}[{index - 1}] has no scene_id."
+                )
+
+            if scene_id in result:
+                raise RuntimeError(
+                    f"Duplicate narration scene ID: {scene_id}."
+                )
+
+            result[scene_id] = row
+
+    return result
+
+
+def measured_audio_record(
+    scene_id: str,
+    narration_row: dict,
+    source_scene: dict,
+) -> dict:
+    status = clean(narration_row.get("status")).lower()
+
+    if status != "completed":
+        raise RuntimeError(
+            f"{scene_id}: TTS narration status is not completed."
+        )
+
+    duration = None
+
+    for key in (
+        "actual_audio_duration_seconds",
+        "audio_duration",
+        "duration",
+    ):
+        duration = valid_duration(narration_row.get(key))
+
+        if duration is not None:
+            break
+
+    if duration is None:
+        raise RuntimeError(
+            f"{scene_id}: real measured TTS duration is missing; "
+            "'auto' or estimated duration cannot be used."
+        )
+
+    audio_path_value = (
+        narration_row.get("audio_path")
+        or narration_row.get("audio_file")
+        or narration_row.get("audio")
+        or narration_row.get("output")
+    )
+
+    if not audio_path_value:
+        raise RuntimeError(
+            f"{scene_id}: TTS audio file path is missing."
+        )
+
+    audio_path = safe_project_path(
+        audio_path_value,
+        f"{scene_id} narration audio",
+    )
+
+    if not audio_path.is_file():
+        raise RuntimeError(
+            f"{scene_id}: TTS audio file does not exist: {audio_path}."
+        )
+
+    if audio_path.stat().st_size < MIN_AUDIO_BYTES:
+        raise RuntimeError(
+            f"{scene_id}: TTS audio file is empty or incomplete."
+        )
+
+    actual_hash = sha256_file(audio_path)
+
+    declared_hash = clean(
+        narration_row.get("audio_sha256")
+        or narration_row.get("audio_hash")
+        or narration_row.get("sha256")
+    ).lower()
+
+    if not re.fullmatch(r"[a-f0-9]{64}", declared_hash):
+        raise RuntimeError(
+            f"{scene_id}: TTS audio SHA256 is missing or invalid."
+        )
+
+    if actual_hash != declared_hash:
+        raise RuntimeError(
+            f"{scene_id}: TTS audio SHA256 does not match the file."
+        )
+
+    return {
+        "audio_path": audio_path.relative_to(ROOT).as_posix(),
+        "audio_sha256": actual_hash,
+        "duration": duration,
+        "actual_audio_duration_seconds": duration,
+        "audio_duration": duration,
+        "duration_source": "ffprobe_measured",
+        "audio_provider": (
+            narration_row.get("tts_provider")
+            or narration_row.get("provider")
+        ),
+        "audio_model": (
+            narration_row.get("tts_model")
+            or narration_row.get("model")
+        ),
+    }
+
+
+def validate_narration_mapping(
     source_scenes: list[dict],
-    jobs_by_id: dict[str, dict],
-    image_manifest: dict,
-    config: dict,
-    format_name: str,
-    part_numbers: list[int],
-    scenes_per_part: int,
-    bible: dict,
-    character_map: dict[str, dict],
-    narration_map: dict[str, dict],
-) -> tuple[list[dict], dict]:
-    manifest_rows = extract_manifest_rows(image_manifest, "image_manifest")
-    if not manifest_rows:
-        raise RuntimeError("Image manifest has no scene records.")
-
-    manifest_by_id = index_by_scene_id(manifest_rows, "image_manifest")
-
+    narration_records: dict[str, dict],
+) -> dict[str, dict]:
     expected_ids = {row["scene_id"] for row in source_scenes}
-    actual_ids = set(manifest_by_id)
+    actual_ids = set(narration_records)
 
     if expected_ids != actual_ids:
         raise RuntimeError(
-            "Image manifest scene mapping mismatch. "
+            "TTS narration records do not match scene IDs. "
             f"Missing={sorted(expected_ids - actual_ids)[:20]}, "
             f"extra={sorted(actual_ids - expected_ids)[:20]}."
         )
 
+    for source in source_scenes:
+        scene_id = source["scene_id"]
+        record = narration_records[scene_id]
+
+        if positive_int(record.get("part"), scene_id + " narration part") != (
+            source["part"]
+        ):
+            raise RuntimeError(
+                f"{scene_id}: narration part mismatch."
+            )
+
+        if normalize_role(record) != source["role"]:
+            raise RuntimeError(
+                f"{scene_id}: narration role mismatch."
+            )
+
+        narration_text = clean(
+            record.get("narration")
+            or record.get("text")
+            or record.get("content")
+        )
+
+        source_text = clean(
+            source.get("narration")
+            or source.get("text")
+        )
+
+        if not narration_text:
+            raise RuntimeError(
+                f"{scene_id}: narration text is missing."
+            )
+
+        if not source_text:
+            raise RuntimeError(
+                f"{scene_id}: source scene narration is missing."
+            )
+
+        if narration_text != source_text:
+            raise RuntimeError(
+                f"{scene_id}: TTS narration text differs from scenes.json."
+            )
+
+    return narration_records
+
+
+def verify_image_record(
+    source: dict,
+    visual_job: dict,
+    image_record: dict,
+    generation_record: dict,
+    format_name: str,
+) -> tuple[Path, dict]:
+    scene_id = source["scene_id"]
+
+    path_value = (
+        visual_job.get("image_path")
+        or visual_job.get("output_path")
+        or visual_job.get("image")
+        or image_record.get("image_path")
+        or image_record.get("image")
+        or image_record.get("file")
+    )
+
+    image_path = safe_project_path(path_value, scene_id)
+    info = validate_image(image_path, scene_id)
+    validate_image_dimensions(info, format_name, scene_id)
+
+    expected_hash = clean(
+        image_record.get("image_sha256")
+    ).lower()
+
+    generation_hash = clean(
+        generation_record.get("image_sha256")
+    ).lower()
+
+    if info["sha256"] != expected_hash:
+        raise RuntimeError(
+            f"{scene_id}: image file SHA256 does not match image_manifest."
+        )
+
+    if info["sha256"] != generation_hash:
+        raise RuntimeError(
+            f"{scene_id}: image file SHA256 does not match "
+            "image_generation_manifest."
+        )
+
+    job_hash = clean(
+        visual_job.get("image_sha256")
+        or visual_job.get("sha256")
+    ).lower()
+
+    if job_hash and job_hash != info["sha256"]:
+        raise RuntimeError(
+            f"{scene_id}: visual job image SHA256 mismatch."
+        )
+
+    prompt_hash = clean(image_record.get("prompt_sha256"))
+    job_prompt_hash = clean(visual_job.get("prompt_sha256"))
+
+    if prompt_hash and job_prompt_hash and prompt_hash != job_prompt_hash:
+        raise RuntimeError(
+            f"{scene_id}: image prompt SHA256 mismatch."
+        )
+
+    prompt_signature = clean(
+        image_record.get("prompt_signature")
+        or image_record.get("job_signature")
+    )
+
+    job_signature = clean(
+        visual_job.get("prompt_signature")
+        or visual_job.get("job_signature")
+    )
+
+    if prompt_signature and job_signature:
+        if prompt_signature != job_signature:
+            raise RuntimeError(
+                f"{scene_id}: image prompt signature mismatch."
+            )
+
+    if clean(image_record.get("source_scene_signature")) != clean(
+        visual_job.get("source_scene_signature")
+    ):
+        raise RuntimeError(
+            f"{scene_id}: source scene signature mismatch."
+        )
+
+    return image_path, info
+
+
+def prepare_jobs(
+    source_scenes: list[dict],
+    jobs_by_id: dict[str, dict],
+    image_by_id: dict[str, dict],
+    generation_by_id: dict[str, dict],
+    narration_by_id: dict[str, dict],
+    bible: dict,
+    character_map: dict[str, dict],
+    format_name: str,
+    part_numbers: list[int],
+    scenes_per_part: int,
+) -> tuple[list[dict], dict]:
+    jobs = []
     role_counts = {role: 0 for role in ROLE_ORDER}
     part_role_counts = {
         part: {role: 0 for role in ROLE_ORDER}
         for part in part_numbers
     }
-
     part_slots = {part: 0 for part in part_numbers}
-    jobs = []
 
     for global_number, source in enumerate(source_scenes, 1):
         scene_id = source["scene_id"]
@@ -901,24 +1215,30 @@ def prepare_photo_motion_jobs(
         role = source["role"]
 
         visual_job = jobs_by_id[scene_id]
-        image_record = manifest_by_id[scene_id]
+        image_record = image_by_id[scene_id]
+        generation_record = generation_by_id[scene_id]
+        narration_row = narration_by_id[scene_id]
 
         image_path, image_info = verify_image_record(
             source,
             visual_job,
             image_record,
+            generation_record,
             format_name,
         )
 
-        narration = clean(
-            source.get("narration")
-            or source.get("text")
-            or visual_job.get("narration")
-            or visual_job.get("text")
+        measured_audio = measured_audio_record(
+            scene_id,
+            narration_row,
+            source,
         )
 
-        if not narration:
-            raise RuntimeError(f"{scene_id}: narration text missing.")
+        narration = clean(
+            narration_row.get("narration")
+            or narration_row.get("text")
+            or source.get("narration")
+            or source.get("text")
+        )
 
         prompt = clean(
             visual_job.get("prompt")
@@ -929,56 +1249,12 @@ def prepare_photo_motion_jobs(
         )
 
         if len(prompt) < 24:
-            raise RuntimeError(f"{scene_id}: visual prompt missing or too short.")
-
-        narration_row = narration_map.get(scene_id)
-        measured = measured_audio_record(scene_id, narration_row)
-
-        source_duration = None
-        for candidate in (
-            narration_row,
-            source,
-            visual_job,
-        ):
-            if not isinstance(candidate, dict):
-                continue
-
-            for key in (
-                "actual_audio_duration_seconds",
-                "audio_duration",
-                "duration",
-                "scene_duration",
-            ):
-                source_duration = normalize_duration_value(
-                    candidate.get(key)
-                )
-                if source_duration is not None:
-                    break
-
-            if source_duration is not None:
-                break
-
-        # Audio-file measurements are authoritative. A configured or
-        # estimated scene duration is never allowed to overwrite them.
-        if measured:
-            duration = measured["duration"]
-            duration_source = "ffprobe_measured"
-        else:
-            duration = source_duration
-            duration_source = (
-                "source_duration"
-                if source_duration is not None
-                else "pending_tts_measurement"
+            raise RuntimeError(
+                f"{scene_id}: visual prompt is missing or too short."
             )
 
         part_slots[part] += 1
         local_slot = part_slots[part]
-
-        source_scene_number = (
-            source["source_scene_number"]
-            if role == "main"
-            else None
-        )
 
         character_data = character_context(
             source,
@@ -987,7 +1263,6 @@ def prepare_photo_motion_jobs(
         )
 
         relative_image = image_path.relative_to(ROOT).as_posix()
-        audio_data = measured or {}
 
         row = {
             "global_scene": global_number,
@@ -998,8 +1273,16 @@ def prepare_photo_motion_jobs(
             "scene": local_slot,
             "local_scene": local_slot,
 
-            "source_scene_number": source_scene_number,
-            "source_local_scene": source_scene_number,
+            "source_scene_number": (
+                source["source_scene_number"]
+                if role == "main"
+                else None
+            ),
+            "source_local_scene": (
+                source["source_scene_number"]
+                if role == "main"
+                else None
+            ),
             "source_scene_id": scene_id,
 
             "scene_id": scene_id,
@@ -1041,19 +1324,18 @@ def prepare_photo_motion_jobs(
             ),
             "source_scene_signature": (
                 visual_job.get("source_scene_signature")
-                or source.get("source_scene_signature")
             ),
 
-            "duration": duration if duration is not None else "auto",
-            "scene_duration": duration if duration is not None else "auto",
-            "duration_source": duration_source,
-            "audio_path": audio_data.get("audio_path"),
-            "audio_sha256": audio_data.get("audio_sha256"),
-            "audio_duration": duration,
-            "actual_audio_duration_seconds": duration,
-            "audio_duration_source": (
-                "ffprobe_measured" if measured else None
-            ),
+            "duration": measured_audio["duration"],
+            "scene_duration": measured_audio["duration"],
+            "duration_source": "ffprobe_measured",
+            "audio_path": measured_audio["audio_path"],
+            "audio_sha256": measured_audio["audio_sha256"],
+            "audio_duration": measured_audio["duration"],
+            "actual_audio_duration_seconds": measured_audio["duration"],
+            "audio_duration_source": "ffprobe_measured",
+            "audio_provider": measured_audio["audio_provider"],
+            "audio_model": measured_audio["audio_model"],
 
             "character_ids": character_data["character_ids"],
             "characters": character_data["characters"],
@@ -1085,11 +1367,11 @@ def prepare_photo_motion_jobs(
         role_counts[role] += 1
         part_role_counts[part][role] += 1
 
-    expected_total_main = len(part_numbers) * scenes_per_part
+    expected_main = len(part_numbers) * scenes_per_part
 
-    if role_counts["main"] != expected_total_main:
+    if role_counts["main"] != expected_main:
         raise RuntimeError(
-            f"Main scene count mismatch: expected {expected_total_main}, "
+            f"Main scene count mismatch: expected {expected_main}, "
             f"found {role_counts['main']}."
         )
 
@@ -1097,36 +1379,57 @@ def prepare_photo_motion_jobs(
         counts = part_role_counts[part]
 
         if counts["hook"] != 1 or counts["main"] != scenes_per_part:
-            raise RuntimeError(f"Part {part}: Hook/Main role counts invalid.")
+            raise RuntimeError(
+                f"Part {part}: Hook/Main scene counts are invalid."
+            )
 
         if position < len(part_numbers) - 1:
             if counts["suspense"] != 1 or counts["resolution"] != 0:
-                raise RuntimeError(f"Part {part}: Suspense/Resolution counts invalid.")
+                raise RuntimeError(
+                    f"Part {part}: Suspense/Resolution counts are invalid."
+                )
         else:
             if counts["resolution"] != 1 or counts["suspense"] != 0:
-                raise RuntimeError(f"Final part {part}: Resolution/Suspense counts invalid.")
+                raise RuntimeError(
+                    f"Final part {part}: Resolution/Suspense counts are invalid."
+                )
 
     if len({row["scene_id"] for row in jobs}) != len(jobs):
         raise RuntimeError("Prepared Photo Motion jobs contain duplicate IDs.")
 
-    if [row["global_scene"] for row in jobs] != list(range(1, len(jobs) + 1)):
-        raise RuntimeError("Photo Motion global numbering is not continuous.")
+    if [row["global_scene"] for row in jobs] != list(
+        range(1, len(jobs) + 1)
+    ):
+        raise RuntimeError(
+            "Photo Motion global scene numbering is not continuous."
+        )
+
+    audio_hashes = {
+        row["scene_id"]: row["audio_sha256"]
+        for row in jobs
+    }
+
+    image_hashes = {
+        row["scene_id"]: row["image_sha256"]
+        for row in jobs
+    }
 
     settings = {
         "version": VERSION,
         "format": format_name,
         "part_numbers": part_numbers,
         "scenes_per_part": scenes_per_part,
-        "character_bible_signature": stable_hash(bible),
-        "source_scene_ids": [row["scene_id"] for row in source_scenes],
-        "image_hashes": {
-            row["scene_id"]: row["image_sha256"]
-            for row in jobs
-        },
-        "audio_hashes": {
-            row["scene_id"]: row.get("audio_sha256")
-            for row in jobs
-        },
+        "source_scene_ids": [
+            row["scene_id"] for row in source_scenes
+        ],
+        "image_hashes": image_hashes,
+        "audio_hashes": audio_hashes,
+        "character_bible_signature": stable_hash({
+            "status": bible.get("status"),
+            "characters": bible.get("characters", []),
+            "scene_character_map": bible.get("scene_character_map", []),
+            "world": bible.get("world", {}),
+        }),
     }
 
     config_signature = stable_hash(settings)
@@ -1155,17 +1458,10 @@ def prepare_photo_motion_jobs(
         "main_scene_numbering": "source_scene_number_preserved",
         "extra_scene_numbering": "separate_local_photo_motion_slot",
         "duration_policy": (
-            "ffprobe_measured_audio_is_authoritative; "
-            "unmeasured_audio_duration_remains_auto"
+            "every_job_requires_ffprobe_measured_tts_audio_duration"
         ),
-        "measured_audio_count": sum(
-            row.get("audio_duration_source") == "ffprobe_measured"
-            for row in jobs
-        ),
-        "pending_audio_measurement_count": sum(
-            row.get("audio_duration_source") != "ffprobe_measured"
-            for row in jobs
-        ),
+        "measured_audio_count": len(jobs),
+        "pending_audio_measurement_count": 0,
         "config_signature": config_signature,
         "character_bible_status": bible.get("status", "unknown"),
         "jobs": jobs,
@@ -1174,30 +1470,139 @@ def prepare_photo_motion_jobs(
     return jobs, document
 
 
-def validate_manifest_status(document: dict, label: str) -> None:
-    if not isinstance(document, dict):
-        raise RuntimeError(f"{label} root must be an object.")
+def make_checkpoint(
+    jobs: list[dict],
+    config_signature: str,
+    previous: Any,
+    resume_enabled: bool,
+    skip_completed: bool,
+) -> dict:
+    old_rows = []
 
-    status = clean(document.get("status")).lower()
-    if status not in {"completed", "complete", "success"}:
-        raise RuntimeError(f"{label} is not completed: {status or 'missing'}.")
+    if (
+        resume_enabled
+        and isinstance(previous, dict)
+        and previous.get("config_signature") == config_signature
+        and isinstance(previous.get("scenes"), list)
+    ):
+        old_rows = previous["scenes"]
 
+    old_by_id = {
+        clean(row.get("scene_id")): row
+        for row in old_rows
+        if isinstance(row, dict) and clean(row.get("scene_id"))
+    }
 
-def validate_manifest_total(document: dict, expected: int, label: str) -> None:
-    value = document.get(
-        "images_required",
-        document.get("total_scenes", document.get("total_jobs", expected)),
-    )
+    rows = []
 
-    try:
-        value = int(value)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"{label}: total count invalid.") from exc
+    for job in jobs:
+        old = old_by_id.get(job["scene_id"], {})
 
-    if value != expected:
-        raise RuntimeError(
-            f"{label}: expected {expected} records, found {value}."
+        reusable = (
+            skip_completed
+            and old.get("status") == "prepared"
+            and old.get("job_signature") == config_signature
+            and old.get("image_sha256") == job["image_sha256"]
+            and old.get("audio_sha256") == job["audio_sha256"]
+            and old.get("image_path") == job["image_path"]
+            and old.get("audio_path") == job["audio_path"]
         )
+
+        rows.append({
+            "scene_id": job["scene_id"],
+            "part": job["part"],
+            "local_scene": job["local_scene"],
+            "source_scene_number": job["source_scene_number"],
+            "role": job["role"],
+            "image_path": job["image_path"],
+            "image_sha256": job["image_sha256"],
+            "audio_path": job["audio_path"],
+            "audio_sha256": job["audio_sha256"],
+            "audio_duration": job["audio_duration"],
+            "job_signature": config_signature,
+            "status": "prepared",
+            "reused_checkpoint": bool(reusable),
+        })
+
+    return {
+        "version": VERSION,
+        "status": "completed",
+        "config_signature": config_signature,
+        "total_jobs": len(jobs),
+        "prepared": len(rows),
+        "pending": 0,
+        "scenes": rows,
+    }
+
+
+def verify_written_outputs(
+    jobs_document: dict,
+    manifest: dict,
+    checkpoint: dict,
+    expected_count: int,
+) -> None:
+    if jobs_document.get("status") != "completed":
+        raise RuntimeError(
+            "Photo Motion jobs read-after-write status verification failed."
+        )
+
+    written_jobs = jobs_document.get("jobs")
+
+    if not isinstance(written_jobs, list):
+        raise RuntimeError(
+            "Photo Motion jobs read-after-write list is invalid."
+        )
+
+    if len(written_jobs) != expected_count:
+        raise RuntimeError(
+            "Photo Motion jobs read-after-write count mismatch."
+        )
+
+    if manifest.get("status") != "completed":
+        raise RuntimeError(
+            "Photo Motion manifest read-after-write status mismatch."
+        )
+
+    if manifest.get("total_jobs") != expected_count:
+        raise RuntimeError(
+            "Photo Motion manifest read-after-write count mismatch."
+        )
+
+    if checkpoint.get("status") != "completed":
+        raise RuntimeError(
+            "Photo Motion checkpoint read-after-write status mismatch."
+        )
+
+    if checkpoint.get("prepared") != expected_count:
+        raise RuntimeError(
+            "Photo Motion checkpoint read-after-write count mismatch."
+        )
+
+    for row in written_jobs:
+        if not isinstance(row, dict):
+            raise RuntimeError(
+                "Photo Motion jobs contain an invalid written record."
+            )
+
+        if not clean(row.get("scene_id")):
+            raise RuntimeError(
+                "Photo Motion job has no scene ID after writing."
+            )
+
+        if valid_duration(row.get("actual_audio_duration_seconds")) is None:
+            raise RuntimeError(
+                f"{row.get('scene_id')}: written job has no measured duration."
+            )
+
+        if not clean(row.get("audio_sha256")):
+            raise RuntimeError(
+                f"{row.get('scene_id')}: written job has no audio SHA256."
+            )
+
+        if not clean(row.get("image_sha256")):
+            raise RuntimeError(
+                f"{row.get('scene_id')}: written job has no image SHA256."
+            )
 
 
 def main() -> int:
@@ -1207,18 +1612,28 @@ def main() -> int:
     log("=" * 64)
 
     config = load_and_validate()
+
     if not isinstance(config, dict):
         raise RuntimeError("Input configuration is not a valid dictionary.")
 
-    format_name = str(get_format(config)).strip().lower()
+    format_name = clean(get_format(config)).lower()
+
     if format_name not in IMAGE_SIZES:
-        raise RuntimeError(f"Unsupported output format: {format_name!r}.")
+        raise RuntimeError(
+            f"Unsupported output format: {format_name!r}."
+        )
 
     parts = positive_int(get_parts(config), "PARTS")
     scenes_per_part = positive_int(get_scenes(config), "SCENES")
 
-    resume_enabled = as_bool(config.get("RESUME_ENABLED", True), True)
-    skip_completed = as_bool(config.get("SKIP_COMPLETED_SCENES", True), True)
+    resume_enabled = as_bool(
+        config.get("RESUME_ENABLED", True),
+        True,
+    )
+    skip_completed = as_bool(
+        config.get("SKIP_COMPLETED_SCENES", True),
+        True,
+    )
 
     log("FORMAT:", format_name)
     log("PARTS:", parts)
@@ -1226,168 +1641,152 @@ def main() -> int:
     log("RESUME ENABLED:", resume_enabled)
     log("SKIP COMPLETED:", skip_completed)
 
-    scenes_document = read_json(SCENES_FILE, required=True)
+    source_document = read_json(SCENES_FILE, required=True)
+
     source_scenes, part_numbers = normalize_source_scenes(
-        scenes_document,
+        source_document,
         parts,
         scenes_per_part,
     )
 
-    bible = validate_character_bible(config)
-    character_map = validate_scene_character_links(source_scenes, bible)
+    expected_ids = {row["scene_id"] for row in source_scenes}
 
     visual_document = read_json(VISUAL_JOBS_FILE, required=True)
-    visual_rows, visual_metadata = extract_job_rows(visual_document)
-    jobs_by_id = verify_job_source_mapping(source_scenes, visual_rows)
-
-    image_manifest = read_json(IMAGE_MANIFEST_FILE, required=True)
-    validate_manifest_status(image_manifest, "image_manifest.json")
-    validate_manifest_total(
-        image_manifest,
-        len(source_scenes),
-        "image_manifest.json",
+    visual_rows, visual_metadata = extract_rows(
+        visual_document,
+        "visual_jobs.json",
     )
 
-    generation_document = read_json(GENERATION_MANIFEST_FILE, required=True)
+    visual_manifest = read_json(
+        VISUAL_JOBS_MANIFEST,
+        required=True,
+    )
+    validate_manifest_status(
+        visual_manifest,
+        "visual_jobs_manifest.json",
+    )
+
+    jobs_by_id = verify_visual_jobs(
+        source_scenes,
+        visual_rows,
+    )
+
+    if isinstance(visual_metadata, dict):
+        declared_format = clean(
+            visual_metadata.get("format")
+        ).lower()
+
+        if declared_format and declared_format != format_name:
+            raise RuntimeError(
+                "visual_jobs.json format does not match Input configuration."
+            )
+
+    visual_manifest_format = clean(
+        visual_manifest.get("format")
+    ).lower()
+
+    if visual_manifest_format and visual_manifest_format != format_name:
+        raise RuntimeError(
+            "visual_jobs_manifest format does not match Input configuration."
+        )
+
+    image_document = read_json(IMAGE_MANIFEST, required=True)
+    generation_document = read_json(
+        GENERATION_MANIFEST,
+        required=True,
+    )
+
+    validate_manifest_status(
+        image_document,
+        "image_manifest.json",
+    )
     validate_manifest_status(
         generation_document,
         "image_generation_manifest.json",
     )
-    validate_manifest_total(
+
+    validate_manifest_count(
+        image_document,
+        len(source_scenes),
+        "image_manifest.json",
+    )
+    validate_manifest_count(
         generation_document,
         len(source_scenes),
         "image_generation_manifest.json",
     )
 
-    generation_rows = extract_manifest_rows(
+    for label, document in (
+        ("image_manifest.json", image_document),
+        ("image_generation_manifest.json", generation_document),
+    ):
+        declared_format = clean(document.get("format")).lower()
+
+        if declared_format and declared_format != format_name:
+            raise RuntimeError(
+                f"{label}: format does not match Input configuration."
+            )
+
+    image_by_id = validate_image_manifests(
+        image_document,
         generation_document,
-        "image_generation_manifest",
+        expected_ids,
     )
+
     generation_by_id = index_by_scene_id(
-        generation_rows,
+        manifest_rows(
+            generation_document,
+            "image_generation_manifest",
+        ),
         "image_generation_manifest",
     )
 
-    image_rows = extract_manifest_rows(
-        image_manifest,
-        "image_manifest",
+    bible = validate_character_bible(config)
+    character_map = validate_character_mapping(
+        source_scenes,
+        bible,
     )
-    image_by_id = index_by_scene_id(image_rows, "image_manifest")
 
-    if set(generation_by_id) != set(image_by_id):
-        raise RuntimeError(
-            "Image manifest और generation manifest scene IDs अलग हैं."
-        )
+    narration_document = read_json(
+        NARRATION_FILE,
+        required=True,
+    )
+    narration_records = narration_map(narration_document)
 
-    for scene_id in image_by_id:
-        image_row = image_by_id[scene_id]
-        generation_row = generation_by_id[scene_id]
+    narration_by_id = validate_narration_mapping(
+        source_scenes,
+        narration_records,
+    )
 
-        if clean(image_row.get("image_sha256")) != clean(
-            generation_row.get("image_sha256")
-        ):
-            raise RuntimeError(
-                f"{scene_id}: image manifest SHA256 generation manifest "
-                "से मेल नहीं खाता."
-            )
-
-        if clean(image_row.get("status")).lower() not in {
-            "generated", "existing", "completed"
-        }:
-            raise RuntimeError(f"{scene_id}: image is not ready.")
-
-    narration_document = read_json(NARRATION_FILE, required=False)
-    narration_map = narration_record_map(narration_document)
-
-    if narration_document is not None:
-        if not isinstance(narration_document, dict):
-            raise RuntimeError("narration.json root must be an object.")
-
-        narration_status = clean(
-            narration_document.get("status")
-        ).lower()
-
-        if narration_status not in {
-            "completed", "complete", "success", "in_progress"
-        }:
-            raise RuntimeError(
-                f"Invalid narration status: {narration_status!r}."
-            )
-
-    jobs, document = prepare_photo_motion_jobs(
+    jobs, document = prepare_jobs(
         source_scenes=source_scenes,
         jobs_by_id=jobs_by_id,
-        image_manifest=image_manifest,
-        config=config,
+        image_by_id=image_by_id,
+        generation_by_id=generation_by_id,
+        narration_by_id=narration_by_id,
+        bible=bible,
+        character_map=character_map,
         format_name=format_name,
         part_numbers=part_numbers,
         scenes_per_part=scenes_per_part,
-        bible=bible,
-        character_map=character_map,
-        narration_map=narration_map,
     )
 
-    VISUALS_DIR.mkdir(parents=True, exist_ok=True)
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    VISUALS.mkdir(parents=True, exist_ok=True)
+    CHECKPOINTS.mkdir(parents=True, exist_ok=True)
 
-    previous = read_json(CHECKPOINT_FILE) if resume_enabled else None
-    previous_signature = (
-        clean(previous.get("config_signature"))
-        if isinstance(previous, dict)
-        else ""
+    previous = (
+        read_json(CHECKPOINT_FILE)
+        if resume_enabled
+        else None
     )
 
-    signature_matches = previous_signature == document["config_signature"]
-
-    previous_rows = (
-        previous.get("scenes", [])
-        if isinstance(previous, dict) and signature_matches
-        else []
+    checkpoint = make_checkpoint(
+        jobs=jobs,
+        config_signature=document["config_signature"],
+        previous=previous,
+        resume_enabled=resume_enabled,
+        skip_completed=skip_completed,
     )
-
-    previous_by_id = {
-        clean(row.get("scene_id")): row
-        for row in previous_rows
-        if isinstance(row, dict) and clean(row.get("scene_id"))
-    }
-
-    checkpoint_rows = []
-
-    for row in jobs:
-        old = previous_by_id.get(row["scene_id"], {})
-        reusable = (
-            signature_matches
-            and skip_completed
-            and old.get("status") == "prepared"
-            and old.get("image_sha256") == row["image_sha256"]
-            and old.get("audio_sha256") == row.get("audio_sha256")
-            and old.get("job_signature") == document["config_signature"]
-        )
-
-        checkpoint_rows.append({
-            "scene_id": row["scene_id"],
-            "part": row["part"],
-            "local_scene": row["local_scene"],
-            "source_scene_number": row["source_scene_number"],
-            "role": row["role"],
-            "image_path": row["image_path"],
-            "image_sha256": row["image_sha256"],
-            "audio_path": row.get("audio_path"),
-            "audio_sha256": row.get("audio_sha256"),
-            "job_signature": document["config_signature"],
-            "status": "prepared",
-            "reused_checkpoint": bool(reusable),
-        })
-
-    checkpoint = {
-        "version": VERSION,
-        "status": "completed",
-        "config_signature": document["config_signature"],
-        "total_jobs": len(jobs),
-        "prepared": len(checkpoint_rows),
-        "pending": 0,
-        "scenes": checkpoint_rows,
-    }
 
     manifest = {
         "version": VERSION,
@@ -1395,54 +1794,60 @@ def main() -> int:
         "format": format_name,
         "parts": len(part_numbers),
         "part_numbers": part_numbers,
+        "total_parts": len(part_numbers),
+        "scenes_per_part": scenes_per_part,
         "total_jobs": len(jobs),
         "config_signature": document["config_signature"],
-        "image_manifest_signature": stable_hash(image_manifest),
-        "generation_manifest_signature": stable_hash(generation_document),
         "visual_jobs_signature": stable_hash(visual_metadata),
-        "measured_audio_count": document["measured_audio_count"],
-        "pending_audio_measurement_count": document[
-            "pending_audio_measurement_count"
-        ],
+        "visual_jobs_manifest_signature": stable_hash(visual_manifest),
+        "image_manifest_signature": stable_hash(image_document),
+        "generation_manifest_signature": stable_hash(generation_document),
+        "narration_signature": clean(
+            narration_document.get("source_signature")
+            or narration_document.get("generation_signature")
+        ) or stable_hash(narration_records),
+        "character_bible_signature": stable_hash({
+            "characters": bible.get("characters", []),
+            "scene_character_map": bible.get("scene_character_map", []),
+            "world": bible.get("world", {}),
+        }),
         "scene_ids": [row["scene_id"] for row in jobs],
+        "measured_audio_count": len(jobs),
+        "pending_audio_measurement_count": 0,
+        "scene_role_counts": document["scene_role_counts"],
+        "status_detail": "all_images_and_tts_audio_verified",
     }
 
-    # Validate in-memory structures before publishing any completed status.
     if len(jobs) != len(source_scenes):
-        raise RuntimeError("Prepared job count differs from source scene count.")
+        raise RuntimeError(
+            "Prepared Photo Motion job count differs from source scenes."
+        )
 
     for row in jobs:
-        if not row["image_sha256"] or not row["image_path"]:
-            raise RuntimeError(f"{row['scene_id']}: final image validation missing.")
+        if not row["image_sha256"] or not row["audio_sha256"]:
+            raise RuntimeError(
+                f"{row['scene_id']}: image/audio integrity data is missing."
+            )
 
-    atomic_json(PHOTO_MOTION_JOBS_FILE, document)
-    atomic_json(PHOTO_MOTION_MANIFEST_FILE, manifest)
+        if valid_duration(row["actual_audio_duration_seconds"]) is None:
+            raise RuntimeError(
+                f"{row['scene_id']}: measured audio duration is invalid."
+            )
+
+    atomic_json(PHOTO_JOBS_FILE, document)
+    atomic_json(PHOTO_MANIFEST_FILE, manifest)
     atomic_json(CHECKPOINT_FILE, checkpoint)
 
-    # Read-after-write verification prevents false completed checkpoints.
-    written_jobs = read_json(PHOTO_MOTION_JOBS_FILE, required=True)
-    written_manifest = read_json(PHOTO_MOTION_MANIFEST_FILE, required=True)
+    written_jobs = read_json(PHOTO_JOBS_FILE, required=True)
+    written_manifest = read_json(PHOTO_MANIFEST_FILE, required=True)
     written_checkpoint = read_json(CHECKPOINT_FILE, required=True)
 
-    if (
-        not isinstance(written_jobs, dict)
-        or written_jobs.get("status") != "completed"
-        or len(written_jobs.get("jobs", [])) != len(jobs)
-    ):
-        raise RuntimeError("Photo Motion jobs write verification failed.")
-
-    if (
-        not isinstance(written_manifest, dict)
-        or written_manifest.get("status") != "completed"
-    ):
-        raise RuntimeError("Photo Motion manifest write verification failed.")
-
-    if (
-        not isinstance(written_checkpoint, dict)
-        or written_checkpoint.get("status") != "completed"
-        or written_checkpoint.get("prepared") != len(jobs)
-    ):
-        raise RuntimeError("Photo Motion checkpoint write verification failed.")
+    verify_written_outputs(
+        written_jobs,
+        written_manifest,
+        written_checkpoint,
+        len(jobs),
+    )
 
     log("-" * 64)
     log("PHOTO MOTION JOBS PREPARED")
@@ -1456,10 +1861,10 @@ def main() -> int:
     for role in ("hook", "main", "suspense", "resolution"):
         log(role.upper() + ":", document["scene_role_counts"][role])
 
-    log("Measured narration audio:", document["measured_audio_count"])
-    log("Pending audio measurements:", document["pending_audio_measurement_count"])
-    log("Photo Motion jobs:", PHOTO_MOTION_JOBS_FILE.relative_to(ROOT))
-    log("Photo Motion manifest:", PHOTO_MOTION_MANIFEST_FILE.relative_to(ROOT))
+    log("Measured TTS audio:", len(jobs))
+    log("Pending TTS measurements: 0")
+    log("Photo Motion jobs:", PHOTO_JOBS_FILE.relative_to(ROOT))
+    log("Photo Motion manifest:", PHOTO_MANIFEST_FILE.relative_to(ROOT))
     log("Checkpoint:", CHECKPOINT_FILE.relative_to(ROOT))
     log("Image API calls: 0")
     log("-" * 64)
