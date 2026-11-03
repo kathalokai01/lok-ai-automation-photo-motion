@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configured image-provider generation with strict fallback and resume."""
+"""Verified, resumable image generation using configured provider order."""
 
 from __future__ import annotations
 
@@ -26,18 +26,18 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 VISUAL_DIR = ROOT / "output" / "visuals"
+
 JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 JOBS_MANIFEST = VISUAL_DIR / "visual_jobs_manifest.json"
 IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
-INPUT_FILE = ROOT / "Input" / "topic.txt"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v27-verified-resume"
+VERSION = "photo-motion-image-generator-v28-billing-safe-resume"
 MIN_IMAGE_BYTES = 1024
+MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
 MAX_DIMENSION = 4096
-MAX_IMAGE_BYTES = 80 * 1024 * 1024
 BASE_SEED = 20261009
 ALLOWED_ROLES = {"hook", "main", "suspense", "resolution"}
 ALLOWED_FORMATS = {"short", "full"}
@@ -47,7 +47,7 @@ POLL_INTERVAL = 2
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "KathaLokAI-PhotoMotion/27.0",
+    "User-Agent": "KathaLokAI-PhotoMotion/28.0",
 })
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -63,6 +63,8 @@ REPLICATE_MODEL = ""
 ALLOW_BILLABLE = False
 IMAGE_FALLBACK_ENABLED = True
 MAX_RETRIES = 1
+
+BILLABLE_BLOCKED = False
 
 PROVIDER_ALIASES = {
     "hf": "huggingface",
@@ -111,6 +113,14 @@ def sha256_text(value):
     ).hexdigest()
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def stable_hash(value):
     raw = json.dumps(
         value,
@@ -122,37 +132,18 @@ def stable_hash(value):
     return sha256_text(raw)
 
 
-def sha256_file(path):
-    hasher = hashlib.sha256()
-
-    with Path(path).open("rb") as stream:
-        for block in iter(
-            lambda: stream.read(1024 * 1024),
-            b"",
-        ):
-            hasher.update(block)
-
-    return hasher.hexdigest()
-
-
 def read_json(path, default=None, required=False):
     path = Path(path)
 
     if not path.is_file():
         if required:
-            raise RuntimeError(
-                f"Required JSON file missing: {path}"
-            )
+            raise RuntimeError(f"Required JSON file missing: {path}")
         return default
 
     try:
-        return json.loads(
-            path.read_text(encoding="utf-8-sig")
-        )
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"Cannot read JSON {path}: {exc}"
-        ) from exc
+        raise RuntimeError(f"Cannot read JSON {path}: {exc}") from exc
 
 
 def save_json(path, data):
@@ -161,17 +152,8 @@ def save_json(path, data):
     temporary = path.with_name(path.name + ".tmp")
 
     try:
-        with temporary.open(
-            "w",
-            encoding="utf-8",
-            newline="\n",
-        ) as stream:
-            json.dump(
-                data,
-                stream,
-                ensure_ascii=False,
-                indent=2,
-            )
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -184,8 +166,7 @@ def save_json(path, data):
 def parse_input_settings():
     sys.path.insert(0, str(SCRIPTS))
     from input_config import load_and_validate
-
-    return load_and_validate(INPUT_FILE)
+    return load_and_validate(ROOT / "Input" / "topic.txt")
 
 
 def apply_input_settings(config):
@@ -200,7 +181,7 @@ def apply_input_settings(config):
 
     settings = get_image_provider_settings(config)
 
-    # Provider order is taken only from Input/topic.txt.
+    # Keep the exact order defined by Input/topic.txt.
     PROVIDER_ORDER = list(settings["IMAGE_PROVIDER_ORDER"])
     HF_SPACES = list(settings["FREE_IMAGE_FALLBACK_SPACES"])
 
@@ -213,26 +194,21 @@ def apply_input_settings(config):
     GEMINI_MODEL = clean(settings["GEMINI_IMAGE_MODEL"])
     REPLICATE_MODEL = clean(settings["REPLICATE_IMAGE_MODEL"])
 
-    ALLOW_BILLABLE = bool(
-        settings["IMAGE_ALLOW_BILLABLE"]
-    )
+    # Both the input setting and workflow environment must allow billing.
+    ALLOW_BILLABLE = bool(settings["IMAGE_ALLOW_BILLABLE"])
+
     IMAGE_FALLBACK_ENABLED = bool(
         settings["IMAGE_FALLBACK_ENABLED"]
     )
+    MAX_RETRIES = max(1, min(5, int(get_max_retries(config))))
 
-    MAX_RETRIES = max(1, get_max_retries(config))
+    supported = {"huggingface", "pollinations", "gemini", "replicate"}
 
     if not PROVIDER_ORDER:
-        raise RuntimeError(
-            "IMAGE_PROVIDER_ORDER is empty."
-        )
+        raise RuntimeError("IMAGE_PROVIDER_ORDER is empty.")
 
-    supported = {
-        "huggingface",
-        "pollinations",
-        "gemini",
-        "replicate",
-    }
+    if len(PROVIDER_ORDER) != len(set(PROVIDER_ORDER)):
+        raise RuntimeError("IMAGE_PROVIDER_ORDER contains duplicates.")
 
     for provider in PROVIDER_ORDER:
         if provider not in supported:
@@ -240,29 +216,14 @@ def apply_input_settings(config):
                 f"Unsupported configured image provider: {provider}"
             )
 
-    if (
-        "huggingface" in PROVIDER_ORDER
-        and not HF_SPACES
-    ):
-        raise RuntimeError(
-            "Hugging Face is configured but no Space is configured."
-        )
+    if "huggingface" in PROVIDER_ORDER and not HF_SPACES:
+        raise RuntimeError("No Hugging Face Space is configured.")
 
-    if (
-        "pollinations" in PROVIDER_ORDER
-        and not POLLINATIONS_MODELS
-    ):
-        raise RuntimeError(
-            "Pollinations is configured but its model list is empty."
-        )
+    if "pollinations" in PROVIDER_ORDER and not POLLINATIONS_MODELS:
+        raise RuntimeError("Pollinations model list is empty.")
 
-    if (
-        "gemini" in PROVIDER_ORDER
-        and not GEMINI_MODEL
-    ):
-        raise RuntimeError(
-            "GEMINI_IMAGE_MODEL is empty."
-        )
+    if "gemini" in PROVIDER_ORDER and not GEMINI_MODEL:
+        raise RuntimeError("GEMINI_IMAGE_MODEL is empty.")
 
     if (
         "replicate" in PROVIDER_ORDER
@@ -275,10 +236,7 @@ def apply_input_settings(config):
             "REPLICATE_IMAGE_MODEL must use owner/model format."
         )
 
-    log(
-        "Configured image provider order:",
-        " -> ".join(PROVIDER_ORDER),
-    )
+    log("Configured image provider order:", " -> ".join(PROVIDER_ORDER))
     log("Billable image providers allowed:", ALLOW_BILLABLE)
     log("Provider fallback enabled:", IMAGE_FALLBACK_ENABLED)
     log("Maximum retries per provider/model:", MAX_RETRIES)
@@ -286,24 +244,15 @@ def apply_input_settings(config):
 
 def safe_path(value, label):
     raw = clean(value)
-
     if not raw:
-        raise RuntimeError(
-            f"{label}: output path is missing."
-        )
+        raise RuntimeError(f"{label}: output path is missing.")
 
     path = Path(raw)
-    if path.is_absolute():
-        resolved = path.resolve()
-    else:
-        resolved = (ROOT / path).resolve()
-
+    resolved = path.resolve() if path.is_absolute() else (ROOT / path).resolve()
     root = ROOT.resolve()
 
     if resolved != root and root not in resolved.parents:
-        raise RuntimeError(
-            f"{label}: output path escapes repository."
-        )
+        raise RuntimeError(f"{label}: output path escapes repository.")
 
     return resolved
 
@@ -315,30 +264,20 @@ def parse_size(value):
             str(value).lower().strip().split("x", 1),
         )
     except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"Invalid image size: {value!r}"
-        ) from exc
+        raise RuntimeError(f"Invalid image size: {value!r}") from exc
 
     if not (
         MIN_DIMENSION <= width <= MAX_DIMENSION
         and MIN_DIMENSION <= height <= MAX_DIMENSION
     ):
-        raise RuntimeError(
-            f"Invalid image dimensions: {width}x{height}."
-        )
+        raise RuntimeError(f"Invalid image dimensions: {width}x{height}")
 
     return width, height
 
 
 def get_jobs():
-    jobs_document = read_json(
-        JOBS_FILE,
-        required=True,
-    )
-    jobs_manifest = read_json(
-        JOBS_MANIFEST,
-        {},
-    )
+    jobs_document = read_json(JOBS_FILE, required=True)
+    jobs_manifest = read_json(JOBS_MANIFEST, {})
 
     if isinstance(jobs_document, list):
         jobs = jobs_document
@@ -348,33 +287,17 @@ def get_jobs():
             or jobs_document.get("visual_jobs")
             or jobs_document.get("scenes")
         )
-
         if not isinstance(jobs, list):
-            raise RuntimeError(
-                "visual_jobs.json has no valid jobs list."
-            )
-
-        jobs_manifest = {
-            **jobs_manifest,
-            **jobs_document,
-        }
+            raise RuntimeError("visual_jobs.json has no valid jobs list.")
+        jobs_manifest = {**jobs_manifest, **jobs_document}
     else:
-        raise RuntimeError(
-            "visual_jobs.json root must be a list or object."
-        )
+        raise RuntimeError("visual_jobs.json root must be a list or object.")
 
-    if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError(
-            "visual_jobs.json contains no image jobs."
-        )
+    if not jobs:
+        raise RuntimeError("visual_jobs.json contains no image jobs.")
 
-    if jobs_manifest and jobs_manifest.get("status") not in {
-        "completed",
-        "ready",
-    }:
-        raise RuntimeError(
-            "Visual jobs manifest is not completed."
-        )
+    if jobs_manifest and jobs_manifest.get("status") not in {"completed", "ready"}:
+        raise RuntimeError("Visual jobs manifest is not completed.")
 
     prepared = []
     seen_global = set()
@@ -384,148 +307,82 @@ def get_jobs():
 
     for index, job in enumerate(jobs, 1):
         if not isinstance(job, dict):
-            raise RuntimeError(
-                f"Image job #{index} is not an object."
-            )
+            raise RuntimeError(f"Image job #{index} is not an object.")
 
         try:
             part = int(job["part"])
             global_number = int(
-                job.get(
-                    "global_scene",
-                    job.get("scene_index", index),
-                )
+                job.get("global_scene", job.get("scene_index", index))
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError(
                 f"Image job #{index} has invalid numbering."
             ) from exc
 
-        role = clean(
-            job.get("role")
-            or job.get("scene_type")
-            or "main"
-        ).lower()
-
+        role = clean(job.get("role") or job.get("scene_type") or "main").lower()
         if role not in ALLOWED_ROLES:
-            raise RuntimeError(
-                f"Unsupported image role in job #{index}: {role!r}."
-            )
+            raise RuntimeError(f"Unsupported image role: {role!r}")
 
         scene_id = clean(
-            job.get("scene_id")
-            or job.get("id")
-            or job.get("source_scene_id")
+            job.get("scene_id") or job.get("id") or job.get("source_scene_id")
         )
 
-        if (
-            not scene_id
-            or not re.fullmatch(
-                r"[A-Za-z0-9_.-]{1,120}",
-                scene_id,
-            )
-        ):
-            raise RuntimeError(
-                f"Image job #{index} has an invalid scene ID."
-            )
-
+        if not scene_id or not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", scene_id):
+            raise RuntimeError(f"Image job #{index} has an invalid scene ID.")
         if scene_id in seen_ids:
-            raise RuntimeError(
-                f"Duplicate image scene ID: {scene_id}."
-            )
+            raise RuntimeError(f"Duplicate image scene ID: {scene_id}")
+        if part < 1 or global_number < 1 or global_number in seen_global:
+            raise RuntimeError(f"{scene_id}: invalid or duplicate numbering.")
 
-        if part < 1 or global_number < 1:
-            raise RuntimeError(
-                f"{scene_id}: part/global numbering must be positive."
-            )
-
-        if global_number in seen_global:
-            raise RuntimeError(
-                f"Duplicate global scene number: {global_number}."
-            )
-
+        source_scene_number = None
         if role == "main":
             raw_local = (
                 job.get("source_scene_number")
                 or job.get("source_local_scene")
                 or job.get("scene")
             )
-
             try:
                 source_scene_number = int(raw_local)
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(
                     f"{scene_id}: main scene requires source scene number."
                 ) from exc
-
             if source_scene_number < 1:
-                raise RuntimeError(
-                    f"{scene_id}: invalid main scene number."
-                )
-        else:
-            source_scene_number = None
+                raise RuntimeError(f"{scene_id}: invalid main scene number.")
 
         try:
-            local_slot = int(
-                job.get(
-                    "local_scene",
-                    job.get("scene", index),
-                )
-            )
+            local_slot = int(job.get("local_scene", job.get("scene", index)))
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"{scene_id}: invalid local image slot."
-            ) from exc
+            raise RuntimeError(f"{scene_id}: invalid local image slot.") from exc
 
         if local_slot < 1 or (part, local_slot) in seen_slots:
-            raise RuntimeError(
-                f"{scene_id}: duplicate or invalid local image slot."
+            raise RuntimeError(f"{scene_id}: duplicate or invalid local slot.")
+
+        size_value = clean(job.get("image_size") or jobs_manifest.get("image_size"))
+        if not size_value:
+            mode = clean(jobs_manifest.get("format")).lower()
+            size_value = "720x1280" if mode == "short" else (
+                "1280x720" if mode == "full" else ""
             )
 
-        size_value = clean(
-            job.get("image_size")
-            or jobs_manifest.get("image_size")
-        )
-
         if not size_value:
-            format_name = clean(
-                jobs_manifest.get("format")
-            ).lower()
-
-            if format_name == "short":
-                size_value = "720x1280"
-            elif format_name == "full":
-                size_value = "1280x720"
-            else:
-                raise RuntimeError(
-                    f"{scene_id}: image dimensions and format are missing."
-                )
+            raise RuntimeError(f"{scene_id}: image size and format are missing.")
 
         size = parse_size(size_value)
-
         prompt = next((
             clean(job.get(key))
             for key in (
-                "prompt",
-                "image_prompt",
-                "visual_prompt",
-                "scene_prompt",
-                "description",
+                "prompt", "image_prompt", "visual_prompt",
+                "scene_prompt", "description",
             )
             if clean(job.get(key))
         ), "")
-
         narration = clean(job.get("narration"))
 
         if len(prompt) < 24:
-            raise RuntimeError(
-                f"{scene_id}: visual prompt is missing or too short."
-            )
-
+            raise RuntimeError(f"{scene_id}: visual prompt is missing or too short.")
         if len(narration) < 8:
-            raise RuntimeError(
-                f"{scene_id}: source narration is missing or too short."
-            )
+            raise RuntimeError(f"{scene_id}: narration is missing or too short.")
 
         destination = safe_path(
             job.get("output_path") or job.get("image_path"),
@@ -533,39 +390,26 @@ def get_jobs():
         )
         relative_path = destination.relative_to(ROOT).as_posix()
 
-        if relative_path in seen_paths:
-            raise RuntimeError(
-                f"Duplicate image destination: {relative_path}."
-            )
-
-        if not relative_path.startswith(
-            "output/visuals/images/"
+        if (
+            relative_path in seen_paths
+            or not relative_path.startswith("output/visuals/images/")
         ):
             raise RuntimeError(
-                f"{scene_id}: image destination must be under "
-                "output/visuals/images/."
+                f"{scene_id}: duplicate or invalid image destination."
             )
 
         signatures = {
-            "source_scene_signature": clean(
-                job.get("source_scene_signature")
-            ),
-            "prompt_signature": clean(
-                job.get("prompt_signature")
-            ),
-            "config_signature": clean(
-                job.get("config_signature")
-            ),
-            "source_fingerprint": clean(
-                job.get("source_fingerprint")
-            ),
+            key: clean(job.get(key))
+            for key in (
+                "source_scene_signature",
+                "prompt_signature",
+                "config_signature",
+                "source_fingerprint",
+            )
         }
 
         if not all(signatures.values()):
-            raise RuntimeError(
-                f"{scene_id}: missing source, prompt, config "
-                "or story fingerprint."
-            )
+            raise RuntimeError(f"{scene_id}: required fingerprints are missing.")
 
         seen_global.add(global_number)
         seen_slots.add((part, local_slot))
@@ -582,104 +426,61 @@ def get_jobs():
             "role": role,
             "prompt": prompt,
             "narration": narration,
-            "negative_prompt": clean(
-                job.get("negative_prompt")
-            ),
+            "negative_prompt": clean(job.get("negative_prompt")),
             "size": size,
             "size_text": f"{size[0]}x{size[1]}",
             "destination": destination,
             "relative_path": relative_path,
-            "duration": job.get(
-                "scene_duration",
-                job.get("duration"),
-            ),
+            "duration": job.get("scene_duration", job.get("duration")),
             "source_job": job,
         })
 
-    prepared.sort(
-        key=lambda row: row["global_scene"]
-    )
+    prepared.sort(key=lambda row: row["global_scene"])
 
-    global_numbers = [
-        row["global_scene"]
-        for row in prepared
-    ]
+    if [row["global_scene"] for row in prepared] != list(range(1, len(prepared) + 1)):
+        raise RuntimeError("Global image job numbering must be continuous from 1.")
 
-    if global_numbers != list(
-        range(1, len(prepared) + 1)
-    ):
-        raise RuntimeError(
-            "Global image job numbering must be continuous from 1."
-        )
+    expected_count = jobs_manifest.get("total_jobs")
+    if expected_count is not None and int(expected_count) != len(prepared):
+        raise RuntimeError("Job count differs from visual jobs manifest.")
 
-    if jobs_manifest:
-        expected_count = jobs_manifest.get("total_jobs")
+    expected_fingerprint = clean(jobs_manifest.get("source_fingerprint"))
+    expected_config = clean(jobs_manifest.get("config_signature"))
 
-        if (
-            expected_count is not None
-            and int(expected_count) != len(prepared)
-        ):
-            raise RuntimeError(
-                "Job count differs from visual jobs manifest."
-            )
-
-        expected_fingerprint = clean(
-            jobs_manifest.get("source_fingerprint")
-        )
-
-        if expected_fingerprint and any(
-            clean(row["source_job"].get("source_fingerprint"))
-            != expected_fingerprint
-            for row in prepared
-        ):
-            raise RuntimeError(
-                "Job source fingerprints do not match manifest."
-            )
-
-        expected_config = clean(
-            jobs_manifest.get("config_signature")
-        )
-
-        if expected_config and any(
-            clean(row["source_job"].get("config_signature"))
-            != expected_config
-            for row in prepared
-        ):
-            raise RuntimeError(
-                "Job config signatures do not match manifest."
-            )
+    for row in prepared:
+        source = row["source_job"]
+        if expected_fingerprint and clean(source.get("source_fingerprint")) != expected_fingerprint:
+            raise RuntimeError("Job source fingerprints do not match manifest.")
+        if expected_config and clean(source.get("config_signature")) != expected_config:
+            raise RuntimeError("Job config signatures do not match manifest.")
 
     return prepared, jobs_manifest
 
 
 def make_prompt(item):
     source = item["source_job"]
-
     sections = [
         item["prompt"],
-        "Photographic quality: photorealistic live-action cinematic still.",
+        "Photorealistic live-action cinematic still.",
         (
-            "Depict the exact story event in the visual prompt. Preserve "
-            "all explicit names, people, locations, objects, animals, "
-            "vehicles, clothing, weather, time period, relationships and "
-            "actions. Do not replace specific story details with generic "
-            "imagery, omit required story nouns or invent events."
+            "Depict the exact story event. Preserve all explicit names, "
+            "people, locations, objects, animals, vehicles, clothing, "
+            "weather, time period, relationships and actions. Do not "
+            "replace specific story details with generic imagery."
         ),
         (
-            "Use narration only as story context. Narration must not "
-            "appear as visible text, subtitles, labels or typography."
+            "Narration is context only and must not appear as visible text, "
+            "subtitles, labels or typography."
         ),
         (
-            "Compose one still image for later zoom, pan and optional "
-            "2.5D parallax. Keep faces, people and important objects "
-            "within safe margins. Do not depict body, face or character "
-            "animation."
+            "Create one still image for later zoom, pan and optional 2.5D "
+            "parallax. Keep important faces and objects within safe margins. "
+            "Do not depict body, face or character animation."
         ),
         (
-            "Use natural human anatomy, realistic skin texture, "
-            "believable materials, physically plausible lighting and "
-            "coherent perspective. No cartoon, anime, illustration, "
-            "CGI, logo or watermark."
+            "Natural anatomy, realistic skin texture, believable materials, "
+            "physically plausible lighting and coherent perspective. "
+            "No cartoon, anime, illustration, CGI, logo or watermark."
         ),
     ]
 
@@ -695,64 +496,34 @@ def make_prompt(item):
         ("mood", "Emotional mood"),
     ):
         value = source.get(key)
-
         if isinstance(value, list):
-            value = ", ".join(
-                clean(entry)
-                for entry in value
-                if clean(entry)
-            )
-
+            value = ", ".join(clean(entry) for entry in value if clean(entry))
         value = clean(value)
-
         if value:
             sections.append(f"{label}: {value}")
 
-    character_records = source.get(
-        "character_references"
-    )
-
-    if (
-        isinstance(character_records, list)
-        and character_records
-    ):
+    character_records = source.get("character_references")
+    if isinstance(character_records, list) and character_records:
         sections.append(
-            "CHARACTER IDENTITY LOCK — preserve the supplied identity "
-            "and continuity. Do not swap, merge or redesign characters: "
-            + json.dumps(
-                character_records,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+            "CHARACTER IDENTITY LOCK: "
+            + json.dumps(character_records, ensure_ascii=False, separators=(",", ":"))
         )
     else:
-        character_names = (
-            source.get("character_names")
-            or source.get("characters")
-        )
-
-        if character_names:
+        names = source.get("character_names") or source.get("characters")
+        if names:
             sections.append(
                 "Required story characters: "
-                + ", ".join(split_values(character_names))
-                + ". Preserve their established identity."
+                + ", ".join(split_values(names))
+                + ". Preserve established identity."
             )
 
-    if item["role"] == "hook":
-        sections.append(
-            "HOOK FRAME: depict the actual opening hook event; "
-            "create curiosity without revealing the final resolution."
-        )
-    elif item["role"] == "suspense":
-        sections.append(
-            "SUSPENSE FRAME: depict the actual unresolved tension "
-            "or danger without showing the final resolution."
-        )
-    elif item["role"] == "resolution":
-        sections.append(
-            "FINAL RESOLUTION FRAME: depict the actual story ending "
-            "and its consequence. Do not invent an alternate ending."
-        )
+    role_instructions = {
+        "hook": "HOOK FRAME: depict the actual opening hook event without revealing final resolution.",
+        "suspense": "SUSPENSE FRAME: depict actual unresolved tension without showing final resolution.",
+        "resolution": "FINAL RESOLUTION FRAME: depict the actual story ending and consequence.",
+    }
+    if item["role"] in role_instructions:
+        sections.append(role_instructions[item["role"]])
 
     return "\n\n".join(sections)
 
@@ -763,47 +534,23 @@ def prompt_hash(item):
 
 def build_negative_prompt(item):
     values = [
-        "wrong story event",
-        "unrelated characters",
-        "unrelated props",
-        "wrong location",
-        "wrong time period",
-        "distorted face",
-        "unrealistic anatomy",
-        "extra fingers",
-        "missing fingers",
-        "fused limbs",
-        "duplicated people",
-        "plastic skin",
-        "waxy face",
-        "floating objects",
-        "captions",
-        "subtitles",
-        "unintended text",
-        "logo",
-        "watermark",
-        "low resolution",
-        "blurry main subject",
-        "cartoon",
-        "anime",
-        "comic-book illustration",
-        "2D drawing",
-        "3D animated character",
-        "body animation",
-        "face animation",
-        "character animation",
-        "motion blur",
+        "wrong story event", "unrelated characters", "unrelated props",
+        "wrong location", "wrong time period", "distorted face",
+        "unrealistic anatomy", "extra fingers", "missing fingers",
+        "fused limbs", "duplicated people", "plastic skin", "waxy face",
+        "floating objects", "captions", "subtitles", "unintended text",
+        "logo", "watermark", "low resolution", "blurry main subject",
+        "cartoon", "anime", "comic-book illustration", "2D drawing",
+        "3D animated character", "body animation", "face animation",
+        "character animation", "motion blur",
     ]
-
     if item["negative_prompt"]:
         values.append(item["negative_prompt"])
-
     return ", ".join(dict.fromkeys(values))
 
 
 def job_signature(item):
     source = item["source_job"]
-
     return stable_hash({
         "version": VERSION,
         "scene_id": item["scene_id"],
@@ -813,25 +560,16 @@ def job_signature(item):
         "prompt": make_prompt(item),
         "negative_prompt": build_negative_prompt(item),
         "size": item["size_text"],
-        "source_scene_signature": source.get(
-            "source_scene_signature"
-        ),
-        "prompt_signature": source.get(
-            "prompt_signature"
-        ),
-        "config_signature": source.get(
-            "config_signature"
-        ),
-        "source_fingerprint": source.get(
-            "source_fingerprint"
-        ),
+        "source_scene_signature": source.get("source_scene_signature"),
+        "prompt_signature": source.get("prompt_signature"),
+        "config_signature": source.get("config_signature"),
+        "source_fingerprint": source.get("source_fingerprint"),
     })
 
 
 def valid_image(path, size):
     try:
         path = Path(path)
-
         if (
             not path.is_file()
             or path.stat().st_size < MIN_IMAGE_BYTES
@@ -849,16 +587,13 @@ def valid_image(path, size):
                 and image.width >= MIN_DIMENSION
                 and image.height >= MIN_DIMENSION
             )
-
     except Exception:
         return False
 
 
 def image_integrity(path, size):
     if not valid_image(path, size):
-        raise RuntimeError(
-            f"Image failed format/dimension/integrity check: {path}"
-        )
+        raise RuntimeError(f"Image integrity check failed: {path}")
 
     with Image.open(path) as image:
         image_format = image.format
@@ -867,9 +602,7 @@ def image_integrity(path, size):
         extrema = image.convert("RGB").getextrema()
 
     if all(low == high for low, high in extrema):
-        raise RuntimeError(
-            f"Generated image is a single flat colour: {path}"
-        )
+        raise RuntimeError(f"Image is a single flat colour: {path}")
 
     return {
         "format": image_format,
@@ -878,22 +611,14 @@ def image_integrity(path, size):
         "size_bytes": Path(path).stat().st_size,
         "sha256": sha256_file(path),
         "file_integrity": "verified",
-        "semantic_story_match": (
-            "not_verified_without_vision_model"
-        ),
+        "semantic_story_match": "not_verified_without_vision_model",
     }
 
 
 def save_image(image, destination, size):
     destination = Path(destination)
-    destination.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    temporary = destination.with_name(
-        destination.stem + ".tmp.png"
-    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.stem + ".tmp.png")
 
     try:
         image = ImageOps.exif_transpose(image).convert("RGB")
@@ -904,28 +629,17 @@ def save_image(image, destination, size):
             color=(18, 18, 18),
             centering=(0.5, 0.5),
         )
-
-        image.save(
-            temporary,
-            "PNG",
-            optimize=True,
-        )
-
+        image.save(temporary, "PNG", optimize=True)
         image_integrity(temporary, size)
         os.replace(temporary, destination)
-
         image_integrity(destination, size)
-
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def save_image_bytes(raw, destination, size):
     if not raw:
-        raise RuntimeError(
-            "Provider returned empty image data."
-        )
-
+        raise RuntimeError("Provider returned empty image data.")
     with Image.open(BytesIO(raw)) as image:
         image.load()
         save_image(image, destination, size)
@@ -933,175 +647,85 @@ def save_image_bytes(raw, destination, size):
 
 def response_image(response, destination, size, provider):
     response.raise_for_status()
-
-    content_type = response.headers.get(
-        "content-type",
-        "",
-    ).lower()
+    content_type = response.headers.get("content-type", "").lower()
 
     if not content_type.startswith("image/"):
         raise RuntimeError(
-            f"{provider} returned non-image content "
-            f"({content_type or 'unknown'})."
+            f"{provider} returned non-image content: {content_type or 'unknown'}"
         )
-
     if len(response.content) > MAX_IMAGE_BYTES:
-        raise RuntimeError(
-            f"{provider} returned an image exceeding the size limit."
-        )
+        raise RuntimeError(f"{provider} image exceeds size limit.")
 
-    save_image_bytes(
-        response.content,
-        destination,
-        size,
-    )
+    save_image_bytes(response.content, destination, size)
 
 
 def deterministic_seed(item):
-    raw = (
-        f"{BASE_SEED}:"
-        f"{item['scene_id']}:"
-        f"{item['global_scene']}"
-    )
-
-    return int(
-        hashlib.sha256(
-            raw.encode("utf-8")
-        ).hexdigest()[:8],
-        16,
-    )
+    raw = f"{BASE_SEED}:{item['scene_id']}:{item['global_scene']}"
+    return int(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8], 16)
 
 
 def hf_parameter_name(parameter):
     if not isinstance(parameter, dict):
         return ""
-
-    return clean(
-        parameter.get("parameter_name")
-        or parameter.get("name")
-    )
+    return clean(parameter.get("parameter_name") or parameter.get("name"))
 
 
-def build_hf_arguments(
-    parameters,
-    prompt,
-    size,
-    seed,
-    negative,
-):
+def build_hf_arguments(parameters, prompt, size, seed, negative):
     width, height = size
     arguments = {}
     prompt_found = False
 
     for parameter in parameters:
         name = hf_parameter_name(parameter)
-
         if not name:
             continue
 
-        normalized = re.sub(
-            r"[^a-z0-9]",
-            "",
-            name.lower(),
-        )
-
+        normalized = re.sub(r"[^a-z0-9]", "", name.lower())
         required = (
-            not bool(
-                parameter.get(
-                    "parameter_has_default",
-                    True,
-                )
-            )
+            not bool(parameter.get("parameter_has_default", True))
             if "parameter_has_default" in parameter
             else bool(parameter.get("required", False))
         )
 
         if any(token in normalized for token in (
-            "prompt",
-            "description",
-            "textprompt",
-            "positiveprompt",
+            "prompt", "description", "textprompt", "positiveprompt"
         )):
             arguments[name] = prompt
             prompt_found = True
-
-        elif normalized in {
-            "width",
-            "imagewidth",
-            "outputwidth",
-        }:
+        elif normalized in {"width", "imagewidth", "outputwidth"}:
             arguments[name] = width
-
-        elif normalized in {
-            "height",
-            "imageheight",
-            "outputheight",
-        }:
+        elif normalized in {"height", "imageheight", "outputheight"}:
             arguments[name] = height
-
         elif normalized in {"seed", "randomseed"}:
             arguments[name] = seed
-
         elif normalized in {"negativeprompt", "negative"}:
             arguments[name] = negative
-
-        elif normalized in {
-            "guidancescale",
-            "guidance",
-            "cfgscale",
-        }:
+        elif normalized in {"guidancescale", "guidance", "cfgscale"}:
             arguments[name] = 7
-
-        elif normalized in {
-            "steps",
-            "numsteps",
-            "inferencesteps",
-        }:
+        elif normalized in {"steps", "numsteps", "inferencesteps"}:
             arguments[name] = 9
-
-        elif normalized in {
-            "randomize",
-            "randomizeseed",
-        }:
+        elif normalized in {"randomize", "randomizeseed"}:
             arguments[name] = False
-
         elif required:
-            raise RuntimeError(
-                f"Unsupported required Hugging Face input: {name}."
-            )
+            raise RuntimeError(f"Unsupported required Hugging Face input: {name}")
 
     if not prompt_found:
-        raise RuntimeError(
-            "Hugging Face endpoint has no supported prompt input."
-        )
+        raise RuntimeError("Hugging Face endpoint has no supported prompt input.")
 
     return arguments
 
 
 def extract_hf_image(result, destination, size, space):
     if isinstance(result, (list, tuple)):
-        if not result:
-            raise RuntimeError(
-                f"{space}: empty endpoint result."
-            )
-
         errors = []
-
-        for item in result:
+        for value in result:
             try:
-                extract_hf_image(
-                    item,
-                    destination,
-                    size,
-                    space,
-                )
+                extract_hf_image(value, destination, size, space)
                 return
             except Exception as exc:
                 errors.append(str(exc))
-
         raise RuntimeError(
-            f"{space}: no usable image in endpoint result. "
-            + "; ".join(errors[:3])
+            f"{space}: no usable image in endpoint result: {'; '.join(errors[:3])}"
         )
 
     if isinstance(result, Image.Image):
@@ -1109,72 +733,37 @@ def extract_hf_image(result, destination, size, space):
         return
 
     if isinstance(result, dict):
-        candidate = (
+        result = (
             result.get("path")
             or result.get("filepath")
             or result.get("url")
             or result.get("image")
         )
-
-        if isinstance(candidate, dict):
-            candidate = (
-                candidate.get("path")
-                or candidate.get("url")
-            )
-
-        result = candidate
+        if isinstance(result, dict):
+            result = result.get("path") or result.get("url")
 
     if isinstance(result, str):
         local = Path(result)
-
         if local.is_file():
             with Image.open(local) as image:
                 image.load()
-                save_image(
-                    image,
-                    destination,
-                    size,
-                )
+                save_image(image, destination, size)
             return
 
         parsed = urlparse(result)
-
-        if (
-            parsed.scheme in {"http", "https"}
-            and parsed.netloc
-        ):
-            response = SESSION.get(
-                result,
-                timeout=TIMEOUT,
-            )
-            response_image(
-                response,
-                destination,
-                size,
-                space,
-            )
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            response = SESSION.get(result, timeout=TIMEOUT)
+            response_image(response, destination, size, space)
             return
 
-    raise RuntimeError(
-        f"{space}: endpoint did not return a usable image."
-    )
+    raise RuntimeError(f"{space}: endpoint did not return a usable image.")
 
 
-def generate_huggingface(
-    prompt,
-    destination,
-    size,
-    seed,
-    space,
-    negative,
-):
+def generate_huggingface(prompt, destination, size, seed, space, negative):
     if Client is None:
-        raise RuntimeError(
-            "gradio_client is not installed."
-        )
+        raise RuntimeError("gradio_client is not installed.")
 
     options = {"verbose": False}
-
     if HF_TOKEN:
         options["hf_token"] = HF_TOKEN
 
@@ -1183,76 +772,32 @@ def generate_huggingface(
     endpoints = api.get("named_endpoints", {})
 
     if not isinstance(endpoints, dict) or not endpoints:
-        raise RuntimeError(
-            f"{space}: no named Gradio endpoint found."
-        )
+        raise RuntimeError(f"{space}: no named Gradio endpoint found.")
 
-    preferred = (
-        "/generate_image",
-        "/generate",
-        "/predict",
-        "/run",
-    )
-
+    preferred = ("/generate_image", "/generate", "/predict", "/run")
     endpoint = next(
-        (
-            name for name in preferred
-            if name in endpoints
-        ),
+        (name for name in preferred if name in endpoints),
         next(iter(endpoints)),
     )
 
-    parameters = endpoints[endpoint].get(
-        "parameters",
-        [],
-    )
-
+    parameters = endpoints[endpoint].get("parameters", [])
     if not isinstance(parameters, list):
-        raise RuntimeError(
-            f"{space}: invalid endpoint parameter schema."
-        )
+        raise RuntimeError(f"{space}: invalid endpoint parameter schema.")
 
     arguments = build_hf_arguments(
-        parameters,
-        prompt,
-        size,
-        seed,
-        negative,
+        parameters, prompt, size, seed, negative
     )
-
-    result = client.predict(
-        api_name=endpoint,
-        **arguments,
-    )
-
-    extract_hf_image(
-        result,
-        destination,
-        size,
-        space,
-    )
+    result = client.predict(api_name=endpoint, **arguments)
+    extract_hf_image(result, destination, size, space)
 
 
-def generate_pollinations(
-    prompt,
-    destination,
-    size,
-    seed,
-    model,
-):
+def generate_pollinations(prompt, destination, size, seed, model):
     width, height = size
-
-    url = (
-        "https://gen.pollinations.ai/image/"
-        + quote(prompt, safe="")
-    )
-
+    url = "https://gen.pollinations.ai/image/" + quote(prompt, safe="")
     headers = {}
 
     if POLLINATIONS_KEY:
-        headers["Authorization"] = (
-            f"Bearer {POLLINATIONS_KEY}"
-        )
+        headers["Authorization"] = f"Bearer {POLLINATIONS_KEY}"
 
     response = SESSION.get(
         url,
@@ -1266,29 +811,17 @@ def generate_pollinations(
         headers=headers,
         timeout=TIMEOUT,
     )
-
-    response_image(
-        response,
-        destination,
-        size,
-        f"Pollinations ({model})",
-    )
+    response_image(response, destination, size, f"Pollinations ({model})")
 
 
 def generate_gemini(prompt, destination, size):
     if not ALLOW_BILLABLE:
-        raise RuntimeError(
-            "Gemini image generation blocked by billable permission."
-        )
-
+        raise RuntimeError("Gemini image generation blocked by billing permission.")
     if not GEMINI_KEY:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not configured."
-        )
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
 
     width, height = size
     aspect = "9:16" if height > width else "16:9"
-
     endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         + quote(GEMINI_MODEL, safe="")
@@ -1304,83 +837,42 @@ def generate_gemini(prompt, destination, size):
         json={
             "contents": [{
                 "parts": [{
-                    "text": (
-                        prompt
-                        + f"\nGenerate one image with {aspect} composition."
-                    )
+                    "text": prompt + f"\nGenerate one image with {aspect} composition."
                 }]
             }],
-            "generationConfig": {
-                "responseModalities": ["IMAGE", "TEXT"]
-            },
+            "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
         },
         timeout=TIMEOUT,
     )
-
     response.raise_for_status()
     data = response.json()
 
     for candidate in data.get("candidates", []):
-        content = candidate.get("content", {})
-
-        for part in content.get("parts", []):
-            inline = (
-                part.get("inlineData")
-                or part.get("inline_data")
-            )
-
-            if (
-                isinstance(inline, dict)
-                and inline.get("data")
-            ):
-                raw = base64.b64decode(
-                    inline["data"],
-                    validate=True,
-                )
-
-                save_image_bytes(
-                    raw,
-                    destination,
-                    size,
-                )
+        for part in candidate.get("content", {}).get("parts", []):
+            inline = part.get("inlineData") or part.get("inline_data")
+            if isinstance(inline, dict) and inline.get("data"):
+                raw = base64.b64decode(inline["data"], validate=True)
+                save_image_bytes(raw, destination, size)
                 return
 
-    raise RuntimeError(
-        "Gemini response contains no image data."
-    )
+    raise RuntimeError("Gemini response contains no image data.")
 
 
-def generate_replicate(
-    prompt,
-    destination,
-    size,
-    seed,
-):
+def generate_replicate(prompt, destination, size, seed):
     if not ALLOW_BILLABLE:
-        raise RuntimeError(
-            "Replicate image generation blocked by billable permission."
-        )
-
+        raise RuntimeError("Replicate image generation blocked by billing permission.")
     if not REPLICATE_KEY:
-        raise RuntimeError(
-            "REPLICATE_API_TOKEN is not configured."
-        )
+        raise RuntimeError("REPLICATE_API_TOKEN is not configured.")
 
     owner, separator, model = REPLICATE_MODEL.partition("/")
-
     if not separator or not owner or not model:
-        raise RuntimeError(
-            "REPLICATE_IMAGE_MODEL must use owner/model format."
-        )
+        raise RuntimeError("REPLICATE_IMAGE_MODEL must use owner/model format.")
 
     width, height = size
     aspect = "9:16" if height > width else "16:9"
 
     response = SESSION.post(
-        (
-            "https://api.replicate.com/v1/models/"
-            f"{owner}/{model}/predictions"
-        ),
+        f"https://api.replicate.com/v1/models/{owner}/{model}/predictions",
         headers={
             "Authorization": f"Bearer {REPLICATE_KEY}",
             "Content-Type": "application/json",
@@ -1396,122 +888,69 @@ def generate_replicate(
         },
         timeout=TIMEOUT,
     )
-
     response.raise_for_status()
     prediction = response.json()
     deadline = time.monotonic() + TIMEOUT
 
-    while prediction.get("status") in {
-        "starting",
-        "processing",
-    }:
+    while prediction.get("status") in {"starting", "processing"}:
         if time.monotonic() >= deadline:
-            raise TimeoutError(
-                "Replicate prediction timed out."
-            )
+            raise TimeoutError("Replicate prediction timed out.")
 
         time.sleep(POLL_INTERVAL)
-
         poll_url = (
             prediction.get("urls", {}).get("get")
-            or (
-                "https://api.replicate.com/v1/predictions/"
-                + clean(prediction.get("id"))
-            )
+            or "https://api.replicate.com/v1/predictions/" + clean(prediction.get("id"))
         )
 
-        if (
-            not clean(prediction.get("id"))
-            and not prediction.get("urls", {}).get("get")
-        ):
-            raise RuntimeError(
-                "Replicate did not return a prediction ID."
-            )
+        if not clean(prediction.get("id")) and not prediction.get("urls", {}).get("get"):
+            raise RuntimeError("Replicate did not return a prediction ID.")
 
         check = SESSION.get(
             poll_url,
-            headers={
-                "Authorization": f"Bearer {REPLICATE_KEY}"
-            },
+            headers={"Authorization": f"Bearer {REPLICATE_KEY}"},
             timeout=min(TIMEOUT, 60),
         )
-
         check.raise_for_status()
         prediction = check.json()
 
     if prediction.get("status") != "succeeded":
         raise RuntimeError(
             "Replicate prediction failed: "
-            + clean(
-                prediction.get("error")
-                or prediction.get("status")
-            )
+            + clean(prediction.get("error") or prediction.get("status"))
         )
 
     output = prediction.get("output")
-
     if isinstance(output, str):
         output = [output]
     elif isinstance(output, dict):
         output = list(output.values())
 
     image_url = next((
-        value
-        for value in (output or [])
-        if (
-            isinstance(value, str)
-            and urlparse(value).scheme in {"https", "http"}
-        )
+        value for value in (output or [])
+        if isinstance(value, str)
+        and urlparse(value).scheme in {"https", "http"}
     ), None)
 
     if not image_url:
-        raise RuntimeError(
-            "Replicate returned no image URL."
-        )
+        raise RuntimeError("Replicate returned no image URL.")
 
-    image_response = SESSION.get(
-        image_url,
-        timeout=TIMEOUT,
-    )
+    image_response = SESSION.get(image_url, timeout=TIMEOUT)
+    response_image(image_response, destination, size, "Replicate")
 
-    response_image(
-        image_response,
-        destination,
-        size,
-        "Replicate",
-    )
-
-def build_provider_attempts(
-    prompt,
-    destination,
-    size,
-    seed,
-    negative,
-):
-    """Build provider/model attempts in the exact configured order."""
-
+def build_provider_attempts(prompt, destination, size, seed, negative):
+    """Create attempts in the exact configured provider order."""
     attempts = []
 
     for provider in PROVIDER_ORDER:
         if provider == "huggingface":
-            spaces = (
-                HF_SPACES
-                if IMAGE_FALLBACK_ENABLED
-                else HF_SPACES[:1]
-            )
-
+            spaces = HF_SPACES if IMAGE_FALLBACK_ENABLED else HF_SPACES[:1]
             for space in spaces:
                 attempts.append((
                     f"Hugging Face: {space}",
                     f"huggingface:{space}",
                     False,
                     lambda space=space: generate_huggingface(
-                        prompt,
-                        destination,
-                        size,
-                        seed,
-                        space,
-                        negative,
+                        prompt, destination, size, seed, space, negative
                     ),
                 ))
 
@@ -1521,61 +960,41 @@ def build_provider_attempts(
                 if IMAGE_FALLBACK_ENABLED
                 else POLLINATIONS_MODELS[:1]
             )
-
             for model in models:
                 attempts.append((
                     f"Pollinations: {model}",
                     f"pollinations:{model}",
                     False,
                     lambda model=model: generate_pollinations(
-                        prompt,
-                        destination,
-                        size,
-                        seed,
-                        model,
+                        prompt, destination, size, seed, model
                     ),
                 ))
 
         elif provider == "gemini":
             if not ALLOW_BILLABLE:
-                log(
-                    "Skipping Gemini: billable permission disabled."
-                )
+                log("Skipping Gemini: billable permission disabled.")
             elif not GEMINI_KEY:
-                log(
-                    "Skipping Gemini: GEMINI_API_KEY missing."
-                )
+                log("Skipping Gemini: GEMINI_API_KEY missing.")
             else:
                 attempts.append((
                     f"Gemini Image: {GEMINI_MODEL}",
                     f"gemini:{GEMINI_MODEL}",
                     True,
-                    lambda: generate_gemini(
-                        prompt,
-                        destination,
-                        size,
-                    ),
+                    lambda: generate_gemini(prompt, destination, size),
                 ))
 
         elif provider == "replicate":
             if not ALLOW_BILLABLE:
-                log(
-                    "Skipping Replicate: billable permission disabled."
-                )
+                log("Skipping Replicate: billable permission disabled.")
             elif not REPLICATE_KEY:
-                log(
-                    "Skipping Replicate: REPLICATE_API_TOKEN missing."
-                )
+                log("Skipping Replicate: REPLICATE_API_TOKEN missing.")
             else:
                 attempts.append((
                     f"Replicate: {REPLICATE_MODEL}",
                     f"replicate:{REPLICATE_MODEL}",
                     True,
                     lambda: generate_replicate(
-                        prompt,
-                        destination,
-                        size,
-                        seed,
+                        prompt, destination, size, seed
                     ),
                 ))
 
@@ -1588,29 +1007,18 @@ def build_provider_attempts(
 def load_previous_records():
     records = {}
 
-    for path in (
-        IMAGE_MANIFEST,
-        GENERATION_MANIFEST,
-    ):
+    for path in (IMAGE_MANIFEST, GENERATION_MANIFEST):
         document = read_json(path, {})
-
-        rows = (
-            document.get("scenes", [])
-            if isinstance(document, dict)
-            else []
-        )
+        rows = document.get("scenes", []) if isinstance(document, dict) else []
 
         if not isinstance(rows, list):
             continue
 
         for row in rows:
-            if not isinstance(row, dict):
-                continue
-
-            scene_id = clean(row.get("scene_id"))
-
-            if scene_id:
-                records[scene_id] = row
+            if isinstance(row, dict):
+                scene_id = clean(row.get("scene_id"))
+                if scene_id:
+                    records[scene_id] = row
 
     return records
 
@@ -1620,9 +1028,7 @@ def can_reuse_image(item, old):
         return False
 
     if clean(old.get("status")).lower() not in {
-        "generated",
-        "existing",
-        "completed",
+        "generated", "existing", "completed"
     }:
         return False
 
@@ -1637,73 +1043,38 @@ def can_reuse_image(item, old):
 
     source = item["source_job"]
 
-    comparisons = (
-        (
-            "prompt_signature",
-            source.get("prompt_signature"),
-        ),
-        (
-            "source_scene_signature",
-            source.get("source_scene_signature"),
-        ),
-        (
-            "source_fingerprint",
-            source.get("source_fingerprint"),
-        ),
-        (
-            "config_signature",
-            source.get("config_signature"),
-        ),
-    )
-
-    for field, expected in comparisons:
-        if clean(old.get(field)) != clean(expected):
+    for field in (
+        "prompt_signature",
+        "source_scene_signature",
+        "source_fingerprint",
+        "config_signature",
+    ):
+        if clean(old.get(field)) != clean(source.get(field)):
             return False
 
     old_path = clean(
-        old.get("image_path")
-        or old.get("image")
-        or old.get("file")
+        old.get("image_path") or old.get("image") or old.get("file")
     )
-
     if old_path != item["relative_path"]:
         return False
 
     expected_hash = clean(old.get("image_sha256"))
-
-    if not re.fullmatch(
-        r"[a-fA-F0-9]{64}",
-        expected_hash,
-    ):
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", expected_hash):
         return False
 
     try:
-        integrity = image_integrity(
-            item["destination"],
-            item["size"],
-        )
+        integrity = image_integrity(item["destination"], item["size"])
     except (OSError, RuntimeError, ValueError):
         return False
 
-    return (
-        integrity["sha256"].casefold()
-        == expected_hash.casefold()
-    )
+    return integrity["sha256"].casefold() == expected_hash.casefold()
 
 
-def make_record(
-    item,
-    status,
-    provider=None,
-    attempts=None,
-):
+def make_record(item, status, provider=None, attempts=None):
     integrity = None
 
     if status in {"generated", "existing"}:
-        integrity = image_integrity(
-            item["destination"],
-            item["size"],
-        )
+        integrity = image_integrity(item["destination"], item["size"])
 
     source = item["source_job"]
 
@@ -1728,27 +1099,13 @@ def make_record(
         "prompt_sha256": prompt_hash(item),
         "prompt_signature": source.get("prompt_signature"),
         "job_signature": job_signature(item),
-        "source_scene_signature": source.get(
-            "source_scene_signature"
-        ),
-        "source_fingerprint": source.get(
-            "source_fingerprint"
-        ),
-        "config_signature": source.get(
-            "config_signature"
-        ),
-        "image_sha256": (
-            integrity["sha256"]
-            if integrity else None
-        ),
-        "file_integrity": (
-            integrity["file_integrity"]
-            if integrity else "pending"
-        ),
+        "source_scene_signature": source.get("source_scene_signature"),
+        "source_fingerprint": source.get("source_fingerprint"),
+        "config_signature": source.get("config_signature"),
+        "image_sha256": integrity["sha256"] if integrity else None,
+        "file_integrity": integrity["file_integrity"] if integrity else "pending",
         "semantic_story_match": (
-            integrity["semantic_story_match"]
-            if integrity
-            else "not_verified"
+            integrity["semantic_story_match"] if integrity else "not_verified"
         ),
         "duration": item["duration"],
         "attempts": list(attempts or []),
@@ -1756,43 +1113,23 @@ def make_record(
 
 
 def selected_model_notice():
-    selection = read_json(
-        SELECTED_MODEL_FILE,
-        {},
-    )
+    selection = read_json(SELECTED_MODEL_FILE, {})
 
     if not isinstance(selection, dict):
         return
-
     if clean(selection.get("status")).lower() != "selected":
         return
 
-    provider = clean(
-        selection.get("provider")
-    ).lower()
-
+    provider = clean(selection.get("provider")).lower()
     model = clean(selection.get("model"))
+    normalized = PROVIDER_ALIASES.get(provider.replace("-", "_"), provider)
 
-    normalized = PROVIDER_ALIASES.get(
-        provider.replace("-", "_"),
-        provider,
-    )
-
-    log(
-        "Visual selector record:",
-        provider or "unknown",
-        model or "unknown",
-    )
+    log("Visual selector record:", provider or "unknown", model or "unknown")
 
     if normalized and normalized not in PROVIDER_ORDER:
-        log(
-            "Selector provider is not configured and will not be used:",
-            provider,
-        )
+        log("Selector provider is not configured and will not be used:", provider)
 
-    log(
-        "Actual generation follows Input IMAGE_PROVIDER_ORDER only."
-    )
+    log("Actual generation follows Input IMAGE_PROVIDER_ORDER only.")
 
 
 def build_policy():
@@ -1800,26 +1137,17 @@ def build_policy():
         "provider_order": list(PROVIDER_ORDER),
         "fallback_enabled": IMAGE_FALLBACK_ENABLED,
         "billable_providers_allowed": ALLOW_BILLABLE,
+        "billable_providers_blocked_after_quota_error": BILLABLE_BLOCKED,
         "max_retries_per_provider": MAX_RETRIES,
         "huggingface_spaces": (
-            list(HF_SPACES)
-            if "huggingface" in PROVIDER_ORDER
-            else []
+            list(HF_SPACES) if "huggingface" in PROVIDER_ORDER else []
         ),
         "pollinations_models": (
-            list(POLLINATIONS_MODELS)
-            if "pollinations" in PROVIDER_ORDER
-            else []
+            list(POLLINATIONS_MODELS) if "pollinations" in PROVIDER_ORDER else []
         ),
-        "gemini_model": (
-            GEMINI_MODEL
-            if "gemini" in PROVIDER_ORDER
-            else None
-        ),
+        "gemini_model": GEMINI_MODEL if "gemini" in PROVIDER_ORDER else None,
         "replicate_model": (
-            REPLICATE_MODEL
-            if "replicate" in PROVIDER_ORDER
-            else None
+            REPLICATE_MODEL if "replicate" in PROVIDER_ORDER else None
         ),
         "provider_credentials_logged": False,
     }
@@ -1827,23 +1155,11 @@ def build_policy():
 
 def count_status(records):
     ready = sum(
-        row.get("status") in {
-            "existing",
-            "generated",
-        }
+        row.get("status") in {"existing", "generated"}
         for row in records
     )
-
-    failed = sum(
-        row.get("status") == "failed"
-        for row in records
-    )
-
-    pending = sum(
-        row.get("status") == "pending"
-        for row in records
-    )
-
+    failed = sum(row.get("status") == "failed" for row in records)
+    pending = sum(row.get("status") == "pending" for row in records)
     return ready, failed, pending
 
 
@@ -1853,17 +1169,9 @@ def build_image_manifest(records, metadata, policy):
 
     return {
         "version": VERSION,
-        "status": (
-            "completed"
-            if ready == total and total > 0
-            else "in_progress"
-        ),
-        "source_fingerprint": metadata.get(
-            "source_fingerprint"
-        ),
-        "config_signature": metadata.get(
-            "config_signature"
-        ),
+        "status": "completed" if ready == total and total > 0 else "in_progress",
+        "source_fingerprint": metadata.get("source_fingerprint"),
+        "config_signature": metadata.get("config_signature"),
         "format": metadata.get("format"),
         "image_size": metadata.get("image_size"),
         "total_scenes": total,
@@ -1876,31 +1184,15 @@ def build_image_manifest(records, metadata, policy):
             {
                 key: row.get(key)
                 for key in (
-                    "scene",
-                    "global_scene",
-                    "global_scene_number",
-                    "part",
-                    "local_scene",
-                    "source_scene_number",
-                    "scene_id",
-                    "role",
-                    "is_extra_scene",
-                    "image",
-                    "image_path",
-                    "image_sha256",
-                    "width",
-                    "height",
-                    "image_size",
-                    "duration",
-                    "status",
-                    "provider",
-                    "prompt_sha256",
-                    "prompt_signature",
-                    "job_signature",
-                    "source_scene_signature",
-                    "source_fingerprint",
-                    "config_signature",
-                    "file_integrity",
+                    "scene", "global_scene", "global_scene_number",
+                    "part", "local_scene", "source_scene_number",
+                    "scene_id", "role", "is_extra_scene",
+                    "image", "image_path", "image_sha256",
+                    "width", "height", "image_size", "duration",
+                    "status", "provider", "prompt_sha256",
+                    "prompt_signature", "job_signature",
+                    "source_scene_signature", "source_fingerprint",
+                    "config_signature", "file_integrity",
                     "semantic_story_match",
                 )
             }
@@ -1909,29 +1201,16 @@ def build_image_manifest(records, metadata, policy):
     }
 
 
-def build_generation_manifest(
-    records,
-    metadata,
-    policy,
-    counters,
-):
+def build_generation_manifest(records, metadata, policy, counters):
     ready, failed, pending = count_status(records)
     total = len(records)
 
     return {
         "version": VERSION,
-        "status": (
-            "completed"
-            if ready == total and total > 0
-            else "in_progress"
-        ),
+        "status": "completed" if ready == total and total > 0 else "in_progress",
         "stage": "image_generation",
-        "source_fingerprint": metadata.get(
-            "source_fingerprint"
-        ),
-        "config_signature": metadata.get(
-            "config_signature"
-        ),
+        "source_fingerprint": metadata.get("source_fingerprint"),
+        "config_signature": metadata.get("config_signature"),
         "format": metadata.get("format"),
         "image_size": metadata.get("image_size"),
         "total_scenes": total,
@@ -1953,120 +1232,99 @@ def build_generation_manifest(
 
 def validate_manifest_consistency(records, metadata):
     if not records:
-        raise RuntimeError(
-            "No image records exist."
-        )
+        raise RuntimeError("No image records exist.")
 
-    ids = [
-        clean(row.get("scene_id"))
-        for row in records
-    ]
-
-    if (
-        any(not value for value in ids)
-        or len(ids) != len(set(ids))
-    ):
-        raise RuntimeError(
-            "Image manifest has missing or duplicate scene IDs."
-        )
+    ids = [clean(row.get("scene_id")) for row in records]
+    if any(not value for value in ids) or len(ids) != len(set(ids)):
+        raise RuntimeError("Image manifest has missing or duplicate scene IDs.")
 
     for row in records:
-        if row.get("status") in {
-            "generated",
-            "existing",
-        }:
-            if not re.fullmatch(
-                r"[a-fA-F0-9]{64}",
-                clean(row.get("image_sha256")),
-            ):
+        if row.get("status") in {"generated", "existing"}:
+            if not re.fullmatch(r"[a-fA-F0-9]{64}", clean(row.get("image_sha256"))):
                 raise RuntimeError(
                     f"{row['scene_id']}: ready image has no valid SHA256."
                 )
-
             if row.get("file_integrity") != "verified":
                 raise RuntimeError(
-                    f"{row['scene_id']}: ready image integrity is unverified."
+                    f"{row['scene_id']}: image integrity is unverified."
                 )
-
             if not clean(row.get("image_path")):
-                raise RuntimeError(
-                    f"{row['scene_id']}: ready image has no path."
-                )
+                raise RuntimeError(f"{row['scene_id']}: image path is missing.")
 
     ready, failed, pending = count_status(records)
-
     if ready + failed + pending != len(records):
-        raise RuntimeError(
-            "Image manifest status totals do not match job count."
-        )
+        raise RuntimeError("Image manifest status totals do not match job count.")
 
-    expected_fingerprint = clean(
-        metadata.get("source_fingerprint")
-    )
-
-    expected_config = clean(
-        metadata.get("config_signature")
-    )
+    expected_fingerprint = clean(metadata.get("source_fingerprint"))
+    expected_config = clean(metadata.get("config_signature"))
 
     for row in records:
         if (
             expected_fingerprint
-            and clean(row.get("source_fingerprint"))
-            != expected_fingerprint
+            and clean(row.get("source_fingerprint")) != expected_fingerprint
         ):
-            raise RuntimeError(
-                f"{row['scene_id']}: source fingerprint mismatch."
-            )
-
+            raise RuntimeError(f"{row['scene_id']}: source fingerprint mismatch.")
         if (
             expected_config
-            and clean(row.get("config_signature"))
-            != expected_config
+            and clean(row.get("config_signature")) != expected_config
         ):
-            raise RuntimeError(
-                f"{row['scene_id']}: config signature mismatch."
-            )
+            raise RuntimeError(f"{row['scene_id']}: config signature mismatch.")
 
-    if ready == len(records):
-        if failed or pending:
-            raise RuntimeError(
-                "Cannot complete manifest with unfinished images."
-            )
+    if ready == len(records) and (failed or pending):
+        raise RuntimeError("Completed image count conflicts with unfinished records.")
 
 
-def save_checkpoints(
-    records,
-    metadata,
-    policy,
-    counters,
-):
-    validate_manifest_consistency(
-        records,
-        metadata,
-    )
+def save_checkpoints(records, metadata, policy, counters):
+    validate_manifest_consistency(records, metadata)
 
     generation = build_generation_manifest(
-        records,
-        metadata,
-        policy,
-        counters,
+        records, metadata, policy, counters
+    )
+    images = build_image_manifest(records, metadata, policy)
+
+    save_json(GENERATION_MANIFEST, generation)
+    save_json(IMAGE_MANIFEST, images)
+
+
+def classify_provider_error(exc):
+    """Return whether this failure is quota/billing/auth related."""
+    status = None
+    response = getattr(exc, "response", None)
+
+    if response is not None:
+        status = getattr(response, "status_code", None)
+
+    message = clean(exc).lower()
+
+    quota_terms = (
+        "quota", "billing", "payment required", "insufficient credit",
+        "insufficient funds", "resource_exhausted", "resource exhausted",
+        "rate limit", "too many requests", "exceeded your",
+        "credit balance", "account suspended",
     )
 
-    images = build_image_manifest(
-        records,
-        metadata,
-        policy,
+    auth_terms = (
+        "unauthorized", "invalid api key", "api key not valid",
+        "authentication", "permission denied", "forbidden",
     )
 
-    save_json(
-        GENERATION_MANIFEST,
-        generation,
+    quota_or_billing = status in {402, 429} or any(
+        term in message for term in quota_terms
+    )
+    authentication = status in {401, 403} or any(
+        term in message for term in auth_terms
     )
 
-    save_json(
-        IMAGE_MANIFEST,
-        images,
-    )
+    return {
+        "stop_retry": bool(quota_or_billing or authentication),
+        "stop_billable": bool(quota_or_billing or authentication),
+        "category": (
+            "quota_or_billing" if quota_or_billing
+            else "authentication" if authentication
+            else "provider_error"
+        ),
+        "http_status": status,
+    }
 
 
 def run_provider_attempts(
@@ -2077,16 +1335,17 @@ def run_provider_attempts(
     policy,
     counters,
 ):
+    global BILLABLE_BLOCKED
+
     prompt = make_prompt(item)
     negative = build_negative_prompt(item)
     seed = deterministic_seed(item)
     destination = item["destination"]
-    size = item["size"]
 
     attempts = build_provider_attempts(
         prompt,
         destination,
-        size,
+        item["size"],
         seed,
         negative,
     )
@@ -2094,80 +1353,52 @@ def run_provider_attempts(
     if not attempts:
         record["status"] = "failed"
         record["error"] = (
-            "No configured image provider is currently usable. "
-            "Check provider credentials, configured model lists "
-            "and billable permission."
+            "No configured image provider is usable. "
+            "Check credentials, model lists and billing permission."
         )
         return
 
-    last_error = (
-        "All configured provider attempts failed."
-    )
+    last_error = "All configured provider attempts failed."
     succeeded = False
 
     for provider_name, provider_key, billable, generate in attempts:
         if succeeded:
             break
 
-        for retry_number in range(
-            1,
-            MAX_RETRIES + 1,
-        ):
+        if billable and BILLABLE_BLOCKED:
+            log("Skipping billable provider after quota/billing failure:", provider_name)
+            continue
+
+        retry_limit = MAX_RETRIES
+
+        for retry_number in range(1, retry_limit + 1):
             try:
                 log(
-                    "Generating:",
-                    item["scene_id"],
-                    "| Part:",
-                    item["part"],
-                    "| Role:",
-                    item["role"],
-                    "| Provider:",
-                    provider_name,
-                    "| Attempt:",
-                    retry_number,
+                    "Generating:", item["scene_id"],
+                    "| Part:", item["part"],
+                    "| Role:", item["role"],
+                    "| Provider:", provider_name,
+                    "| Attempt:", retry_number,
                 )
 
-                destination.parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
+                destination.parent.mkdir(parents=True, exist_ok=True)
 
                 record["status"] = "pending"
                 record["current_provider"] = provider_name
                 record["current_attempt"] = retry_number
 
-                save_checkpoints(
-                    records,
-                    metadata,
-                    policy,
-                    counters,
-                )
+                save_checkpoints(records, metadata, build_policy(), counters)
 
                 counters["external_api_calls"] += 1
-
                 if billable:
                     counters["billable_api_calls"] += 1
 
                 generate()
 
-                integrity = image_integrity(
-                    destination,
-                    size,
-                )
+                integrity = image_integrity(destination, item["size"])
 
-                record.update(
-                    make_record(
-                        item,
-                        "generated",
-                        provider_name,
-                        record.get("attempts", []),
-                    )
-                )
-
-                record.setdefault(
-                    "attempts",
-                    [],
-                ).append({
+                success_attempts = list(record.get("attempts", []))
+                success_attempts.append({
                     "provider": provider_name,
                     "provider_key": provider_key,
                     "billable": billable,
@@ -2177,51 +1408,46 @@ def run_provider_attempts(
                     "timestamp": int(time.time()),
                 })
 
+                record.update(
+                    make_record(
+                        item,
+                        "generated",
+                        provider_name,
+                        success_attempts,
+                    )
+                )
+
                 record.pop("current_provider", None)
                 record.pop("current_attempt", None)
                 record.pop("last_provider_error", None)
                 record.pop("error", None)
 
                 succeeded = True
+                save_checkpoints(records, metadata, build_policy(), counters)
 
-                save_checkpoints(
-                    records,
-                    metadata,
-                    policy,
-                    counters,
-                )
-
-                log(
-                    "IMAGE CHECKPOINT SAVED:",
-                    item["scene_id"],
-                )
+                log("IMAGE CHECKPOINT SAVED:", item["scene_id"])
                 break
 
             except Exception as exc:
-                last_error = (
-                    f"{type(exc).__name__}: {exc}"
-                )
+                last_error = f"{type(exc).__name__}: {exc}"
+                classification = classify_provider_error(exc)
 
-                # Remove only an invalid/partial file from this attempt.
+                # Never leave a corrupt or partial image at the final path.
                 if destination.is_file():
                     try:
-                        image_integrity(
-                            destination,
-                            size,
-                        )
+                        image_integrity(destination, item["size"])
                     except Exception:
                         destination.unlink(missing_ok=True)
 
-                record.setdefault(
-                    "attempts",
-                    [],
-                ).append({
+                record.setdefault("attempts", []).append({
                     "provider": provider_name,
                     "provider_key": provider_key,
                     "billable": billable,
                     "attempt": retry_number,
                     "status": "failed",
                     "error": last_error[:800],
+                    "error_category": classification["category"],
+                    "http_status": classification["http_status"],
                     "timestamp": int(time.time()),
                 })
 
@@ -2229,20 +1455,28 @@ def run_provider_attempts(
                 record["last_provider_error"] = last_error[:800]
 
                 log(
-                    "Provider failed:",
-                    provider_name,
-                    last_error[:350],
+                    "Provider failed:", provider_name,
+                    "|", classification["category"],
+                    "|", last_error[:350],
                 )
 
-                save_checkpoints(
-                    records,
-                    metadata,
-                    policy,
-                    counters,
-                )
+                if billable and classification["stop_billable"]:
+                    BILLABLE_BLOCKED = True
+                    log(
+                        "Further billable image providers are blocked "
+                        "for this run after a billing/quota/authentication failure."
+                    )
 
-            if not IMAGE_FALLBACK_ENABLED:
-                break
+                save_checkpoints(records, metadata, build_policy(), counters)
+
+                if classification["stop_retry"]:
+                    break
+
+                if not IMAGE_FALLBACK_ENABLED:
+                    break
+
+        if not IMAGE_FALLBACK_ENABLED:
+            break
 
     if not succeeded:
         record["status"] = "failed"
@@ -2250,25 +1484,16 @@ def run_provider_attempts(
         record.pop("current_provider", None)
         record.pop("current_attempt", None)
 
-        log(
-            "IMAGE FAILED:",
-            item["scene_id"],
-            "|",
-            last_error[:350],
-        )
+        log("IMAGE FAILED:", item["scene_id"], "|", last_error[:350])
 
 
 def validate_output_format(format_name, metadata, items):
     if format_name not in ALLOWED_FORMATS:
         raise RuntimeError(
-            f"Visual jobs manifest has invalid format: {format_name!r}."
+            f"Visual jobs manifest has invalid format: {format_name!r}"
         )
 
-    expected_size = (
-        "720x1280"
-        if format_name == "short"
-        else "1280x720"
-    )
+    expected_size = "720x1280" if format_name == "short" else "1280x720"
 
     if clean(metadata.get("image_size")) != expected_size:
         raise RuntimeError(
@@ -2279,8 +1504,7 @@ def validate_output_format(format_name, metadata, items):
     for item in items:
         if item["size_text"] != expected_size:
             raise RuntimeError(
-                f"{item['scene_id']}: image size does not match "
-                f"{format_name.upper()}."
+                f"{item['scene_id']}: image size does not match {format_name.upper()}."
             )
 
     return expected_size
@@ -2296,30 +1520,15 @@ def main():
     apply_input_settings(config)
     selected_model_notice()
 
-    VISUAL_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    VISUAL_DIR.mkdir(parents=True, exist_ok=True)
 
     items, metadata = get_jobs()
+    format_name = clean(metadata.get("format")).lower()
 
-    format_name = clean(
-        metadata.get("format")
-    ).lower()
+    expected_size = validate_output_format(format_name, metadata, items)
 
-    expected_size = validate_output_format(
-        format_name,
-        metadata,
-        items,
-    )
-
-    expected_fingerprint = clean(
-        metadata.get("source_fingerprint")
-    )
-
-    expected_config = clean(
-        metadata.get("config_signature")
-    )
+    expected_fingerprint = clean(metadata.get("source_fingerprint"))
+    expected_config = clean(metadata.get("config_signature"))
 
     if not expected_fingerprint or not expected_config:
         raise RuntimeError(
@@ -2330,10 +1539,7 @@ def main():
     records = []
 
     for item in items:
-        old = previous.get(
-            item["scene_id"],
-            {},
-        )
+        old = previous.get(item["scene_id"], {})
 
         if can_reuse_image(item, old):
             record = make_record(
@@ -2343,32 +1549,19 @@ def main():
                 old.get("attempts", []),
             )
         else:
-            record = make_record(
-                item,
-                "pending",
-            )
+            record = make_record(item, "pending")
 
         records.append(record)
 
     policy = build_policy()
-
     counters = {
         "external_api_calls": 0,
         "billable_api_calls": 0,
     }
 
-    save_checkpoints(
-        records,
-        metadata,
-        policy,
-        counters,
-    )
+    save_checkpoints(records, metadata, policy, counters)
 
-    ready_before = sum(
-        row["status"] == "existing"
-        for row in records
-    )
-
+    ready_before = sum(row["status"] == "existing" for row in records)
     pending_items = [
         (item, record)
         for item, record in zip(items, records)
@@ -2376,17 +1569,14 @@ def main():
     ]
 
     log("-" * 64)
-    log("Format:", format_name)
-    log("Image dimensions:", expected_size)
-    log("Total image jobs:", len(items))
-    log("Verified reusable images:", ready_before)
-    log("Images requiring generation:", len(pending_items))
-    log(
-        "Configured provider order:",
-        " -> ".join(PROVIDER_ORDER),
-    )
-    log("Billable providers allowed:", ALLOW_BILLABLE)
-    log("Fallback enabled:", IMAGE_FALLBACK_ENABLED)
+    log("FORMAT:", format_name)
+    log("IMAGE DIMENSIONS:", expected_size)
+    log("TOTAL IMAGE JOBS:", len(items))
+    log("VERIFIED REUSABLE IMAGES:", ready_before)
+    log("IMAGES REQUIRING GENERATION:", len(pending_items))
+    log("CONFIGURED PROVIDER ORDER:", " -> ".join(PROVIDER_ORDER))
+    log("BILLABLE PROVIDERS ALLOWED:", ALLOW_BILLABLE)
+    log("FALLBACK ENABLED:", IMAGE_FALLBACK_ENABLED)
     log("-" * 64)
 
     for item, record in pending_items:
@@ -2398,75 +1588,42 @@ def main():
             policy,
             counters,
         )
+        save_checkpoints(records, metadata, build_policy(), counters)
 
-        save_checkpoints(
-            records,
-            metadata,
-            policy,
-            counters,
-        )
-
-    save_checkpoints(
-        records,
-        metadata,
-        policy,
-        counters,
-    )
+    save_checkpoints(records, metadata, build_policy(), counters)
 
     ready, failed, pending = count_status(records)
-
     failed_ids = [
-        row["scene_id"]
-        for row in records
+        row["scene_id"] for row in records
         if row["status"] == "failed"
     ]
 
     log("=" * 64)
     log("IMAGE GENERATION SUMMARY")
-    log("Images ready:", f"{ready}/{len(records)}")
-    log("Failed:", failed)
-    log("Pending:", pending)
-    log("Verified reused:", ready_before)
-    log(
-        "External provider calls:",
-        counters["external_api_calls"],
-    )
-    log(
-        "Billable provider calls:",
-        counters["billable_api_calls"],
-    )
-    log(
-        "Image manifest:",
-        IMAGE_MANIFEST.relative_to(ROOT),
-    )
-    log(
-        "Generation manifest:",
-        GENERATION_MANIFEST.relative_to(ROOT),
-    )
+    log("IMAGES READY:", f"{ready}/{len(records)}")
+    log("FAILED:", failed)
+    log("PENDING:", pending)
+    log("VERIFIED REUSED:", ready_before)
+    log("EXTERNAL PROVIDER CALLS:", counters["external_api_calls"])
+    log("BILLABLE PROVIDER CALLS:", counters["billable_api_calls"])
+    log("BILLABLE PROVIDERS BLOCKED:", BILLABLE_BLOCKED)
+    log("IMAGE MANIFEST:", IMAGE_MANIFEST.relative_to(ROOT))
+    log("GENERATION MANIFEST:", GENERATION_MANIFEST.relative_to(ROOT))
     log("=" * 64)
 
-    if (
-        failed
-        or pending
-        or ready != len(records)
-    ):
+    if failed or pending or ready != len(records):
         raise RuntimeError(
             "Image generation is incomplete. Failed scene IDs: "
-            + (
-                ", ".join(failed_ids)
-                if failed_ids
-                else "none"
-            )
+            + (", ".join(failed_ids) if failed_ids else "none")
             + ". Successful image checkpoints have been preserved."
         )
 
     log(
-        "All image files passed format, dimensions, "
-        "integrity and SHA256 checks."
+        "All image files passed format, dimensions, integrity and SHA256 checks."
     )
     log(
-        "Story-event semantic verification is not claimed; "
-        "this file has no configured vision-verification provider."
+        "Semantic story matching is not claimed without a configured "
+        "vision-verification provider."
     )
 
     return 0
@@ -2479,8 +1636,5 @@ if __name__ == "__main__":
         log("IMAGE GENERATION CANCELLED")
         raise SystemExit(130)
     except Exception as exc:
-        log(
-            "IMAGE GENERATION FAILED:",
-            f"{type(exc).__name__}: {exc}",
-        )
+        log("IMAGE GENERATION FAILED:", f"{type(exc).__name__}: {exc}")
         raise SystemExit(1)
