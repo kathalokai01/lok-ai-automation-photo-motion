@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Prepare complete, role-aware, language-safe and resumable captions."""
+"""Prepare verified, language-aware captions for every narration role."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -25,24 +26,20 @@ from input_config import (
 
 CONFIG_FILE = ROOT / "Input" / "topic.txt"
 NARRATION_FILE = ROOT / "output" / "narration" / "narration.json"
+AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v14-all-roles-verified"
+VERSION = "prepare-captions-v15-audio-role-font-verified"
+MIN_AUDIO_BYTES = 1000
+DURATION_TOLERANCE = 0.15
 
 LANGUAGE_ALIASES = {
-    "hi": "hindi",
-    "hin": "hindi",
-    "hindi": "hindi",
-    "हिंदी": "hindi",
-    "en": "english",
-    "eng": "english",
-    "english": "english",
+    "hi": "hindi", "hin": "hindi", "hindi": "hindi", "हिंदी": "hindi",
+    "en": "english", "eng": "english", "english": "english",
     "अंग्रेज़ी": "english",
-    "mixed": "hinglish",
-    "hinglish": "hinglish",
-    "hi-en": "hinglish",
-    "en-hi": "hinglish",
+    "mixed": "hinglish", "hinglish": "hinglish",
+    "hi-en": "hinglish", "en-hi": "hinglish",
 }
 
 LANGUAGE_FIELDS = {
@@ -71,13 +68,7 @@ SOURCE_FIELDS = (
     "content", "story_text",
 )
 
-ROLE_ORDER = {
-    "hook": 0,
-    "main": 1,
-    "suspense": 2,
-    "resolution": 3,
-}
-
+ROLE_ORDER = {"hook": 0, "main": 1, "suspense": 2, "resolution": 3}
 EXTRA_ROLES = {"hook", "suspense", "resolution"}
 
 
@@ -90,17 +81,21 @@ def clean_text(value: Any) -> str:
         return ""
     value = value.replace("\ufeff", "").replace("\x00", "")
     value = re.sub(r"[ \t]+", " ", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
+    value = re.sub(r"\s+", " ", value)
     return value.strip()
-
-
-def normalized_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", clean_text(value)).strip()
 
 
 def sha256(value: Any) -> str:
     raw = value if isinstance(value, bytes) else str(value).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def canonical_hash(value: Any) -> str:
@@ -124,7 +119,6 @@ def read_json(path: Path) -> Any:
 def write_json_atomic(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -137,14 +131,11 @@ def write_json_atomic(path: Path, data: Any) -> None:
 
 
 def normalize_language(value: Any) -> str:
-    raw = normalized_text(str(value or "")).lower()
+    raw = clean_text(str(value or "")).lower()
     return LANGUAGE_ALIASES.get(raw, raw)
 
 
-def first_text(
-    row: dict,
-    fields: tuple[str, ...],
-) -> tuple[str, str]:
+def first_text(row: dict, fields: tuple[str, ...]) -> tuple[str, str]:
     for field in fields:
         value = clean_text(row.get(field))
         if value:
@@ -156,43 +147,60 @@ def narration_text(row: dict) -> str:
     return first_text(row, SOURCE_FIELDS)[0]
 
 
-def get_scene_id(row: dict) -> str:
-    return clean_text(row.get("scene_id") or row.get("id"))
+def scene_identity(row: dict) -> tuple[str, int, str, int | None]:
+    if not isinstance(row, dict):
+        raise RuntimeError("Narration record must be an object.")
 
+    try:
+        part = int(row["part"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Narration record has invalid part.") from exc
 
-def get_role(row: dict) -> str:
     role = clean_text(
-        row.get("role")
-        or row.get("scene_type")
-        or row.get("scene_role")
-        or "main"
+        row.get("role") or row.get("scene_type") or row.get("scene_role") or "main"
     ).lower()
 
-    if role in {"extra", "extra_scene"}:
-        raise RuntimeError(
-            "Extra narration must declare hook, suspense or resolution role."
-        )
+    if part < 1:
+        raise RuntimeError("Narration part must be positive.")
 
-    return role
+    if role == "main":
+        try:
+            scene = int(row["scene"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("Main narration record has invalid scene.") from exc
+
+        if scene < 1:
+            raise RuntimeError("Main scene number must be positive.")
+
+        expected_id = f"part_{part:02d}_scene_{scene:02d}"
+        if clean_text(row.get("scene_id") or row.get("id")) != expected_id:
+            raise RuntimeError(
+                f"Main scene ID mismatch: expected {expected_id}."
+            )
+        return expected_id, part, role, scene
+
+    if role not in EXTRA_ROLES:
+        raise RuntimeError(f"Invalid narration role: {role!r}.")
+
+    expected_id = f"part_{part:02d}_{role}"
+    if clean_text(row.get("scene_id") or row.get("id")) != expected_id:
+        raise RuntimeError(
+            f"Extra scene ID mismatch: expected {expected_id}."
+        )
+    return expected_id, part, role, None
 
 
 def nested_caption_text(value: Any) -> str:
     if isinstance(value, str):
         return clean_text(value)
-
     if isinstance(value, dict):
         return first_text(
-            value,
-            ("caption", "caption_text", "text", "value"),
+            value, ("caption", "caption_text", "text", "value")
         )[0]
-
     return ""
 
 
-def find_nested_caption(
-    container: Any,
-    mode: str,
-) -> tuple[str, str]:
+def find_nested_caption(container: Any, mode: str) -> tuple[str, str]:
     if isinstance(container, dict):
         for key in LANGUAGE_KEYS[mode]:
             if key in container:
@@ -206,7 +214,6 @@ def find_nested_caption(
                 container.get("lang", container.get("language_code", "")),
             )
         )
-
         if declared == mode:
             value = nested_caption_text(container)
             if value:
@@ -216,14 +223,12 @@ def find_nested_caption(
         for index, item in enumerate(container):
             if not isinstance(item, dict):
                 continue
-
             declared = normalize_language(
                 item.get(
                     "language",
                     item.get("lang", item.get("language_code", "")),
                 )
             )
-
             if declared == mode:
                 value = nested_caption_text(item)
                 if value:
@@ -232,23 +237,13 @@ def find_nested_caption(
     return "", ""
 
 
-def choose_caption(
-    row: dict,
-    mode: str,
-) -> tuple[str, str, str]:
+def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
     text, field = first_text(row, LANGUAGE_FIELDS[mode])
     if text:
         return text, field, "explicit-language-field"
 
-    for container_name in (
-        "caption_texts",
-        "translations",
-        "captions",
-    ):
-        text, nested_key = find_nested_caption(
-            row.get(container_name),
-            mode,
-        )
+    for container_name in ("caption_texts", "translations", "captions"):
+        text, nested_key = find_nested_caption(row.get(container_name), mode)
         if text:
             return (
                 text,
@@ -257,17 +252,11 @@ def choose_caption(
             )
 
     generic, generic_field = first_text(
-        row,
-        ("caption_text", "display_caption"),
+        row, ("caption_text", "display_caption")
     )
-
     declared = normalize_language(
-        row.get(
-            "caption_language",
-            row.get("caption_lang", ""),
-        )
+        row.get("caption_language", row.get("caption_lang", ""))
     )
-
     if generic and declared == mode:
         return generic, generic_field, "declared-generic-caption"
 
@@ -275,115 +264,36 @@ def choose_caption(
     source_language = normalize_language(
         row.get(
             "language",
-            row.get(
-                "narration_language",
-                row.get("source_language", ""),
-            ),
+            row.get("narration_language", row.get("source_language", "")),
         )
     )
 
-    if mode == "hindi" and source:
-        if source_language in {"", "hindi"}:
-            return (
-                source,
-                "source-narration",
-                "original-hindi-narration",
-            )
+    if mode == "hindi" and source and source_language in {"", "hindi"}:
+        return source, "source-narration", "original-hindi-narration"
 
     if mode == "hinglish" and source:
-        has_devanagari = bool(
-            re.search(r"[\u0900-\u097F]", source)
-        )
-        if (
-            source_language in {"", "hindi", "hinglish"}
-            or has_devanagari
-        ):
-            return (
-                source,
-                "source-narration",
-                "original-mixed-narration",
-            )
+        has_devanagari = bool(re.search(r"[\u0900-\u097F]", source))
+        if source_language in {"", "hindi", "hinglish"} or has_devanagari:
+            return source, "source-narration", "original-mixed-narration"
 
     return "", "", "requested-language-caption-not-provided"
 
 
-def resolve_font_size(config: dict, video_format: str) -> int:
-    configured = get_caption_font_size(config)
-
-    if str(configured).strip().lower() == "auto":
-        return 24 if video_format == "short" else 28
-
-    try:
-        size = int(configured)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            "CAPTION_FONT_SIZE must be auto or an integer from 16 to 64."
-        ) from exc
-
-    if not 16 <= size <= 64:
-        raise RuntimeError(
-            "CAPTION_FONT_SIZE must be between 16 and 64."
-        )
-
-    return size
-
-
 def narration_rows(data: Any) -> tuple[list[dict], list[dict]]:
-    if not isinstance(data, dict):
-        raise RuntimeError("narration.json must contain a JSON object.")
-
-    if data.get("status") != "completed":
-        raise RuntimeError(
-            "Narration preparation is incomplete; captions cannot proceed."
-        )
+    if not isinstance(data, dict) or data.get("status") != "completed":
+        raise RuntimeError("Narration preparation is not completed.")
 
     main_rows = data.get("scenes")
-    extra_rows = data.get("extra_scenes", [])
+    extra_rows = data.get("extra_scenes")
 
     if not isinstance(main_rows, list) or not main_rows:
-        raise RuntimeError(
-            "narration.json must contain a non-empty scenes list."
-        )
-
+        raise RuntimeError("Narration manifest has no Main scenes.")
     if not isinstance(extra_rows, list):
-        raise RuntimeError(
-            "narration.json extra_scenes must be a list."
-        )
-
-    if not all(isinstance(row, dict) for row in main_rows):
-        raise RuntimeError("Invalid Main narration record.")
-
-    if not all(isinstance(row, dict) for row in extra_rows):
-        raise RuntimeError("Invalid extra narration record.")
+        raise RuntimeError("Narration extra_scenes must be a list.")
+    if not all(isinstance(row, dict) for row in main_rows + extra_rows):
+        raise RuntimeError("Narration manifest contains invalid records.")
 
     return main_rows, extra_rows
-
-
-def validate_part_metadata(
-    data: dict,
-    parts: int,
-    scenes_per_part: int,
-) -> None:
-    for field, expected in (
-        ("total_parts", parts),
-        ("scenes_per_part", scenes_per_part),
-    ):
-        declared = data.get(field)
-        if declared is None:
-            continue
-
-        try:
-            declared = int(declared)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Narration {field} is invalid."
-            ) from exc
-
-        if declared != expected:
-            raise RuntimeError(
-                f"Narration {field} mismatch: "
-                f"configured={expected}, narration={declared}."
-            )
 
 
 def validate_narration_records(
@@ -397,139 +307,55 @@ def validate_narration_records(
         for part in range(1, parts + 1)
         for scene in range(1, scenes_per_part + 1)
     }
+    main_map: dict[tuple[int, int], dict] = {}
+    extra_map: dict[str, dict] = {}
+    all_ids: set[str] = set()
 
-    main_map = {}
-    extra_map = {}
-    all_ids = set()
-
-    for index, row in enumerate(main_rows, 1):
-        role = get_role(row)
+    for row in main_rows:
+        sid, part, role, scene = scene_identity(row)
         if role != "main":
-            raise RuntimeError(
-                f"Main narration record {index} has role {role!r}."
-            )
-
-        try:
-            part = int(row["part"])
-            scene = int(row["scene"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid Main part/scene in record {index}."
-            ) from exc
-
-        key = (part, scene)
-        if key not in expected_main:
-            raise RuntimeError(f"Unexpected Main scene mapping: {key}.")
-
-        if key in main_map:
-            raise RuntimeError(f"Duplicate Main scene mapping: {key}.")
-
-        sid = get_scene_id(row)
-        if not sid:
-            raise RuntimeError(f"Main scene {key} has no scene_id.")
-
+            raise RuntimeError(f"{sid}: Main list contains a non-Main role.")
+        key = (part, int(scene))
+        if key not in expected_main or key in main_map:
+            raise RuntimeError(f"Unexpected or duplicate Main mapping: {key}.")
         if sid in all_ids:
-            raise RuntimeError(f"Duplicate scene_id: {sid}")
-
-        text = narration_text(row)
-        if not text:
-            raise RuntimeError(f"Main scene {sid} has empty narration.")
-
-        if row.get("status") != "completed":
-            raise RuntimeError(f"Main narration is incomplete: {sid}")
-
-        all_ids.add(sid)
+            raise RuntimeError(f"Duplicate narration scene ID: {sid}.")
+        if row.get("status") != "completed" or not narration_text(row):
+            raise RuntimeError(f"Main narration is incomplete: {sid}.")
         main_map[key] = row
-
-    missing_main = sorted(expected_main - set(main_map))
-    if missing_main:
-        raise RuntimeError(
-            f"Missing Main narration scenes: {missing_main[:30]}"
-        )
-
-    if len(main_rows) != len(expected_main):
-        raise RuntimeError(
-            f"Main narration count mismatch: expected {len(expected_main)}, "
-            f"found {len(main_rows)}."
-        )
-
-    for index, row in enumerate(extra_rows, 1):
-        role = get_role(row)
-        if role not in EXTRA_ROLES:
-            raise RuntimeError(
-                f"Extra narration record {index} has invalid role {role!r}."
-            )
-
-        try:
-            part = int(row["part"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Invalid part in extra narration record {index}."
-            ) from exc
-
-        if not 1 <= part <= parts:
-            raise RuntimeError(
-                f"Extra narration part is outside configured range: {part}."
-            )
-
-        sid = get_scene_id(row)
-        if not sid:
-            raise RuntimeError(
-                f"Part {part} {role} record has no scene_id."
-            )
-
-        if sid in all_ids:
-            raise RuntimeError(f"Duplicate scene_id: {sid}")
-
-        if row.get("status") != "completed":
-            raise RuntimeError(
-                f"Extra narration is incomplete: {sid}"
-            )
-
-        if not narration_text(row):
-            raise RuntimeError(
-                f"Extra narration has empty text: {sid}"
-            )
-
         all_ids.add(sid)
-        extra_map[sid] = row
 
-    for part in range(1, parts + 1):
-        part_roles = [
-            get_role(row)
-            for row in extra_rows
-            if int(row["part"]) == part
-        ]
-
-        if part_roles.count("hook") != 1:
-            raise RuntimeError(
-                f"Part {part} must contain exactly one Hook."
-            )
-
-        if part < parts:
-            if part_roles.count("suspense") != 1:
-                raise RuntimeError(
-                    f"Non-final part {part} must contain exactly one Suspense."
-                )
-            if "resolution" in part_roles:
-                raise RuntimeError(
-                    f"Non-final part {part} cannot contain Resolution."
-                )
-        else:
-            if part_roles.count("resolution") != 1:
-                raise RuntimeError(
-                    "Final part must contain exactly one Resolution."
-                )
-            if "suspense" in part_roles:
-                raise RuntimeError(
-                    "Final part cannot contain Suspense."
-                )
-
-    expected_extra_count = parts + max(0, parts - 1) + 1
-    if len(extra_rows) != expected_extra_count:
+    if set(main_map) != expected_main:
         raise RuntimeError(
-            "Extra narration count mismatch: "
-            f"expected {expected_extra_count}, found {len(extra_rows)}."
+            "Main narration mapping mismatch: "
+            f"missing={sorted(expected_main-set(main_map))}, "
+            f"extra={sorted(set(main_map)-expected_main)}."
+        )
+
+    for row in extra_rows:
+        sid, part, role, _ = scene_identity(row)
+        if not 1 <= part <= parts:
+            raise RuntimeError(f"{sid}: part is outside selected range.")
+        if sid in all_ids or sid in extra_map:
+            raise RuntimeError(f"Duplicate narration scene ID: {sid}.")
+        if row.get("status") != "completed" or not narration_text(row):
+            raise RuntimeError(f"Extra narration is incomplete: {sid}.")
+        extra_map[sid] = row
+        all_ids.add(sid)
+
+    expected_extra = []
+    for part in range(1, parts + 1):
+        expected_extra.append(f"part_{part:02d}_hook")
+        if part < parts:
+            expected_extra.append(f"part_{part:02d}_suspense")
+        else:
+            expected_extra.append(f"part_{part:02d}_resolution")
+
+    if set(extra_map) != set(expected_extra) or len(extra_map) != len(expected_extra):
+        raise RuntimeError(
+            "Hook/Suspense/Resolution mapping mismatch: "
+            f"missing={sorted(set(expected_extra)-set(extra_map))}, "
+            f"unexpected={sorted(set(extra_map)-set(expected_extra))}."
         )
 
     ordered_main = [
@@ -537,58 +363,150 @@ def validate_narration_records(
         for part in range(1, parts + 1)
         for scene in range(1, scenes_per_part + 1)
     ]
-
-    ordered_extra = sorted(
-        extra_rows,
-        key=lambda row: (
-            int(row["part"]),
-            ROLE_ORDER[get_role(row)],
-            get_scene_id(row),
-        ),
-    )
-
+    ordered_extra = [
+        extra_map[sid] for sid in expected_extra
+    ]
     return ordered_main, ordered_extra
 
 
-def positive_duration(row: dict) -> float | None:
-    """
-    Return an existing duration only as metadata.
+def validate_audio_manifest(
+    narration_data: dict,
+    expected_rows: list[dict],
+) -> tuple[dict[str, dict], str]:
+    if not AUDIO_FILE.is_file():
+        raise RuntimeError(f"TTS audio manifest is missing: {AUDIO_FILE}")
 
-    This stage runs before TTS, so it never declares estimated time
-    to be actual measured audio duration.
-    """
-    for field in (
-        "narration_duration_estimate_seconds",
-        "estimated_duration",
-    ):
-        value = row.get(field)
-        if value is None or str(value).strip() == "":
-            continue
+    audio_data = read_json(AUDIO_FILE)
+    if not isinstance(audio_data, dict) or audio_data.get("status") != "completed":
+        raise RuntimeError("TTS audio manifest is not completed.")
+
+    jobs = audio_data.get("jobs")
+    if not isinstance(jobs, list) or not jobs:
+        raise RuntimeError("TTS audio manifest contains no jobs.")
+
+    expected = {}
+    for row in expected_rows:
+        sid, part, role, scene = scene_identity(row)
+        expected[sid] = (part, role, scene, narration_text(row))
+
+    audio_map: dict[str, dict] = {}
+    for index, job in enumerate(jobs, 1):
+        if not isinstance(job, dict):
+            raise RuntimeError(f"Invalid TTS audio job {index}.")
+
+        sid = clean_text(job.get("scene_id"))
+        if not sid or sid in audio_map:
+            raise RuntimeError(f"Missing or duplicate TTS scene ID: {sid!r}.")
+
+        if sid not in expected:
+            raise RuntimeError(f"Unexpected TTS audio job: {sid}.")
+
+        part, role, scene, source_text = expected[sid]
+        try:
+            job_part = int(job["part"])
+            job_role = clean_text(job.get("role")).lower()
+            job_scene = (
+                int(job["scene"])
+                if job.get("scene") is not None
+                else None
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"{sid}: invalid TTS part/role/scene.") from exc
+
+        if (job_part, job_role, job_scene) != (part, role, scene):
+            raise RuntimeError(f"{sid}: TTS role mapping does not match narration.")
+
+        if job.get("status") != "completed":
+            raise RuntimeError(f"{sid}: TTS audio is not completed.")
+
+        output = clean_text(job.get("output"))
+        if not output:
+            raise RuntimeError(f"{sid}: TTS output path is missing.")
+
+        audio_path = Path(output)
+        if not audio_path.is_absolute():
+            audio_path = ROOT / audio_path
+        audio_path = audio_path.resolve()
+
+        if not audio_path.is_relative_to(ROOT.resolve()):
+            raise RuntimeError(f"{sid}: TTS audio path escapes project root.")
+        if not audio_path.is_file() or audio_path.stat().st_size < MIN_AUDIO_BYTES:
+            raise RuntimeError(f"{sid}: TTS audio file is missing or too small.")
+
+        declared_hash = clean_text(job.get("sha256"))
+        actual_hash = sha256_file(audio_path)
+        if not declared_hash or declared_hash != actual_hash:
+            raise RuntimeError(f"{sid}: TTS audio SHA-256 mismatch.")
 
         try:
-            number = float(value)
-        except (TypeError, ValueError):
-            continue
+            duration = float(job["duration"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"{sid}: TTS measured duration is invalid.") from exc
 
-        if 0.1 <= number <= 3600:
-            return round(number, 3)
+        if not math.isfinite(duration) or duration <= 0:
+            raise RuntimeError(f"{sid}: TTS measured duration is invalid.")
+        if job.get("duration_source") != "ffprobe_measured":
+            raise RuntimeError(f"{sid}: TTS duration is not ffprobe-measured.")
 
-    return None
+        if not job.get("fingerprint"):
+            raise RuntimeError(f"{sid}: TTS fingerprint is missing.")
+
+        audio_map[sid] = {
+            "path": audio_path.relative_to(ROOT).as_posix(),
+            "sha256": actual_hash,
+            "duration": round(duration, 5),
+            "provider": job.get("provider"),
+            "model": job.get("model"),
+            "fingerprint": job["fingerprint"],
+            "size_bytes": audio_path.stat().st_size,
+        }
+
+    if set(audio_map) != set(expected):
+        raise RuntimeError(
+            "TTS job mapping mismatch: "
+            f"missing={sorted(set(expected)-set(audio_map))}, "
+            f"unexpected={sorted(set(audio_map)-set(expected))}."
+        )
+
+    narration_audio_status = narration_data.get("tts_status")
+    if narration_audio_status != "completed":
+        raise RuntimeError("Narration manifest TTS status is not completed.")
+
+    for row in expected_rows:
+        sid, _, _, _ = scene_identity(row)
+        audio = audio_map[sid]
+        if row.get("audio_duration_source") != "ffprobe_measured":
+            raise RuntimeError(f"{sid}: narration audio timing is not measured.")
+        if row.get("audio_sha256") != audio["sha256"]:
+            raise RuntimeError(f"{sid}: narration/TTS audio hashes disagree.")
+        try:
+            narration_duration = float(row.get("actual_audio_duration_seconds"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"{sid}: narration measured duration is missing.") from exc
+        if abs(narration_duration - audio["duration"]) > DURATION_TOLERANCE:
+            raise RuntimeError(f"{sid}: narration/TTS durations disagree.")
+
+    return audio_map, canonical_hash(audio_data)
+
+
+def resolve_font_size(config: dict, video_format: str) -> int:
+    configured = get_caption_font_size(config)
+    if str(configured).strip().lower() == "auto":
+        return 24 if video_format == "short" else 28
+    try:
+        size = int(configured)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("CAPTION_FONT_SIZE must be auto or 16–64.") from exc
+    if not 16 <= size <= 64:
+        raise RuntimeError("CAPTION_FONT_SIZE must be between 16 and 64.")
+    return size
 
 
 def safe_checkpoint_name(row: dict) -> str:
-    role = get_role(row)
-    part = int(row["part"])
-
+    sid, part, role, scene = scene_identity(row)
     if role == "main":
-        scene = int(row["scene"])
         return f"part_{part:02d}_scene_{scene:02d}.json"
-
-    sid = get_scene_id(row)
-    safe_sid = re.sub(r"[^A-Za-z0-9_-]+", "_", sid).strip("_")
-    if not safe_sid:
-        raise RuntimeError("Unsafe extra scene_id for checkpoint.")
-    return f"part_{part:02d}_{safe_sid}.json"
+    return f"part_{part:02d}_{role}.json"
 
 
 def checkpoint_path(row: dict) -> Path:
@@ -602,7 +520,6 @@ def load_reusable_checkpoint(
 ) -> dict | None:
     if not path.is_file():
         return None
-
     try:
         cached = read_json(path)
     except RuntimeError:
@@ -610,192 +527,143 @@ def load_reusable_checkpoint(
 
     if not isinstance(cached, dict):
         return None
-
     if cached.get("status") != "completed":
         return None
-
     if cached.get("version") != VERSION:
         return None
-
     if cached.get("fingerprint") != expected_fingerprint:
         return None
-
     if cached.get("caption_sha256") != caption_hash:
         return None
 
     text = cached.get("text")
     if not isinstance(text, str) or not text.strip():
         return None
-
     if sha256(text) != caption_hash:
         return None
-
     return cached
 
 
-def build_caption_record(
-    row: dict,
-    text: str,
-    mode: str,
-    source_field: str,
-    selection_method: str,
-    font: str,
-    font_size: int,
-    reused: bool,
-) -> dict:
-    role = get_role(row)
-    part = int(row["part"])
-    sid = get_scene_id(row)
-
-    record = {
-        "part": part,
-        "scene": int(row["scene"]) if role == "main" else None,
-        "scene_id": sid,
-        "role": role,
-        "scene_type": role,
-        "text": text,
-        "caption": text,
-        "caption_language": mode,
-        "caption_source_field": source_field,
-        "selection_method": selection_method,
-        "source_text_sha256": sha256(narration_text(row)),
-        "caption_sha256": sha256(text),
-        "font": font,
-        "font_size": font_size,
-        "status": "completed",
-        "checkpoint_reused": reused,
-        "timing_status": "pending_audio_alignment",
-    }
-
-    duration = positive_duration(row)
-    if duration is not None:
-        record["narration_duration_estimate_seconds"] = duration
-
-    return record
-
-
-def make_checkpoint(
-    row: dict,
-    text: str,
-    mode: str,
-    source_field: str,
-    method: str,
-    font: str,
-    font_size: int,
-    fingerprint_value: str,
-) -> dict:
-    return {
-        "status": "completed",
-        "version": VERSION,
-        "fingerprint": fingerprint_value,
-        "part": int(row["part"]),
-        "scene": (
-            int(row["scene"])
-            if get_role(row) == "main"
-            else None
-        ),
-        "scene_id": get_scene_id(row),
-        "role": get_role(row),
-        "text": text,
-        "caption_sha256": sha256(text),
-        "source_text_sha256": sha256(narration_text(row)),
-        "caption_language": mode,
-        "caption_source_field": source_field,
-        "selection_method": method,
-        "translation_performed_here": False,
-        "font": font,
-        "font_size": font_size,
-    }
+def positive_estimate(row: dict) -> float | None:
+    for field in ("narration_duration_estimate_seconds", "estimated_duration"):
+        value = row.get(field)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and 0.1 <= number <= 3600:
+            return round(number, 3)
+    return None
 
 
 def prepare_one(
     row: dict,
     mode: str,
     settings: dict,
+    audio: dict,
 ) -> tuple[dict, bool]:
-    sid = get_scene_id(row)
-    original = normalized_text(narration_text(row))
-
-    if not original:
-        raise RuntimeError(f"Empty narration for {sid}.")
+    sid, part, role, scene = scene_identity(row)
+    source = clean_text(narration_text(row))
+    if not source:
+        raise RuntimeError(f"{sid}: source narration is empty.")
 
     caption, source_field, method = choose_caption(row, mode)
     if not caption:
         raise RuntimeError(
             f"CAPTIONS={mode}: no matching language caption for {sid}. "
-            "No translation API is called by this file."
+            "No translation is performed by this stage."
         )
 
-    caption = normalized_text(caption)
+    caption = clean_text(caption)
     if not caption:
-        raise RuntimeError(f"Empty caption text for {sid}.")
-
-    source_hash = sha256(original)
-    caption_hash = sha256(caption)
+        raise RuntimeError(f"{sid}: caption text is empty.")
 
     fingerprint_data = {
+        "version": VERSION,
         "settings": settings,
         "scene_id": sid,
-        "part": int(row["part"]),
-        "scene": (
-            int(row["scene"])
-            if get_role(row) == "main"
-            else None
-        ),
-        "role": get_role(row),
-        "source_sha256": source_hash,
-        "caption_sha256": caption_hash,
+        "part": part,
+        "scene": scene,
+        "role": role,
+        "source_sha256": sha256(source),
+        "caption_sha256": sha256(caption),
         "source_field": source_field,
         "selection_method": method,
+        "audio_sha256": audio["sha256"],
+        "audio_fingerprint": audio["fingerprint"],
+        "audio_duration": audio["duration"],
     }
     fingerprint_value = canonical_hash(fingerprint_data)
+    caption_hash = sha256(caption)
 
-    path = checkpoint_path(row)
     cached = load_reusable_checkpoint(
-        path,
-        fingerprint_value,
-        caption_hash,
+        checkpoint_path(row), fingerprint_value, caption_hash
     )
 
-    if cached:
-        selected_text = normalized_text(cached["text"])
-        if sha256(selected_text) != caption_hash:
-            raise RuntimeError(
-                f"Cached caption integrity failure: {sid}"
-            )
-        reused = True
-    else:
-        selected_text = caption
-        checkpoint = make_checkpoint(
-            row=row,
-            text=selected_text,
-            mode=mode,
-            source_field=source_field,
-            method=method,
-            font=settings["font"],
-            font_size=settings["font_size"],
-            fingerprint_value=fingerprint_value,
-        )
-        write_json_atomic(path, checkpoint)
-        reused = False
+    reused = cached is not None
+    selected_text = clean_text(cached["text"]) if reused else caption
+    if sha256(selected_text) != caption_hash:
+        raise RuntimeError(f"{sid}: cached caption integrity failure.")
 
-    record = build_caption_record(
-        row=row,
-        text=selected_text,
-        mode=mode,
-        source_field=source_field,
-        selection_method=method,
-        font=settings["font"],
-        font_size=settings["font_size"],
-        reused=reused,
-    )
+    if not reused:
+        checkpoint = {
+            "status": "completed",
+            "version": VERSION,
+            "fingerprint": fingerprint_value,
+            "part": part,
+            "scene": scene,
+            "scene_id": sid,
+            "role": role,
+            "text": selected_text,
+            "caption_sha256": caption_hash,
+            "source_text_sha256": sha256(source),
+            "audio_sha256": audio["sha256"],
+            "audio_fingerprint": audio["fingerprint"],
+            "caption_language": mode,
+            "caption_source_field": source_field,
+            "selection_method": method,
+            "translation_performed_here": False,
+            "font": settings["font"],
+            "font_size": settings["font_size"],
+        }
+        write_json_atomic(checkpoint_path(row), checkpoint)
+
+    record = {
+        "part": part,
+        "scene": scene,
+        "scene_id": sid,
+        "role": role,
+        "scene_type": role,
+        "text": selected_text,
+        "caption": selected_text,
+        "caption_language": mode,
+        "caption_source_field": source_field,
+        "selection_method": method,
+        "source_text_sha256": sha256(source),
+        "caption_sha256": caption_hash,
+        "audio_path": audio["path"],
+        "audio_sha256": audio["sha256"],
+        "audio_duration_seconds": audio["duration"],
+        "audio_fingerprint": audio["fingerprint"],
+        "audio_provider": audio["provider"],
+        "audio_model": audio["model"],
+        "font": settings["font"],
+        "font_size": settings["font_size"],
+        "status": "completed",
+        "checkpoint_reused": reused,
+        "timing_status": "audio_verified_word_alignment_pending",
+    }
+
+    estimate = positive_estimate(row)
+    if estimate is not None:
+        record["narration_duration_estimate_seconds"] = estimate
 
     return record, reused
-
 
 def validate_prepared_records(
     main_records: list[dict],
     extra_records: list[dict],
+    audio_map: dict[str, dict],
     parts: int,
     scenes_per_part: int,
 ) -> None:
@@ -804,75 +672,88 @@ def validate_prepared_records(
         for part in range(1, parts + 1)
         for scene in range(1, scenes_per_part + 1)
     }
-
     actual_main = set()
-    ids = set()
+    all_ids: set[str] = set()
 
     for row in main_records:
-        key = (int(row["part"]), int(row["scene"]))
+        try:
+            part = int(row["part"])
+            scene = int(row["scene"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("Prepared Main caption has invalid mapping.") from exc
+
+        key = (part, scene)
+        sid = clean_text(row.get("scene_id"))
+
         if key in actual_main:
-            raise RuntimeError(f"Duplicate prepared Main caption: {key}.")
-        actual_main.add(key)
-
-        sid = get_scene_id(row)
-        if not sid or sid in ids:
-            raise RuntimeError(f"Duplicate or missing caption ID: {sid!r}")
-        ids.add(sid)
-
+            raise RuntimeError(f"Duplicate Main caption mapping: {key}.")
+        if not sid or sid in all_ids:
+            raise RuntimeError(f"Missing or duplicate caption ID: {sid!r}.")
         if row.get("role") != "main":
-            raise RuntimeError(f"Main caption role mismatch: {sid}")
-
-        if not row.get("text"):
-            raise RuntimeError(f"Empty prepared caption: {sid}")
-
+            raise RuntimeError(f"{sid}: Main caption role mismatch.")
+        if not clean_text(row.get("text")):
+            raise RuntimeError(f"{sid}: caption text is empty.")
         if row.get("caption_sha256") != sha256(row["text"]):
-            raise RuntimeError(f"Caption hash mismatch: {sid}")
+            raise RuntimeError(f"{sid}: caption SHA-256 mismatch.")
+        if sid not in audio_map:
+            raise RuntimeError(f"{sid}: verified TTS audio mapping is missing.")
+        if row.get("audio_sha256") != audio_map[sid]["sha256"]:
+            raise RuntimeError(f"{sid}: caption/audio hash mapping mismatch.")
+
+        actual_main.add(key)
+        all_ids.add(sid)
 
     if actual_main != expected_main:
         raise RuntimeError(
             "Prepared Main caption mapping mismatch: "
-            f"missing={sorted(expected_main - actual_main)}, "
-            f"extra={sorted(actual_main - expected_main)}"
+            f"missing={sorted(expected_main-actual_main)}, "
+            f"extra={sorted(actual_main-expected_main)}."
         )
 
-    expected_extra_roles = []
+    expected_extras = []
     for part in range(1, parts + 1):
-        expected_extra_roles.append((part, "hook"))
+        expected_extras.append((part, "hook"))
         if part < parts:
-            expected_extra_roles.append((part, "suspense"))
+            expected_extras.append((part, "suspense"))
         else:
-            expected_extra_roles.append((part, "resolution"))
+            expected_extras.append((part, "resolution"))
 
-    actual_extra_roles = []
+    actual_extras = []
 
     for row in extra_records:
-        sid = get_scene_id(row)
-        if not sid or sid in ids:
-            raise RuntimeError(f"Duplicate or missing extra caption ID: {sid!r}")
-        ids.add(sid)
+        sid = clean_text(row.get("scene_id"))
+        if not sid or sid in all_ids:
+            raise RuntimeError(f"Missing or duplicate extra caption ID: {sid!r}.")
 
-        role = get_role(row)
+        role = clean_text(row.get("role")).lower()
         if role not in EXTRA_ROLES:
-            raise RuntimeError(f"Invalid extra caption role: {role}")
-
-        actual_extra_roles.append((int(row["part"]), role))
-
+            raise RuntimeError(f"{sid}: invalid extra caption role.")
         if row.get("scene") is not None:
-            raise RuntimeError(
-                f"Extra caption must not occupy Main scene number: {sid}"
-            )
-
-        if not row.get("text"):
-            raise RuntimeError(f"Empty extra caption: {sid}")
-
+            raise RuntimeError(f"{sid}: extra caption cannot have Main scene number.")
+        if not clean_text(row.get("text")):
+            raise RuntimeError(f"{sid}: extra caption text is empty.")
         if row.get("caption_sha256") != sha256(row["text"]):
-            raise RuntimeError(f"Extra caption hash mismatch: {sid}")
+            raise RuntimeError(f"{sid}: extra caption SHA-256 mismatch.")
+        if sid not in audio_map:
+            raise RuntimeError(f"{sid}: verified TTS audio mapping is missing.")
+        if row.get("audio_sha256") != audio_map[sid]["sha256"]:
+            raise RuntimeError(f"{sid}: extra caption/audio hash mismatch.")
 
-    if sorted(actual_extra_roles) != sorted(expected_extra_roles):
+        actual_extras.append((int(row["part"]), role))
+        all_ids.add(sid)
+
+    if sorted(actual_extras) != sorted(expected_extras):
         raise RuntimeError(
             "Extra caption role mapping mismatch: "
-            f"expected={sorted(expected_extra_roles)}, "
-            f"found={sorted(actual_extra_roles)}"
+            f"expected={sorted(expected_extras)}, "
+            f"found={sorted(actual_extras)}."
+        )
+
+    if all_ids != set(audio_map):
+        raise RuntimeError(
+            "Caption/TTS record set mismatch: "
+            f"missing captions={sorted(set(audio_map)-all_ids)}, "
+            f"unexpected captions={sorted(all_ids-set(audio_map))}."
         )
 
 
@@ -880,13 +761,12 @@ def main() -> int:
     config = load_and_validate(CONFIG_FILE)
 
     video_format = str(get_format(config)).strip().lower()
-    configured_parts = int(get_parts(config))
+    parts = int(get_parts(config))
     scenes_per_part = int(get_scenes(config))
 
     if video_format not in {"short", "full"}:
-        raise RuntimeError(f"Unsupported FORMAT: {video_format!r}")
-
-    if configured_parts < 1 or scenes_per_part < 1:
+        raise RuntimeError(f"Unsupported FORMAT: {video_format!r}.")
+    if parts < 1 or scenes_per_part < 1:
         raise RuntimeError("PARTS and SCENES must be positive integers.")
 
     mode = normalize_language(config.get("CAPTIONS", "hindi"))
@@ -895,41 +775,54 @@ def main() -> int:
             f"Invalid CAPTIONS={mode!r}; use hindi, english or hinglish."
         )
 
-    font = str(get_caption_font(config)).strip()
+    font = clean_text(str(get_caption_font(config)))
     if not font:
         raise RuntimeError("CAPTION_FONT resolved to an empty value.")
 
     font_size = resolve_font_size(config, video_format)
 
     if not NARRATION_FILE.is_file():
-        raise RuntimeError(
-            f"Narration manifest is missing: {NARRATION_FILE}"
-        )
+        raise RuntimeError(f"Narration manifest is missing: {NARRATION_FILE}.")
 
     narration_data = read_json(NARRATION_FILE)
     if not isinstance(narration_data, dict):
-        raise RuntimeError("Narration manifest is not a JSON object.")
+        raise RuntimeError("Narration manifest must be a JSON object.")
 
-    validate_part_metadata(
-        narration_data,
-        configured_parts,
+    for field, expected in (
+        ("total_parts", parts),
+        ("scenes_per_part", scenes_per_part),
+    ):
+        declared = narration_data.get(field)
+        if declared is not None:
+            try:
+                declared = int(declared)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Narration {field} is invalid.") from exc
+            if declared != expected:
+                raise RuntimeError(
+                    f"Narration {field} mismatch: "
+                    f"configured={expected}, narration={declared}."
+                )
+
+    main_rows, extra_rows = narration_rows(narration_data)
+    ordered_main, ordered_extras = validate_narration_records(
+        main_rows,
+        extra_rows,
+        parts,
         scenes_per_part,
     )
 
-    main_rows, extra_rows = narration_rows(narration_data)
-
-    ordered_main, ordered_extra = validate_narration_records(
-        main_rows,
-        extra_rows,
-        configured_parts,
-        scenes_per_part,
+    all_rows = ordered_main + ordered_extras
+    audio_map, audio_manifest_hash = validate_audio_manifest(
+        narration_data,
+        all_rows,
     )
 
     settings = {
         "version": VERSION,
         "format": video_format,
         "mode": mode,
-        "parts": configured_parts,
+        "parts": parts,
         "scenes_per_part": scenes_per_part,
         "font": font,
         "font_size": font_size,
@@ -943,22 +836,27 @@ def main() -> int:
     reused_count = 0
     created_count = 0
 
-    all_rows = sorted(
-        ordered_main + ordered_extra,
+    ordered_rows = sorted(
+        all_rows,
         key=lambda row: (
             int(row["part"]),
-            ROLE_ORDER[get_role(row)],
-            int(row["scene"]) if get_role(row) == "main" else 0,
-            get_scene_id(row),
+            ROLE_ORDER[scene_identity(row)[2]],
+            int(row["scene"]) if scene_identity(row)[2] == "main" else 0,
         ),
     )
 
-    main_ids = {get_scene_id(row) for row in ordered_main}
+    main_ids = {scene_identity(row)[0] for row in ordered_main}
 
-    for index, row in enumerate(all_rows, 1):
-        record, reused = prepare_one(row, mode, settings)
+    for index, row in enumerate(ordered_rows, 1):
+        sid, _, _, _ = scene_identity(row)
+        record, reused = prepare_one(
+            row,
+            mode,
+            settings,
+            audio_map[sid],
+        )
 
-        if get_scene_id(row) in main_ids:
+        if sid in main_ids:
             prepared_main.append(record)
         else:
             prepared_extras.append(record)
@@ -970,40 +868,34 @@ def main() -> int:
 
         log(
             f"{'REUSED' if reused else 'PREPARED'} "
-            f"{index}/{len(all_rows)} "
+            f"{index}/{len(ordered_rows)} "
             f"part={row['part']} "
-            f"role={get_role(row)} "
-            f"id={get_scene_id(row)} "
-            f"language={mode}"
+            f"role={scene_identity(row)[2]} "
+            f"id={sid} language={mode}"
         )
 
     prepared_main.sort(
-        key=lambda row: (
-            int(row["part"]),
-            int(row["scene"]),
-        )
+        key=lambda row: (int(row["part"]), int(row["scene"]))
     )
     prepared_extras.sort(
         key=lambda row: (
             int(row["part"]),
             ROLE_ORDER[row["role"]],
-            row["scene_id"],
         )
     )
 
     validate_prepared_records(
         prepared_main,
         prepared_extras,
-        configured_parts,
+        audio_map,
+        parts,
         scenes_per_part,
     )
 
     narration_hash = canonical_hash(narration_data)
-
     role_counts = {
         role: sum(
-            1
-            for row in prepared_main + prepared_extras
+            1 for row in prepared_main + prepared_extras
             if row["role"] == role
         )
         for role in ROLE_ORDER
@@ -1016,23 +908,22 @@ def main() -> int:
         "mode": mode,
         "source": "output/narration/narration.json",
         "source_sha256": narration_hash,
+        "audio_source": "output/narration/audio_jobs.json",
+        "audio_source_sha256": audio_manifest_hash,
         "model": "existing-caption-text",
         "api_calls": 0,
         "translation_performed": False,
         "translation_note": (
-            "This stage uses existing language-specific caption fields. "
-            "It does not claim to translate narration. "
-            "Actual word-level audio timing is performed by burn_captions.py."
+            "Uses existing language-specific caption fields or the original "
+            "narration when its language matches. No translation is claimed."
         ),
-        "configured_parts": configured_parts,
-        "parts": configured_parts,
+        "configured_parts": parts,
+        "parts": parts,
         "dynamic_short_parts": False,
         "scenes_per_part": scenes_per_part,
         "total_scenes": len(prepared_main),
         "total_extra_scenes": len(prepared_extras),
-        "total_caption_records": (
-            len(prepared_main) + len(prepared_extras)
-        ),
+        "total_caption_records": len(prepared_main) + len(prepared_extras),
         "role_counts": role_counts,
         "caption_font": font,
         "caption_font_size": font_size,
@@ -1040,40 +931,34 @@ def main() -> int:
             config.get("CAPTION_FONT_SIZE", "auto")
         ),
         "timing_source": (
-            "Actual TTS audio alignment is performed by burn_captions.py."
+            "Verified ffprobe audio durations; word-level alignment is "
+            "performed by burn_captions.py."
         ),
-        "timing_status": "pending_audio_alignment",
+        "timing_status": "audio_verified_word_alignment_pending",
         "checkpoint_reused": reused_count,
         "checkpoint_prepared": created_count,
-
-        # burn_captions.py requires this list to contain Main scenes only.
-        # Extra records have scene=None and are therefore kept separately.
         "captions": prepared_main,
-
-        # Extra-role caption metadata is retained without breaking the
-        # existing Main scene (part, scene) mapping consumed by burn_captions.
         "extra_captions": prepared_extras,
     }
 
     write_json_atomic(CAPTION_FILE, result)
 
     verified = read_json(CAPTION_FILE)
-    if verified.get("status") != "completed":
+    if not isinstance(verified, dict) or verified.get("status") != "completed":
         raise RuntimeError("Caption manifest read-back status failed.")
-
     if verified.get("source_sha256") != narration_hash:
         raise RuntimeError("Caption manifest source hash mismatch.")
-
+    if verified.get("audio_source_sha256") != audio_manifest_hash:
+        raise RuntimeError("Caption manifest audio source hash mismatch.")
     if len(verified.get("captions", [])) != len(prepared_main):
         raise RuntimeError("Caption manifest Main count mismatch.")
-
     if len(verified.get("extra_captions", [])) != len(prepared_extras):
-        raise RuntimeError("Caption manifest extra count mismatch.")
+        raise RuntimeError("Caption manifest extra-role count mismatch.")
 
     log("=" * 56)
     log("CAPTION PREPARATION COMPLETED")
     log("Format:", video_format)
-    log("Configured parts:", configured_parts)
+    log("Parts:", parts)
     log("Scenes per part:", scenes_per_part)
     log("Main captions:", len(prepared_main))
     log("Extra-role captions:", len(prepared_extras))
@@ -1081,10 +966,11 @@ def main() -> int:
     log("Language:", mode)
     log("Font:", font)
     log("Font size:", font_size)
+    log("Verified TTS audio records:", len(audio_map))
     log("Reused checkpoints:", reused_count)
     log("New checkpoints:", created_count)
     log("Translation API calls: 0")
-    log("Timing:", "pending actual TTS audio alignment")
+    log("Word timing: pending burn_captions.py alignment")
     log("Output:", CAPTION_FILE.relative_to(ROOT))
     log("=" * 56)
 
