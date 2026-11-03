@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generate story-aware cinematic thumbnails for Katha Lok AI."""
+"""Generate one verified, format-correct, story-driven cinematic thumbnail."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,7 +24,13 @@ from PIL import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import load_and_validate, normalize_format
+from input_config import (
+    load_and_validate,
+    get_format,
+    get_parts,
+    get_parts_range,
+    get_topic,
+)
 
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 
@@ -39,16 +45,15 @@ VISUAL_MANIFESTS = (
     ROOT / "output" / "visuals" / "visual_jobs.json",
 )
 
+OUTPUT_FILE = ROOT / "output" / "thumbnail.jpg"
 OUTPUT_DIR = ROOT / "output" / "thumbnail"
-MAIN_OUTPUT = ROOT / "output" / "thumbnail.jpg"
-LANDSCAPE_OUTPUT = OUTPUT_DIR / "thumbnail_1280x720.jpg"
-VERTICAL_OUTPUT = OUTPUT_DIR / "thumbnail_1080x1920.jpg"
-MANIFEST_OUTPUT = OUTPUT_DIR / "thumbnail_manifest.json"
+MANIFEST_FILE = OUTPUT_DIR / "thumbnail_manifest.json"
 
-VERSION = "thumbnail-v41-story-driven-cinematic"
+VERSION = "thumbnail-v50-format-correct-story-grounded"
 MIN_IMAGE_BYTES = 1000
-LANDSCAPE_SIZE = (1280, 720)
-VERTICAL_SIZE = (1080, 1920)
+SHORT_SIZE = (720, 1280)
+FULL_SIZE = (1280, 720)
+MAX_TITLE_CHARS = 100
 
 TITLE_KEYS = (
     "final_title",
@@ -65,7 +70,7 @@ SUMMARY_KEYS = (
     "short_summary",
 )
 
-STORY_TEXT_KEYS = (
+STORY_KEYS = (
     "story_text",
     "full_story",
     "complete_story",
@@ -84,6 +89,7 @@ IMAGE_KEYS = (
     "image",
     "file",
     "path",
+    "output",
 )
 
 FONT_CANDIDATES = (
@@ -100,177 +106,303 @@ def log(*values: Any) -> None:
     print(*values, flush=True)
 
 
-def clean_text(value: Any) -> str:
+def clean(value: Any) -> str:
     if not isinstance(value, str):
         return ""
-    return re.sub(r"\s+", " ", value).strip().strip("\"' ")
+    return re.sub(r"\s+", " ", value).strip().strip("\"'“”‘’ ")
 
 
-def read_json(path: Path) -> Any:
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError, TypeError) as exc:
-        log("WARNING: Could not read JSON:", path, exc)
-        return None
-
-
-def write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    try:
-        temporary.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+def multiline(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = value.replace("\ufeff", "")
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
 
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_json(path: Path, data: dict) -> None:
+    atomic_write(
+        path,
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def read_json(path: Path, required: bool = False) -> Any:
+    if not path.is_file():
+        if required:
+            raise RuntimeError(f"Required file missing: {path}")
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        if required:
+            raise RuntimeError(f"Invalid JSON {path}: {exc}") from exc
+        log("Ignoring invalid optional JSON:", path, exc)
+        return None
+
+
+def nested_objects(data: dict) -> list[dict]:
+    result = [data]
+    seen = {id(data)}
+
+    for key in ("story", "metadata", "story_metadata", "result", "data"):
+        value = data.get(key)
+        if isinstance(value, dict) and id(value) not in seen:
+            result.append(value)
+            seen.add(id(value))
+
+    return result
+
+
 def first_text(data: dict, keys: tuple[str, ...]) -> str:
     for key in keys:
-        value = clean_text(data.get(key))
+        value = clean(data.get(key))
         if value:
             return value
     return ""
 
 
-def nested_story_objects(data: dict) -> list[dict]:
-    result = [data]
-    for key in ("story", "metadata", "story_metadata", "result"):
-        value = data.get(key)
-        if isinstance(value, dict):
-            result.append(value)
-    return result
-
-
-def get_story_document() -> tuple[dict, str]:
+def load_story_document() -> tuple[dict, Path]:
     for path in STORY_FILES:
         data = read_json(path)
+
         if isinstance(data, dict):
-            return data, path.relative_to(ROOT).as_posix()
+            return data, path
+
     raise RuntimeError(
-        "Story JSON missing. Expected output/story/ai_story.json "
-        "or output/story/story.json."
+        "Neither ai_story.json nor story.json exists. "
+        "Thumbnail generation requires a completed story."
     )
 
 
-def story_text_from(data: dict) -> str:
-    for obj in nested_story_objects(data):
-        for key in STORY_TEXT_KEYS:
-            value = clean_text(obj.get(key))
+def extract_story_text(data: dict) -> str:
+    for obj in nested_objects(data):
+        for key in STORY_KEYS:
+            value = multiline(obj.get(key))
             if len(value) >= 100:
                 return value
 
     parts = data.get("parts")
+
+    if not isinstance(parts, list):
+        nested = data.get("story")
+        parts = nested.get("parts") if isinstance(nested, dict) else None
+
     if isinstance(parts, list):
-        chunks = []
+        sections = []
+
         for part in parts:
             if not isinstance(part, dict):
                 continue
-            value = first_text(part, ("narration", "text", "story", "content"))
+
+            value = multiline(
+                part.get("narration")
+                or part.get("text")
+                or part.get("story")
+                or part.get("content")
+            )
+
             if value:
-                chunks.append(value)
-        if len(" ".join(chunks)) >= 100:
-            return " ".join(chunks)
+                sections.append(value)
+                continue
+
+            scenes = part.get("scenes")
+            if isinstance(scenes, list):
+                for scene in scenes:
+                    if not isinstance(scene, dict):
+                        continue
+                    narration = multiline(
+                        scene.get("narration")
+                        or scene.get("narration_text")
+                        or scene.get("text")
+                    )
+                    if narration:
+                        sections.append(narration)
+
+        reconstructed = "\n\n".join(sections)
+        if len(reconstructed) >= 100:
+            return reconstructed
 
     scenes = data.get("scenes")
+
     if isinstance(scenes, list):
-        chunks = []
+        sections = []
+
         for scene in scenes:
             if not isinstance(scene, dict):
                 continue
-            value = first_text(
-                scene,
-                ("narration", "narration_text", "text", "description"),
+
+            narration = multiline(
+                scene.get("narration")
+                or scene.get("narration_text")
+                or scene.get("text")
             )
-            if value:
-                chunks.append(value)
-        if len(" ".join(chunks)) >= 100:
-            return " ".join(chunks)
+
+            if narration:
+                sections.append(narration)
+
+        reconstructed = "\n\n".join(sections)
+        if len(reconstructed) >= 100:
+            return reconstructed
+
+    raise RuntimeError(
+        "Complete story narration is missing or too short. "
+        "A first-line-only title is not permitted."
+    )
+
+
+def extract_story_summary(data: dict) -> str:
+    for obj in nested_objects(data):
+        summary = first_text(obj, SUMMARY_KEYS)
+        if summary:
+            return summary
 
     return ""
 
 
-def derive_title_from_summary(data: dict, story_text: str) -> str:
-    for obj in nested_story_objects(data):
-        summary = first_text(obj, SUMMARY_KEYS)
-        if summary:
-            # A summary can be a title only when it is already concise.
-            sentence = re.split(r"[.!?।]\s+", summary, maxsplit=1)[0]
-            if 5 <= len(sentence) <= 72:
-                return sentence.strip(" ,:;।")
+def derive_title_from_complete_story(
+    story_text: str,
+    summary: str,
+) -> str:
+    """Create a compact title from the full story, not its opening line."""
 
-    # Derive a short title from the story's central conflict and ending,
-    # never from the first sentence alone.
-    text = clean_text(story_text)
-    if not text:
-        return ""
+    if summary:
+        sentences = [
+            clean(item)
+            for item in re.split(r"(?<=[.!?।])\s+", summary)
+            if clean(item)
+        ]
+
+        if sentences:
+            candidate = " ".join(sentences[:2])
+            words = candidate.split()
+
+            if len(words) > 11:
+                candidate = " ".join(words[:11])
+
+            if len(candidate) >= 8:
+                return candidate.rstrip(" ,:;।.!?")
 
     sentences = [
-        item.strip()
-        for item in re.split(r"(?<=[.!?।])\s+", text)
-        if len(item.strip()) >= 25
+        clean(item)
+        for item in re.split(r"(?<=[.!?।])\s+", story_text)
+        if len(clean(item)) >= 20
     ]
+
     if not sentences:
-        return ""
+        raise RuntimeError("Cannot derive a title from the complete story.")
 
-    ending = " ".join(sentences[-3:])
-    ending = re.sub(r"\([^)]*\)", "", ending)
-    ending = re.sub(r"\s+", " ", ending).strip()
+    # Use the middle conflict and ending context together.
+    selected = []
 
-    # Extract a compact phrase from the final consequence/resolution.
-    words = ending.split()
-    if len(words) > 11:
-        ending = " ".join(words[-11:])
+    if len(sentences) >= 3:
+        selected.extend(sentences[1:3])
+        selected.extend(sentences[-2:])
+    else:
+        selected.extend(sentences)
 
-    return ending.strip(" ,:;।.!?\"'")[:72]
+    candidate = " ".join(selected)
+    candidate = re.sub(r"\([^)]*\)", "", candidate)
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+
+    words = candidate.split()
+
+    if len(words) > 12:
+        candidate = " ".join(words[:12])
+
+    candidate = candidate.strip(" ,:;।.!?\"'")
+
+    if len(candidate) < 8:
+        raise RuntimeError("Derived story title is not meaningful.")
+
+    return candidate
 
 
-def get_story_title(data: dict, config: dict) -> tuple[str, str]:
-    for obj in nested_story_objects(data):
+def load_title(
+    data: dict,
+    config: dict,
+    story_text: str,
+    summary: str,
+) -> tuple[str, str]:
+    for obj in nested_objects(data):
         title = first_text(obj, TITLE_KEYS)
+
         if title:
-            return title, "story_json"
+            return title, "completed_story_metadata"
 
     title_file = ROOT / "output" / "story" / "final_title.txt"
+
     if title_file.is_file():
-        title = clean_text(title_file.read_text(encoding="utf-8-sig"))
+        title = clean(
+            title_file.read_text(encoding="utf-8-sig")
+        )
         if title:
             return title, "final_title.txt"
 
-    story_text = story_text_from(data)
-    derived = derive_title_from_summary(data, story_text)
-    if derived:
-        log("WARNING: Story title absent; derived thumbnail title from story summary/ending.")
-        return derived, "derived_from_story_summary_and_ending"
+    explicit_title = clean(str(config.get("TITLE", "")))
 
-    topic = clean_text(str(config.get("TOPIC", "")))
-    if topic:
-        log("WARNING: No generated title or summary; using configured TOPIC.")
-        return topic, "Input/topic.txt"
+    if explicit_title:
+        return explicit_title, "Input/topic.txt:TITLE"
 
-    raise RuntimeError(
-        "No usable story title, summary or topic was found. "
-        "Refusing to use the first story sentence as a title."
+    derived = derive_title_from_complete_story(
+        story_text,
+        summary,
     )
 
+    return derived, "derived_from_complete_story_summary"
 
-def resolve_image(value: Any) -> Path | None:
+
+def validate_story_status(data: dict) -> None:
+    statuses = [
+        clean(obj.get("status")).lower()
+        for obj in nested_objects(data)
+        if obj.get("status")
+    ]
+
+    if statuses and not any(
+        status in {"completed", "complete", "success", "done"}
+        for status in statuses
+    ):
+        raise RuntimeError(
+            f"Story generation is not complete: {statuses}"
+        )
+
+    for obj in nested_objects(data):
+        if obj.get("error"):
+            raise RuntimeError("Story file contains an error field.")
+
+
+def safe_local_path(value: Any) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
 
     candidate = Path(value.strip())
+
     if not candidate.is_absolute():
         candidate = ROOT / candidate
 
@@ -281,12 +413,16 @@ def resolve_image(value: Any) -> Path | None:
     except (OSError, ValueError):
         return None
 
-    if not candidate.is_file() or candidate.stat().st_size < MIN_IMAGE_BYTES:
+    if not candidate.is_file():
+        return None
+
+    if candidate.stat().st_size < MIN_IMAGE_BYTES:
         return None
 
     try:
         with Image.open(candidate) as image:
             image.verify()
+
         with Image.open(candidate) as image:
             if image.format not in {"PNG", "JPEG", "WEBP"}:
                 return None
@@ -298,23 +434,33 @@ def resolve_image(value: Any) -> Path | None:
     return candidate
 
 
-def row_image(row: dict) -> Path | None:
+def extract_image_path(row: dict) -> Path | None:
     for key in IMAGE_KEYS:
-        result = resolve_image(row.get(key))
-        if result:
-            return result
+        path = safe_local_path(row.get(key))
+        if path:
+            return path
 
-    nested = row.get("source_scene")
-    if isinstance(nested, dict):
+    for key in ("image", "visual", "asset", "result"):
+        nested = row.get(key)
+
+        if isinstance(nested, dict):
+            for image_key in IMAGE_KEYS:
+                path = safe_local_path(nested.get(image_key))
+                if path:
+                    return path
+
+    nested_scene = row.get("source_scene")
+
+    if isinstance(nested_scene, dict):
         for key in IMAGE_KEYS:
-            result = resolve_image(nested.get(key))
-            if result:
-                return result
+            path = safe_local_path(nested_scene.get(key))
+            if path:
+                return path
 
     return None
 
 
-def manifest_rows(path: Path) -> list[dict]:
+def rows_from_manifest(path: Path) -> list[dict]:
     data = read_json(path)
 
     if isinstance(data, list):
@@ -325,8 +471,10 @@ def manifest_rows(path: Path) -> list[dict]:
             or data.get("jobs")
             or data.get("visuals")
             or data.get("items")
+            or data.get("images")
             or []
         )
+
         if isinstance(rows, dict):
             rows = list(rows.values())
     else:
@@ -336,13 +484,31 @@ def manifest_rows(path: Path) -> list[dict]:
         return []
 
     return [
-        {**row, "_manifest": path.name}
+        {**row, "_manifest": path.relative_to(ROOT).as_posix()}
         for row in rows
         if isinstance(row, dict)
     ]
 
 
-def scene_number(row: dict, fallback: int) -> int:
+def row_part(row: dict) -> int:
+    for key in ("part", "part_number", "part_index"):
+        try:
+            value = int(row.get(key))
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            continue
+
+    scene_id = clean(row.get("scene_id") or row.get("id"))
+    match = re.search(r"part[_-]?(\d+)", scene_id, re.I)
+
+    if match:
+        return int(match.group(1))
+
+    return 1
+
+
+def row_scene(row: dict, fallback: int) -> int:
     for key in (
         "global_scene",
         "global_scene_number",
@@ -351,93 +517,183 @@ def scene_number(row: dict, fallback: int) -> int:
         "local_scene",
     ):
         try:
-            number = int(row.get(key, 0))
-            if number > 0:
-                return number
+            value = int(row.get(key))
+            if value > 0:
+                return value
         except (TypeError, ValueError):
             continue
+
     return fallback
 
 
-def load_visual_candidates() -> list[dict]:
-    merged: dict[tuple[int, int], dict] = {}
+def role_name(row: dict) -> str:
+    value = clean(
+        row.get("role")
+        or row.get("scene_role")
+        or row.get("kind")
+    ).lower()
+
+    aliases = {
+        "main_scene": "main",
+        "main-scene": "main",
+        "opening_hook": "hook",
+        "opening-hook": "hook",
+        "final_suspense": "suspense",
+        "ending_suspense": "suspense",
+        "final_resolution": "resolution",
+    }
+
+    return aliases.get(value, value)
+
+
+def load_visual_candidates(
+    minimum_part: int,
+    maximum_part: int,
+) -> list[dict]:
+    merged: dict[tuple[int, str], dict] = {}
 
     for path in reversed(VISUAL_MANIFESTS):
-        for index, row in enumerate(manifest_rows(path), 1):
-            try:
-                part = int(row.get("part", 1))
-            except (TypeError, ValueError):
-                part = 1
+        for index, row in enumerate(rows_from_manifest(path), 1):
+            part = row_part(row)
 
-            scene = scene_number(row, index)
-            key = (part, scene)
+            if not minimum_part <= part <= maximum_part:
+                continue
+
+            scene_id = clean(
+                row.get("scene_id")
+                or row.get("id")
+                or f"part_{part:02d}_scene_{row_scene(row, index):02d}"
+            )
+
+            key = (part, scene_id)
             merged[key] = {**merged.get(key, {}), **row}
 
-    candidates = []
-    accepted = {"", "completed", "complete", "success", "done", "generated"}
+    accepted_statuses = {
+        "", "completed", "complete", "success", "done", "generated", "reused"
+    }
 
-    for (part, scene), row in merged.items():
-        status = clean_text(row.get("status")).lower()
-        if status not in accepted:
+    candidates = []
+
+    for (part, scene_id), row in merged.items():
+        status = clean(row.get("status")).lower()
+
+        if status not in accepted_statuses:
             continue
 
-        image = row_image(row)
-        if image is None:
+        path = extract_image_path(row)
+
+        if path is None:
+            continue
+
+        declared_hash = clean(
+            row.get("sha256")
+            or row.get("image_sha256")
+            or row.get("output_sha256")
+        )
+
+        actual_hash = sha256_file(path)
+
+        if declared_hash and declared_hash.lower() != actual_hash:
+            log("Skipping image with SHA256 mismatch:", path)
             continue
 
         candidates.append({
-            "path": image,
+            "path": path,
             "part": part,
-            "scene": scene,
+            "scene_id": scene_id,
+            "scene": row_scene(row, len(candidates) + 1),
+            "role": role_name(row),
             "row": row,
             "manifest": row.get("_manifest", ""),
+            "sha256": actual_hash,
         })
+
+    if not candidates:
+        raise RuntimeError(
+            "No valid generated scene image found for the selected parts."
+        )
 
     return candidates
 
 
-def scene_description(row: dict) -> str:
+def description_text(row: dict) -> str:
     fields = (
-        "title", "role", "purpose", "beat", "mood",
-        "visual_prompt", "image_prompt", "prompt",
-        "scene_prompt", "description", "action",
-        "story_anchor", "suspense_prompt",
+        "title",
+        "role",
+        "purpose",
+        "beat",
+        "mood",
+        "visual_prompt",
+        "image_prompt",
+        "prompt",
+        "scene_prompt",
+        "description",
+        "action",
+        "story_anchor",
+        "suspense_prompt",
+        "character_summary",
     )
 
-    values = [clean_text(row.get(key)) for key in fields]
+    values = [
+        clean(row.get(key))
+        for key in fields
+    ]
+
     nested = row.get("source_scene")
 
     if isinstance(nested, dict):
-        values.extend(clean_text(nested.get(key)) for key in fields)
+        values.extend(
+            clean(nested.get(key))
+            for key in fields
+        )
 
     return " ".join(value for value in values if value).lower()
 
 
-def scene_score(candidate: dict) -> int:
+def score_candidate(candidate: dict) -> int:
     row = candidate["row"]
-    description = scene_description(row)
+    description = description_text(row)
+    role = candidate["role"]
+
     score = 0
 
-    positive_groups = (
-        ("hook", "opening_hook", "first reveal", "opening"),
-        ("suspense", "mystery", "secret", "twist", "unknown"),
-        ("climax", "finale", "reveal", "confrontation"),
-        ("fear", "danger", "threat", "haunted", "ghost"),
-        ("dramatic", "intense", "emotional", "shock"),
-        ("close-up", "close up", "character focus", "face"),
-        ("fire", "storm", "chase", "battle", "conflict"),
+    role_scores = {
+        "hook": 13,
+        "suspense": 18,
+        "resolution": 10,
+        "main": 4,
+    }
+
+    score += role_scores.get(role, 0)
+
+    groups = (
+        ("mystery", "secret", "unknown", "रहस्य", "राज"),
+        ("climax", "finale", "reveal", "confrontation", "टकराव"),
+        ("fear", "danger", "threat", "haunted", "भय", "खतरा"),
+        ("dramatic", "intense", "emotional", "shock", "नाटकीय"),
+        ("close-up", "close up", "character focus", "face", "चेहरा"),
+        ("fire", "storm", "chase", "battle", "conflict", "आग", "युद्ध"),
         ("crying", "fearful", "angry", "surprised", "shocked"),
+        ("hero", "villain", "protagonist", "antagonist", "नायक", "खलनायक"),
     )
 
-    for group in positive_groups:
+    for group in groups:
         if any(term in description for term in group):
             score += 3
 
     negative_terms = (
-        "empty room", "plain background", "title card",
-        "text overlay", "wide establishing shot", "empty landscape",
+        "empty room",
+        "plain background",
+        "title card",
+        "text overlay",
+        "empty landscape",
+        "blank background",
     )
-    score -= 4 * sum(term in description for term in negative_terms)
+
+    score -= 4 * sum(
+        term in description
+        for term in negative_terms
+    )
 
     if row.get("opening_hook_required"):
         score += 4
@@ -446,28 +702,26 @@ def scene_score(candidate: dict) -> int:
     if row.get("climax_required"):
         score += 5
 
-    if clean_text(row.get("status")).lower() in {
-        "completed", "complete", "success", "done", "generated"
-    }:
-        score += 2
-
     return score
 
 
-def choose_hero_visual() -> dict:
-    candidates = load_visual_candidates()
-
-    if not candidates:
-        raise RuntimeError(
-            "No valid generated scene image found in the visual manifests."
-        )
+def choose_hero(
+    minimum_part: int,
+    maximum_part: int,
+) -> dict:
+    candidates = load_visual_candidates(
+        minimum_part,
+        maximum_part,
+    )
 
     for candidate in candidates:
-        candidate["score"] = scene_score(candidate)
+        candidate["score"] = score_candidate(candidate)
 
+    # Prefer story-relevant dramatic images, not simply the last image.
     candidates.sort(
         key=lambda item: (
             item["score"],
+            item["role"] in {"hook", "suspense"},
             -item["part"],
             -item["scene"],
             item["path"].stat().st_size,
@@ -475,22 +729,25 @@ def choose_hero_visual() -> dict:
         reverse=True,
     )
 
-    chosen = candidates[0]
-    log("Selected thumbnail scene:", chosen["scene"])
-    log("Selected thumbnail part:", chosen["part"])
-    log("Selected thumbnail score:", chosen["score"])
-    log("Selected image:", chosen["path"].relative_to(ROOT))
-    return chosen
+    selected = candidates[0]
+
+    log("Selected hero part:", selected["part"])
+    log("Selected hero scene:", selected["scene_id"])
+    log("Selected hero role:", selected["role"])
+    log("Selected hero score:", selected["score"])
+
+    return selected
 
 
 def find_font(size: int) -> ImageFont.FreeTypeFont:
     for candidate in FONT_CANDIDATES:
         path = Path(candidate)
+
         if path.is_file():
             try:
                 return ImageFont.truetype(str(path), size=size)
             except Exception:
-                pass
+                continue
 
     for family in (
         "Noto Sans Devanagari:style=Bold",
@@ -507,25 +764,34 @@ def find_font(size: int) -> ImageFont.FreeTypeFont:
                 text=True,
                 timeout=10,
             )
+
             font_path = result.stdout.strip()
+
             if font_path and Path(font_path).is_file():
-                return ImageFont.truetype(font_path, size=size)
+                return ImageFont.truetype(
+                    font_path,
+                    size=size,
+                )
         except Exception:
             continue
 
     raise RuntimeError(
-        "No usable Hindi font found. Install Noto Sans Devanagari or Mukta."
+        "No usable Hindi font found. "
+        "Install Noto Sans Devanagari, Mukta or Hind."
     )
 
 
-def shorten_title(title: str, limit: int = 84) -> str:
-    title = clean_text(title)
-    if len(title) <= limit:
+def shorten_title(title: str) -> str:
+    title = clean(title)
+
+    if len(title) <= MAX_TITLE_CHARS:
         return title
 
-    shortened = title[:limit]
+    shortened = title[:MAX_TITLE_CHARS]
+
     if " " in shortened:
         shortened = shortened.rsplit(" ", 1)[0]
+
     return shortened.rstrip(" ,.!?;:।") + "…"
 
 
@@ -555,16 +821,17 @@ def wrap_text(
     return lines
 
 
-def estimate_focal_point(image: Image.Image) -> tuple[float, float]:
+def focal_point(image: Image.Image) -> tuple[float, float]:
     sample = image.convert("RGB")
     sample.thumbnail((240, 240))
 
-    gray = sample.convert("L")
-    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edges = sample.convert("L").filter(ImageFilter.FIND_EDGES)
     width, height = edges.size
     pixels = edges.load()
 
-    total = weighted_x = weighted_y = 0.0
+    total = 0.0
+    weighted_x = 0.0
+    weighted_y = 0.0
 
     for y in range(height):
         for x in range(width):
@@ -594,15 +861,27 @@ def crop_to_ratio(
         new_width = max(1, int(height * ratio))
         center = int(fx * width)
         left = max(0, min(width - new_width, center - new_width // 2))
-        return image.crop((left, 0, left + new_width, height))
+
+        return image.crop((
+            left,
+            0,
+            left + new_width,
+            height,
+        ))
 
     new_height = max(1, int(width / ratio))
     center = int(fy * height)
     top = max(0, min(height - new_height, center - new_height // 2))
-    return image.crop((0, top, width, top + new_height))
+
+    return image.crop((
+        0,
+        top,
+        width,
+        top + new_height,
+    ))
 
 
-def sample_palette(image: Image.Image) -> dict:
+def scene_palette(image: Image.Image) -> dict:
     sample = image.convert("RGB").resize((48, 48))
     pixels = list(sample.getdata())
     count = max(1, len(pixels))
@@ -621,7 +900,7 @@ def sample_palette(image: Image.Image) -> dict:
     elif brightness < 78:
         accent = (255, 190, 75)
     elif brightness > 185:
-        accent = (125, 85, 230)
+        accent = (145, 115, 255)
     else:
         accent = (255, 215, 100)
 
@@ -631,20 +910,28 @@ def sample_palette(image: Image.Image) -> dict:
         "outline": (8, 9, 13),
         "brightness": round(brightness, 2),
         "average_rgb": [
-            round(red), round(green), round(blue)
+            round(red),
+            round(green),
+            round(blue),
         ],
     }
 
 
-def apply_cinematic_grade(image: Image.Image) -> Image.Image:
-    image = ImageEnhance.Color(image).enhance(1.13)
-    image = ImageEnhance.Contrast(image).enhance(1.12)
-    image = ImageEnhance.Sharpness(image).enhance(1.15)
+def cinematic_grade(image: Image.Image) -> Image.Image:
+    image = ImageEnhance.Color(image).enhance(1.15)
+    image = ImageEnhance.Contrast(image).enhance(1.13)
+    image = ImageEnhance.Sharpness(image).enhance(1.20)
+
     return image.filter(
-        ImageFilter.UnsharpMask(radius=1.5, percent=115, threshold=3)
+        ImageFilter.UnsharpMask(
+            radius=1.5,
+            percent=120,
+            threshold=3,
+        )
     )
 
-def make_gradient_overlay(
+
+def gradient_overlay(
     size: tuple[int, int],
     placement: str,
 ) -> Image.Image:
@@ -653,37 +940,53 @@ def make_gradient_overlay(
     draw = ImageDraw.Draw(overlay)
 
     if placement == "bottom":
-        start = int(height * 0.42)
+        start = int(height * 0.43)
+
         for y in range(start, height):
             progress = (y - start) / max(1, height - start)
-            alpha = int(12 + 215 * progress)
-            draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
+            alpha = int(15 + 220 * progress)
+            draw.line(
+                (0, y, width, y),
+                fill=(0, 0, 0, alpha),
+            )
 
     elif placement == "top":
         end = int(height * 0.52)
+
         for y in range(end):
             progress = 1 - y / max(1, end)
-            alpha = int(12 + 205 * progress)
-            draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
+            alpha = int(15 + 215 * progress)
+            draw.line(
+                (0, y, width, y),
+                fill=(0, 0, 0, alpha),
+            )
 
     elif placement == "left":
-        band = int(width * 0.62)
+        band = int(width * 0.64)
+
         for x in range(band):
             progress = 1 - x / max(1, band)
-            alpha = int(12 + 205 * progress)
-            draw.line((x, 0, x, height), fill=(0, 0, 0, alpha))
+            alpha = int(15 + 215 * progress)
+            draw.line(
+                (x, 0, x, height),
+                fill=(0, 0, 0, alpha),
+            )
 
     else:
-        start = int(width * 0.38)
+        start = int(width * 0.36)
+
         for x in range(start, width):
             progress = (x - start) / max(1, width - start)
-            alpha = int(12 + 205 * progress)
-            draw.line((x, 0, x, height), fill=(0, 0, 0, alpha))
+            alpha = int(15 + 215 * progress)
+            draw.line(
+                (x, 0, x, height),
+                fill=(0, 0, 0, alpha),
+            )
 
     return overlay
 
 
-def choose_title_placement(
+def choose_placement(
     focal: tuple[float, float],
     vertical: bool,
 ) -> str:
@@ -694,12 +997,14 @@ def choose_title_placement(
 
     if fx > 0.64:
         return "left"
+
     if fx < 0.36:
         return "right"
+
     return "bottom"
 
 
-def draw_cinematic_title(
+def draw_title(
     image: Image.Image,
     title: str,
     vertical: bool,
@@ -707,20 +1012,31 @@ def draw_cinematic_title(
 ) -> tuple[Image.Image, dict]:
     image = image.convert("RGB")
     width, height = image.size
-    palette = sample_palette(image)
+    palette = scene_palette(image)
 
-    placement = choose_title_placement(focal, vertical)
-    overlay = make_gradient_overlay(image.size, placement)
+    placement = choose_placement(focal, vertical)
+
     image = Image.alpha_composite(
-        image.convert("RGBA"), overlay
+        image.convert("RGBA"),
+        gradient_overlay(image.size, placement),
     ).convert("RGB")
 
     draw = ImageDraw.Draw(image)
     title = shorten_title(title)
 
-    max_width = int(width * (0.82 if placement in {"left", "right"} else 0.90))
-    base_size = max(26, width // (13 if vertical else 16))
-    min_size = max(18, width // 42)
+    max_width = int(
+        width * (
+            0.82
+            if placement in {"left", "right"}
+            else 0.90
+        )
+    )
+
+    base_size = max(
+        28,
+        width // (13 if vertical else 15),
+    )
+    min_size = max(20, width // 42)
 
     selected_font = None
     selected_lines = []
@@ -728,7 +1044,13 @@ def draw_cinematic_title(
 
     for size in range(base_size, min_size - 1, -1):
         font = find_font(size)
-        lines = wrap_text(draw, title, font, max_width)
+        lines = wrap_text(
+            draw,
+            title,
+            font,
+            max_width,
+        )
+
         if 1 <= len(lines) <= 3:
             selected_font = font
             selected_lines = lines
@@ -738,23 +1060,31 @@ def draw_cinematic_title(
     if selected_font is None:
         selected_font = find_font(min_size)
         selected_lines = wrap_text(
-            draw, title, selected_font, max_width
+            draw,
+            title,
+            selected_font,
+            max_width,
         )[:3]
-        selected_size = min_size
 
     if not selected_lines:
-        raise RuntimeError("Thumbnail title could not be laid out.")
+        raise RuntimeError("Thumbnail title layout failed.")
 
-    spacing = max(5, selected_size // 5)
+    spacing = max(6, selected_size // 5)
     line_heights = []
 
     for line in selected_lines:
         bounds = draw.textbbox(
-            (0, 0), line, font=selected_font, stroke_width=2
+            (0, 0),
+            line,
+            font=selected_font,
+            stroke_width=2,
         )
         line_heights.append(max(1, bounds[3] - bounds[1]))
 
-    total_height = sum(line_heights) + spacing * (len(line_heights) - 1)
+    total_height = (
+        sum(line_heights)
+        + spacing * (len(line_heights) - 1)
+    )
 
     if placement == "top":
         start_y = int(height * 0.07)
@@ -763,7 +1093,10 @@ def draw_cinematic_title(
     else:
         start_y = int(height * 0.34)
 
-    start_y = max(18, min(start_y, height - total_height - 25))
+    start_y = max(
+        18,
+        min(start_y, height - total_height - 25),
+    )
 
     if placement == "left":
         x_anchor, alignment = int(width * 0.07), "left"
@@ -772,7 +1105,7 @@ def draw_cinematic_title(
     else:
         x_anchor, alignment = width // 2, "center"
 
-    accent_width = max(60, int(width * 0.14))
+    accent_width = max(65, int(width * 0.15))
     accent_height = max(5, selected_size // 12)
 
     if alignment == "left":
@@ -782,7 +1115,10 @@ def draw_cinematic_title(
     else:
         accent_x = (width - accent_width) // 2
 
-    accent_y = max(10, start_y - max(18, selected_size // 2))
+    accent_y = max(
+        10,
+        start_y - max(18, selected_size // 2),
+    )
 
     draw.rounded_rectangle(
         (
@@ -799,7 +1135,10 @@ def draw_cinematic_title(
 
     for line, line_height in zip(selected_lines, line_heights):
         bounds = draw.textbbox(
-            (0, 0), line, font=selected_font, stroke_width=2
+            (0, 0),
+            line,
+            font=selected_font,
+            stroke_width=2,
         )
         text_width = bounds[2] - bounds[0]
 
@@ -810,7 +1149,10 @@ def draw_cinematic_title(
         else:
             x = (width - text_width) // 2
 
-        x = max(12, min(x, width - text_width - 12))
+        x = max(
+            12,
+            min(x, width - text_width - 12),
+        )
 
         draw.text(
             (x + 3, y + 4),
@@ -820,6 +1162,7 @@ def draw_cinematic_title(
             stroke_width=max(4, selected_size // 10),
             stroke_fill=(0, 0, 0),
         )
+
         draw.text(
             (x, y),
             line,
@@ -847,38 +1190,70 @@ def draw_cinematic_title(
     return image, design
 
 
+def verify_image(
+    path: Path,
+    expected_size: tuple[int, int],
+) -> None:
+    if not path.is_file():
+        raise RuntimeError(f"Thumbnail missing: {path}")
+
+    if path.stat().st_size < MIN_IMAGE_BYTES:
+        raise RuntimeError("Thumbnail file is unexpectedly small.")
+
+    try:
+        with Image.open(path) as image:
+            image.verify()
+
+        with Image.open(path) as image:
+            if image.format != "JPEG":
+                raise RuntimeError("Thumbnail is not JPEG.")
+
+            if image.size != expected_size:
+                raise RuntimeError(
+                    f"Wrong thumbnail dimensions: {image.size}; "
+                    f"expected {expected_size}."
+                )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Thumbnail verification failed: {exc}"
+        ) from exc
+
+
 def create_thumbnail(
     source: Path,
     title: str,
     dimensions: tuple[int, int],
-    destination: Path,
 ) -> dict:
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     with Image.open(source) as original:
         image = ImageOps.exif_transpose(original).convert("RGB")
 
-    focal = estimate_focal_point(image)
+    focal = focal_point(image)
+
     image = crop_to_ratio(
         image,
         dimensions[0] / dimensions[1],
         focal,
     )
+
     image = image.resize(
         dimensions,
         Image.Resampling.LANCZOS,
     )
-    image = apply_cinematic_grade(image)
 
-    image, design = draw_cinematic_title(
+    image = cinematic_grade(image)
+
+    image, design = draw_title(
         image=image,
         title=title,
         vertical=dimensions[1] > dimensions[0],
         focal=focal,
     )
 
-    temporary = destination.with_name(
-        destination.stem + ".tmp.jpg"
+    temporary = OUTPUT_FILE.with_name(
+        OUTPUT_FILE.stem + ".tmp.jpg"
     )
 
     try:
@@ -891,112 +1266,80 @@ def create_thumbnail(
             subsampling=0,
         )
 
-        with Image.open(temporary) as check:
-            check.verify()
-
-        with Image.open(temporary) as check:
-            if check.format != "JPEG":
-                raise RuntimeError("Thumbnail output is not JPEG.")
-            if check.size != dimensions:
-                raise RuntimeError(
-                    f"Wrong dimensions {check.size}; expected {dimensions}."
-                )
-
-        if temporary.stat().st_size < MIN_IMAGE_BYTES:
-            raise RuntimeError("Thumbnail output is unexpectedly small.")
-
-        temporary.replace(destination)
+        verify_image(temporary, dimensions)
+        os.replace(temporary, OUTPUT_FILE)
 
     finally:
         temporary.unlink(missing_ok=True)
 
     return {
-        "file": destination.relative_to(ROOT).as_posix(),
+        "file": OUTPUT_FILE.relative_to(ROOT).as_posix(),
         "width": dimensions[0],
         "height": dimensions[1],
-        "bytes": destination.stat().st_size,
-        "sha256": sha256_file(destination),
+        "bytes": OUTPUT_FILE.stat().st_size,
+        "sha256": sha256_file(OUTPUT_FILE),
         "success": True,
         "design": design,
     }
 
 
-def copy_verified(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".tmp")
-
-    try:
-        shutil.copy2(source, temporary)
-
-        with Image.open(temporary) as image:
-            image.verify()
-
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def verify_thumbnail(
-    path: Path,
+def verify_saved_manifest(
+    manifest: dict,
+    expected_format: str,
     expected_size: tuple[int, int],
 ) -> None:
-    if not path.is_file():
-        raise RuntimeError(f"Thumbnail missing: {path}")
+    if manifest.get("status") != "completed":
+        raise RuntimeError("Thumbnail manifest status is incomplete.")
 
-    if path.stat().st_size < MIN_IMAGE_BYTES:
-        raise RuntimeError(f"Thumbnail file is too small: {path}")
+    if manifest.get("format") != expected_format:
+        raise RuntimeError("Thumbnail manifest FORMAT mismatch.")
 
-    try:
-        with Image.open(path) as image:
-            image.verify()
+    declared = (
+        manifest.get("thumbnail")
+        or manifest.get("path")
+        or manifest.get("output")
+    )
 
-        with Image.open(path) as image:
-            if image.format != "JPEG":
-                raise RuntimeError(
-                    f"Invalid thumbnail format: {image.format}"
-                )
-            if image.size != expected_size:
-                raise RuntimeError(
-                    f"Invalid thumbnail dimensions: {image.size}; "
-                    f"expected {expected_size}"
-                )
-    except Exception as exc:
+    if declared != OUTPUT_FILE.relative_to(ROOT).as_posix():
         raise RuntimeError(
-            f"Thumbnail verification failed: {path}: {exc}"
-        ) from exc
+            "Thumbnail manifest does not point to output/thumbnail.jpg."
+        )
 
-
-def verify_manifest_outputs(manifest: dict) -> None:
     outputs = manifest.get("thumbnails")
 
-    if not isinstance(outputs, list) or not outputs:
-        raise RuntimeError("Thumbnail manifest contains no outputs.")
-
-    for item in outputs:
-        if not isinstance(item, dict):
-            raise RuntimeError("Invalid thumbnail manifest record.")
-
-        relative = item.get("file")
-        if not isinstance(relative, str) or not relative.strip():
-            raise RuntimeError("Thumbnail manifest has no output path.")
-
-        path = resolve_image(relative)
-        if path is None:
-            raise RuntimeError(
-                f"Manifest points to an invalid thumbnail: {relative}"
-            )
-
-        declared_hash = item.get("sha256")
-        if declared_hash and sha256_file(path) != declared_hash:
-            raise RuntimeError(
-                f"Thumbnail SHA256 mismatch: {relative}"
-            )
-
-        expected = (
-            int(item.get("width", 0)),
-            int(item.get("height", 0)),
+    if not isinstance(outputs, list) or len(outputs) != 1:
+        raise RuntimeError(
+            "Manifest must contain exactly one format-correct thumbnail."
         )
-        verify_thumbnail(path, expected)
+
+    item = outputs[0]
+
+    if not isinstance(item, dict):
+        raise RuntimeError("Invalid thumbnail manifest output record.")
+
+    if item.get("file") != declared:
+        raise RuntimeError("Thumbnail manifest output path mismatch.")
+
+    if item.get("success") is not True:
+        raise RuntimeError("Thumbnail is not marked successful.")
+
+    if (
+        int(item.get("width", 0)),
+        int(item.get("height", 0)),
+    ) != expected_size:
+        raise RuntimeError("Thumbnail manifest dimensions mismatch.")
+
+    verify_image(OUTPUT_FILE, expected_size)
+
+    actual_hash = sha256_file(OUTPUT_FILE)
+
+    if item.get("sha256") != actual_hash:
+        raise RuntimeError("Thumbnail SHA256 verification failed.")
+
+    if manifest.get("source_image_sha256") != manifest.get(
+        "selected_image_sha256"
+    ):
+        raise RuntimeError("Source image SHA256 metadata mismatch.")
 
 
 def main() -> None:
@@ -1008,138 +1351,133 @@ def main() -> None:
         raise RuntimeError("Input/topic.txt is missing.")
 
     config = load_and_validate(INPUT_FILE)
-    format_name = normalize_format(config)
+    mode = get_format(config)
 
-    if format_name not in {"short", "full"}:
-        raise RuntimeError(
-            f"Unsupported FORMAT in Input/topic.txt: {format_name}"
-        )
+    if mode not in {"short", "full"}:
+        raise RuntimeError(f"Unsupported FORMAT: {mode}")
 
-    story_data, story_source = get_story_document()
-    title, title_source = get_story_title(story_data, config)
-    title = clean_text(title)
+    minimum_part, maximum_part = get_parts_range(config)
+    selected_parts = get_parts(config)
+
+    if not minimum_part <= selected_parts <= maximum_part:
+        raise RuntimeError("Selected PARTS is outside configured range.")
+
+    story_data, story_path = load_story_document()
+    validate_story_status(story_data)
+
+    story_text = extract_story_text(story_data)
+    summary = extract_story_summary(story_data)
+
+    title, title_source = load_title(
+        story_data,
+        config,
+        story_text,
+        summary,
+    )
+
+    title = shorten_title(title)
 
     if not title:
-        raise RuntimeError("Story title is empty.")
+        raise RuntimeError("Story-derived thumbnail title is empty.")
 
-    hero = choose_hero_visual()
+    hero = choose_hero(
+        minimum_part,
+        maximum_part,
+    )
+
     source = hero["path"]
 
     if not source.is_file():
-        raise RuntimeError(
-            f"Selected scene image disappeared: {source}"
-        )
+        raise RuntimeError("Selected story image disappeared.")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    dimensions = SHORT_SIZE if mode == "short" else FULL_SIZE
 
-    # Generate one landscape image and copy it to the legacy path.
-    landscape = create_thumbnail(
+    thumbnail_record = create_thumbnail(
         source=source,
         title=title,
-        dimensions=LANDSCAPE_SIZE,
-        destination=LANDSCAPE_OUTPUT,
+        dimensions=dimensions,
     )
-    copy_verified(LANDSCAPE_OUTPUT, MAIN_OUTPUT)
 
-    # The main path is consumed by final validation and packaging.
-    main_record = {
-        **landscape,
-        "file": MAIN_OUTPUT.relative_to(ROOT).as_posix(),
-        "bytes": MAIN_OUTPUT.stat().st_size,
-        "sha256": sha256_file(MAIN_OUTPUT),
-        "success": True,
-    }
+    verify_image(OUTPUT_FILE, dimensions)
 
-    results = [main_record]
-
-    # Keep the additional vertical asset only for SHORT format.
-    if format_name == "short":
-        vertical = create_thumbnail(
-            source=source,
-            title=title,
-            dimensions=VERTICAL_SIZE,
-            destination=VERTICAL_OUTPUT,
-        )
-        results.append(vertical)
-
-    verify_thumbnail(MAIN_OUTPUT, LANDSCAPE_SIZE)
-    verify_thumbnail(LANDSCAPE_OUTPUT, LANDSCAPE_SIZE)
-
-    if format_name == "short":
-        verify_thumbnail(VERTICAL_OUTPUT, VERTICAL_SIZE)
-
-    if not all(item.get("success") for item in results):
-        raise RuntimeError("One or more thumbnail outputs failed.")
+    source_hash = sha256_file(source)
 
     manifest = {
         "status": "completed",
         "version": VERSION,
-        "format": format_name,
+        "format": mode,
         "title": title,
         "title_source": title_source,
-        "story_source": story_source,
-        "thumbnail": MAIN_OUTPUT.relative_to(ROOT).as_posix(),
-        "path": MAIN_OUTPUT.relative_to(ROOT).as_posix(),
-        "output": MAIN_OUTPUT.relative_to(ROOT).as_posix(),
-        "landscape_thumbnail": LANDSCAPE_OUTPUT.relative_to(ROOT).as_posix(),
+        "story_source": story_path.relative_to(ROOT).as_posix(),
+        "story_word_count": len(re.findall(r"\S+", story_text)),
+        "configured_part_range": [
+            minimum_part,
+            maximum_part,
+        ],
+        "selected_parts": selected_parts,
+        "thumbnail": OUTPUT_FILE.relative_to(ROOT).as_posix(),
+        "path": OUTPUT_FILE.relative_to(ROOT).as_posix(),
+        "output": OUTPUT_FILE.relative_to(ROOT).as_posix(),
+        "width": dimensions[0],
+        "height": dimensions[1],
         "source_image": source.relative_to(ROOT).as_posix(),
         "source_manifest": hero["manifest"],
+        "source_image_sha256": source_hash,
+        "selected_image_sha256": source_hash,
         "selected_part": hero["part"],
         "selected_scene": hero["scene"],
+        "selected_scene_id": hero["scene_id"],
+        "selected_role": hero["role"],
         "scene_score": hero["score"],
-        "source_image_sha256": sha256_file(source),
         "design": {
             "story_specific_title": True,
             "title_not_taken_from_first_sentence": True,
+            "complete_story_read": True,
             "dramatic_scene_selection": True,
+            "story_role_aware_selection": True,
             "adaptive_focal_crop": True,
             "adaptive_title_position": True,
             "adaptive_scene_palette": True,
             "cinematic_color_grade": True,
-            "adaptive_dark_gradient_for_readability": True,
+            "adaptive_gradient_for_readability": True,
             "bold_hindi_font": True,
             "fixed_red_gold_template": False,
+            "duplicate_thumbnail_copies": False,
+            "format_specific_dimensions": True,
             "ai_character_generation": False,
         },
-        "thumbnails": results,
+        "thumbnails": [
+            thumbnail_record,
+        ],
     }
 
-    if format_name == "short":
-        manifest["vertical_thumbnail"] = (
-            VERTICAL_OUTPUT.relative_to(ROOT).as_posix()
-        )
+    write_json(MANIFEST_FILE, manifest)
 
-    write_json(MANIFEST_OUTPUT, manifest)
+    saved = read_json(MANIFEST_FILE, required=True)
 
-    saved_manifest = read_json(MANIFEST_OUTPUT)
-
-    if not isinstance(saved_manifest, dict):
+    if not isinstance(saved, dict):
         raise RuntimeError("Thumbnail manifest could not be reloaded.")
 
-    if saved_manifest.get("status") != "completed":
-        raise RuntimeError("Thumbnail manifest status is invalid.")
-
-    if saved_manifest.get("format") != format_name:
-        raise RuntimeError("Thumbnail manifest format mismatch.")
-
-    verify_manifest_outputs(saved_manifest)
+    verify_saved_manifest(
+        saved,
+        mode,
+        dimensions,
+    )
 
     log("-" * 65)
-    log("FORMAT:", format_name)
+    log("FORMAT:", mode)
     log("TITLE:", title)
     log("TITLE SOURCE:", title_source)
-    log("STORY SOURCE:", story_source)
-    log("SELECTED PART:", hero["part"])
-    log("SELECTED SCENE:", hero["scene"])
-    log("SOURCE IMAGE:", source.relative_to(ROOT))
-    log("MAIN THUMBNAIL:", MAIN_OUTPUT.relative_to(ROOT))
-    log("LANDSCAPE THUMBNAIL:", LANDSCAPE_OUTPUT.relative_to(ROOT))
-
-    if format_name == "short":
-        log("VERTICAL THUMBNAIL:", VERTICAL_OUTPUT.relative_to(ROOT))
-
-    log("OUTPUT COUNT:", len(results))
-    log("MANIFEST:", MANIFEST_OUTPUT.relative_to(ROOT))
+    log("STORY SOURCE:", story_path.relative_to(ROOT))
+    log("PART RANGE:", f"{minimum_part}-{maximum_part}")
+    log("SELECTED PART COUNT:", selected_parts)
+    log("HERO PART:", hero["part"])
+    log("HERO SCENE:", hero["scene_id"])
+    log("HERO ROLE:", hero["role"])
+    log("THUMBNAIL:", OUTPUT_FILE.relative_to(ROOT))
+    log("DIMENSIONS:", f"{dimensions[0]}x{dimensions[1]}")
+    log("SHA256:", thumbnail_record["sha256"])
+    log("MANIFEST:", MANIFEST_FILE.relative_to(ROOT))
     log("THUMBNAIL GENERATION: SUCCESS")
 
 
@@ -1148,7 +1486,7 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         log("Thumbnail generation cancelled.")
-        sys.exit(130)
+        raise SystemExit(130)
     except Exception as exc:
-        log("THUMBNAIL GENERATION FAILED:", str(exc))
-        raise
+        log("THUMBNAIL GENERATION FAILED:", f"{type(exc).__name__}: {exc}")
+        raise SystemExit(1)
