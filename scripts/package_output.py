@@ -49,7 +49,7 @@ METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v81-selected-format-portable-verified"
+VERSION = "output-packager-v82-story-root-story-named-media-verified"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
@@ -75,22 +75,51 @@ REQUIRED_CHECKS = (
     "captions", "thumbnail", "metadata", "unique_output_files",
     "mode_separation",
 )
-REQUIRED_MEMBERS = {
-    "output/thumbnail.jpg",
-    "output/thumbnail/thumbnail_manifest.json",
-    "output/youtube_metadata.txt",
-    "output/publish/youtube_metadata.json",
-    "output/publish/youtube_tags.txt",
-    "output/captions/final_captions.srt",
-    "output/captions/captions.json",
-    "output/validation_report.json",
-    "output/scene_renders/render_manifest.json",
-    "output/photo_motion/photo_motion_manifest.json",
-    "output/narration/audio_jobs.json",
-    "output/sound_design/sound_design_manifest.json",
-    "output/sound_design/sfx_timing_validation.json",
-    "output/package_manifest.json",
+REQUIRED_RELATIVE_MEMBERS = {
+    "thumbnail.jpg", "thumbnail/thumbnail_manifest.json",
+    "youtube_metadata.txt", "publish/youtube_metadata.json",
+    "publish/youtube_tags.txt", "captions/final_captions.srt",
+    "captions/captions.json", "validation_report.json",
+    "scene_renders/render_manifest.json",
+    "photo_motion/photo_motion_manifest.json",
+    "narration/audio_jobs.json",
+    "sound_design/sound_design_manifest.json",
+    "sound_design/sfx_timing_validation.json",
 }
+
+
+def package_root_name(slug: str, mode: str) -> str:
+    return f"{slug}-{mode}"
+
+
+def package_member(root_name: str, relative: str, slug: str = "") -> str:
+    relative = PurePosixPath(relative).as_posix()
+    match = re.fullmatch(r"parts/part_(\d+)\.mp4", relative)
+    if match:
+        if not slug:
+            fail("Story slug is required for Part video filenames")
+        return f"{root_name}/parts/{slug}-part-{int(match.group(1)):02d}.mp4"
+    if relative == "thumbnail.jpg":
+        if not slug:
+            fail("Story slug is required for the packaged thumbnail")
+        return f"{root_name}/{slug}-thumbnail.jpg"
+    return f"{root_name}/{relative}"
+
+
+def required_members(root_name: str, slug: str) -> set[str]:
+    members = {package_member(root_name, rel, slug) for rel in REQUIRED_RELATIVE_MEMBERS}
+    members.add(f"{root_name}/package_manifest.json")
+    return members
+
+
+def remap_manifest_paths(value: Any, root_name: str, slug: str) -> Any:
+    if isinstance(value, dict):
+        return {key: remap_manifest_paths(item, root_name, slug) for key, item in value.items()}
+    if isinstance(value, list):
+        return [remap_manifest_paths(item, root_name, slug) for item in value]
+    if isinstance(value, str) and value.startswith("output/"):
+        return package_member(root_name, value[len("output/"):], slug)
+    return value
 
 
 def log(*values: Any) -> None:
@@ -764,7 +793,6 @@ def validate_srt() -> tuple[Path, dict]:
         "caption_manifest": "output/captions/captions.json",
     }
 
-
 def read_story_title() -> str:
     candidates = (
         OUT / "story" / "story.json",
@@ -846,35 +874,27 @@ def validate_narration_manifest() -> dict:
     }
 
 
-def portable_render_manifest(
-    source: dict,
-    checked_parts: list[dict],
-    package_members: set[str],
-) -> dict:
+def portable_render_manifest(source: dict, checked_parts: list[dict],
+                             package_members: set[str], root_name: str,
+                             slug: str) -> dict:
     data = json.loads(json.dumps(source))
     for key in (
-        "scenes", "completed_scenes", "all_completed_scenes",
-        "extra_scenes", "completed_count", "all_completed_scene_count",
-        "extra_scene_count", "final_video", "alias", "combined_video",
-        "combined_output", "pre_caption_video",
+        "scenes", "completed_scenes", "all_completed_scenes", "extra_scenes",
+        "completed_count", "all_completed_scene_count", "extra_scene_count",
+        "final_video", "alias", "combined_video", "combined_output",
+        "pre_caption_video",
     ):
         data.pop(key, None)
-
     portable_parts = []
     for item in checked_parts:
-        member = "output/" + item["path"]
+        member = package_member(root_name, item["path"], slug)
         if member not in package_members:
             fail(f"Rendered Part missing from archive selection: {member}")
         portable_parts.append({
-            "part": item["part"],
-            "path": member,
-            "status": "completed",
-            "duration": item["duration"],
-            "width": item["width"],
-            "height": item["height"],
-            "fps": item["fps"],
-            "bytes": item["bytes"],
-            "sha256": item["sha256"],
+            "part": item["part"], "path": member, "status": "completed",
+            "duration": item["duration"], "width": item["width"],
+            "height": item["height"], "fps": item["fps"],
+            "bytes": item["bytes"], "sha256": item["sha256"],
         })
     data["parts"] = portable_parts
     data["part_numbers"] = [item["part"] for item in portable_parts]
@@ -884,7 +904,7 @@ def portable_render_manifest(
     data["format_alias_included"] = False
     data["package_manifest_view"] = True
     data["package_manifest_version"] = VERSION
-    return data
+    return remap_manifest_paths(data, root_name, slug)
 
 
 def package_file_list(
@@ -920,23 +940,17 @@ def package_file_list(
     return sorted(selected, key=lambda path: output_relative(path))
 
 
-def validate_zip_member(name: str) -> None:
+def validate_zip_member(name: str, root_name: str) -> None:
     member = PurePosixPath(name)
-    if (
-        not name
-        or name.startswith("/")
-        or "\\" in name
-        or ":" in name
-        or not member.parts
-        or member.parts[0] != "output"
-        or any(piece in {"", ".", ".."} for piece in member.parts)
-    ):
+    if (not name or name.startswith("/") or "\\" in name or ":" in name
+            or not member.parts or member.parts[0] != root_name
+            or any(piece in {"", ".", ".."} for piece in member.parts)):
         fail(f"Unsafe ZIP member path: {name!r}")
     if member.suffix.lower() == ".zip":
         fail(f"Nested ZIP is forbidden: {name}")
 
 
-def validate_zip_structure(archive: zipfile.ZipFile) -> list[str]:
+def validate_zip_structure(archive: zipfile.ZipFile, root_name: str) -> list[str]:
     bad = archive.testzip()
     if bad:
         fail(f"ZIP CRC verification failed: {bad}")
@@ -947,7 +961,7 @@ def validate_zip_structure(archive: zipfile.ZipFile) -> list[str]:
     if len(names) != len(set(names)):
         fail("ZIP contains duplicate entries")
     for info in infos:
-        validate_zip_member(info.filename)
+        validate_zip_member(info.filename, root_name)
         mode = info.external_attr >> 16
         if stat.S_ISLNK(mode):
             fail(f"ZIP symlink is forbidden: {info.filename}")
@@ -959,36 +973,25 @@ def validate_zip_structure(archive: zipfile.ZipFile) -> list[str]:
 
 
 def build_embedded_manifest(
-    mode: str,
-    title: str,
-    slug: str,
-    archive_name: str,
-    part_records: list[dict],
-    file_records: list[dict],
-    validation: dict,
-    thumbnail_info: dict,
-    metadata_info: dict,
-    caption_info: dict,
-    sound_info: dict,
-    narration_info: dict,
+    mode: str, title: str, slug: str, archive_name: str,
+    part_records: list[dict], file_records: list[dict], validation: dict,
+    thumbnail_info: dict, metadata_info: dict, caption_info: dict,
+    sound_info: dict, narration_info: dict, root_name: str,
 ) -> dict:
-    return {
-        "status": "completed",
-        "version": VERSION,
-        "format": mode,
-        "story_title": title,
-        "story_slug": slug,
-        "archive": archive_name,
-        "parts": len(part_records),
-        "part_numbers": [item["part"] for item in part_records],
-        "part_videos_only": True,
-        "combined_video_included": False,
-        "format_alias_included": False,
-        "part_files": part_records,
-        "thumbnail": thumbnail_info,
-        "metadata": metadata_info,
-        "captions": caption_info,
-        "sound_manifests": sound_info,
+    packaged_parts = []
+    for item in part_records:
+        row = dict(item)
+        row["path"] = package_member(root_name, item["path"], slug)
+        packaged_parts.append(row)
+    manifest = {
+        "status": "completed", "version": VERSION, "format": mode,
+        "story_title": title, "story_slug": slug, "package_root": root_name,
+        "archive": archive_name, "parts": len(packaged_parts),
+        "part_numbers": [item["part"] for item in packaged_parts],
+        "part_videos_only": True, "combined_video_included": False,
+        "format_alias_included": False, "part_files": packaged_parts,
+        "thumbnail": thumbnail_info, "metadata": metadata_info,
+        "captions": caption_info, "sound_manifests": sound_info,
         "narration": narration_info,
         "validation_report": "output/validation_report.json",
         "render_manifest": "output/scene_renders/render_manifest.json",
@@ -996,86 +999,62 @@ def build_embedded_manifest(
         "archive_sha256_embedded": False,
         "package_files": [
             item for item in file_records
-            if item["path"] != "output/package_manifest.json"
+            if item["path"] != f"{root_name}/package_manifest.json"
         ],
         "validation_checks": validation["checks"],
         "manifest_zip_consistency": "valid",
     }
+    return remap_manifest_paths(manifest, root_name, slug)
 
 
-def build_archive(
-    archive_path: Path,
-    files: list[Path],
-    render: dict,
-    embedded_manifest: dict,
-) -> list[dict]:
+def build_archive(archive_path: Path, files: list[Path], render: dict,
+                  embedded_manifest: dict, root_name: str, slug: str) -> list[dict]:
     temporary = archive_path.with_name(archive_path.name + ".tmp")
     temporary.unlink(missing_ok=True)
     package_members = {
-        "output/" + output_relative(path) for path in files
+        package_member(root_name, output_relative(path), slug) for path in files
     }
-    package_members.add("output/package_manifest.json")
+    package_members.add(f"{root_name}/package_manifest.json")
     portable_render = portable_render_manifest(
-        render["source"], render["parts"], package_members
+        render["source"], render["parts"], package_members, root_name, slug
     )
     records = []
-
     try:
-        with zipfile.ZipFile(
-            temporary,
-            "w",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=ZIP_LEVEL,
-            allowZip64=True,
-        ) as archive:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED,
+                             compresslevel=ZIP_LEVEL, allowZip64=True) as archive:
             for path in files:
-                member = "output/" + output_relative(path)
+                member = package_member(root_name, output_relative(path), slug)
                 if path.resolve() == RENDER.resolve():
-                    payload = (
-                        json.dumps(
-                            portable_render,
-                            ensure_ascii=False,
-                            indent=2,
-                        ) + "\n"
-                    ).encode("utf-8")
+                    payload = (json.dumps(portable_render, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+                elif path.suffix.lower() == ".json":
+                    try:
+                        data = json.loads(path.read_text(encoding="utf-8-sig"))
+                    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                        fail(f"Invalid JSON package member {path.name}: {exc}")
+                    data = remap_manifest_paths(data, root_name, slug)
+                    payload = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
                 else:
                     payload = path.read_bytes()
                 if not payload:
                     fail(f"Refusing empty package file: {member}")
                 archive.writestr(member, payload)
-                records.append({
-                    "path": member,
-                    "bytes": len(payload),
-                    "sha256": sha256_bytes(payload),
-                })
-
+                records.append({"path": member, "bytes": len(payload),
+                                "sha256": sha256_bytes(payload)})
             manifest_payload = (
-                json.dumps(
-                    embedded_manifest,
-                    ensure_ascii=False,
-                    indent=2,
-                ) + "\n"
+                json.dumps(embedded_manifest, ensure_ascii=False, indent=2) + "\n"
             ).encode("utf-8")
-            archive.writestr(
-                "output/package_manifest.json", manifest_payload
-            )
-            records.append({
-                "path": "output/package_manifest.json",
-                "bytes": len(manifest_payload),
-                "sha256": sha256_bytes(manifest_payload),
-            })
-
+            manifest_member = f"{root_name}/package_manifest.json"
+            archive.writestr(manifest_member, manifest_payload)
+            records.append({"path": manifest_member, "bytes": len(manifest_payload),
+                            "sha256": sha256_bytes(manifest_payload)})
         with zipfile.ZipFile(temporary, "r") as archive:
-            names = validate_zip_structure(archive)
+            names = validate_zip_structure(archive, root_name)
             if set(names) != package_members:
                 fail("ZIP entries differ from selected package files")
             for record in records:
                 payload = archive.read(record["path"])
-                if len(payload) != record["bytes"]:
-                    fail(f"ZIP member byte count mismatch: {record['path']}")
-                if sha256_bytes(payload) != record["sha256"]:
-                    fail(f"ZIP member SHA256 mismatch: {record['path']}")
-
+                if len(payload) != record["bytes"] or sha256_bytes(payload) != record["sha256"]:
+                    fail(f"ZIP member size/hash mismatch: {record['path']}")
         os.replace(temporary, archive_path)
         return records
     except Exception:
@@ -1084,47 +1063,34 @@ def build_archive(
 
 
 def verify_packaged_archive(
-    archive_path: Path,
-    mode: str,
-    parts: int,
-    dimensions: tuple[int, int],
-    fps: float,
-    records: list[dict],
+    archive_path: Path, mode: str, parts: int, dimensions: tuple[int, int],
+    fps: float, records: list[dict], root_name: str, slug: str, title: str,
 ) -> dict:
     if not archive_path.is_file() or archive_path.stat().st_size < MIN_VIDEO_BYTES:
         fail("Final ZIP is missing or too small")
     expected_part_members = [
-        f"output/parts/part_{number:02d}.mp4"
+        package_member(root_name, f"parts/part_{number:02d}.mp4", slug)
         for number in range(1, parts + 1)
     ]
     expected_hashes = {item["path"]: item for item in records}
-
     with zipfile.ZipFile(archive_path, "r") as archive:
-        names = validate_zip_structure(archive)
+        names = validate_zip_structure(archive, root_name)
         name_set = set(names)
-        missing = REQUIRED_MEMBERS - name_set
+        missing = required_members(root_name, slug) - name_set
         if missing:
             fail(f"Required ZIP files are missing: {sorted(missing)}")
         if name_set != set(expected_hashes):
             fail("ZIP entries differ from package hash manifest")
-
-        video_members = [
-            name for name in names
-            if PurePosixPath(name).suffix.lower() in VIDEO_SUFFIXES
-        ]
-        if set(video_members) != set(expected_part_members):
+        videos = [name for name in names
+                  if PurePosixPath(name).suffix.lower() in VIDEO_SUFFIXES]
+        if set(videos) != set(expected_part_members):
             fail("ZIP contains missing, extra or incorrectly named Part videos")
-
         for name, record in expected_hashes.items():
             payload = archive.read(name)
-            if len(payload) != record["bytes"]:
-                fail(f"ZIP member size mismatch: {name}")
-            if sha256_bytes(payload) != record["sha256"]:
-                fail(f"ZIP member hash mismatch: {name}")
-
-        embedded = json.loads(
-            archive.read("output/package_manifest.json").decode("utf-8")
-        )
+            if len(payload) != record["bytes"] or sha256_bytes(payload) != record["sha256"]:
+                fail(f"ZIP member size/hash mismatch: {name}")
+        manifest_member = f"{root_name}/package_manifest.json"
+        embedded = json.loads(archive.read(manifest_member).decode("utf-8"))
         if embedded.get("status") != "completed":
             fail("Embedded package manifest is incomplete")
         if embedded.get("version") != VERSION or embedded.get("format") != mode:
@@ -1139,10 +1105,12 @@ def verify_packaged_archive(
             fail("Embedded manifest self-hash handling is invalid")
         if embedded.get("parts") != parts:
             fail("Embedded manifest Part count mismatch")
-
-        render_data = json.loads(
-            archive.read("output/scene_renders/render_manifest.json").decode("utf-8")
-        )
+        if embedded.get("story_title") != title or embedded.get("story_slug") != slug:
+            fail("Embedded package manifest story identity mismatch")
+        if embedded.get("package_root") != root_name:
+            fail("Embedded package root mismatch")
+        render_member = f"{root_name}/scene_renders/render_manifest.json"
+        render_data = json.loads(archive.read(render_member).decode("utf-8"))
         if clean(render_data.get("status")).lower() != "completed":
             fail("Packaged render manifest is incomplete")
         if clean(render_data.get("format")).lower() != mode:
@@ -1151,11 +1119,9 @@ def verify_packaged_archive(
             fail("Packaged render manifest is not Part-only")
         if render_data.get("captions_burned") is not True:
             fail("Packaged render manifest does not confirm burned captions")
-
         part_rows = render_data.get("parts")
         if not isinstance(part_rows, list) or len(part_rows) != parts:
             fail("Packaged render manifest Part list is invalid")
-
         verified_parts = []
         with tempfile.TemporaryDirectory(prefix="katha-package-check-") as temp:
             for index, row in enumerate(part_rows, 1):
@@ -1180,44 +1146,36 @@ def verify_packaged_archive(
                 if temp_path.stat().st_size != int(row.get("bytes", -1)):
                     fail(f"Packaged Part {index} byte count mismatch")
                 verified_parts.append({
-                    "part": index,
-                    "path": member,
+                    "part": index, "path": member,
                     "duration": round(info["duration"], 3),
-                    "sha256": digest,
-                    "bytes": temp_path.stat().st_size,
+                    "sha256": digest, "bytes": temp_path.stat().st_size,
                 })
-
-        if any(
-            name in name_set for name in (
-                "output/katha_lok_ai_final.mp4",
-                "output/katha_lok_ai_short.mp4",
-                "output/katha_lok_ai_full.mp4",
-            )
-        ):
+        if any(PurePosixPath(name).suffix.lower() in VIDEO_SUFFIXES
+               and name not in expected_part_members for name in name_set):
             fail("Combined or format-alias video found in ZIP")
-
+        thumbnail_member = f"{root_name}/{slug}-thumbnail.jpg"
+        if thumbnail_member not in name_set:
+            fail("Story-named thumbnail is missing")
         return {
-            "status": "valid",
-            "crc": "valid",
-            "entry_count": len(names),
-            "part_count": len(verified_parts),
-            "part_videos_only": True,
+            "status": "valid", "crc": "valid", "entry_count": len(names),
+            "part_count": len(verified_parts), "part_videos_only": True,
+            "package_root": root_name, "thumbnail": thumbnail_member,
             "verified_parts": verified_parts,
             "member_hashes_verified": len(records),
         }
 
 
 def verify_package_report(
-    archive_path: Path,
-    expected_report: dict,
+    archive_path: Path, expected_report: dict, root_name: str,
 ) -> None:
     saved = read_json(REPORT)
     if saved.get("status") != "completed":
         fail("Package report status verification failed")
-    if saved.get("version") != VERSION:
-        fail("Package report version verification failed")
-    if saved.get("format") != expected_report.get("format"):
-        fail("Package report FORMAT verification failed")
+    for key in ("version", "format", "story_title", "story_slug", "package_root"):
+        if saved.get(key) != expected_report.get(key):
+            fail(f"Package report {key} verification failed")
+    if saved.get("package_root") != root_name:
+        fail("Package report story root mismatch")
     if saved.get("archive") != archive_path.name:
         fail("Package report archive name mismatch")
     if saved.get("archive_sha256") != sha256_file(archive_path):
@@ -1230,10 +1188,8 @@ def verify_package_report(
         fail("Package manifest ZIP consistency is invalid")
     if saved.get("zip_validation", {}).get("status") != "valid":
         fail("Package ZIP validation report is invalid")
-    if saved.get("part_videos_only") is not True:
-        fail("Package report does not confirm Part-only videos")
-    if saved.get("combined_video_included") is not False:
-        fail("Package report incorrectly includes combined video")
+    if saved.get("part_videos_only") is not True or saved.get("combined_video_included") is not False:
+        fail("Package report Part-only guarantees are invalid")
     if saved.get("format_alias_included") is not False:
         fail("Package report incorrectly includes format alias")
     files = saved.get("files")
@@ -1244,13 +1200,11 @@ def verify_package_report(
         if not isinstance(item, dict):
             fail("Package file record is invalid")
         name = item.get("path")
-        validate_zip_member(name)
+        validate_zip_member(name, root_name)
         if name in seen:
             fail(f"Duplicate package report path: {name}")
         seen.add(name)
-        if not isinstance(item.get("sha256"), str) or not re.fullmatch(
-            r"[0-9a-f]{64}", item["sha256"]
-        ):
+        if not isinstance(item.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"]):
             fail(f"Package file hash is invalid: {name}")
         if not isinstance(item.get("bytes"), int) or item["bytes"] <= 0:
             fail(f"Package file size is invalid: {name}")
@@ -1327,6 +1281,7 @@ def main() -> int:
     title = read_story_title()
     slug = safe_slug(title)
     archive_path = ROOT / f"katha-lok-{slug}-{mode}-output.zip"
+    root_name = package_root_name(slug, mode)
 
     required_paths = [
         RENDER, VALIDATION, PHOTO, AUDIO, SOUND, SFX_VALIDATION,
@@ -1335,9 +1290,9 @@ def main() -> int:
     ]
     files = package_file_list(render, required_paths)
     package_members = {
-        "output/" + output_relative(path) for path in files
+        package_member(root_name, output_relative(path), slug) for path in files
     }
-    package_members.add("output/package_manifest.json")
+    package_members.add(f"{root_name}/package_manifest.json")
 
     part_records = render["parts"]
     embedded_manifest = build_embedded_manifest(
@@ -1353,6 +1308,7 @@ def main() -> int:
         caption_info=caption_info,
         sound_info=sound_info,
         narration_info=narration_info,
+        root_name=root_name,
     )
 
     log("STORY TITLE:", title)
@@ -1368,7 +1324,7 @@ def main() -> int:
     temporary_archive.unlink(missing_ok=True)
     try:
         records = build_archive(
-            temporary_archive, files, render, embedded_manifest
+            temporary_archive, files, render, embedded_manifest, root_name, slug
         )
         zip_validation = verify_packaged_archive(
             temporary_archive,
@@ -1377,6 +1333,9 @@ def main() -> int:
             dimensions,
             fps,
             records,
+            root_name,
+            slug,
+            title,
         )
         os.replace(temporary_archive, archive_path)
     finally:
@@ -1390,6 +1349,8 @@ def main() -> int:
         "format": mode,
         "story_title": title,
         "story_slug": slug,
+        "package_root": root_name,
+        "package_layout": "story-root-with-story-named-part-videos-and-thumbnail",
         "parts": parts,
         "configured_parts": parts,
         "part_numbers": list(range(1, parts + 1)),
@@ -1435,11 +1396,11 @@ def main() -> int:
     }
 
     write_json(REPORT, report)
-    verify_package_report(archive_path, report)
+    verify_package_report(archive_path, report, root_name)
 
     with zipfile.ZipFile(archive_path, "r") as archive:
         embedded = json.loads(
-            archive.read("output/package_manifest.json").decode("utf-8")
+            archive.read(f"{root_name}/package_manifest.json").decode("utf-8")
         )
         if embedded.get("archive") != archive_path.name:
             fail("Embedded manifest archive name mismatch")
@@ -1465,6 +1426,8 @@ def main() -> int:
     log("PART VIDEOS ONLY: yes")
     log("COMBINED VIDEO: excluded")
     log("FORMAT ALIAS: excluded")
+    log("PACKAGE FOLDER:", root_name)
+    log("STORY-NAMED THUMBNAIL:", f"{slug}-thumbnail.jpg")
     log("ZIP:", archive_path.name)
     log("ZIP BYTES:", archive_path.stat().st_size)
     log("ZIP SHA256:", archive_hash)
