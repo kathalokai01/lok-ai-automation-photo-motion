@@ -80,10 +80,10 @@ jobs:
             scripts/input_config.py
             scripts/story_length_policy.py
             scripts/select_gemini_model.py
-            scripts/generate_story_plan.py
             scripts/generate_story.py
             scripts/validate_story_length.py
             scripts/verify_story.py
+            scripts/generate_story_plan.py
             scripts/generate_ai_story.py
             scripts/generate_character_bible.py
             scripts/generate_scenes.py
@@ -149,9 +149,7 @@ jobs:
               raise SystemExit("Invalid PARTS range.")
 
           if selected is not None and not minimum <= selected <= maximum:
-              raise SystemExit(
-                  f"Actual PARTS {selected} is outside {minimum}-{maximum}"
-              )
+              raise SystemExit("Selected PARTS is outside configured range.")
 
           if minimum == maximum and selected not in (None, minimum):
               raise SystemExit("Fixed PARTS selection mismatch.")
@@ -163,25 +161,23 @@ jobs:
               raise SystemExit(f"Invalid FPS: {fps}")
 
           if len(tts) < 3 or len(set(tts)) != len(tts):
-              raise SystemExit("TTS provider order is invalid.")
+              raise SystemExit("TTS provider fallback order is invalid.")
 
           if not images or len(set(images)) != len(images):
-              raise SystemExit("Image provider order is invalid.")
+              raise SystemExit("Image provider fallback order is invalid.")
 
           if not get_global_billable_permission(config):
-              raise SystemExit(
-                  "Input configuration does not allow billable providers."
-              )
+              raise SystemExit("Billable providers are not enabled.")
 
           print("INPUT CONFIGURATION VALID")
           print("FORMAT:", mode)
           print("PARTS RANGE:", minimum, "-", maximum)
-          print("ACTUAL PARTS:", selected if selected is not None else "selected after corrected story")
-          print("SCENES PER PART:", scenes)
+          print("ACTUAL PARTS:", selected if selected is not None else "pending story selection")
+          print("SCENES:", scenes)
           print("FPS:", fps)
           print("TTS FALLBACK ORDER:", " -> ".join(tts))
           print("IMAGE FALLBACK ORDER:", " -> ".join(images))
-          print("BILLABLE PROVIDERS ALLOWED: true")
+          print("BILLABLE PROVIDERS: enabled")
           PY
 
       - name: Calculate input and pipeline fingerprints
@@ -205,13 +201,8 @@ jobs:
               | awk '{print $1}'
           )"
 
-          {
-            echo "input_hash=$INPUT_HASH"
-            echo "pipeline_hash=$PIPELINE_HASH"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "Input fingerprint: $INPUT_HASH"
-          echo "Pipeline fingerprint: $PIPELINE_HASH"
+          echo "input_hash=$INPUT_HASH" >> "$GITHUB_OUTPUT"
+          echo "pipeline_hash=$PIPELINE_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Restore matching resumable checkpoint
         shell: bash
@@ -256,7 +247,6 @@ jobs:
             [ -s "$CHECKPOINT" ] || continue
 
             if ! unzip -tq "$CHECKPOINT" >/dev/null 2>&1; then
-              echo "Skipping corrupt checkpoint: $RUN_ID"
               continue
             fi
 
@@ -272,7 +262,7 @@ jobs:
           with zipfile.ZipFile(archive) as zf:
               infos = zf.infolist()
               if not infos:
-                  raise SystemExit("Empty checkpoint ZIP.")
+                  raise SystemExit("Empty checkpoint.")
 
               total_size = 0
               seen = set()
@@ -287,14 +277,14 @@ jobs:
                       or any(part in {"", ".", ".."} for part in path.parts)
                       or ":" in path.parts[0]
                   ):
-                      raise SystemExit(f"Unsafe ZIP path: {name}")
+                      raise SystemExit(f"Unsafe checkpoint path: {name}")
 
                   if name in seen:
-                      raise SystemExit(f"Duplicate ZIP path: {name}")
+                      raise SystemExit(f"Duplicate checkpoint path: {name}")
                   seen.add(name)
 
                   if stat.S_ISLNK(info.external_attr >> 16):
-                      raise SystemExit(f"Symlink in checkpoint: {name}")
+                      raise SystemExit(f"Checkpoint symlink: {name}")
 
                   total_size += info.file_size
                   if total_size > 8 * 1024 * 1024 * 1024:
@@ -304,7 +294,6 @@ jobs:
               zf.extractall(destination)
           PY
             then
-              echo "Skipping unsafe checkpoint: $RUN_ID"
               continue
             fi
 
@@ -355,11 +344,8 @@ jobs:
 
           if not isinstance(context.get("naming_key"), str) or not context["naming_key"]:
               raise SystemExit("Checkpoint naming key is missing.")
-
-          print("Checkpoint FORMAT, PARTS and naming context verified.")
           PY
             then
-              echo "Checkpoint context mismatch: $RUN_ID"
               continue
             fi
 
@@ -439,6 +425,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/pipeline_preflight.py
 
           python - <<'PY'
@@ -450,16 +437,20 @@ jobs:
               raise SystemExit("Preflight report was not created.")
 
           report = json.loads(path.read_text(encoding="utf-8"))
+
           if report.get("ready_to_run") is not True:
               for item in report.get("failures", []):
                   print("PREFLIGHT FAILURE:", item)
-              raise SystemExit("Preflight did not approve generation.")
+              raise SystemExit("Preflight blocked generation.")
 
           if report.get("api_calls_made") != 0:
               raise SystemExit("Preflight must not make API calls.")
 
-          print("Preflight report verified.")
-          print("Checks passed:", report.get("checks_passed"))
+          if report.get("generation_performed") is not False:
+              raise SystemExit("Preflight must not generate assets.")
+
+          print("PREFLIGHT PASSED")
+          print("Checks:", report.get("checks_passed"))
           PY
 
       - name: Generate caption font preview
@@ -473,50 +464,14 @@ jobs:
       - name: Select configured Gemini model
         run: python scripts/select_gemini_model.py
 
-      - name: Generate complete story plan
-        run: python scripts/generate_story_plan.py
-
       - name: Generate story
         run: python scripts/generate_story.py
-
-      - name: Verify actual PARTS selection
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          from scripts.input_config import (
-              load_and_validate,
-              get_format,
-              get_parts_range,
-              get_parts,
-              get_selected_parts_record,
-          )
-
-          config = load_and_validate("Input/topic.txt")
-          mode = get_format(config)
-          minimum, maximum = get_parts_range(config)
-          actual = get_parts(config)
-          record = get_selected_parts_record(config)
-
-          if not minimum <= actual <= maximum:
-              raise SystemExit("Actual PARTS is outside the configured range.")
-
-          if record is None or record.get("selected_parts") != actual:
-              raise SystemExit("Actual PARTS selection record is missing or inconsistent.")
-
-          if record.get("format") != mode:
-              raise SystemExit("PARTS selection FORMAT mismatch.")
-
-          print("FORMAT:", mode)
-          print("ACTUAL PARTS:", actual)
-          print("PARTS RANGE:", minimum, "-", maximum)
-          PY
 
       - name: Validate exact story length and structure
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/validate_story_length.py
 
           python - <<'PY'
@@ -554,13 +509,53 @@ jobs:
               )
 
           print("STORY LENGTH VALIDATION PASSED")
-          print("Actual PARTS:", found_parts)
-          print("Scenes:", found_scenes)
-          print("Words:", summary.get("total_words"))
+          print("PARTS:", found_parts)
+          print("SCENES:", found_scenes)
+          print("WORDS:", summary.get("total_words"))
           PY
 
       - name: Verify story preservation and consistency
         run: python scripts/verify_story.py
+
+      - name: Generate complete story plan
+        run: python scripts/generate_story_plan.py
+
+      - name: Verify actual PARTS selection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from scripts.input_config import (
+              load_and_validate,
+              get_format,
+              get_parts_range,
+              get_parts,
+              get_selected_parts_record,
+          )
+
+          config = load_and_validate("Input/topic.txt")
+          mode = get_format(config)
+          minimum, maximum = get_parts_range(config)
+          actual = get_parts(config)
+          record = get_selected_parts_record(config)
+
+          if not minimum <= actual <= maximum:
+              raise SystemExit("Actual PARTS is outside configured range.")
+
+          if record is None:
+              raise SystemExit("PARTS selection record is missing.")
+
+          if record.get("selected_parts") != actual:
+              raise SystemExit("PARTS selection record is inconsistent.")
+
+          if record.get("format") != mode:
+              raise SystemExit("PARTS selection FORMAT mismatch.")
+
+          print("FORMAT:", mode)
+          print("ACTUAL PARTS:", actual)
+          print("PARTS RANGE:", minimum, "-", maximum)
+          PY
 
       - name: Generate AI story artifacts
         run: python scripts/generate_ai_story.py
@@ -589,8 +584,7 @@ jobs:
           if [ -s output/music/flow_music_manifest.json ]; then
             echo "Background music manifest created."
           else
-            echo "::warning::Music provider did not create a manifest."
-            echo "Sound design will apply its configured fallback."
+            echo "::warning::Music manifest unavailable; configured sound-design fallback will be used."
           fi
 
       - name: Prepare visual generation jobs
@@ -628,11 +622,8 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/generate_youtube_metadata.py
-
           test -s output/youtube_metadata.txt
           test -s output/publish/youtube_metadata.json
-
-          echo "YouTube metadata files verified."
 
       - name: Validate final video and deliverables
         run: python scripts/validate_final_output.py
@@ -657,6 +648,7 @@ jobs:
               raise SystemExit("Package manifest is missing.")
 
           manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
           if manifest.get("status") != "completed":
               raise SystemExit("Package status is not completed.")
 
@@ -677,9 +669,7 @@ jobs:
               archive.name,
               flags=re.UNICODE,
           ):
-              raise SystemExit(
-                  "ZIP filename must contain the story title and selected FORMAT."
-              )
+              raise SystemExit("ZIP filename must contain story title and FORMAT.")
 
           if not archive.is_file() or archive.stat().st_size == 0:
               raise SystemExit("Story ZIP is missing or empty.")
@@ -689,15 +679,14 @@ jobs:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
 
-          actual_hash = digest.hexdigest()
-          if manifest.get("archive_sha256") != actual_hash:
+          if manifest.get("archive_sha256") != digest.hexdigest():
               raise SystemExit("Archive SHA256 mismatch.")
 
           if manifest.get("archive_bytes") != archive.stat().st_size:
               raise SystemExit("Archive byte count mismatch.")
 
           if manifest.get("zip_integrity") != "valid":
-              raise SystemExit("ZIP integrity is not valid.")
+              raise SystemExit("ZIP integrity is invalid.")
 
           if manifest.get("manifest_zip_consistency") != "valid":
               raise SystemExit("ZIP and manifest consistency failed.")
@@ -724,35 +713,31 @@ jobs:
                   raise SystemExit(f"Corrupt ZIP member: {bad}")
 
               names = zf.namelist()
-              if not names:
-                  raise SystemExit("ZIP is empty.")
+              if not names or len(names) != len(set(names)):
+                  raise SystemExit("ZIP is empty or contains duplicate members.")
 
-              if len(names) != len(set(names)):
-                  raise SystemExit("Duplicate ZIP members found.")
-
-              videos = [
+              videos = {
                   name for name in names
                   if name.lower().endswith((".mp4", ".mov", ".mkv", ".webm"))
-              ]
+              }
 
               expected_videos = {
                   f"output/parts/part_{number:02d}.mp4"
                   for number in range(1, expected_parts + 1)
               }
 
-              if set(videos) != expected_videos:
+              if videos != expected_videos:
                   raise SystemExit(
-                      "ZIP must contain exactly the expected story Part videos; "
-                      f"found={sorted(videos)}"
+                      f"Unexpected Part videos: {sorted(videos)}"
                   )
 
-              forbidden_names = {
+              forbidden = {
                   "output/katha_lok_ai_final.mp4",
                   "output/katha_lok_ai_short.mp4",
                   "output/katha_lok_ai_full.mp4",
               }
 
-              if forbidden_names.intersection(names):
+              if forbidden.intersection(names):
                   raise SystemExit("Generic or combined video found in ZIP.")
 
           Path("output/package_archive_name.txt").write_text(
@@ -763,17 +748,12 @@ jobs:
           print("FORMAT:", mode)
           print("ACTUAL PARTS:", expected_parts)
           print("STORY ZIP:", archive.name)
-          print("ZIP SHA256:", actual_hash)
           print("ZIP integrity: valid")
           PY
 
           ARCHIVE="$(cat output/package_archive_name.txt)"
           test -s "$ARCHIVE"
-
-          {
-            echo "archive=$ARCHIVE"
-          } >> "$GITHUB_OUTPUT"
-
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           ls -lh "$ARCHIVE"
 
       - name: Verify final package and archive
@@ -796,13 +776,14 @@ jobs:
           manifest_path = Path("output/package_manifest.json")
 
           if not archive.is_file() or archive.stat().st_size == 0:
-              raise SystemExit("Final story ZIP is missing or empty.")
+              raise SystemExit("Final story ZIP is missing.")
 
           manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          mode = manifest.get("format")
+
           if manifest.get("status") != "completed":
               raise SystemExit("Package status is not completed.")
 
-          mode = manifest.get("format")
           if mode not in {"short", "full"}:
               raise SystemExit("Invalid package FORMAT.")
 
@@ -817,10 +798,10 @@ jobs:
               raise SystemExit("ZIP name does not match story and FORMAT.")
 
           if manifest.get("parts") != manifest.get("configured_parts"):
-              raise SystemExit("Actual PARTS mismatch in package manifest.")
+              raise SystemExit("Actual PARTS mismatch.")
 
           if manifest.get("zip_integrity") != "valid":
-              raise SystemExit("ZIP integrity is not valid.")
+              raise SystemExit("ZIP integrity is invalid.")
 
           if manifest.get("manifest_zip_consistency") != "valid":
               raise SystemExit("ZIP/manifest consistency failed.")
@@ -839,47 +820,35 @@ jobs:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
 
-          actual_hash = digest.hexdigest()
-          if actual_hash != manifest.get("archive_sha256"):
+          if digest.hexdigest() != manifest.get("archive_sha256"):
               raise SystemExit("Final ZIP SHA256 mismatch.")
 
           if archive.stat().st_size != manifest.get("archive_bytes"):
               raise SystemExit("Final ZIP byte count mismatch.")
 
           with zipfile.ZipFile(archive, "r") as zf:
-              bad_member = zf.testzip()
-              if bad_member:
-                  raise SystemExit(f"Corrupt ZIP member: {bad_member}")
+              bad = zf.testzip()
+              if bad:
+                  raise SystemExit(f"Corrupt ZIP member: {bad}")
 
               names = zf.namelist()
               if not names or len(names) != len(set(names)):
                   raise SystemExit("ZIP is empty or contains duplicate members.")
 
-              videos = [
+              videos = {
                   name for name in names
                   if name.lower().endswith((".mp4", ".mov", ".mkv", ".webm"))
-              ]
+              }
 
               expected = {
                   f"output/parts/part_{number:02d}.mp4"
                   for number in range(1, int(manifest["parts"]) + 1)
               }
 
-              if set(videos) != expected:
+              if videos != expected:
                   raise SystemExit("ZIP contains missing or extra Part videos.")
 
-              if any(
-                  name in names
-                  for name in (
-                      "output/katha_lok_ai_final.mp4",
-                      "output/katha_lok_ai_short.mp4",
-                      "output/katha_lok_ai_full.mp4",
-                  )
-              ):
-                  raise SystemExit("Generic or combined video is forbidden.")
-
           print("Final ZIP integrity: valid")
-          print("Final ZIP SHA256:", actual_hash)
           print("FORMAT:", mode)
           print("ACTUAL PARTS:", manifest["parts"])
           print("STORY ZIP:", archive.name)
@@ -889,7 +858,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: katha-lok-ai-photo-motion-${{ github.run_id }}
+          name: katha-lok-ai-photo-motion-output-${{ github.run_id }}
           path: ${{ steps.package.outputs.archive }}
           if-no-files-found: error
           compression-level: 0
@@ -945,8 +914,9 @@ jobs:
 
           slug = re.sub(r"[^\w-]+", "-", title.lower(), flags=re.UNICODE)
           slug = re.sub(r"-+", "-", slug).strip("-")[:100]
+
           if not slug:
-              raise SystemExit("Cannot checkpoint without a story naming key.")
+              raise SystemExit("Cannot checkpoint without story naming key.")
 
           context = {
               "schema_version": 1,
@@ -972,7 +942,9 @@ jobs:
                   handle.write("\n")
                   handle.flush()
                   os.fsync(handle.fileno())
+
               os.replace(temporary_name, destination)
+
           except Exception:
               Path(temporary_name).unlink(missing_ok=True)
               raise
@@ -996,9 +968,11 @@ jobs:
               raise SystemExit("Output directory is unavailable.")
 
           files = []
+
           for path in sorted(root.rglob("*")):
               if path.is_symlink():
                   raise SystemExit(f"Refusing checkpoint symlink: {path}")
+
               if path.is_file():
                   files.append(path)
 
@@ -1014,6 +988,7 @@ jobs:
           ) as zf:
               for path in files:
                   relative = path.as_posix()
+
                   if relative.startswith("/") or ".." in Path(relative).parts:
                       raise SystemExit(f"Unsafe checkpoint path: {relative}")
 
