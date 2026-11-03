@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Role-aware, sentence-safe and resumable narration preparation."""
+"""Sentence-safe, role-aware narration preparation with verified TTS reuse."""
 
 from __future__ import annotations
 
@@ -13,25 +13,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
 from input_config import (
     load_and_validate,
-    get_parts,
+    get_selected_parts,
     get_scenes,
     get_format,
     get_topic,
     get_story_text,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
 SCENES_FILE = ROOT / "output/scenes/scenes.json"
 AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 TTS_MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 
-SCRIPT_VERSION = 8
-MIN_SCENE_DURATION = 0.5
-MAX_SCENE_DURATION = 3600.0
+SCRIPT_VERSION = 9
+MIN_DURATION = 0.5
+MAX_DURATION = 3600.0
+MIN_AUDIO_BYTES = 1000
 WORDS_PER_MINUTE = {"kids": 115, "adult": 145}
 
 ROLE_ORDER = {
@@ -51,6 +54,8 @@ ROLE_ALIASES = {
     "ending": "resolution",
     "final": "resolution",
 }
+
+CLOSING_QUOTES = "\"'”’)]}»"
 
 
 def utc_now() -> str:
@@ -74,13 +79,15 @@ def stable_hash(value: Any) -> str:
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with Path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
 def load_json(path: Path, required: bool = True) -> Any:
+    path = Path(path)
+
     if not path.is_file():
         if required:
             raise RuntimeError(f"Required file not found: {path}")
@@ -89,16 +96,17 @@ def load_json(path: Path, required: bool = True) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
-        raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
+        raise RuntimeError(f"Invalid JSON {path}: {exc}") from exc
 
 
-def save_json_atomic(path: Path, data: Any) -> None:
+def save_json_atomic(path: Path, value: Any) -> None:
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
 
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2)
+            json.dump(value, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -146,7 +154,7 @@ def positive_int(value: Any, label: str) -> int:
     return number
 
 
-def positive_number(value: Any, label: str) -> float:
+def finite_duration(value: Any, label: str) -> float:
     if isinstance(value, bool):
         raise RuntimeError(f"{label} must be numeric.")
 
@@ -155,54 +163,49 @@ def positive_number(value: Any, label: str) -> float:
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"{label} must be numeric.") from exc
 
-    if not math.isfinite(number):
-        raise RuntimeError(f"{label} must be finite.")
-
-    if not MIN_SCENE_DURATION <= number <= MAX_SCENE_DURATION:
+    if not math.isfinite(number) or not MIN_DURATION <= number <= MAX_DURATION:
         raise RuntimeError(
-            f"{label} must be between "
-            f"{MIN_SCENE_DURATION} and {MAX_SCENE_DURATION} seconds."
+            f"{label} must be between {MIN_DURATION} and "
+            f"{MAX_DURATION} seconds."
         )
 
     return round(number, 3)
 
 
-def count_words(text: str) -> int:
-    return len(re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE))
+def count_words(value: str) -> int:
+    return len(re.findall(r"\b[\w'-]+\b", value, flags=re.UNICODE))
 
 
 def clean_narration(value: Any, label: str) -> str:
     if not isinstance(value, str):
         raise RuntimeError(f"{label}: narration must be text.")
 
-    text = (
+    value = (
         value.replace("\ufeff", "")
         .replace("\x00", "")
         .replace("\r\n", "\n")
         .replace("\r", "\n")
     )
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value).strip()
 
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = text.strip()
-
-    if not text:
+    if not value:
         raise RuntimeError(f"{label}: narration is empty.")
 
-    return text
+    if re.search(r"(?:^|\s)([\w'-]+)[.!?।॥]?\s+\1[.!?।॥]?$", value, re.I):
+        raise RuntimeError(
+            f"{label}: repeated final word detected; source narration "
+            "must be corrected rather than silently rewritten."
+        )
+
+    return value
 
 
-def sentence_units(text: str) -> list[str]:
-    """
-    Preserve complete sentence units.
+def sentence_units(value: str) -> list[str]:
+    """Split only after complete sentence punctuation; retain punctuation."""
+    value = re.sub(r"\s+", " ", value).strip()
 
-    Hindi danda, double danda, English punctuation and closing quotation
-    marks remain attached to their sentence.
-    """
-
-    text = re.sub(r"\s+", " ", text).strip()
-
-    if not text:
+    if not value:
         return []
 
     abbreviations = {
@@ -210,16 +213,13 @@ def sentence_units(text: str) -> list[str]:
         "जैसे.", "etc.", "e.g.", "i.e.", "vs.",
     }
 
-    units = []
+    units: list[str] = []
     start = 0
+    pattern = re.compile(r"""[.!?।॥]+["'”’)\]}»]*(?=\s|$)""")
 
-    pattern = re.compile(
-        r"""[.!?।॥]+(?:["'”’)\]]*)?(?=\s|$)"""
-    )
-
-    for match in pattern.finditer(text):
+    for match in pattern.finditer(value):
         end = match.end()
-        candidate = text[start:end].strip()
+        candidate = value[start:end].strip()
 
         if not candidate:
             start = end
@@ -233,41 +233,66 @@ def sentence_units(text: str) -> list[str]:
         units.append(candidate)
         start = end
 
-    remainder = text[start:].strip()
+    remainder = value[start:].strip()
 
     if remainder:
         units.append(remainder)
 
-    return units or [text]
+    return units or [value]
 
 
-def validate_sentence_integrity(text: str, label: str) -> None:
-    if not isinstance(text, str) or not text.strip():
+def clause_units(value: str) -> list[str]:
+    """
+    Build optional natural pause units without changing narration.
+    Commas, semicolons, colons and Hindi clause separators remain attached.
+    """
+    result: list[str] = []
+
+    for sentence in sentence_units(value):
+        start = 0
+
+        for match in re.finditer(r"[,;:，；：](?:\s+|$)", sentence):
+            end = match.end()
+            unit = sentence[start:end].strip()
+
+            if unit:
+                result.append(unit)
+
+            start = end
+
+        tail = sentence[start:].strip()
+
+        if tail:
+            result.append(tail)
+
+    return result or [value.strip()]
+
+
+def validate_sentence_integrity(value: str, label: str) -> None:
+    if not isinstance(value, str) or not value.strip():
         raise RuntimeError(f"{label}: narration is empty.")
 
-    units = sentence_units(text)
-
-    if not units:
-        raise RuntimeError(f"{label}: no valid narration units.")
-
-    for index, unit in enumerate(units, 1):
-        if not unit.strip():
-            raise RuntimeError(
-                f"{label}: empty sentence unit at position {index}."
-            )
-
-    if "\x00" in text:
+    if "\x00" in value:
         raise RuntimeError(f"{label}: narration contains null characters.")
+
+    units = sentence_units(value)
+
+    if not units or any(not unit.strip() for unit in units):
+        raise RuntimeError(f"{label}: invalid sentence segmentation.")
+
+    if " ".join(units).strip() != re.sub(r"\s+", " ", value).strip():
+        raise RuntimeError(
+            f"{label}: sentence segmentation changed source text."
+        )
 
 
 def estimate_speech_duration(
-    text: str,
+    value: str,
     audience: str,
     speed: str,
 ) -> float:
-    """Estimate only; measured TTS audio duration remains authoritative."""
-
-    words = count_words(text)
+    """Estimate only. It is never written as measured audio duration."""
+    words = count_words(value)
     base_wpm = WORDS_PER_MINUTE.get(audience, 145)
 
     try:
@@ -276,22 +301,21 @@ def estimate_speech_duration(
         speed_percent = 0
 
     rate = max(40.0, base_wpm * (1.0 + speed_percent / 100.0))
+    sentence_pauses = len(re.findall(r"[.!?।॥]+", value))
+    clause_pauses = len(re.findall(r"[,;:]", value))
 
-    sentence_pauses = len(re.findall(r"[.!?।॥]+", text))
-    comma_pauses = len(re.findall(r"[,;:]", text))
+    seconds = (words / rate) * 60.0
+    seconds += sentence_pauses * 0.22
+    seconds += clause_pauses * 0.08
 
-    estimate = (words / rate) * 60.0
-    estimate += sentence_pauses * 0.22
-    estimate += comma_pauses * 0.08
-
-    return round(max(0.5, estimate), 3)
+    return round(max(MIN_DURATION, seconds), 3)
 
 
 def read_scene_duration(
     scene: dict,
     duration_policy: str,
     label: str,
-):
+) -> float | str:
     for field in (
         "duration",
         "scene_duration",
@@ -306,11 +330,11 @@ def read_scene_duration(
         if str(value).strip().lower() == "auto":
             return "auto"
 
-        return positive_number(value, f"{label} {field}")
+        return finite_duration(value, f"{label} {field}")
 
     if duration_policy == "fixed":
         raise RuntimeError(
-            f"{label}: SCENE_DURATION is fixed but no duration was supplied."
+            f"{label}: fixed SCENE_DURATION requires a source duration."
         )
 
     return "auto"
@@ -327,39 +351,66 @@ def normalize_role(scene: dict) -> str:
     role = ROLE_ALIASES.get(raw, raw)
 
     if role not in ROLE_ORDER:
-        raise RuntimeError(f"Unsupported narration role: {raw!r}")
+        raise RuntimeError(f"Unsupported narration role: {raw!r}.")
 
     return role
 
 
-def scene_key(scene: dict):
-    try:
-        part = int(scene["part"])
-        number = int(scene["scene"])
-    except (KeyError, TypeError, ValueError):
-        return None
+def build_settings(config: dict) -> dict:
+    mode = get_format(config)
+    audience = cfg_text(config, "AUDIENCE", "adult").lower()
+    voice = cfg_text(config, "VOICE", "male").lower()
+    speed = cfg_text(config, "SPEED", "+0%")
+    captions = cfg_text(config, "CAPTIONS", "hindi").lower()
+    duration_policy = cfg_text(config, "SCENE_DURATION", "auto").lower()
 
-    if part < 1 or number < 1:
-        return None
+    if audience not in {"adult", "kids"}:
+        raise RuntimeError("AUDIENCE must be adult or kids.")
 
-    return part, number
+    if voice not in {"male", "female"}:
+        raise RuntimeError("VOICE must be male or female.")
 
+    if not re.fullmatch(r"[+-]?\d{1,2}%", speed):
+        raise RuntimeError("SPEED must be a percentage such as +0%.")
 
-def load_story_metadata() -> dict:
-    value = load_json(AI_STORY_FILE, required=False)
-    return value if isinstance(value, dict) else {}
+    if not -50 <= int(speed.replace("%", "")) <= 50:
+        raise RuntimeError("SPEED must be between -50% and +50%.")
+
+    if captions not in {"hindi", "english", "hinglish"}:
+        raise RuntimeError("CAPTIONS must be hindi, english or hinglish.")
+
+    if duration_policy not in {"auto", "fixed"}:
+        raise RuntimeError("SCENE_DURATION must be auto or fixed.")
+
+    selected_parts = get_selected_parts(config, required=True)
+
+    return {
+        "format": mode,
+        "parts": positive_int(selected_parts, "selected PARTS"),
+        "scenes_per_part": positive_int(get_scenes(config), "SCENES"),
+        "audience": audience,
+        "voice": voice,
+        "speed": speed,
+        "captions": captions,
+        "scene_duration": duration_policy,
+        "music": cfg_bool(config, "MUSIC", True),
+        "sfx": cfg_bool(config, "SFX", True),
+        "ambient_sound": cfg_bool(config, "AMBIENT_SOUND", True),
+        "transitions": cfg_text(config, "TRANSITIONS", "cinematic"),
+    }
 
 
 def resolve_title(config: dict, story: dict) -> str:
+    for field in ("title", "generated_title", "story_title"):
+        value = story.get(field)
+
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
     explicit_title = cfg_text(config, "TITLE")
 
     if explicit_title:
         return explicit_title
-
-    story_title = story.get("title") or story.get("generated_title")
-
-    if isinstance(story_title, str) and story_title.strip():
-        return story_title.strip()
 
     topic = get_topic(config)
 
@@ -369,72 +420,26 @@ def resolve_title(config: dict, story: dict) -> str:
     source_story = get_story_text(config).strip()
 
     if source_story:
-        first_sentence = sentence_units(source_story)
-        if first_sentence:
-            return first_sentence[0][:120].strip()
-
-    for field in ("topic", "story_title"):
-        value = story.get(field)
-
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    raise RuntimeError(
-        "Story title could not be resolved from Input/topic.txt or ai_story.json."
-    )
-
-
-def build_settings(config: dict) -> dict:
-    fmt = get_format(config)
-
-    audience = cfg_text(config, "AUDIENCE", "adult").lower()
-
-    if audience not in {"adult", "kids"}:
-        raise RuntimeError("AUDIENCE must be adult or kids.")
-
-    voice = cfg_text(config, "VOICE", "male").lower()
-
-    if voice not in {"male", "female"}:
-        raise RuntimeError("VOICE must be male or female.")
-
-    speed = cfg_text(config, "SPEED", "+0%")
-
-    if not re.fullmatch(r"[+-]?\d{1,2}%", speed):
+        # A complete-story title must come from the story generator.
+        # Do not manufacture a title from the opening sentence.
         raise RuntimeError(
-            "SPEED must be a percentage such as +0% or -10%."
+            "ai_story.json has no full-story title; narration cannot "
+            "use the first sentence as a substitute title."
         )
 
-    speed_number = int(speed.replace("%", ""))
+    raise RuntimeError("Story title is missing.")
 
-    if not -50 <= speed_number <= 50:
-        raise RuntimeError("SPEED must be between -50% and +50%.")
 
-    captions = cfg_text(config, "CAPTIONS", "hindi").lower()
+def load_story_metadata() -> dict:
+    value = load_json(AI_STORY_FILE, required=False)
 
-    if captions not in {"hindi", "english", "hinglish"}:
-        raise RuntimeError("CAPTIONS must be hindi, english or hinglish.")
+    if value is None:
+        return {}
 
-    duration_policy = cfg_text(
-        config, "SCENE_DURATION", "auto"
-    ).lower()
+    if not isinstance(value, dict):
+        raise RuntimeError("ai_story.json must contain a JSON object.")
 
-    if duration_policy not in {"auto", "fixed"}:
-        raise RuntimeError("SCENE_DURATION must be auto or fixed.")
-
-    return {
-        "format": fmt,
-        "audience": audience,
-        "voice": voice,
-        "speed": speed,
-        "captions": captions,
-        "scene_duration": duration_policy,
-        "parts": positive_int(get_parts(config), "PARTS"),
-        "scenes_per_part": positive_int(get_scenes(config), "SCENES"),
-        "music": cfg_bool(config, "MUSIC", True),
-        "sfx": cfg_bool(config, "SFX", True),
-        "ambient_sound": cfg_bool(config, "AMBIENT_SOUND", True),
-        "transitions": cfg_text(config, "TRANSITIONS", "cinematic"),
-    }
+    return value
 
 
 def extract_scene_rows(data: Any) -> list[dict]:
@@ -443,7 +448,7 @@ def extract_scene_rows(data: Any) -> list[dict]:
 
     if data.get("status") != "completed":
         raise RuntimeError(
-            "Scene generation is incomplete. Narration preparation stopped."
+            "Scene generation is incomplete; narration stopped."
         )
 
     rows = data.get("scenes")
@@ -454,6 +459,14 @@ def extract_scene_rows(data: Any) -> list[dict]:
     return rows
 
 
+def canonical_main_id(part: int, scene: int) -> str:
+    return f"part_{part:02d}_scene_{scene:02d}"
+
+
+def canonical_extra_id(part: int, role: str) -> str:
+    return f"part_{part:02d}_{role}"
+
+
 def validate_scene_collection(
     data: Any,
     parts: int,
@@ -462,36 +475,31 @@ def validate_scene_collection(
     rows = extract_scene_rows(data)
 
     expected_main = {
-        (part, number)
+        (part, scene)
         for part in range(1, parts + 1)
-        for number in range(1, scenes_per_part + 1)
+        for scene in range(1, scenes_per_part + 1)
     }
 
-    main_map = {}
-    extras = []
-    extra_ids = set()
+    main_map: dict[tuple[int, int], dict] = {}
+    extras: list[dict] = []
+    all_ids: set[str] = set()
 
     for index, source in enumerate(rows, 1):
         if not isinstance(source, dict):
             raise RuntimeError(f"Scene record {index} is not an object.")
 
         role = normalize_role(source)
-
-        part = positive_int(
-            source.get("part"),
-            f"scene record {index} part",
-        )
+        part = positive_int(source.get("part"), f"scene {index} part")
 
         if not 1 <= part <= parts:
             raise RuntimeError(
-                f"Scene record {index} refers to unconfigured part {part}."
+                f"Scene record {index} refers to unselected part {part}."
             )
 
         label = f"Part {part} {role.upper()}"
         item = dict(source)
         item["role"] = role
         item["part"] = part
-
         item["narration"] = clean_narration(
             source.get("narration"),
             label,
@@ -500,82 +508,94 @@ def validate_scene_collection(
         validate_sentence_integrity(item["narration"], label)
 
         if role == "main":
-            key = scene_key(source)
-
-            if key is None or key not in expected_main:
+            try:
+                scene_number = int(source.get("scene"))
+            except (TypeError, ValueError) as exc:
                 raise RuntimeError(
-                    f"Invalid main scene mapping in record {index}."
+                    f"{label}: main scene number is missing."
+                ) from exc
+
+            key = (part, scene_number)
+
+            if key not in expected_main:
+                raise RuntimeError(
+                    f"{label}: scene number {scene_number} is outside "
+                    "the configured scene grid."
+                )
+
+            expected_id = canonical_main_id(part, scene_number)
+            actual_id = str(source.get("scene_id") or "").strip()
+
+            if actual_id != expected_id:
+                raise RuntimeError(
+                    f"{label}: scene_id must be {expected_id}, "
+                    f"received {actual_id!r}."
                 )
 
             if key in main_map:
-                raise RuntimeError(
-                    f"Duplicate main scene mapping: {key}."
-                )
+                raise RuntimeError(f"Duplicate main scene mapping: {key}.")
 
-            item["scene"] = key[1]
-            item["scene_id"] = str(
-                source.get("scene_id")
-                or f"part_{part:02d}_scene_{key[1]:03d}"
-            ).strip()
-
+            item["scene"] = scene_number
+            item["scene_id"] = expected_id
             main_map[key] = item
 
         else:
-            scene_id = str(
-                source.get("scene_id")
-                or source.get("id")
-                or f"part_{part:02d}_{role}"
+            expected_id = canonical_extra_id(part, role)
+            actual_id = str(
+                source.get("scene_id") or source.get("id") or ""
             ).strip()
 
-            if not scene_id:
+            if actual_id != expected_id:
                 raise RuntimeError(
-                    f"Part {part} {role}: scene_id is missing."
+                    f"{label}: scene_id must be {expected_id}, "
+                    f"received {actual_id!r}."
                 )
 
-            if scene_id in extra_ids:
-                raise RuntimeError(
-                    f"Duplicate extra scene ID: {scene_id}."
-                )
+            if actual_id in all_ids:
+                raise RuntimeError(f"Duplicate extra scene ID: {actual_id}.")
 
-            extra_ids.add(scene_id)
-            item["scene_id"] = scene_id
             item["scene"] = None
+            item["scene_id"] = expected_id
             extras.append(item)
+
+        scene_id = item["scene_id"]
+
+        if scene_id in all_ids:
+            raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
+
+        all_ids.add(scene_id)
 
     missing = sorted(expected_main - set(main_map))
 
     if missing:
         raise RuntimeError(
-            f"Missing configured main scenes ({len(missing)}): {missing[:25]}"
+            f"Missing main scene records ({len(missing)}): {missing[:30]}."
         )
 
     for part in range(1, parts + 1):
         roles = [
-            item["role"]
-            for item in extras
-            if item["part"] == part
+            row["role"] for row in extras if row["part"] == part
         ]
 
         if roles.count("hook") != 1:
             raise RuntimeError(
-                f"Part {part} must contain exactly one separate Hook."
+                f"Part {part} requires exactly one separate Hook."
             )
 
         if part < parts:
             if roles.count("suspense") != 1:
                 raise RuntimeError(
-                    f"Part {part} must contain exactly one Suspense."
+                    f"Part {part} requires exactly one Suspense."
                 )
 
             if "resolution" in roles:
                 raise RuntimeError(
                     f"Non-final part {part} cannot contain Resolution."
                 )
-
         else:
             if roles.count("resolution") != 1:
                 raise RuntimeError(
-                    "Final part must contain exactly one Resolution."
+                    "Final part requires exactly one Resolution."
                 )
 
             if "suspense" in roles:
@@ -584,53 +604,52 @@ def validate_scene_collection(
                 )
 
     ordered_main = [
-        main_map[(part, number)]
+        main_map[(part, scene)]
         for part in range(1, parts + 1)
-        for number in range(1, scenes_per_part + 1)
+        for scene in range(1, scenes_per_part + 1)
     ]
 
     extras.sort(
-        key=lambda item: (
-            item["part"],
-            ROLE_ORDER[item["role"]],
-            str(item["scene_id"]),
+        key=lambda row: (
+            row["part"],
+            ROLE_ORDER[row["role"]],
         )
     )
 
     return ordered_main, extras
 
 
-def build_source_signature(
+def source_signature(
     title: str,
     settings: dict,
-    main_scenes: list[dict],
-    extra_scenes: list[dict],
+    main_sources: list[dict],
+    extra_sources: list[dict],
 ) -> str:
-
-    def relevant(rows):
-        result = []
-
-        for row in rows:
-            result.append({
-                "part": int(row["part"]),
+    def relevant(rows: list[dict]) -> list[dict]:
+        return [
+            {
+                "part": row["part"],
                 "scene": row.get("scene"),
-                "scene_id": row.get("scene_id"),
+                "scene_id": row["scene_id"],
                 "role": row["role"],
                 "narration": row["narration"],
                 "duration": row.get("duration"),
                 "dialogue": row.get("dialogue", ""),
                 "character_ids": row.get("character_ids", []),
                 "visual_prompt": row.get("visual_prompt", ""),
-            })
-
-        return result
+                "source_scene_signature": row.get(
+                    "source_scene_signature"
+                ),
+            }
+            for row in rows
+        ]
 
     return stable_hash({
         "script_version": SCRIPT_VERSION,
         "title": title,
         "settings": settings,
-        "main_scenes": relevant(main_scenes),
-        "extra_scenes": relevant(extra_scenes),
+        "main": relevant(main_sources),
+        "extras": relevant(extra_sources),
     })
 
 
@@ -640,49 +659,22 @@ def build_narration_record(
     title: str,
     role: str,
 ) -> dict:
-
     part = positive_int(scene.get("part"), "narration part")
-    scene_number = scene.get("scene")
 
     if role == "main":
-        scene_number = positive_int(
-            scene_number,
-            "main scene number",
-        )
-
-        scene_id = str(
-            scene.get("scene_id")
-            or f"part_{part:02d}_scene_{scene_number:03d}"
-        ).strip()
-
+        scene_number = positive_int(scene.get("scene"), "scene number")
+        scene_id = canonical_main_id(part, scene_number)
         global_number = (
-            (part - 1) * settings["scenes_per_part"]
-            + scene_number
+            (part - 1) * settings["scenes_per_part"] + scene_number
         )
-
     else:
         scene_number = None
-
-        scene_id = str(
-            scene.get("scene_id")
-            or f"part_{part:02d}_{role}"
-        ).strip()
-
+        scene_id = canonical_extra_id(part, role)
         global_number = None
 
-    if not scene_id:
-        raise RuntimeError(
-            f"Part {part} {role}: scene_id is empty."
-        )
-
     label = f"Part {part} {role.upper()}"
-
-    text = clean_narration(
-        scene.get("narration"),
-        label,
-    )
-
-    validate_sentence_integrity(text, label)
+    narration = clean_narration(scene.get("narration"), label)
+    validate_sentence_integrity(narration, label)
 
     duration = read_scene_duration(
         scene,
@@ -690,8 +682,8 @@ def build_narration_record(
         label,
     )
 
-    estimate = estimate_speech_duration(
-        text,
+    estimated = estimate_speech_duration(
+        narration,
         settings["audience"],
         settings["speed"],
     )
@@ -704,13 +696,12 @@ def build_narration_record(
     character_ids = scene.get("character_ids", [])
 
     if not isinstance(character_ids, list):
-        raise RuntimeError(
-            f"{scene_id}: character_ids must be a list."
-        )
+        raise RuntimeError(f"{scene_id}: character_ids must be a list.")
 
-    sentence_list = sentence_units(text)
+    sentences = sentence_units(narration)
+    clauses = clause_units(narration)
 
-    record = {
+    return {
         "part": part,
         "scene": scene_number,
         "scene_id": scene_id,
@@ -719,11 +710,13 @@ def build_narration_record(
         "scene_type": role,
         "title": str(scene.get("title", "")).strip(),
         "story_title": title,
-        "text": text,
-        "narration": text,
-        "sentence_units": sentence_list,
-        "sentence_count": len(sentence_list),
-        "word_count": count_words(text),
+        "text": narration,
+        "narration": narration,
+        "sentence_units": sentences,
+        "sentence_count": len(sentences),
+        "clause_units": clauses,
+        "clause_count": len(clauses),
+        "word_count": count_words(narration),
         "language": settings["captions"],
         "voice": settings["voice"],
         "speed": settings["speed"],
@@ -732,8 +725,8 @@ def build_narration_record(
         "audience": settings["audience"],
         "duration": duration,
         "scene_duration": duration,
-        "narration_duration_estimate_seconds": estimate,
-        "estimated_duration": estimate,
+        "narration_duration_estimate_seconds": estimated,
+        "estimated_duration": estimated,
         "actual_audio_duration_seconds": None,
         "audio_duration": None,
         "audio_duration_source": "not_measured_tts_pending",
@@ -748,31 +741,24 @@ def build_narration_record(
         "status": "completed",
     }
 
-    return record
-
-
 def validate_cached_audio(record: dict) -> bool:
-    """
-    Preserve existing TTS output only when its actual file and SHA256
-    still match the previously measured TTS record.
-    """
-
+    """Reuse only an existing TTS file with matching measured duration and SHA."""
     if not isinstance(record, dict):
         return False
 
     if record.get("audio_duration_source") != "ffprobe_measured":
         return False
 
-    audio_path_value = (
+    value = (
         record.get("audio_path")
         or record.get("audio_file")
         or record.get("audio")
     )
 
-    if not isinstance(audio_path_value, str) or not audio_path_value.strip():
+    if not isinstance(value, str) or not value.strip():
         return False
 
-    path = Path(audio_path_value)
+    path = Path(value)
 
     if not path.is_absolute():
         path = ROOT / path
@@ -783,17 +769,15 @@ def validate_cached_audio(record: dict) -> bool:
         if not path.is_relative_to(ROOT.resolve()):
             return False
 
-        if not path.is_file() or path.stat().st_size < 1000:
+        if not path.is_file() or path.stat().st_size < MIN_AUDIO_BYTES:
             return False
-
-        actual_hash = sha256_file(path)
 
         declared_hash = (
             record.get("audio_sha256")
             or record.get("audio_hash")
         )
 
-        if not declared_hash or actual_hash != declared_hash:
+        if not declared_hash or sha256_file(path) != declared_hash:
             return False
 
         duration = record.get("actual_audio_duration_seconds")
@@ -811,39 +795,38 @@ def validate_cached_audio(record: dict) -> bool:
 
         return True
 
-    except (OSError, TypeError, ValueError, RuntimeError):
+    except (OSError, TypeError, ValueError):
         return False
 
 
 def load_reusable_records(
-    source_signature: str,
+    current_signature: str,
     settings: dict,
     enabled: bool,
 ) -> dict[str, dict]:
-
     if not enabled:
         return {}
 
-    existing = load_json(OUTPUT_FILE, required=False)
+    document = load_json(OUTPUT_FILE, required=False)
 
-    if not isinstance(existing, dict):
+    if not isinstance(document, dict):
         return {}
 
-    if existing.get("status") not in {"in_progress", "completed"}:
+    if document.get("status") not in {"in_progress", "completed"}:
         return {}
 
-    if existing.get("source_signature") != source_signature:
-        log("Existing narration checkpoint does not match current scenes.")
+    if document.get("source_signature") != current_signature:
+        log("Narration cache rejected: source signature changed.")
         return {}
 
-    if existing.get("input_config") != settings:
-        log("Narration settings changed; old records will not be reused.")
+    if document.get("input_config") != settings:
+        log("Narration cache rejected: settings changed.")
         return {}
 
-    reusable = {}
+    reusable: dict[str, dict] = {}
 
     for field in ("scenes", "extra_scenes"):
-        rows = existing.get(field, [])
+        rows = document.get(field, [])
 
         if not isinstance(rows, list):
             continue
@@ -853,14 +836,18 @@ def load_reusable_records(
                 continue
 
             scene_id = str(row.get("scene_id") or "").strip()
-            text = row.get("text")
 
             if (
                 scene_id
                 and row.get("status") == "completed"
-                and isinstance(text, str)
-                and text.strip()
+                and isinstance(row.get("text"), str)
+                and row["text"].strip()
             ):
+                if scene_id in reusable:
+                    raise RuntimeError(
+                        f"Duplicate cached narration ID: {scene_id}."
+                    )
+
                 reusable[scene_id] = dict(row)
 
     return reusable
@@ -870,7 +857,6 @@ def reusable_record_matches(
     cached: dict,
     current: dict,
 ) -> bool:
-
     fields = (
         "scene_id",
         "part",
@@ -885,6 +871,8 @@ def reusable_record_matches(
         "duration",
         "story_title",
         "sentence_units",
+        "clause_units",
+        "word_count",
     )
 
     return all(
@@ -897,7 +885,6 @@ def preserve_tts_result(
     cached: dict,
     current: dict,
 ) -> dict:
-
     result = dict(current)
 
     if not validate_cached_audio(cached):
@@ -937,8 +924,7 @@ def validate_record_group(
     expected_ids: list[str],
     label: str,
 ) -> None:
-
-    actual_ids = []
+    actual_ids: list[str] = []
 
     for index, record in enumerate(records, 1):
         if not isinstance(record, dict):
@@ -958,9 +944,9 @@ def validate_record_group(
                 f"{label}: duplicate scene_id {scene_id}."
             )
 
-        text = record.get("text")
+        narration = record.get("text")
 
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(narration, str) or not narration.strip():
             raise RuntimeError(
                 f"{label}: empty narration for {scene_id}."
             )
@@ -970,17 +956,66 @@ def validate_record_group(
                 f"{label}: incomplete narration {scene_id}."
             )
 
-        validate_sentence_integrity(text, scene_id)
+        validate_sentence_integrity(narration, scene_id)
 
-        if record.get("word_count") != count_words(text):
+        if record.get("word_count") != count_words(narration):
             raise RuntimeError(
-                f"{scene_id}: word_count does not match narration text."
+                f"{scene_id}: word_count does not match narration."
             )
 
-        if record.get("sentence_units") != sentence_units(text):
+        if record.get("sentence_units") != sentence_units(narration):
             raise RuntimeError(
-                f"{scene_id}: sentence units do not match narration text."
+                f"{scene_id}: sentence segmentation mismatch."
             )
+
+        if record.get("clause_units") != clause_units(narration):
+            raise RuntimeError(
+                f"{scene_id}: clause segmentation mismatch."
+            )
+
+        estimate = record.get("narration_duration_estimate_seconds")
+
+        if (
+            isinstance(estimate, bool)
+            or not isinstance(estimate, (int, float))
+            or not math.isfinite(float(estimate))
+            or float(estimate) <= 0
+        ):
+            raise RuntimeError(
+                f"{scene_id}: narration estimate is invalid."
+            )
+
+        actual = record.get("actual_audio_duration_seconds")
+        source = record.get("audio_duration_source")
+
+        if actual is None:
+            if source != "not_measured_tts_pending":
+                raise RuntimeError(
+                    f"{scene_id}: unmeasured audio must remain pending."
+                )
+
+            if record.get("audio_duration") is not None:
+                raise RuntimeError(
+                    f"{scene_id}: estimate must not be stored as audio_duration."
+                )
+
+        else:
+            if source != "ffprobe_measured":
+                raise RuntimeError(
+                    f"{scene_id}: actual duration must be ffprobe measured."
+                )
+
+            finite_duration(actual, f"{scene_id} measured audio duration")
+
+            if record.get("audio_duration") != actual:
+                raise RuntimeError(
+                    f"{scene_id}: audio_duration must equal measured duration."
+                )
+
+            if not validate_cached_audio(record):
+                raise RuntimeError(
+                    f"{scene_id}: measured audio record failed file/SHA validation."
+                )
 
         actual_ids.append(scene_id)
 
@@ -997,19 +1032,18 @@ def validate_final_records(
     parts: int,
     scenes_per_part: int,
 ) -> None:
-
-    expected_main_keys = [
+    expected_main = [
         (part, scene)
         for part in range(1, parts + 1)
         for scene in range(1, scenes_per_part + 1)
     ]
 
-    actual_main_keys = [
+    actual_main = [
         (int(row["part"]), int(row["scene"]))
         for row in main_records
     ]
 
-    if actual_main_keys != expected_main_keys:
+    if actual_main != expected_main:
         raise RuntimeError(
             "Main narration part/scene order is incorrect."
         )
@@ -1020,24 +1054,24 @@ def validate_final_records(
         "Main narration",
     )
 
-    expected_extra_roles = []
+    expected_extra: list[tuple[int, str]] = []
 
     for part in range(1, parts + 1):
-        expected_extra_roles.append((part, "hook"))
+        expected_extra.append((part, "hook"))
 
         if part < parts:
-            expected_extra_roles.append((part, "suspense"))
+            expected_extra.append((part, "suspense"))
         else:
-            expected_extra_roles.append((part, "resolution"))
+            expected_extra.append((part, "resolution"))
 
-    actual_extra_roles = [
+    actual_extra = [
         (int(row["part"]), str(row["role"]))
         for row in extra_records
     ]
 
-    if actual_extra_roles != expected_extra_roles:
+    if actual_extra != expected_extra:
         raise RuntimeError(
-            "Hook/Suspense/Resolution narration order or count is incorrect."
+            "Hook/Suspense/Resolution records have incorrect mapping or order."
         )
 
     validate_record_group(
@@ -1059,7 +1093,7 @@ def validate_final_records(
     for row in main_records + extra_records:
         if row.get("status") != "completed":
             raise RuntimeError(
-                f"Narration record incomplete: {row.get('scene_id')}"
+                f"Narration record incomplete: {row.get('scene_id')}."
             )
 
 
@@ -1067,13 +1101,12 @@ def make_output_document(
     status: str,
     title: str,
     settings: dict,
-    source_signature: str,
+    current_signature: str,
     main_records: list[dict],
     extra_records: list[dict],
     started_at: str,
     error: str | None = None,
 ) -> dict:
-
     now = utc_now()
     all_records = main_records + extra_records
 
@@ -1086,7 +1119,7 @@ def make_output_document(
         "model": "not_required",
         "api_calls": 0,
         "source_file": SCENES_FILE.relative_to(ROOT).as_posix(),
-        "source_signature": source_signature,
+        "source_signature": current_signature,
         "total_parts": settings["parts"],
         "scenes_per_part": settings["scenes_per_part"],
         "total_scenes": settings["parts"] * settings["scenes_per_part"],
@@ -1097,34 +1130,41 @@ def make_output_document(
         "input_config": settings,
         "duration_policy": {
             "scene_duration": (
-                "configured_scene_duration"
+                "configured_fixed_duration"
                 if settings["scene_duration"] == "fixed"
-                else "source_scene_duration_or_auto"
+                else "source_duration_or_auto"
             ),
             "narration_duration": (
                 "estimate_only_until_tts_audio_is_generated"
             ),
-            "actual_audio_duration_field": (
-                "actual_audio_duration_seconds"
-            ),
-            "actual_audio_duration_source": "ffprobe_measured",
-            "sentence_integrity": (
-                "preserve_complete_sentence_units_without_arbitrary_truncation"
-            ),
+            "estimate_field": "narration_duration_estimate_seconds",
+            "measured_audio_field": "actual_audio_duration_seconds",
+            "measured_audio_source": "ffprobe_measured",
             "duration_must_be_measured_by_tts": True,
+            "estimated_duration_is_not_actual_audio_duration": True,
             "no_arbitrary_fixed_duration": True,
+        },
+        "segmentation_policy": {
+            "sentence_boundaries": [
+                ".", "!", "?", "।", "॥"
+            ],
+            "clause_boundaries": [
+                ",", ";", ":"
+            ],
+            "punctuation_retained": True,
+            "no_arbitrary_sentence_truncation": True,
+            "source_narration_preserved": True,
         },
         "role_policy": {
             "hook": "one separate narration record per part",
             "main": "configured main scene grid",
-            "suspense": "one separate narration for every non-final part",
+            "suspense": "one separate narration per non-final part",
             "resolution": "one separate narration for final part only",
         },
         "scenes": main_records,
         "extra_scenes": extra_records,
         "all_scene_ids": [
-            row["scene_id"]
-            for row in all_records
+            row["scene_id"] for row in all_records
         ],
         "started_at": started_at,
         "updated_at": now,
@@ -1142,7 +1182,7 @@ def save_progress(
     status: str,
     title: str,
     settings: dict,
-    source_signature: str,
+    current_signature: str,
     main_map: dict,
     extra_map: dict,
     started_at: str,
@@ -1151,10 +1191,8 @@ def save_progress(
     last_scene_id: str | None = None,
     error: str | None = None,
 ) -> None:
-
     main_records = [
-        main_map[key]
-        for key in sorted(main_map)
+        main_map[key] for key in sorted(main_map)
     ]
 
     extra_records = sorted(
@@ -1162,7 +1200,6 @@ def save_progress(
         key=lambda row: (
             int(row["part"]),
             ROLE_ORDER[row["role"]],
-            str(row["scene_id"]),
         ),
     )
 
@@ -1170,7 +1207,7 @@ def save_progress(
         status,
         title,
         settings,
-        source_signature,
+        current_signature,
         main_records,
         extra_records,
         started_at,
@@ -1184,7 +1221,7 @@ def save_progress(
         {
             "status": status,
             "script_version": SCRIPT_VERSION,
-            "source_signature": source_signature,
+            "source_signature": current_signature,
             "completed_main": len(main_records),
             "expected_main": expected_main,
             "completed_extras": len(extra_records),
@@ -1198,7 +1235,7 @@ def save_progress(
 
 def main() -> int:
     log("=" * 64)
-    log("KATHA LOK AI - ROLE-AWARE NARRATION PREPARATION")
+    log("KATHA LOK AI — SENTENCE-SAFE NARRATION PREPARATION")
     log("=" * 64)
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
@@ -1208,14 +1245,8 @@ def main() -> int:
     scenes_per_part = settings["scenes_per_part"]
     expected_main_total = parts * scenes_per_part
 
-    resume_enabled = cfg_bool(
-        config, "RESUME_ENABLED", True
-    )
-
-    skip_completed = cfg_bool(
-        config, "SKIP_COMPLETED_SCENES", True
-    )
-
+    resume_enabled = cfg_bool(config, "RESUME_ENABLED", True)
+    skip_completed = cfg_bool(config, "SKIP_COMPLETED_SCENES", True)
     save_each_scene = cfg_bool(
         config,
         "SAVE_CHECKPOINT_AFTER_EACH_SCENE",
@@ -1226,14 +1257,13 @@ def main() -> int:
     title = resolve_title(config, story)
 
     source_data = load_json(SCENES_FILE)
-
     main_sources, extra_sources = validate_scene_collection(
         source_data,
         parts,
         scenes_per_part,
     )
 
-    source_signature = build_source_signature(
+    current_signature = source_signature(
         title,
         settings,
         main_sources,
@@ -1241,14 +1271,14 @@ def main() -> int:
     )
 
     reusable = load_reusable_records(
-        source_signature,
+        current_signature,
         settings,
         resume_enabled and skip_completed,
     )
 
     started_at = utc_now()
-    main_map = {}
-    extra_map = {}
+    main_map: dict[tuple[int, int], dict] = {}
+    extra_map: dict[str, dict] = {}
 
     ordered_sources = (
         [(row, "main") for row in main_sources]
@@ -1293,7 +1323,6 @@ def main() -> int:
                     f"[{index}/{len(ordered_sources)}] REUSED "
                     f"{scene_id} ({role})"
                 )
-
             else:
                 log(
                     f"[{index}/{len(ordered_sources)}] PREPARED "
@@ -1305,15 +1334,14 @@ def main() -> int:
 
                 if key in main_map:
                     raise RuntimeError(
-                        f"Duplicate narration mapping: {key}"
+                        f"Duplicate narration mapping: {key}."
                     )
 
                 main_map[key] = current
-
             else:
                 if scene_id in extra_map:
                     raise RuntimeError(
-                        f"Duplicate extra narration ID: {scene_id}"
+                        f"Duplicate extra narration ID: {scene_id}."
                     )
 
                 extra_map[scene_id] = current
@@ -1323,7 +1351,7 @@ def main() -> int:
                     "in_progress",
                     title,
                     settings,
-                    source_signature,
+                    current_signature,
                     main_map,
                     extra_map,
                     started_at,
@@ -1341,14 +1369,13 @@ def main() -> int:
         final_extras = []
 
         for part in range(1, parts + 1):
-            roles = ["hook"]
+            required_roles = (
+                ["hook", "suspense"]
+                if part < parts
+                else ["hook", "resolution"]
+            )
 
-            if part < parts:
-                roles.append("suspense")
-            else:
-                roles.append("resolution")
-
-            for role in roles:
+            for role in required_roles:
                 matches = [
                     row
                     for row in extra_map.values()
@@ -1357,8 +1384,8 @@ def main() -> int:
 
                 if len(matches) != 1:
                     raise RuntimeError(
-                        f"Expected exactly one Part {part} {role} narration; "
-                        f"found {len(matches)}."
+                        f"Expected exactly one Part {part} {role} "
+                        f"narration; found {len(matches)}."
                     )
 
                 final_extras.append(matches[0])
@@ -1374,7 +1401,7 @@ def main() -> int:
             "completed",
             title,
             settings,
-            source_signature,
+            current_signature,
             final_main,
             final_extras,
             started_at,
@@ -1387,7 +1414,7 @@ def main() -> int:
             {
                 "status": "completed",
                 "script_version": SCRIPT_VERSION,
-                "source_signature": source_signature,
+                "source_signature": current_signature,
                 "completed_main": len(final_main),
                 "expected_main": expected_main_total,
                 "completed_extras": len(final_extras),
@@ -1397,12 +1424,25 @@ def main() -> int:
             },
         )
 
+        saved = load_json(OUTPUT_FILE)
+
+        if (
+            not isinstance(saved, dict)
+            or saved.get("status") != "completed"
+            or saved.get("source_signature") != current_signature
+            or len(saved.get("scenes", [])) != expected_main_total
+            or len(saved.get("extra_scenes", [])) != len(final_extras)
+        ):
+            raise RuntimeError(
+                "Narration output read-after-write validation failed."
+            )
+
     except Exception as exc:
         save_progress(
             "failed",
             title,
             settings,
-            source_signature,
+            current_signature,
             main_map,
             extra_map,
             started_at,
@@ -1412,14 +1452,14 @@ def main() -> int:
         )
         raise
 
+    all_records = final_main + final_extras
     estimate_total = sum(
         row["narration_duration_estimate_seconds"]
-        for row in final_main + final_extras
+        for row in all_records
     )
-
     measured_count = sum(
-        bool(row.get("audio_duration_source") == "ffprobe_measured")
-        for row in final_main + final_extras
+        row.get("audio_duration_source") == "ffprobe_measured"
+        for row in all_records
     )
 
     log()
@@ -1430,9 +1470,9 @@ def main() -> int:
     log("PARTS              :", parts)
     log("MAIN SCENES        :", len(final_main))
     log("HOOK/SUSPENSE/END  :", len(final_extras))
-    log("TOTAL RECORDS      :", len(final_main) + len(final_extras))
+    log("TOTAL RECORDS      :", len(all_records))
     log("ESTIMATED SPEECH   :", f"{estimate_total:.1f}s")
-    log("MEASURED AUDIO     :", measured_count, "/", len(final_main) + len(final_extras))
+    log("MEASURED TTS AUDIO :", measured_count, "/", len(all_records))
     log("EXTERNAL API CALLS :", 0)
     log("OUTPUT             :", OUTPUT_FILE.relative_to(ROOT))
     log("CHECKPOINT         :", CHECKPOINT_FILE.relative_to(ROOT))
