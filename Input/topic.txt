@@ -61,7 +61,7 @@ STORY_TEXT = """अयान के माथे पर पसीने की �
 PARTS = "7-11"
 
 # Scenes per selected story part.
-SCENES = 13
+SCENES = 7-15
 
 # auto | short | medium | long
 STORY_LENGTH = "auto"
