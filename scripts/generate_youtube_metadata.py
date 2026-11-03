@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Story-grounded Hindi YouTube metadata generation and verification."""
+"""Generate story-grounded Hindi YouTube title, description and tags."""
 
 from __future__ import annotations
 
@@ -18,17 +18,13 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import (
-    load_and_validate,
-    get_format,
-    get_topic,
-    get_title_source,
-    get_parts,
-)
+from input_config import load_and_validate, get_format, get_topic, get_parts
 
 INPUT_TOPIC = ROOT / "Input" / "topic.txt"
-INPUT_STORY = ROOT / "output" / "story" / "ai_story.json"
-STORY_FILE = ROOT / "output" / "story" / "story.json"
+STORY_FILES = (
+    ROOT / "output" / "story" / "ai_story.json",
+    ROOT / "output" / "story" / "story.json",
+)
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
 OUTPUT_DIR = ROOT / "output" / "publish"
@@ -39,7 +35,7 @@ OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 CHECKPOINT = ROOT / "output" / "checkpoints" / "youtube_metadata.json"
 
-VERSION = "youtube-metadata-v20-complete-story-grounded"
+VERSION = "youtube-metadata-v21-complete-story-relevance-verified"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
@@ -48,6 +44,7 @@ MIN_TAGS = 5
 MAX_TAGS = 20
 MAX_TAG_LENGTH = 100
 MIN_STORY_WORDS = 30
+
 RETRYABLE_HTTP = {408, 409, 425, 429, 500, 502, 503, 504}
 PERMANENT_HTTP = {400, 401, 403, 404}
 
@@ -57,7 +54,6 @@ TITLE_KEYS = (
     "story_title",
     "title",
 )
-
 SUMMARY_KEYS = (
     "story_summary",
     "summary",
@@ -65,7 +61,6 @@ SUMMARY_KEYS = (
     "logline",
     "short_summary",
 )
-
 STORY_TEXT_KEYS = (
     "story_text",
     "full_story",
@@ -85,10 +80,10 @@ def log(*values: Any) -> None:
 def clean(value: Any) -> str:
     if not isinstance(value, str):
         return ""
-    return re.sub(r"\s+", " ", value).strip()
+    return re.sub(r"\s+", " ", value).strip().strip("\"'“”‘’")
 
 
-def normalize_multiline(value: Any) -> str:
+def multiline(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     value = value.replace("\ufeff", "")
@@ -113,6 +108,14 @@ def digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def file_hash(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(block)
+    return hasher.hexdigest()
+
+
 def atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -127,7 +130,7 @@ def atomic_write(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def atomic_write_json(path: Path, data: dict) -> None:
+def write_json(path: Path, data: dict) -> None:
     atomic_write(
         path,
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -143,10 +146,15 @@ def read_json(path: Path, required: bool = True) -> dict | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid JSON {path}: {exc}") from exc
+        if required:
+            raise RuntimeError(f"Invalid JSON {path}: {exc}") from exc
+        log("Ignoring unreadable optional JSON:", path, exc)
+        return None
 
     if not isinstance(data, dict):
-        raise RuntimeError(f"Expected JSON object: {path}")
+        if required:
+            raise RuntimeError(f"Expected JSON object: {path}")
+        return None
 
     return data
 
@@ -190,8 +198,10 @@ def ordered_parts(story: dict) -> list[dict]:
 
         try:
             number = int(part.get("part", index))
-        except (TypeError, ValueError):
-            raise RuntimeError(f"Invalid story part number: {index}")
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid story part number at index {index}."
+            ) from exc
 
         indexed.append((number, part))
 
@@ -236,7 +246,7 @@ def extract_part_narration(parts: list[dict]) -> str:
     sections = []
 
     for part in parts:
-        narration = normalize_multiline(
+        narration = multiline(
             part.get("narration")
             or part.get("text")
             or part.get("story")
@@ -249,22 +259,20 @@ def extract_part_narration(parts: list[dict]) -> str:
 
         scenes = part.get("scenes")
 
-        if not isinstance(scenes, list):
-            continue
-
-        for scene in ordered_scenes(scenes):
-            value = normalize_multiline(
-                scene.get("narration")
-                or scene.get("narration_text")
-                or scene.get("text")
-            )
-            if value:
-                sections.append(value)
+        if isinstance(scenes, list):
+            for scene in ordered_scenes(scenes):
+                value = multiline(
+                    scene.get("narration")
+                    or scene.get("narration_text")
+                    or scene.get("text")
+                )
+                if value:
+                    sections.append(value)
 
     return "\n\n".join(sections).strip()
 
 
-def extract_scene_narration(story: dict) -> str:
+def extract_top_level_scenes(story: dict) -> str:
     scenes = story.get("scenes")
 
     if not isinstance(scenes, list):
@@ -277,7 +285,7 @@ def extract_scene_narration(story: dict) -> str:
     sections = []
 
     for scene in ordered_scenes(scenes):
-        value = normalize_multiline(
+        value = multiline(
             scene.get("narration")
             or scene.get("narration_text")
             or scene.get("text")
@@ -288,29 +296,28 @@ def extract_scene_narration(story: dict) -> str:
     return "\n\n".join(sections).strip()
 
 
-def extract_canonical_story(story: dict) -> tuple[str, str]:
-    """Prefer complete canonical narration over summaries or first lines."""
+def extract_complete_story(story: dict) -> tuple[str, str]:
+    """Use complete narration; never substitute a first sentence or summary."""
 
     for obj in nested_objects(story):
         for key in STORY_TEXT_KEYS:
-            value = normalize_multiline(obj.get(key))
+            value = multiline(obj.get(key))
             if word_count(value) >= MIN_STORY_WORDS:
                 return value, key
 
-    parts = ordered_parts(story)
-    reconstructed = extract_part_narration(parts)
+    reconstructed = extract_part_narration(ordered_parts(story))
 
     if word_count(reconstructed) >= MIN_STORY_WORDS:
         return reconstructed, "ordered_parts_and_scenes"
 
-    reconstructed = extract_scene_narration(story)
+    reconstructed = extract_top_level_scenes(story)
 
     if word_count(reconstructed) >= MIN_STORY_WORDS:
         return reconstructed, "ordered_top_level_scenes"
 
     raise RuntimeError(
-        "Complete story narration not found. "
-        "Metadata generation stopped instead of using a partial story."
+        "Complete story narration is missing or too short. "
+        "Metadata generation will not use a partial story."
     )
 
 
@@ -322,19 +329,29 @@ def validate_story_status(story: dict) -> None:
     ]
 
     if statuses and not any(
-        value in {"completed", "complete", "success", "done"}
-        for value in statuses
+        status in {"completed", "complete", "success", "done"}
+        for status in statuses
     ):
-        raise RuntimeError(
-            f"Story is not completed: {statuses}"
-        )
+        raise RuntimeError(f"Story generation is not complete: {statuses}")
 
     for obj in nested_objects(story):
         if obj.get("error"):
             raise RuntimeError("Story JSON contains an error field.")
 
 
-def load_config() -> tuple[dict, str, str]:
+def load_story() -> tuple[dict, Path]:
+    for path in STORY_FILES:
+        data = read_json(path, required=False)
+        if isinstance(data, dict):
+            validate_story_status(data)
+            return data, path
+
+    raise RuntimeError(
+        "Completed ai_story.json or story.json was not found."
+    )
+
+
+def load_config() -> tuple[dict, str, str, int]:
     if not INPUT_TOPIC.is_file():
         raise RuntimeError("Input/topic.txt is missing.")
 
@@ -349,7 +366,12 @@ def load_config() -> tuple[dict, str, str]:
     if mode not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {mode!r}")
 
-    return config, topic, mode
+    parts = get_parts(config)
+
+    if isinstance(parts, bool) or int(parts) < 1:
+        raise RuntimeError("Selected PARTS count is invalid.")
+
+    return config, topic, mode, int(parts)
 
 
 def load_selected_model() -> str:
@@ -357,7 +379,7 @@ def load_selected_model() -> str:
 
     if data.get("status") != "selected":
         raise RuntimeError(
-            "Selected Gemini model is not confirmed in selected_model.json."
+            "Selected model is not confirmed in selected_model.json."
         )
 
     model = clean(data.get("model"))
@@ -368,7 +390,11 @@ def load_selected_model() -> str:
     return model
 
 
-def prepare_story(story: dict, selected_mode: str, config: dict) -> dict:
+def prepare_story(
+    story: dict,
+    mode: str,
+    configured_parts: int,
+) -> dict:
     validate_story_status(story)
 
     story_mode = clean(story.get("format")).lower()
@@ -376,12 +402,12 @@ def prepare_story(story: dict, selected_mode: str, config: dict) -> dict:
     if story_mode and story_mode not in {"short", "full"}:
         raise RuntimeError(f"Invalid story format: {story_mode!r}")
 
-    if story_mode and story_mode != selected_mode:
+    if story_mode and story_mode != mode:
         raise RuntimeError(
-            f"Story format mismatch: input={selected_mode}, story={story_mode}"
+            f"Story format mismatch: input={mode}, story={story_mode}."
         )
 
-    story_text, source = extract_canonical_story(story)
+    story_text, source = extract_complete_story(story)
     parts = ordered_parts(story)
 
     existing_title = ""
@@ -391,19 +417,17 @@ def prepare_story(story: dict, selected_mode: str, config: dict) -> dict:
         existing_title = existing_title or first_text(obj, TITLE_KEYS)
         summary = summary or first_text(obj, SUMMARY_KEYS)
 
-    actual_words = word_count(story_text)
+    count = word_count(story_text)
 
-    if actual_words < MIN_STORY_WORDS:
+    if count < MIN_STORY_WORDS:
         raise RuntimeError(
-            f"Story is too short for metadata: {actual_words} words."
+            f"Story is too short for metadata: {count} words."
         )
 
-    configured_parts = int(get_parts(config))
-
-    if parts and configured_parts > 0 and len(parts) != configured_parts:
+    if parts and len(parts) != configured_parts:
         raise RuntimeError(
             f"Story part count mismatch: configured={configured_parts}, "
-            f"story={len(parts)}"
+            f"story={len(parts)}."
         )
 
     return {
@@ -411,8 +435,7 @@ def prepare_story(story: dict, selected_mode: str, config: dict) -> dict:
         "source": source,
         "existing_title": existing_title,
         "summary": summary,
-        "character_count": len(story_text),
-        "word_count": actual_words,
+        "word_count": count,
         "part_count": len(parts),
         "story_fingerprint": hashlib.sha256(
             story_text.encode("utf-8")
@@ -428,10 +451,10 @@ def normalize_title(value: Any) -> str:
         raise RuntimeError("Generated YouTube title is empty.")
 
     if len(title) > MAX_TITLE_CHARS:
-        shortened = title[:MAX_TITLE_CHARS]
-        if " " in shortened:
-            shortened = shortened.rsplit(" ", 1)[0]
-        title = shortened.rstrip(" ,.!?;:।")
+        title = title[:MAX_TITLE_CHARS]
+        if " " in title:
+            title = title.rsplit(" ", 1)[0]
+        title = title.rstrip(" ,.!?;:।")
 
     if not title:
         raise RuntimeError("Generated title cannot fit YouTube limit.")
@@ -486,12 +509,12 @@ def normalize_tags(raw: Any) -> list[str]:
         seen.add(key)
         tags.append(tag)
 
-        if len(tags) >= MAX_TAGS:
+        if len(tags) == MAX_TAGS:
             break
 
     if len(tags) < MIN_TAGS:
         raise RuntimeError(
-            f"Only {len(tags)} valid unique tags; minimum is {MIN_TAGS}."
+            f"Only {len(tags)} unique tags; minimum is {MIN_TAGS}."
         )
 
     return tags
@@ -507,19 +530,15 @@ def validate_metadata(
     if not isinstance(data, dict):
         raise RuntimeError("Metadata response is not a JSON object.")
 
-    title = normalize_title(data.get("title"))
-    description = normalize_description(data.get("description"))
-    tags = normalize_tags(data.get("tags"))
-
     return {
         "status": "completed",
         "version": VERSION,
         "format": mode,
         "topic": topic,
         "model": model,
-        "title": title,
-        "description": description,
-        "tags": tags,
+        "title": normalize_title(data.get("title")),
+        "description": normalize_description(data.get("description")),
+        "tags": normalize_tags(data.get("tags")),
         "input_fingerprint": fingerprint,
     }
 
@@ -533,15 +552,14 @@ def make_fingerprint(
 ) -> str:
     relevant_config = {
         "FORMAT": mode,
-        "AUDIENCE": config.get("AUDIENCE"),
-        "CAPTIONS": config.get("CAPTIONS"),
         "TITLE": config.get("TITLE"),
         "TOPIC": config.get("TOPIC"),
         "PARTS": config.get("PARTS"),
         "PARTS_SELECTED": config.get("PARTS_SELECTED"),
+        "AUDIENCE": config.get("AUDIENCE"),
     }
 
-    payload = {
+    return digest({
         "version": VERSION,
         "topic": topic,
         "story_text": story["text"],
@@ -552,137 +570,84 @@ def make_fingerprint(
         "model": model,
         "format": mode,
         "config": relevant_config,
-    }
-
-    return digest(payload)
-
-
-def verify_saved_text(path: Path, expected: str, label: str) -> None:
-    if not path.is_file():
-        raise RuntimeError(f"Saved {label} file is missing.")
-
-    actual = path.read_text(encoding="utf-8-sig").strip()
-
-    if actual != expected.strip():
-        raise RuntimeError(f"Saved {label} verification failed.")
-
-
-def build_combined_text(metadata: dict) -> str:
-    title = normalize_title(metadata.get("title"))
-    description = normalize_description(metadata.get("description"))
-    tags = normalize_tags(metadata.get("tags"))
-
-    return (
-        f"TITLE\n{title}\n\n"
-        f"DESCRIPTION\n{description}\n\n"
-        f"TAGS\n{', '.join(tags)}\n"
-    )
-
-
-def verify_output_files(metadata: dict) -> None:
-    expected = {
-        OUTPUT_TITLE: metadata["title"],
-        OUTPUT_DESCRIPTION: metadata["description"],
-        OUTPUT_TEXT: build_combined_text(metadata),
-    }
-
-    for path, value in expected.items():
-        verify_saved_text(path, value, path.name)
-
-    try:
-        saved_tags = [
-            clean(item)
-            for item in OUTPUT_TAGS.read_text(encoding="utf-8-sig").splitlines()
-            if clean(item)
-        ]
-    except (OSError, UnicodeError) as exc:
-        raise RuntimeError(f"Cannot read saved tags: {exc}") from exc
-
-    if saved_tags != metadata["tags"]:
-        raise RuntimeError("Saved YouTube tags verification failed.")
-
-    saved_json = read_json(OUTPUT_JSON)
-
-    if saved_json != metadata:
-        raise RuntimeError("Saved metadata JSON does not match generated data.")
-
-
-def save_outputs(metadata: dict) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    validated = validate_metadata(
-        metadata,
-        metadata["topic"],
-        metadata["model"],
-        metadata["input_fingerprint"],
-        metadata["format"],
-    )
-
-    atomic_write_json(OUTPUT_JSON, validated)
-    atomic_write(OUTPUT_TITLE, validated["title"] + "\n")
-    atomic_write(
-        OUTPUT_DESCRIPTION,
-        validated["description"] + "\n",
-    )
-    atomic_write(
-        OUTPUT_TAGS,
-        "\n".join(validated["tags"]) + "\n",
-    )
-    atomic_write(OUTPUT_TEXT, build_combined_text(validated))
-    atomic_write_json(CHECKPOINT, {
-        "status": "completed",
-        "version": VERSION,
-        "input_fingerprint": validated["input_fingerprint"],
-        "metadata_sha256": hashlib.sha256(
-            json.dumps(
-                validated,
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest(),
     })
 
-    verify_output_files(validated)
 
+def build_prompt(topic: str, story: dict, mode: str) -> str:
+    if mode == "short":
+        format_instruction = """
+यह केवल YouTube SHORT वीडियो है।
+Title और Description में इसे Short के रूप में ही प्रस्तुत करें।
+Full movie, full-length video या लंबी फिल्म न लिखें।
+"""
+    else:
+        format_instruction = """
+यह FULL-LENGTH कहानी वीडियो है।
+इसे YouTube Short न बताएं।
+पूरी कहानी के केंद्रीय संघर्ष और उसके परिणाम का सही परिचय दें।
+"""
 
-def load_cache(
-    fingerprint: str,
-    topic: str,
-    model: str,
-    mode: str,
-) -> dict | None:
-    data = read_json(OUTPUT_JSON, required=False)
+    return f"""
+आप Katha Lok AI के Hindi YouTube metadata editor हैं।
+पूरी कहानी आरंभ से अंत तक पढ़कर ही metadata बनाएं।
 
-    if not data:
-        return None
+USER TOPIC:
+{topic or "उपलब्ध नहीं"}
 
-    try:
-        if data.get("status") != "completed":
-            return None
-        if data.get("version") != VERSION:
-            return None
-        if data.get("input_fingerprint") != fingerprint:
-            return None
-        if data.get("model") != model:
-            return None
-        if data.get("format") != mode:
-            return None
+EXISTING STORY TITLE:
+{story["existing_title"] or "उपलब्ध नहीं"}
 
-        metadata = validate_metadata(
-            data,
-            topic,
-            model,
-            fingerprint,
-            mode,
-        )
+STORY SUMMARY:
+{story["summary"] or "अलग summary उपलब्ध नहीं"}
 
-        verify_output_files(metadata)
-        return metadata
+VIDEO FORMAT:
+{mode.upper()}
 
-    except Exception as exc:
-        log("Metadata cache rejected:", exc)
-        return None
+FORMAT INSTRUCTIONS:
+{format_instruction}
 
+COMPLETE STORY:
+<complete_story>
+{story["text"]}
+</complete_story>
+
+अनिवार्य नियम:
+
+1. पूरी कहानी आरंभ से अंत तक पढ़ें।
+2. केवल पहली पंक्ति, शुरुआती वाक्य या USER TOPIC से Title न बनाएं।
+3. पूरी कहानी का सार, मुख्य पात्र, संघर्ष, कारण, turning point और ending समझें।
+4. Title कहानी के वास्तविक केंद्रीय विचार और महत्वपूर्ण घटना पर आधारित हो।
+5. मौजूदा story title गलत या अधूरा हो तो उसे दोहराने के बजाय बेहतर Title बनाएं।
+6. कहानी में मौजूद न होने वाले पात्र, घटनाएं, स्थान, रहस्य या twist न जोड़ें।
+7. Description पूरी कहानी के वास्तविक कथानक पर आधारित हो।
+8. झूठा निष्कर्ष या कहानी में न मौजूद घटना न लिखें।
+9. Ending का अनावश्यक spoiler न दें; मूल संघर्ष स्पष्ट रखें।
+10. Hook या suspense का दावा तभी करें जब कहानी में वास्तव में मौजूद हो।
+11. Tags केवल कहानी के पात्रों, विषय, genre, घटनाओं, भाषा और वास्तविक विषयवस्तु से संबंधित हों।
+12. असंबंधित trending keywords, दूसरे creators, brands, लोकप्रिय फिल्मों या unrelated topics के नाम न जोड़ें।
+13. कम से कम 5 और अधिकतम 20 अलग-अलग relevant tags दें।
+14. Hindi और जरूरी English search terms का स्वाभाविक मिश्रण रखें।
+15. नकली URL, social links, credits, sources या channel details न बनाएं।
+16. असंबंधित hashtags न जोड़ें।
+17. स्वाभाविक Hindi Devanagari भाषा का प्रयोग करें।
+18. Title अधिकतम 100 characters और Description अधिकतम 5000 characters हो।
+19. चुने हुए FORMAT से अलग video format का दावा न करें।
+20. Description में कहानी का सार और दर्शक को मिलने वाला वास्तविक अनुभव लिखें।
+21. केवल JSON लौटाएं; अतिरिक्त टिप्पणी नहीं।
+
+JSON:
+{{
+  "title": "पूरी कहानी के सार पर आधारित YouTube title",
+  "description": "कहानी पर आधारित सटीक YouTube description",
+  "tags": [
+    "कहानी से संबंधित tag 1",
+    "कहानी से संबंधित tag 2",
+    "कहानी से संबंधित tag 3",
+    "कहानी से संबंधित tag 4",
+    "कहानी से संबंधित tag 5"
+  ]
+}}
+"""
 
 def extract_response_text(result: dict) -> str:
     candidates = result.get("candidates")
@@ -690,7 +655,7 @@ def extract_response_text(result: dict) -> str:
     if not isinstance(candidates, list) or not candidates:
         feedback = result.get("promptFeedback", {})
         raise RuntimeError(
-            f"Gemini returned no metadata candidates: {feedback}"
+            f"Gemini returned no candidates: {feedback}"
         )
 
     candidate = candidates[0]
@@ -717,7 +682,8 @@ def extract_response_text(result: dict) -> str:
 
     if not response:
         raise RuntimeError(
-            f"Gemini returned empty metadata. Finish reason={finish_reason!r}"
+            f"Gemini returned empty metadata. "
+            f"Finish reason={finish_reason!r}"
         )
 
     return response
@@ -753,85 +719,6 @@ def parse_metadata_json(response: str) -> dict:
         raise RuntimeError("Gemini metadata must be a JSON object.")
 
     return data
-
-
-def build_prompt(topic: str, story: dict, mode: str) -> str:
-    if mode == "short":
-        format_instruction = """
-यह केवल YouTube SHORT वीडियो है।
-- Title संक्षिप्त हो और पूरी कहानी के केंद्रीय संघर्ष/रहस्य पर आधारित हो।
-- Description में इसे केवल Short के रूप में प्रस्तुत करें।
-- Full movie, full-length video या लंबी फिल्म न लिखें।
-"""
-    else:
-        format_instruction = """
-यह FULL-LENGTH कहानी वीडियो है।
-- Title पूरी कहानी के केंद्रीय संघर्ष, पात्र और परिणाम के सार पर आधारित हो।
-- Description पूरी कहानी का सटीक परिचय दे।
-- इसे YouTube Short न बताएं।
-"""
-
-    return f"""
-आप Katha Lok AI के Hindi YouTube metadata editor हैं।
-पूरी कहानी पढ़कर ही Title, Description और Tags बनाएं।
-
-USER TOPIC:
-{topic or "उपलब्ध नहीं"}
-
-EXISTING STORY TITLE:
-{story["existing_title"] or "उपलब्ध नहीं"}
-
-AVAILABLE STORY SUMMARY:
-{story["summary"] or "अलग summary उपलब्ध नहीं"}
-
-VIDEO FORMAT:
-{mode.upper()}
-
-FORMAT RULES:
-{format_instruction}
-
-COMPLETE STORY:
-<complete_story>
-{story["text"]}
-</complete_story>
-
-अनिवार्य नियम:
-
-1. पूरी कहानी आरंभ से अंत तक पढ़ें।
-2. केवल पहली पंक्ति, शुरुआती वाक्य या USER TOPIC से Title न बनाएं।
-3. कहानी का पूरा सार समझकर मुख्य पात्र, संघर्ष, कारण, turning point और ending पहचानें।
-4. Title कहानी के वास्तविक केंद्रीय विचार और महत्वपूर्ण घटना से बने।
-5. यदि मौजूदा Title कहानी का सही सार नहीं बताता तो उसे दोहराने के बजाय बेहतर Title बनाएं।
-6. कहानी में मौजूद न होने वाले पात्र, घटनाएं, स्थान, रहस्य या twist न जोड़ें।
-7. Description कहानी के वास्तविक कथानक पर आधारित हो।
-8. Description में कहानी का झूठा निष्कर्ष या ऐसी घटना न लिखें जो कहानी में नहीं है।
-9. जरूरत से ज्यादा ending spoiler न दें; लेकिन कहानी का मूल संघर्ष स्पष्ट रखें।
-10. Hook या suspense का दावा केवल तभी करें जब कहानी में वास्तव में मौजूद हो।
-11. Tags कहानी के पात्रों, विषय, genre, घटनाओं और भाषा से संबंधित हों।
-12. असंबंधित trending keywords, दूसरे creators, brands या लोकप्रिय फिल्मों के नाम न जोड़ें।
-13. कम से कम 5 और अधिकतम 20 अलग-अलग relevant tags दें।
-14. Hindi और जरूरी English search terms का स्वाभाविक मिश्रण रखें।
-15. नकली URL, social links, credits, sources या channel details न बनाएं।
-16. असंबंधित hashtags न जोड़ें।
-17. भाषा स्वाभाविक Hindi Devanagari हो; जरूरी English शब्द रख सकते हैं।
-18. Title अधिकतम 100 characters और Description अधिकतम 5000 characters का हो।
-19. चुने हुए FORMAT से अलग video format का दावा न करें।
-20. Description में कहानी का सार, दर्शक को मिलने वाला अनुभव और relevant context रखें।
-21. केवल JSON लौटाएं; कोई अतिरिक्त टिप्पणी नहीं।
-
-JSON:
-{{
-  "title": "पूरी कहानी के सार पर आधारित YouTube title",
-  "description": "कहानी पर आधारित सटीक YouTube description",
-  "tags": [
-    "कहानी से संबंधित tag 1",
-    "कहानी से संबंधित tag 2",
-    "कहानी से संबंधित tag 3",
-    "कहानी से संबंधित tag 4",
-    "कहानी से संबंधित tag 5"
-  ]
-}}
-"""
 
 
 def generate_metadata(
@@ -953,15 +840,183 @@ def generate_metadata(
     )
 
 
-def main() -> None:
-    config, topic, mode = load_config()
+def build_combined_text(metadata: dict) -> str:
+    return (
+        f"TITLE\n{metadata['title']}\n\n"
+        f"DESCRIPTION\n{metadata['description']}\n\n"
+        f"TAGS\n{', '.join(metadata['tags'])}\n"
+    )
 
-    story_data = read_json(INPUT_STORY)
+
+def verify_saved_text(
+    path: Path,
+    expected: str,
+    label: str,
+) -> None:
+    if not path.is_file():
+        raise RuntimeError(f"Saved {label} file is missing.")
+
+    actual = path.read_text(encoding="utf-8-sig").strip()
+
+    if actual != expected.strip():
+        raise RuntimeError(f"Saved {label} verification failed.")
+
+
+def verify_output_files(metadata: dict) -> None:
+    verify_saved_text(
+        OUTPUT_TITLE,
+        metadata["title"],
+        "YouTube title",
+    )
+
+    verify_saved_text(
+        OUTPUT_DESCRIPTION,
+        metadata["description"],
+        "YouTube description",
+    )
+
+    verify_saved_text(
+        OUTPUT_TEXT,
+        build_combined_text(metadata),
+        "combined metadata",
+    )
+
+    if not OUTPUT_TAGS.is_file():
+        raise RuntimeError("YouTube tags file is missing.")
+
+    saved_tags = [
+        clean(item)
+        for item in OUTPUT_TAGS.read_text(
+            encoding="utf-8-sig"
+        ).splitlines()
+        if clean(item)
+    ]
+
+    if saved_tags != metadata["tags"]:
+        raise RuntimeError("Saved YouTube tags verification failed.")
+
+    saved_json = read_json(OUTPUT_JSON)
+
+    if saved_json != metadata:
+        raise RuntimeError(
+            "Saved YouTube metadata JSON does not match generated data."
+        )
+
+    checkpoint = read_json(CHECKPOINT)
+
+    if checkpoint.get("status") != "completed":
+        raise RuntimeError("YouTube metadata checkpoint is incomplete.")
+
+    if checkpoint.get("input_fingerprint") != metadata["input_fingerprint"]:
+        raise RuntimeError("Metadata checkpoint fingerprint mismatch.")
+
+    expected_hash = digest(metadata)
+
+    if checkpoint.get("metadata_sha256") != expected_hash:
+        raise RuntimeError("Metadata checkpoint SHA256 mismatch.")
+
+
+def save_outputs(metadata: dict) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
+
+    validated = validate_metadata(
+        metadata,
+        metadata["topic"],
+        metadata["model"],
+        metadata["input_fingerprint"],
+        metadata["format"],
+    )
+
+    # Write individual files before marking the checkpoint complete.
+    write_json(OUTPUT_JSON, validated)
+    atomic_write(
+        OUTPUT_TITLE,
+        validated["title"] + "\n",
+    )
+    atomic_write(
+        OUTPUT_DESCRIPTION,
+        validated["description"] + "\n",
+    )
+    atomic_write(
+        OUTPUT_TAGS,
+        "\n".join(validated["tags"]) + "\n",
+    )
+    atomic_write(
+        OUTPUT_TEXT,
+        build_combined_text(validated),
+    )
+
+    checkpoint = {
+        "status": "completed",
+        "version": VERSION,
+        "input_fingerprint": validated["input_fingerprint"],
+        "metadata_sha256": digest(validated),
+        "output_files": {
+            "json": OUTPUT_JSON.relative_to(ROOT).as_posix(),
+            "title": OUTPUT_TITLE.relative_to(ROOT).as_posix(),
+            "description": OUTPUT_DESCRIPTION.relative_to(ROOT).as_posix(),
+            "tags": OUTPUT_TAGS.relative_to(ROOT).as_posix(),
+            "combined": OUTPUT_TEXT.relative_to(ROOT).as_posix(),
+        },
+    }
+
+    write_json(CHECKPOINT, checkpoint)
+    verify_output_files(validated)
+
+
+def load_cache(
+    fingerprint: str,
+    topic: str,
+    model: str,
+    mode: str,
+) -> dict | None:
+    data = read_json(OUTPUT_JSON, required=False)
+
+    if not isinstance(data, dict):
+        return None
+
+    try:
+        if data.get("status") != "completed":
+            return None
+
+        if data.get("version") != VERSION:
+            return None
+
+        if data.get("input_fingerprint") != fingerprint:
+            return None
+
+        if data.get("model") != model:
+            return None
+
+        if data.get("format") != mode:
+            return None
+
+        metadata = validate_metadata(
+            data,
+            topic,
+            model,
+            fingerprint,
+            mode,
+        )
+
+        verify_output_files(metadata)
+        return metadata
+
+    except Exception as exc:
+        log("Existing metadata cache rejected:", exc)
+        return None
+
+
+def main() -> None:
+    config, topic, mode, configured_parts = load_config()
+
+    story_data, story_path = load_story()
 
     prepared = prepare_story(
         story_data,
         mode,
-        config,
+        configured_parts,
     )
 
     model = load_selected_model()
@@ -1000,7 +1055,8 @@ def main() -> None:
         log("Generating metadata from complete story.")
         log("Selected model:", model)
         log("Format:", mode)
-        log("Story source:", prepared["source"])
+        log("Story source:", story_path.relative_to(ROOT))
+        log("Story text source:", prepared["source"])
         log("Story word count:", prepared["word_count"])
         log("Story part count:", prepared["part_count"])
 
@@ -1025,12 +1081,13 @@ def main() -> None:
     log("Format:", mode)
     log("Title:", metadata["title"])
     log("Description characters:", len(metadata["description"]))
-    log("Relevant tags:", len(metadata["tags"]))
-    log("JSON:", OUTPUT_JSON)
-    log("TITLE:", OUTPUT_TITLE)
-    log("DESCRIPTION:", OUTPUT_DESCRIPTION)
-    log("TAGS:", OUTPUT_TAGS)
-    log("COMBINED:", OUTPUT_TEXT)
+    log("Relevant unique tags:", len(metadata["tags"]))
+    log("JSON:", OUTPUT_JSON.relative_to(ROOT))
+    log("TITLE:", OUTPUT_TITLE.relative_to(ROOT))
+    log("DESCRIPTION:", OUTPUT_DESCRIPTION.relative_to(ROOT))
+    log("TAGS:", OUTPUT_TAGS.relative_to(ROOT))
+    log("COMBINED:", OUTPUT_TEXT.relative_to(ROOT))
+    log("CHECKPOINT:", CHECKPOINT.relative_to(ROOT))
 
 
 if __name__ == "__main__":
@@ -1040,5 +1097,8 @@ if __name__ == "__main__":
         log("YOUTUBE METADATA: CANCELLED")
         raise SystemExit(130)
     except Exception as exc:
-        log("YOUTUBE METADATA: FAILED:", f"{type(exc).__name__}: {exc}")
+        log(
+            "YOUTUBE METADATA: FAILED:",
+            f"{type(exc).__name__}: {exc}",
+        )
         raise SystemExit(1)
