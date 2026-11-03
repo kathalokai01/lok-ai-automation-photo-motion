@@ -22,14 +22,15 @@ from input_config import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-INPUT_FILE = ROOT / "output" / "story" / "story.json"
+STORY_FILE = ROOT / "output" / "story" / "story.json"
+PLAN_FILE = ROOT / "output" / "story" / "story_plan.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "ai_story.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v12-strict-plan-role-validation"
+VERSION = "ai-story-v13-separate-story-and-plan-inputs"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -208,22 +209,22 @@ def validate_source_extra(
         )
 
 
-def validate_source_plan(story: dict, expected_format: str):
-    if story.get("status") not in {"planned", "completed", "in_progress"}:
+def validate_source_plan(plan: dict, expected_format: str):
+    if plan.get("status") not in {"planned", "completed", "in_progress"}:
         raise RuntimeError(
-            f"Invalid story-plan status: {story.get('status')!r}"
+            f"Invalid story-plan status: {plan.get('status')!r}"
         )
 
-    if clean(story.get("format")).lower() != expected_format:
+    if clean(plan.get("format")).lower() != expected_format:
         raise RuntimeError(
             "Story-plan format does not match Input/topic.txt."
         )
 
-    parts = story.get("parts")
+    parts = plan.get("parts")
     if not isinstance(parts, list) or not parts:
         raise RuntimeError("Story plan has no parts.")
 
-    if story.get("parts_count") not in (None, len(parts)):
+    if plan.get("parts_count") not in (None, len(parts)):
         raise RuntimeError("Story-plan parts_count mismatch.")
 
     all_ids = set()
@@ -292,7 +293,7 @@ def validate_source_plan(story: dict, expected_format: str):
                     f"Unexpected {key} in part {part_number}."
                 )
 
-    if story.get("total_scenes") not in (None, total_main_scenes):
+    if plan.get("total_scenes") not in (None, total_main_scenes):
         raise RuntimeError("Story-plan total_scenes mismatch.")
 
     return len(parts), total_main_scenes
@@ -608,6 +609,7 @@ Extra record का scene_id और role source plan से हूबहू म�
 केवल JSON लौटाएँ। JSON के बाहर कोई टिप्पणी न दें।
 """
 
+
 def validate_text_fields(record: Any, label: str) -> dict:
     if not isinstance(record, dict):
         raise ValueError(f"{label} must be a JSON object.")
@@ -704,7 +706,6 @@ def validate_generated_scenes(
             )
 
     return result
-
 
 def validate_extra_record(
     generated: Any,
@@ -937,7 +938,7 @@ def source_part_signature(part: dict) -> str:
 
 
 def build_generation_signature(
-    source_story: dict,
+    source_data: dict,
     config: dict,
     topic: str,
     story_text: str,
@@ -945,7 +946,7 @@ def build_generation_signature(
 ) -> str:
     return stable_hash({
         "version": VERSION,
-        "source_story": source_story,
+        "source_data": source_data,
         "config": config,
         "topic": topic,
         "story_text": story_text,
@@ -1054,10 +1055,10 @@ def find_existing_part(parts: list, part_number: int):
 
 def validate_final_output(
     ai_story: dict,
-    source_story: dict,
+    source_plan: dict,
     config: dict,
 ):
-    source_parts = source_story["parts"]
+    source_parts = source_plan["parts"]
     output_parts = ai_story.get("parts")
 
     if not isinstance(output_parts, list):
@@ -1204,20 +1205,31 @@ def main() -> None:
     input_config = load_input_config()
     config = build_config()
     model = load_selected_model()
-    source_story = read_json(INPUT_FILE)
+
+    # कहानी का मूल पाठ story.json से पढ़ें।
+    source_story = read_json(STORY_FILE)
+
+    # Scene IDs, Hook, Suspense और Resolution केवल story_plan.json से पढ़ें।
+    source_plan = read_json(PLAN_FILE)
 
     total_parts, total_scenes = validate_source_plan(
-        source_story,
+        source_plan,
         config["format"],
     )
 
-    topic = clean(get_topic(input_config)) or clean(
-        source_story.get("topic")
-    ) or clean(source_story.get("title")) or "कहानी"
+    topic = (
+        clean(get_topic(input_config))
+        or clean(source_story.get("topic"))
+        or clean(source_story.get("final_title"))
+        or clean(source_story.get("title"))
+        or clean(source_plan.get("final_title"))
+        or "कहानी"
+    )
 
-    story_text = clean(get_story_text(input_config)) or clean(
-        source_story.get("corrected_complete_story")
-        or source_story.get("story_text")
+    story_text = (
+        clean(get_story_text(input_config))
+        or clean(source_story.get("corrected_complete_story"))
+        or clean(source_story.get("story_text"))
     )
 
     if not story_text:
@@ -1225,8 +1237,18 @@ def main() -> None:
             "Final corrected story text is missing from story.json/Input."
         )
 
+    source_story_signature = stable_hash(source_story)
+    source_plan_signature = stable_hash(source_plan)
+
     signature = build_generation_signature(
-        source_story, config, topic, story_text, model
+        {
+            "story_signature": source_story_signature,
+            "plan_signature": source_plan_signature,
+        },
+        config,
+        topic,
+        story_text,
+        model,
     )
 
     existing = read_json(OUTPUT_FILE, required=False)
@@ -1234,13 +1256,15 @@ def main() -> None:
         isinstance(existing, dict)
         and existing.get("version") == VERSION
         and existing.get("generation_signature") == signature
+        and existing.get("source_story_signature") == source_story_signature
+        and existing.get("source_plan_signature") == source_plan_signature
         and existing.get("status") in {"in_progress", "completed"}
         and config["resume_enabled"]
     )
 
     if resumable:
         ai_story = existing
-        log("Matching generation checkpoint found.")
+        log("Matching story and plan generation checkpoint found.")
     else:
         ai_story = {
             "version": VERSION,
@@ -1254,7 +1278,8 @@ def main() -> None:
             "scene_duration": config["scene_duration"],
             "model": model,
             "generation_signature": signature,
-            "source_story_signature": stable_hash(source_story),
+            "source_story_signature": source_story_signature,
+            "source_plan_signature": source_plan_signature,
             "input_config": config,
             "parts": [],
         }
@@ -1271,7 +1296,8 @@ def main() -> None:
         "scene_duration": config["scene_duration"],
         "model": model,
         "generation_signature": signature,
-        "source_story_signature": stable_hash(source_story),
+        "source_story_signature": source_story_signature,
+        "source_plan_signature": source_plan_signature,
         "input_config": config,
     })
 
@@ -1281,6 +1307,8 @@ def main() -> None:
     log(f"Format: {config['format']}")
     log(f"Parts: {total_parts}")
     log(f"Main scenes: {total_scenes}")
+    log("Story source: story.json")
+    log("Scene and role source: story_plan.json")
     log("Hook/Suspense/Resolution: separate role records")
     log("=" * 58)
 
@@ -1288,7 +1316,7 @@ def main() -> None:
     if not isinstance(cached_parts, list):
         cached_parts = []
 
-    for source_part in source_story["parts"]:
+    for source_part in source_plan["parts"]:
         part_number = source_part["part"]
         cached = find_existing_part(cached_parts, part_number)
 
@@ -1333,7 +1361,7 @@ def main() -> None:
 
     completed_parts, completed_scenes, narrations = validate_final_output(
         ai_story,
-        source_story,
+        source_plan,
         config,
     )
 
