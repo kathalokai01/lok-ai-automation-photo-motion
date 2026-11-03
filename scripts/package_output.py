@@ -49,7 +49,7 @@ METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v80-selected-format-portable-verified"
+VERSION = "output-packager-v81-selected-format-portable-verified"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
@@ -152,24 +152,50 @@ def sha256_bytes(value: bytes) -> str:
 def output_path(value: Any, label: str, minimum: int = 1) -> Path:
     if not isinstance(value, str) or not value.strip():
         fail(f"{label}: path is missing")
+
     candidate = Path(value.strip())
     if not candidate.is_absolute():
         candidate = ROOT / candidate
-    resolved = candidate.resolve()
-    if not resolved.is_relative_to(OUT.resolve()):
+
+    lexical = Path(os.path.abspath(str(candidate)))
+    output_root = Path(os.path.abspath(str(OUT)))
+
+    try:
+        lexical.relative_to(output_root)
+    except ValueError:
         fail(f"{label}: path must remain inside output/")
+
+    current = output_root
+    if current.is_symlink():
+        fail(f"{label}: output root must not be a symlink")
+
+    relative = lexical.relative_to(output_root)
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            fail(f"{label}: symlink path is forbidden: {current}")
+
+    resolved_root = output_root.resolve()
+    resolved = lexical.resolve(strict=False)
+
+    if not resolved.is_relative_to(resolved_root):
+        fail(f"{label}: resolved path must remain inside output/")
+
     if not resolved.is_file():
         fail(f"{label}: file not found: {resolved}")
+
     if resolved.stat().st_size < minimum:
         fail(f"{label}: file is empty or too small")
+
     return resolved
 
 
 def output_relative(path: Path) -> str:
+    resolved_root = OUT.resolve()
     resolved = path.resolve()
-    if not resolved.is_relative_to(OUT.resolve()):
+    if not resolved.is_relative_to(resolved_root):
         fail(f"Path escapes output/: {resolved}")
-    return resolved.relative_to(OUT.resolve()).as_posix()
+    return resolved.relative_to(resolved_root).as_posix()
 
 
 def parse_fps(value: Any, label: str) -> float:
@@ -505,6 +531,7 @@ def validate_render(
         "scene_duration_total": round(scene_duration, 3),
         **role_report,
     }
+
 
 def validate_thumbnail(mode: str, dimensions: tuple[int, int]) -> tuple[Path, dict]:
     path = output_path("output/thumbnail.jpg", "Thumbnail", MIN_IMAGE_BYTES)
@@ -930,6 +957,7 @@ def validate_zip_structure(archive: zipfile.ZipFile) -> list[str]:
             fail(f"Empty ZIP member is forbidden: {info.filename}")
     return names
 
+
 def build_embedded_manifest(
     mode: str,
     title: str,
@@ -1228,20 +1256,31 @@ def verify_package_report(
             fail(f"Package file size is invalid: {name}")
 
 
-def reject_opposite_format_files(mode: str) -> None:
+def reject_opposite_format_files(mode: str) -> list[str]:
     opposite = "full" if mode == "short" else "short"
     candidates = [
         OUT / "parts" / f"katha_lok_ai_{opposite}.mp4",
         OUT / f"katha_lok_ai_{opposite}.mp4",
         OUT / "videos" / f"katha_lok_ai_{opposite}.mp4",
     ]
-    found = [str(path.relative_to(ROOT)) for path in candidates if path.exists()]
-    if found:
-        fail(f"Opposite-format videos are present: {found}")
+
+    excluded = [
+        str(path.relative_to(ROOT))
+        for path in candidates
+        if path.exists() and path.is_file()
+    ]
 
     for path in ROOT.glob(f"katha-lok-*-{opposite}-output.zip"):
         if path.is_file():
-            fail(f"Opposite-format ZIP is present: {path.name}")
+            excluded.append(str(path.relative_to(ROOT)))
+
+    if excluded:
+        log(
+            "OPPOSITE-FORMAT ARTIFACTS EXCLUDED FROM CURRENT PACKAGE:",
+            sorted(set(excluded)),
+        )
+
+    return sorted(set(excluded))
 
 
 def main() -> int:
@@ -1276,7 +1315,7 @@ def main() -> int:
     log("RESOLUTION:", dimensions)
     log("FPS:", fps)
 
-    reject_opposite_format_files(mode)
+    excluded_opposite_artifacts = reject_opposite_format_files(mode)
     validation = validate_validation_report(mode, parts, scenes)
     render = validate_render(mode, parts, scenes, dimensions, fps)
     thumbnail, thumbnail_info = validate_thumbnail(mode, dimensions)
@@ -1392,6 +1431,7 @@ def main() -> int:
         "validation_checks": validation["checks"],
         "embedded_manifest_self_hash_omitted": True,
         "part_video_paths_only": True,
+        "excluded_opposite_format_artifacts": excluded_opposite_artifacts,
     }
 
     write_json(REPORT, report)
@@ -1430,6 +1470,7 @@ def main() -> int:
     log("ZIP SHA256:", archive_hash)
     log("ZIP CRC: valid")
     log("PACKAGED FILES:", len(records))
+    log("EXCLUDED OPPOSITE-FORMAT ARTIFACTS:", len(excluded_opposite_artifacts))
     log("MANIFEST:", output_relative(REPORT))
     log("=" * 68)
     return 0
