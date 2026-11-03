@@ -54,13 +54,26 @@ STORY_TEXT = """अयान के माथे पर पसीने की �
 # STORY STRUCTURE
 # ============================================================
 
+# PARTS:
 # Fixed count example: PARTS = 4
 # Inclusive range examples: "2-8", "4-6", "7-11", "12-18"
 # Range selection is finalized from corrected story word count.
 # Reversed ranges such as "11-8" are invalid.
 PARTS = "7-11"
 
-# Scenes per selected story part.
+# SCENES:
+# Min-Max range per story Part.
+# दोनों संख्याएँ Inclusive हैं।
+# उदाहरण: SCENES = 7-15
+# पहला अंक = प्रत्येक Part के लिए न्यूनतम Scene Count।
+# दूसरा अंक = प्रत्येक Part के लिए अधिकतम Scene Count।
+# प्रत्येक Part का Actual Scene Count इस Range के भीतर अलग हो सकता है।
+# Scene Count को सभी Parts के लिए समान रखना अनिवार्य नहीं है।
+# Scene का विभाजन पूर्ण वाक्य, अर्थपूर्ण Clause और संबंधित छोटे वाक्यों
+# के समूह के आधार पर होगा।
+# Maximum से अधिक Scene-worthy Units होने पर शेष पूरे वाक्य
+# अगले Part में कहानी के क्रम से भेजे जाएँगे।
+# FULL Mode में पूरी कहानी एक ही Part होगी।
 SCENES = 7-15
 
 # auto | short | medium | long
