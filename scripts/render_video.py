@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render role-aware photo-motion clips with verified narration and sound."""
+"""Render verified, role-aware photo-motion clips with measured narration audio."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 PRE_CAPTION_VIDEO = VIDEO_DIR / "pre_caption_render.mp4"
 
-VERSION = "render-video-v61-dynamic-scenes-role-aware"
+VERSION = "render-video-v62-variable-scenes-role-audio-verified"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -83,7 +83,7 @@ def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as stream:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
             stream.flush()
@@ -136,14 +136,17 @@ def require_file(path, label, minimum=MIN_VIDEO_BYTES):
 
 
 def run(command, label, timeout=1800):
-    result = subprocess.run(
-        [str(value) for value in command],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [str(value) for value in command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{label} timed out") from exc
     if result.stdout:
         log(result.stdout[-3000:])
     if result.returncode:
@@ -159,7 +162,7 @@ def parse_fps(value):
     try:
         rate = Fraction(str(value))
         return float(rate) if rate > 0 else None
-    except (ValueError, ZeroDivisionError):
+    except (ValueError, ZeroDivisionError, TypeError):
         return None
 
 
@@ -309,7 +312,9 @@ def selected_part_numbers(config, manifest, count):
         config.get("PART_NUMBERS"),
     ):
         if isinstance(candidate, list) and candidate:
-            numbers = [positive_int(item, "part number") for item in candidate]
+            numbers = [
+                positive_int(item, "part number") for item in candidate
+            ]
             if (
                 len(numbers) != count
                 or numbers != sorted(set(numbers))
@@ -334,27 +339,79 @@ def expected_role_sequence(parts):
     }
 
 
-def validate_actual_scene_counts(manifest, parts, minimum, maximum):
-    raw = manifest.get("actual_scene_counts")
-    if not isinstance(raw, dict):
-        raise RuntimeError(
-            "Photo Motion manifest actual_scene_counts is missing"
-        )
-
+def actual_counts_from_photo_rows(manifest, rows, parts, minimum, maximum):
+    """Use actual Main rows; never assume the configured minimum is the count."""
+    declared = manifest.get("actual_scene_counts")
     counts = {}
+
     for part in parts:
-        candidates = (str(part), f"part_{part:02d}", part)
-        value = next(
-            (raw[key] for key in candidates if key in raw),
-            None,
-        )
-        count = positive_int(value, f"Part {part} actual scene count")
+        main_numbers = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                row_part = int(row.get("part"))
+            except (TypeError, ValueError):
+                continue
+            if row_part != part or normalize_role(row) != "main":
+                continue
+            local = positive_int(
+                row.get(
+                    "local_scene",
+                    row.get("source_scene_number", row.get("scene")),
+                ),
+                f"Part {part} Main scene",
+            )
+            if local in main_numbers:
+                raise RuntimeError(
+                    f"Photo Motion has duplicate Main scene {part}/{local}"
+                )
+            main_numbers.add(local)
+
+        if not main_numbers:
+            raise RuntimeError(f"Photo Motion has no Main scenes for Part {part}")
+
+        expected_numbers = set(range(1, max(main_numbers) + 1))
+        if main_numbers != expected_numbers:
+            raise RuntimeError(
+                f"Part {part} Main scene numbers are not continuous: "
+                f"{sorted(main_numbers)}"
+            )
+
+        count = len(main_numbers)
         if not minimum <= count <= maximum:
             raise RuntimeError(
-                f"Part {part} has {count} scenes; allowed range is "
+                f"Part {part} has {count} Main scenes; allowed range is "
                 f"{minimum}-{maximum}"
             )
+
+        if isinstance(declared, dict):
+            candidates = (str(part), f"part_{part:02d}", part)
+            declared_value = next(
+                (declared[key] for key in candidates if key in declared),
+                None,
+            )
+            if declared_value is not None:
+                if positive_int(
+                    declared_value, f"Part {part} declared scene count"
+                ) != count:
+                    raise RuntimeError(
+                        f"Part {part} declared/actual scene count mismatch"
+                    )
+
         counts[part] = count
+
+    if isinstance(declared, dict):
+        for key in declared:
+            try:
+                declared_part = int(str(key).replace("part_", ""))
+            except (TypeError, ValueError):
+                continue
+            if declared_part not in parts:
+                raise RuntimeError(
+                    f"Photo Motion has scene counts for unselected Part "
+                    f"{declared_part}"
+                )
 
     return counts
 
@@ -375,7 +432,6 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
     rows = data.get("scenes")
     if not isinstance(rows, list) or not rows:
         raise RuntimeError("Photo Motion manifest has no scenes")
-
     if int(data.get("completed_count", -1)) != len(rows):
         raise RuntimeError("Photo Motion completed_count mismatch")
 
@@ -440,7 +496,7 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
             raise RuntimeError(f"Photo Motion {sid} dimensions mismatch")
         validate_fps(info, fps, sid)
 
-        record = {
+        by_id[sid] = {
             "scene_id": sid,
             "part": part,
             "role": role,
@@ -453,14 +509,13 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
             "height": height,
             "fps": fps,
         }
-        by_id[sid] = record
         role_counts[role][part] = role_counts[role].get(part, 0) + 1
 
         if role == "main":
             key = (part, local_scene)
             if key in main_map:
-                raise RuntimeError(f"Duplicate main scene: {key}")
-            main_map[key] = record
+                raise RuntimeError(f"Duplicate Main scene: {key}")
+            main_map[key] = by_id[sid]
 
     expected_main = {
         (part, scene)
@@ -474,9 +529,7 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
             f"extra={sorted(set(main_map) - expected_main)}"
         )
 
-    expected_roles = expected_role_sequence(parts)
-    for part in parts:
-        required = expected_roles[part]
+    for part, required in expected_role_sequence(parts).items():
         for role in required:
             expected_count = scene_counts[part] if role == "main" else 1
             actual_count = role_counts[role].get(part, 0)
@@ -500,7 +553,6 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
             item["global_scene"],
         ),
     )
-
     global_numbers = [item["global_scene"] for item in ordered]
     if global_numbers != list(range(1, len(ordered) + 1)):
         raise RuntimeError(
@@ -508,6 +560,7 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
         )
 
     return by_id, ordered, data
+
 
 def load_audio_map(parts, scene_counts):
     data = read_json(AUDIO_MANIFEST, "Narration audio manifest")
@@ -592,7 +645,9 @@ def load_audio_map(parts, scene_counts):
             row.get("duration_source")
             or row.get("audio_duration_source")
         )
-        if duration_source != "ffprobe_measured":
+        if duration_source not in {
+            "ffprobe_measured", "measured", "actual"
+        }:
             raise RuntimeError(
                 f"Narration duration is not ffprobe-measured: {sid}"
             )
@@ -632,13 +687,11 @@ def load_audio_map(parts, scene_counts):
 
 
 def validate_photo_audio_pairing(photo_by_id, audio_by_id):
-    photo_ids = set(photo_by_id)
-    audio_ids = set(audio_by_id)
-    if photo_ids != audio_ids:
+    if set(photo_by_id) != set(audio_by_id):
         raise RuntimeError(
             "Photo Motion and narration scene IDs differ; "
-            f"missing_audio={sorted(photo_ids - audio_ids)}; "
-            f"missing_video={sorted(audio_ids - photo_ids)}"
+            f"missing_audio={sorted(set(photo_by_id) - set(audio_by_id))}; "
+            f"missing_video={sorted(set(audio_by_id) - set(photo_by_id))}"
         )
 
     for sid, photo in photo_by_id.items():
@@ -648,7 +701,9 @@ def validate_photo_audio_pairing(photo_by_id, audio_by_id):
             or photo["role"] != audio["role"]
             or photo["local_scene"] != audio["local_scene"]
         ):
-            raise RuntimeError(f"{sid}: Photo Motion/narration mapping mismatch")
+            raise RuntimeError(
+                f"{sid}: Photo Motion/narration mapping mismatch"
+            )
 
 
 def load_sound_assets(parts, narration, mode, audio_manifest_hash):
@@ -659,9 +714,9 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
     validate_completed(validation, "SFX timing validation")
 
     if str(manifest.get("format", "")).lower() != mode:
-        raise RuntimeError("Sound design FORMAT mismatch")
+        raise RuntimeError("Sound design FORMAT does not match Input")
     if str(validation.get("format", "")).lower() != mode:
-        raise RuntimeError("SFX validation FORMAT mismatch")
+        raise RuntimeError("SFX validation FORMAT does not match Input")
 
     manifest_parts = manifest.get("part_numbers")
     if isinstance(manifest_parts, list):
@@ -701,7 +756,6 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
             f"{category} track",
         )
         require_file(path, f"{category} track", MIN_AUDIO_BYTES)
-
         info = probe(path)
         if not info["has_audio"]:
             raise RuntimeError(f"{category} track has no audio stream")
@@ -745,19 +799,21 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
 
         cue_scene = cue.get("scene")
         if cue_role == "main":
-            if positive_int(cue_scene, f"SFX cue {index} scene") != narration_row["local_scene"]:
+            if positive_int(
+                cue_scene, f"SFX cue {index} scene"
+            ) != narration_row["local_scene"]:
                 raise RuntimeError(f"SFX cue scene mismatch: {sid}")
         elif cue_scene not in (None, "", 0, "0"):
-            raise RuntimeError(f"Extra-role SFX cue must have scene=None: {sid}")
+            raise RuntimeError(
+                f"Extra-role SFX cue must have scene=None: {sid}"
+            )
 
         start_value = cue.get(
             "start_seconds",
             cue.get("actual_start_seconds", cue.get("time", cue.get("start"))),
         )
         start = finite_number(
-            start_value,
-            f"SFX cue {index} start",
-            minimum=0,
+            start_value, f"SFX cue {index} start", minimum=0
         )
         gain = finite_number(
             cue.get("gain", 0.5),
@@ -769,16 +825,16 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
         kind = str(cue.get("kind") or cue.get("type") or "effect").strip()
         cue_key = (sid, round(start, 6), kind)
         if cue_key in seen_cues:
-            raise RuntimeError(f"Duplicate SFX cue: {sid} at {start:.3f}s")
+            raise RuntimeError(
+                f"Duplicate SFX cue: {sid} at {start:.3f}s"
+            )
         seen_cues.add(cue_key)
 
         path = first_path(
-            cue,
-            ("file", "path", "audio_path", "output"),
+            cue, ("file", "path", "audio_path", "output"),
             f"SFX cue {index}",
         )
         require_file(path, f"SFX cue {index}", MIN_AUDIO_BYTES)
-
         info = probe(path)
         if not info["has_audio"]:
             raise RuntimeError(f"SFX cue {index} has no audio stream")
@@ -793,8 +849,7 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
             raise RuntimeError(f"SFX cue starts outside narration: {sid}")
 
         latest_start = max(
-            0.0,
-            duration - info["duration"] - SFX_END_MARGIN,
+            0.0, duration - info["duration"] - SFX_END_MARGIN
         )
         actual_start = min(start, latest_start)
         usable_duration = min(info["duration"], duration - actual_start)
@@ -915,7 +970,6 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         "-stream_loop", "-1", "-i", str(photo["video"]),
         "-i", str(audio["audio"]),
     ]
-
     filters = [
         (
             f"[0:v]scale={width}:{height}:"
@@ -948,7 +1002,6 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
             "-ss", f"{offset:.4f}",
             "-i", str(track["path"]),
         ])
-
         label = f"bed{input_index}"
         filters.append(
             f"[{input_index}:a]aresample={AUDIO_RATE},"
@@ -974,7 +1027,6 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         label = f"sfx{cue_index}"
         delay = max(0, int(round(cue["start"] * 1000)))
         fade = min(0.4, max(0.05, usable * 0.2))
-
         filters.append(
             f"[{input_index}:a]aresample={AUDIO_RATE},"
             f"atrim=duration={usable:.4f},"
@@ -988,7 +1040,6 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         input_index += 1
 
     mix_labels = ["[narr]"]
-
     if bed_labels:
         filters.append(
             "".join(bed_labels)
@@ -1014,30 +1065,14 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
 
 
 def render_scene(
-    photo,
-    audio,
-    sound_assets,
-    output,
-    signature,
-    old_row,
-    width,
-    height,
-    fps,
-    timeline_offset,
-    resume,
-    skip_completed,
+    photo, audio, sound_assets, output, signature, old_row,
+    width, height, fps, timeline_offset, resume, skip_completed,
 ):
     output.parent.mkdir(parents=True, exist_ok=True)
 
     if resume and skip_completed:
         cached = reusable_scene(
-            output,
-            old_row,
-            signature,
-            width,
-            height,
-            fps,
-            audio["duration"],
+            output, old_row, signature, width, height, fps, audio["duration"]
         )
         if cached:
             log("REUSED:", photo["scene_id"])
@@ -1047,15 +1082,9 @@ def render_scene(
     temporary.unlink(missing_ok=True)
 
     inputs, filters = build_audio_filter(
-        photo,
-        audio,
-        sound_assets,
-        timeline_offset,
-        width,
-        height,
-        fps,
+        photo, audio, sound_assets, timeline_offset,
+        width, height, fps,
     )
-
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         *inputs,
@@ -1090,7 +1119,6 @@ def render_scene(
                 f"{photo['scene_id']}: rendered dimensions mismatch"
             )
         validate_fps(info, fps, photo["scene_id"])
-
         if abs(info["duration"] - audio["duration"]) > DURATION_TOLERANCE:
             raise RuntimeError(
                 f"{photo['scene_id']}: rendered duration mismatch"
@@ -1119,7 +1147,6 @@ def concat_videos(paths, destination, width, height, fps, minimum=10000):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.stem + ".joining.mp4")
     list_file = None
-
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -1158,7 +1185,6 @@ def concat_videos(paths, destination, width, height, fps, minimum=10000):
             f"Join {destination.name}",
             timeout=2400,
         )
-
         require_file(temporary, "Joined video", minimum)
         info = probe(temporary)
         if not info["has_video"] or not info["has_audio"]:
@@ -1166,7 +1192,6 @@ def concat_videos(paths, destination, width, height, fps, minimum=10000):
         if (info["width"], info["height"]) != (width, height):
             raise RuntimeError(f"Joined video dimensions mismatch: {destination}")
         validate_fps(info, fps, destination.name)
-
         os.replace(temporary, destination)
         return probe(destination)
     finally:
@@ -1175,8 +1200,10 @@ def concat_videos(paths, destination, width, height, fps, minimum=10000):
         temporary.unlink(missing_ok=True)
 
 
-def make_render_row(photo, audio, output, info, checksum, signature, reused,
-                    width, height, fps, timeline_offset, sound_assets):
+def make_render_row(
+    photo, audio, output, info, checksum, signature, reused,
+    width, height, fps, timeline_offset, sound_assets,
+):
     return {
         "scene_id": photo["scene_id"],
         "role": photo["role"],
@@ -1219,7 +1246,6 @@ def verify_rendered_scene(row, width, height, fps):
         f"Rendered scene {row.get('scene_id')}",
     )
     require_file(path, "Rendered scene")
-
     checksum = sha256_file(path)
     if checksum != row.get("sha256"):
         raise RuntimeError(
@@ -1236,7 +1262,6 @@ def verify_rendered_scene(row, width, height, fps):
             f"Rendered scene dimensions mismatch: {row.get('scene_id')}"
         )
     validate_fps(info, fps, str(row.get("scene_id")))
-
     if abs(info["duration"] - float(row.get("duration", 0))) > DURATION_TOLERANCE:
         raise RuntimeError(
             f"Rendered scene duration mismatch: {row.get('scene_id')}"
@@ -1245,20 +1270,9 @@ def verify_rendered_scene(row, width, height, fps):
 
 
 def build_manifest(
-    mode,
-    fps,
-    width,
-    height,
-    parts,
-    part_numbers,
-    scene_counts,
-    completed,
-    part_rows,
-    photo_hash,
-    audio_hash,
-    sound_fingerprint,
-    status,
-    error=None,
+    mode, fps, width, height, parts, part_numbers, scene_counts,
+    completed, part_rows, photo_hash, audio_hash, sound_fingerprint,
+    status, error=None,
 ):
     all_rows = [
         completed[item["scene_id"]]
@@ -1347,7 +1361,6 @@ def build_progress(completed, ordered, status, error=None):
                 else None
             ),
         })
-
     result = {
         "version": VERSION,
         "stage": "render_video",
@@ -1390,8 +1403,13 @@ def main():
 
     photo_data = read_json(PHOTO_MANIFEST, "Photo Motion manifest")
     part_numbers = selected_part_numbers(config, photo_data, parts_count)
-    scene_counts = validate_actual_scene_counts(
+    photo_rows = photo_data.get("scenes")
+    if not isinstance(photo_rows, list) or not photo_rows:
+        raise RuntimeError("Photo Motion manifest has no scene rows")
+
+    scene_counts = actual_counts_from_photo_rows(
         photo_data,
+        photo_rows,
         part_numbers,
         scene_minimum,
         scene_maximum,
@@ -1417,7 +1435,6 @@ def main():
         mode,
         audio_manifest_hash,
     )
-
     if str(sound_data.get("format", "")).lower() != mode:
         raise RuntimeError("Sound design FORMAT does not match Input")
 
@@ -1604,11 +1621,9 @@ def main():
             row = part_rows[index]
             if int(row["part"]) != part:
                 raise RuntimeError("Part output order mismatch")
-
             path = safe_path(row["path"], f"Part {part} video")
             if sha256_file(path) != row["sha256"]:
                 raise RuntimeError(f"Part {part} SHA-256 mismatch")
-
             info = probe(path)
             if not info["has_video"] or not info["has_audio"]:
                 raise RuntimeError(f"Part {part} lacks video/audio")
