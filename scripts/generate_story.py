@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from input_config import (
     get_format, get_topic, get_story_text, get_parts_range,
     get_scenes_range, set_selected_parts, load_and_validate,
+    get_title_source,
 )
 from story_length_policy import (
     parse_parts_range, build_length_policy, select_final_part_count,
@@ -37,15 +38,18 @@ from generate_story_plan import (
 )
 
 STORY_DIR = ROOT / "output" / "story"
+OUTPUT_DIR = ROOT / "output"
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT_FILE = STORY_DIR / "story.json"
 CACHE_FILE = STORY_DIR / "story_cache.json"
+CHECKPOINT_FILE = STORY_DIR / "story_checkpoint.json"
+CORRECTED_STORY_FILE = STORY_DIR / "corrected_complete_story.txt"
 PLAN_FILE = STORY_DIR / "story_plan.json"
 TITLE_FILE = STORY_DIR / "final_title.txt"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v31-variable-scene-range-natural-boundaries-final-merge"
+VERSION = "story-builder-v32-runtime-interface-fixes"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -519,7 +523,6 @@ def _partition_short_story(
             if groups is not None:
                 return groups, part_count, False
 
-    # Final merge/rebalance fallback: final Part may use the documented 239-word cap.
     merged_candidates = [
         number for number in range(minimum_parts, maximum_parts + 1)
         if number >= 1
@@ -882,7 +885,6 @@ def generate_complete_story(
         },
     }
 
-
 def verify_revision_semantics(
     original: str,
     revised: str,
@@ -890,10 +892,9 @@ def verify_revision_semantics(
     model: str,
     api_key: str,
 ) -> dict:
-    """Independent model pass; rejects revisions that admit omissions or new events."""
     prompt = f"""
 You are a strict Hindi story continuity auditor.
-Compare the ORIGINAL PART and REVISED PART against the COMPLETE STORY context.
+Compare the ORIGINAL PART and REVISED PART against the COMPLETE STORY.
 Do not rewrite either text.
 
 Return JSON only with boolean fields:
@@ -954,18 +955,14 @@ REVISED PART:
             for key in keys
         },
         "omitted_events": (
-            omissions
-            if isinstance(omissions, list)
+            omissions if isinstance(omissions, list)
             else [str(omissions)]
         ),
         "added_events": (
-            additions
-            if isinstance(additions, list)
+            additions if isinstance(additions, list)
             else [str(additions)]
         ),
-        "explanation": clean(
-            result.get("explanation")
-        ),
+        "explanation": clean(result.get("explanation")),
     }
 
 
@@ -980,15 +977,13 @@ def repair_short_part(
     final_merged: bool = False,
     return_evidence: bool = False,
 ):
-    """Retry out-of-target narration; accept changed text only with semantic evidence."""
     current = normalize_text(part_text)
     records: list[dict] = []
     original_hash = sha256(current)
     evidence = None
 
     hard_max = (
-        SHORT_MERGED_MAX
-        if final_merged
+        SHORT_MERGED_MAX if final_merged
         else SHORT_HARD_MAX
     )
 
@@ -1072,9 +1067,7 @@ RULES:
             record["after_sha256"] = sha256(revised)
 
             if sha256(revised) == sha256(current):
-                record["outcome"] = (
-                    "unchanged_text_no_revision_evidence"
-                )
+                record["outcome"] = "unchanged_text_no_revision_evidence"
                 records.append(record)
                 continue
 
@@ -1089,9 +1082,7 @@ RULES:
             record["semantic_verification"] = semantic
 
             if not semantic["passed"]:
-                record["outcome"] = (
-                    "semantic_preservation_failed"
-                )
+                record["outcome"] = "semantic_preservation_failed"
                 records.append(record)
                 continue
 
@@ -1115,9 +1106,6 @@ RULES:
 
             if SHORT_MIN <= word_count(current) <= SHORT_MAX:
                 break
-
-            if word_count(current) > hard_max:
-                continue
 
         except Exception as exc:
             record["outcome"] = "failed"
@@ -1157,12 +1145,12 @@ def _evidence_is_semantic(
         and evidence.get("semantic_preservation_verified") is True
     )
 
+
 def _rebalance_for_merged_count(
     story_text: str,
     part_count: int,
     scenes_range: tuple[int, int],
 ) -> list[str] | None:
-    """Repartition the complete ordered story after a final-Part merge."""
     scenes_min, scenes_max = scenes_range
     units = split_sentences(story_text)
 
@@ -1205,7 +1193,6 @@ def _rebalance_for_merged_count(
 
     return groups
 
-
 def _partition_and_revise(
     complete_story: str,
     mode: str,
@@ -1244,7 +1231,6 @@ def _partition_and_revise(
             scenes_range,
         )
 
-    original_groups = list(groups)
     revised_groups: list[str] = []
     revision_rows: list[dict] = []
     evidence_by_part: dict[int, dict] = {}
@@ -1413,11 +1399,7 @@ def _partition_and_revise(
 
             else:
                 old_part_count = len(revised_groups)
-
-                revised_groups = (
-                    revised_groups[:-2] + [merged_text]
-                )
-
+                revised_groups = revised_groups[:-2] + [merged_text]
                 merged_fallback = True
                 merged_number = len(revised_groups)
 
@@ -1425,14 +1407,12 @@ def _partition_and_revise(
                 evidence_by_part.pop(merged_number, None)
 
                 revision_rows = [
-                    row
-                    for row in revision_rows
+                    row for row in revision_rows
                     if int(row.get("part", 0)) < merged_number
                 ]
 
                 attempted_parts = [
-                    number
-                    for number in attempted_parts
+                    number for number in attempted_parts
                     if number < merged_number
                 ]
 
@@ -1451,15 +1431,11 @@ def _partition_and_revise(
 
         for number, part in enumerate(revised_groups, 1):
             amount = word_count(part)
-
             is_final_merged = bool(
-                merged_fallback
-                and number == len(revised_groups)
+                merged_fallback and number == len(revised_groups)
             )
-
             maximum = (
-                SHORT_MERGED_MAX
-                if is_final_merged
+                SHORT_MERGED_MAX if is_final_merged
                 else SHORT_HARD_MAX
             )
 
@@ -1471,7 +1447,6 @@ def _partition_and_revise(
 
             if amount > SHORT_MAX and not is_final_merged:
                 evidence = evidence_by_part.get(number)
-
                 if not _evidence_is_semantic(evidence, part):
                     raise RuntimeError(
                         f"SHORT Part {number} has {amount} words but "
@@ -1514,12 +1489,10 @@ def _partition_and_revise(
         "selection_source": "corrected_story_scene_aware_partition",
         "revision_attempted": bool(attempted_parts),
         "revision_outcome": (
-            "verified"
-            if evidence_by_part
+            "verified" if evidence_by_part
             else (
                 "attempted_without_verified_change"
-                if attempted_parts
-                else "not_required"
+                if attempted_parts else "not_required"
             )
         ),
         "revision_parts": sorted(set(attempted_parts)),
@@ -1547,27 +1520,23 @@ def _partition_and_revise(
         ],
     })
 
-    validation_parts = []
-
-    for number, part in enumerate(revised_groups, 1):
-        validation_parts.append({
+    validation_parts = [
+        {
             "part": number,
             "narration": part,
             "revision_evidence": evidence_by_part.get(number),
             "final_part_merged": bool(
                 merged_fallback and number == len(revised_groups)
             ),
-        })
+        }
+        for number, part in enumerate(revised_groups, 1)
+    ]
 
-    validation = validate_all_parts(
-        validation_parts,
-        policy,
-    )
+    validation = validate_all_parts(validation_parts, policy)
 
     if mode == "short":
         filtered_errors = [
-            error
-            for error in validation.get("errors", [])
+            error for error in validation.get("errors", [])
             if not (
                 merged_fallback
                 and "Part " + str(len(revised_groups)) + ":" in error
@@ -1596,11 +1565,9 @@ def _partition_and_revise(
                 for number in validation.get("retry_parts", [])
                 if number != final_number
             ]
-
             validation["retry_required"] = bool(
                 validation["retry_parts"]
             )
-
             validation["final_part_exception"] = None
             validation["final_part_merge_proposal"] = None
 
@@ -1619,15 +1586,13 @@ def _partition_and_revise(
 
         for number, part in enumerate(revised_groups, 1):
             amount = word_count(part)
-
             if amount < SHORT_MIN:
                 raise RuntimeError(
                     f"SHORT Part {number} remains below 120 words."
                 )
 
             is_final_merged = bool(
-                merged_fallback
-                and number == len(revised_groups)
+                merged_fallback and number == len(revised_groups)
             )
 
             if (
@@ -1646,10 +1611,7 @@ def _partition_and_revise(
     policy["parts_validation"] = {
         "valid": True,
         "actual_parts": selected_count,
-        "word_counts": [
-            word_count(part)
-            for part in revised_groups
-        ],
+        "word_counts": [word_count(part) for part in revised_groups],
         "final_part_merged": bool(merged_fallback),
         "final_merged_limit": (
             SHORT_MERGED_MAX if merged_fallback else None
@@ -1680,7 +1642,6 @@ def select_final_parts(
     api_key: str,
     title: str,
 ) -> tuple[list[str], dict, dict]:
-    """Backward-compatible public entry point."""
     return _partition_and_revise(
         complete_story=complete_story,
         mode=mode,
@@ -1750,7 +1711,6 @@ def make_final_plan(
     write_json(PLAN_FILE, plan)
     return plan
 
-
 def _visual_prompt(
     scene_text: str,
     anchor: str,
@@ -1791,10 +1751,7 @@ def make_story(
 
     plan_parts = plan.get("parts")
 
-    if (
-        not isinstance(plan_parts, list)
-        or len(plan_parts) != len(parts)
-    ):
+    if not isinstance(plan_parts, list) or len(plan_parts) != len(parts):
         raise RuntimeError(
             "Final plan and final story Part counts do not match."
         )
@@ -1825,9 +1782,7 @@ def make_story(
                 f"for Part {part_number}."
             )
 
-        narration = normalize_text(
-            plan_part.get("narration")
-        )
+        narration = normalize_text(plan_part.get("narration"))
 
         if clean(narration) != clean(original_narration):
             raise RuntimeError(
@@ -1837,10 +1792,7 @@ def make_story(
 
         scenes = []
 
-        for scene_number, planned in enumerate(
-            planned_scenes,
-            1,
-        ):
+        for scene_number, planned in enumerate(planned_scenes, 1):
             if not isinstance(planned, dict):
                 raise RuntimeError(
                     "Invalid final Story Plan Scene record."
@@ -1860,10 +1812,7 @@ def make_story(
                 planned.get("narration")
                 or planned.get("story_anchor")
             )
-
-            anchor = clean(
-                planned.get("story_anchor")
-            )
+            anchor = clean(planned.get("story_anchor"))
 
             if not scene_text or clean(scene_text) != anchor:
                 raise RuntimeError(
@@ -1904,7 +1853,6 @@ def make_story(
             all_scenes.append(scene)
 
         is_final = part_number == len(plan_parts)
-
         hook = plan_part.get("hook_scene")
         suspense = plan_part.get("suspense_scene")
         resolution = plan_part.get("resolution_scene")
@@ -1939,8 +1887,7 @@ def make_story(
             all_resolutions.append(resolution)
 
         extras = [
-            item
-            for item in (hook, suspense, resolution)
+            item for item in (hook, suspense, resolution)
             if isinstance(item, dict)
         ]
 
@@ -1949,8 +1896,7 @@ def make_story(
 
         revision_row = next(
             (
-                row
-                for row in reversed(revision_rows)
+                row for row in reversed(revision_rows)
                 if row.get("part") == part_number
                 and row.get("after_sha256") == narration_hash
             ),
@@ -1969,8 +1915,7 @@ def make_story(
             "revision_attempted": bool(evidence),
             "revision_evidence": evidence,
             "final_part_merged": bool(
-                selection.get("final_part_merged")
-                and is_final
+                selection.get("final_part_merged") and is_final
             ),
             "main_scene_count": len(scenes),
             "actual_scene_count": len(scenes),
@@ -1982,8 +1927,7 @@ def make_story(
         })
 
     final_story_text = "\n\n".join(
-        row["narration"]
-        for row in story_parts
+        row["narration"] for row in story_parts
     )
 
     if clean(final_story_text) != clean(complete_story):
@@ -1992,8 +1936,7 @@ def make_story(
         )
 
     actual_counts = [
-        part["main_scene_count"]
-        for part in story_parts
+        part["main_scene_count"] for part in story_parts
     ]
 
     if len(all_scenes) > MAX_TOTAL_SCENES:
@@ -2052,14 +1995,9 @@ def make_story(
         "source_fingerprint": source_fingerprint,
     }
 
-    validate_story(
-        result,
-        len(story_parts),
-        scenes_range,
-        mode,
-    )
-
+    validate_story(result, len(story_parts), scenes_range, mode)
     return result
+
 
 def validate_story(
     story: dict,
@@ -2092,7 +2030,6 @@ def validate_story(
             raise RuntimeError(f"Part {number} narration is empty.")
 
         reconstructed.append(narration)
-
         part_scenes = part.get("scenes")
 
         if (
@@ -2136,10 +2073,7 @@ def validate_story(
             "Part narration does not reconstruct the complete story."
         )
 
-    if len(scenes) != sum(
-        len(part["scenes"])
-        for part in parts
-    ):
+    if len(scenes) != sum(len(part["scenes"]) for part in parts):
         raise RuntimeError("Global Main Scene count mismatch.")
 
     if story.get("total_parts") != expected_parts:
@@ -2149,8 +2083,7 @@ def validate_story(
         raise RuntimeError("Total Scene metadata mismatch.")
 
     if story.get("actual_scene_counts") != [
-        len(part["scenes"])
-        for part in parts
+        len(part["scenes"]) for part in parts
     ]:
         raise RuntimeError("Actual Scene count metadata mismatch.")
 
@@ -2195,13 +2128,7 @@ def cache_is_valid(
         if not isinstance(parts, list) or not parts:
             return False
 
-        validate_story(
-            cached,
-            len(parts),
-            scenes_range,
-            mode,
-        )
-
+        validate_story(cached, len(parts), scenes_range, mode)
         return True
 
     except Exception as exc:
@@ -2215,11 +2142,10 @@ def reusable_corrected_story_checkpoint(
     candidates = [
         CACHE_FILE,
         CHECKPOINT_FILE,
-        CORRECTED_STORY_FILE,
     ]
 
     for path in candidates:
-        if not os.path.isfile(path):
+        if not path.is_file():
             continue
 
         try:
@@ -2283,21 +2209,25 @@ ENTIRE story below.
 
 Do not base the title only on its opening.
 Do not add events or characters.
-Return only the title.
+Return JSON only in this format:
+{{"title":"..."}}.
 
 Story:
 {complete_story}
 """
 
     response = call_model(
-        model=model,
-        api_key=api_key,
-        prompt=prompt,
+        prompt,
+        model,
+        api_key,
         max_tokens=120,
-        timeout=TIMEOUT,
     )
 
-    title = clean(parse_model_response(response))
+    title = clean(
+        response.get("title")
+        or response.get("story_text")
+        or response.get("text")
+    )
 
     if not title:
         title = clean(topic)
@@ -2309,7 +2239,8 @@ Story:
 
 
 def main() -> None:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    STORY_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     config = load_and_validate()
 
@@ -2321,13 +2252,14 @@ def main() -> None:
         )
 
     topic = clean(get_topic(config))
+    title_source = clean(get_title_source(config))
     source_text = normalize_text(
         get_complete_source(config)
     )
 
-    if not source_text and not topic:
+    if not source_text and not topic and not title_source:
         raise RuntimeError(
-            "Provide a story or topic in Input/topic.txt."
+            "Provide a story, title or topic in Input/topic.txt."
         )
 
     scenes_range = get_scenes_range(config)
@@ -2355,16 +2287,24 @@ def main() -> None:
             f"Invalid SCENES range: {scenes_range}."
         )
 
+    parts_specification = str(get_parts_range(config))
+
     source_fingerprint = fingerprint({
         "mode": mode,
         "topic": topic,
+        "title_source": title_source,
         "source_text": source_text,
-        "parts": str(get_parts_range(config)),
+        "parts": parts_specification,
         "scenes_range": list(scenes_range),
     })
 
-    model = get_selected_model(config)
-    api_key = get_api_key(config, model)
+    model = get_selected_model()
+    api_key = get_api_key()
+
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY or GOOGLE_API_KEY is not configured."
+        )
 
     cached = read_json(CACHE_FILE)
 
@@ -2374,20 +2314,24 @@ def main() -> None:
         mode,
         scenes_range,
     ):
-        log("Valid completed Story cache found; reusing corrected story.")
-
-        cached_story = cached
-        corrected_story = normalize_text(
-            cached_story["corrected_complete_story"]
+        log(
+            "Valid completed Story cache found; "
+            "reusing corrected story and existing Parts."
         )
+
+        corrected_story = normalize_text(
+            cached["corrected_complete_story"]
+        )
+
         parts = [
             normalize_text(part["narration"])
-            for part in cached_story["parts"]
+            for part in cached["parts"]
         ]
 
         title = clean(
-            cached_story.get("final_title")
-            or cached_story.get("title")
+            cached.get("final_title")
+            or cached.get("title")
+            or title_source
         )
 
         if not title:
@@ -2398,20 +2342,9 @@ def main() -> None:
                 corrected_story,
             )
 
-        policy = cached_story.get(
-            "story_length_policy",
-            {},
-        )
-
-        selection = cached_story.get(
-            "parts_selection",
-            {},
-        )
-
-        proofreading = cached_story.get(
-            "proofreading",
-            {},
-        )
+        policy = cached.get("story_length_policy", {})
+        selection = cached.get("parts_selection", {})
+        proofreading = cached.get("proofreading", {})
 
         plan = make_final_plan(
             config=config,
@@ -2442,16 +2375,22 @@ def main() -> None:
         write_json(OUTPUT_FILE, rebuilt_story)
         write_json(CACHE_FILE, rebuilt_story)
 
-        log(
-            "Reused corrected story and rebuilt Story Plan and "
-            "Story Scene records."
+        atomic_write(
+            TITLE_FILE,
+            title + "\n",
         )
-        log(f"Completed: {len(parts)} Parts, {len(plan.get('parts', []))} planned Parts.")
+
+        log(
+            f"Completed from cache: {len(parts)} Parts, "
+            f"{len(rebuilt_story['scenes'])} Main Scenes."
+        )
         return
 
     checkpoint = reusable_corrected_story_checkpoint(
         source_fingerprint
     )
+
+    checkpoint_data = {}
 
     if checkpoint:
         checkpoint_data = checkpoint["data"]
@@ -2465,17 +2404,42 @@ def main() -> None:
             },
         )
 
-        log("Reusing corrected-story checkpoint; skipping story generation.")
+        log(
+            "Reusing corrected-story checkpoint; "
+            "skipping story generation."
+        )
 
     else:
-        complete_story, proofreading = generate_complete_story(
-            source_text=source_text,
-            topic=topic,
+        generated = generate_complete_story(
             mode=mode,
+            topic=topic,
+            title=title_source,
+            source_text=source_text,
             config=config,
             model=model,
             api_key=api_key,
         )
+
+        if not isinstance(generated, dict):
+            raise RuntimeError(
+                "Story generator returned an invalid result."
+            )
+
+        complete_story = normalize_text(
+            generated.get("story_text")
+        )
+
+        proofreading = generated.get(
+            "proofreading",
+            {},
+        )
+
+        generated_title = clean(
+            generated.get("title")
+        )
+
+        if generated_title and not title_source:
+            title_source = generated_title
 
     complete_story = normalize_text(complete_story)
 
@@ -2492,8 +2456,7 @@ def main() -> None:
         existing_title=(
             checkpoint_data.get("final_title")
             or checkpoint_data.get("title")
-            if checkpoint
-            else ""
+            or title_source
         ),
     )
 
@@ -2517,10 +2480,6 @@ def main() -> None:
         },
     )
 
-    parts_specification = str(
-        get_parts_range(config)
-    )
-
     parts, policy, selection = select_final_parts(
         complete_story=complete_story,
         mode=mode,
@@ -2535,7 +2494,9 @@ def main() -> None:
     final_story_text = "\n\n".join(parts)
 
     if not final_story_text.strip():
-        raise RuntimeError("Final Part segmentation returned empty text.")
+        raise RuntimeError(
+            "Final Part segmentation returned empty text."
+        )
 
     atomic_write(
         CORRECTED_STORY_FILE,
