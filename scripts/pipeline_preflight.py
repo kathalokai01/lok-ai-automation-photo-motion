@@ -751,7 +751,11 @@ def validate_existing_manifest(
             "actual_scene_counts": {},
         }
 
-    if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size <= 0
+    ):
         raise ValueError(
             f"{name}: manifest is missing, empty or unsafe."
         )
@@ -760,7 +764,11 @@ def validate_existing_manifest(
         data = json.loads(
             path.read_text(encoding="utf-8-sig")
         )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
         raise ValueError(
             f"{name}: invalid JSON: {exc}"
         ) from exc
@@ -770,8 +778,19 @@ def validate_existing_manifest(
             f"{name}: unsupported manifest root type."
         )
 
-    retryable_narration_audio = False
-    narration_jobs = []
+    is_tts = (
+        name == "narration_audio"
+        and isinstance(data, dict)
+    )
+
+    status = ""
+    raw_jobs = None
+    raw_parts = None
+    summary = {}
+    total_jobs = None
+
+    legacy_empty_tts_marker = False
+    resumable_tts_manifest = False
 
     if isinstance(data, dict):
         status = str(
@@ -779,16 +798,80 @@ def validate_existing_manifest(
         ).strip().lower()
 
         raw_jobs = data.get("jobs")
+        raw_parts = data.get("parts")
 
-        # TTS v13 writes scene records under "jobs".
-        # Older checkpoints may not contain retryable=True.
-        retryable_narration_audio = (
-            name == "narration_audio"
-            and status == "failed"
+        if isinstance(data.get("summary"), dict):
+            summary = data["summary"]
+
+        total_jobs = summary.get("total_jobs")
+
+        if is_tts and status == "failed":
+            legacy_empty_tts_marker = (
+                isinstance(raw_jobs, list)
+                and len(raw_jobs) == 0
+                and type(data.get("total")) is int
+                and data["total"] > 0
+                and type(data.get("completed")) is int
+                and data["completed"] == 0
+                and type(data.get("failed")) is int
+                and data["failed"] == 0
+                and isinstance(
+                    data.get("requested_voice"), str
+                )
+                and bool(
+                    data["requested_voice"].strip()
+                )
+                and isinstance(
+                    data.get("configured_rate"), str
+                )
+                and bool(
+                    data["configured_rate"].strip()
+                )
+                and not data.get("source_sha256")
+                and not data.get("config_sha256")
+                and not _manifest_rows(data)
+            )
+
+        valid_tts_hashes = (
+            bool(
+                str(
+                    data.get("source_sha256", "")
+                ).strip()
+            )
+            and bool(
+                str(
+                    data.get("config_sha256", "")
+                ).strip()
+            )
+        )
+
+        valid_tts_total = (
+            type(total_jobs) is int
+            and total_jobs > 0
+        )
+
+        resumable_tts_manifest = (
+            is_tts
+            and status in {"running", "failed"}
             and isinstance(raw_jobs, list)
-            and bool(str(data.get("source_sha256", "")).strip())
-            and bool(str(data.get("config_sha256", "")).strip())
-            and bool(str(data.get("failure", "")).strip())
+            and valid_tts_hashes
+            and valid_tts_total
+            and len(raw_jobs) <= total_jobs
+            and (
+                status == "running"
+                or (
+                    data.get("retryable") is True
+                    and isinstance(
+                        data.get("failure"), str
+                    )
+                    and bool(data["failure"].strip())
+                )
+            )
+        )
+
+        retryable_narration_audio = (
+            legacy_empty_tts_marker
+            or resumable_tts_manifest
         )
 
         if status in FAILED and not retryable_narration_audio:
@@ -796,28 +879,48 @@ def validate_existing_manifest(
                 f"{name}: manifest status is {status}."
             )
 
-        if status and status not in SUCCESS | NONFINAL | FAILED:
+        if (
+            is_tts
+            and status in {"running", "failed"}
+            and not retryable_narration_audio
+        ):
             raise ValueError(
-                f"{name}: unknown manifest status {status!r}."
+                "narration_audio: failed/running manifest "
+                "does not have a valid resumable identity."
             )
 
-        if retryable_narration_audio:
-            narration_jobs = [
-                row for row in raw_jobs
-                if isinstance(row, dict)
-            ]
+        known_status = SUCCESS | NONFINAL | FAILED
+
+        if (
+            status
+            and status not in known_status
+            and not (
+                is_tts
+                and resumable_tts_manifest
+                and status == "running"
+            )
+        ):
+            raise ValueError(
+                f"{name}: unknown manifest status "
+                f"{status!r}."
+            )
 
         for field in ("format", "mode"):
             declared = data.get(field)
 
-            if declared is not None:
-                normalized = str(declared).strip().lower()
+            if declared is None:
+                continue
 
-                if normalized and normalized != expected_format:
-                    raise ValueError(
-                        f"{name}: {field}={normalized}, "
-                        f"expected {expected_format}."
-                    )
+            normalized = str(declared).strip().lower()
+
+            if (
+                normalized
+                and normalized != expected_format
+            ):
+                raise ValueError(
+                    f"{name}: {field}={normalized}, "
+                    f"expected {expected_format}."
+                )
 
         declared_input = (
             data.get("input_fingerprint")
@@ -827,67 +930,324 @@ def validate_existing_manifest(
 
         if (
             declared_input
-            and str(declared_input).lower() != input_fingerprint
+            and str(declared_input).lower()
+            != input_fingerprint
         ):
             raise ValueError(
-                f"{name}: artifact belongs to a different input file."
+                f"{name}: artifact belongs to "
+                "a different input file."
             )
 
-        if expected_parts is not None:
-            for field in (
-                "parts",
-                "total_parts",
-                "selected_parts",
-            ):
-                value = data.get(field)
+        for field in (
+            "parts",
+            "total_parts",
+            "selected_parts",
+        ):
+            value = data.get(field)
 
-                if value is None:
-                    continue
+            if value is None:
+                continue
 
-                try:
-                    actual = int(value)
-                except (TypeError, ValueError) as exc:
+            # TTS v13 stores Part audio records in "parts".
+            # This field is a list, not a Part-count integer.
+            if field == "parts" and isinstance(value, list):
+                if (
+                    expected_parts is not None
+                    and len(value) > expected_parts
+                ):
                     raise ValueError(
-                        f"{name}: invalid {field}."
-                    ) from exc
+                        f"{name}: too many Part records."
+                    )
 
-                if actual != expected_parts:
+                if (
+                    status in SUCCESS
+                    and expected_parts is not None
+                    and len(value) != expected_parts
+                ):
                     raise ValueError(
-                        f"{name}: {field}={actual}, "
+                        f"{name}: Part record count "
+                        f"{len(value)} does not match "
                         f"expected {expected_parts}."
                     )
 
-        if expected_format == "full":
-            for field in (
-                "parts",
-                "total_parts",
-                "selected_parts",
-            ):
-                value = data.get(field)
-
-                if value is None:
-                    continue
-
-                try:
-                    actual = int(value)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"{name}: invalid {field}."
-                    ) from exc
-
-                if actual != 1:
+                if (
+                    expected_format == "full"
+                    and (
+                        len(value) > 1
+                        or (
+                            status in SUCCESS
+                            and len(value) != 1
+                        )
+                    )
+                ):
                     raise ValueError(
                         f"{name}: FULL mode requires "
-                        f"{field}=1; found {value}."
+                        "exactly one Part record."
                     )
 
-    if retryable_narration_audio:
-        rows = narration_jobs
+                if (
+                    status in SUCCESS
+                    and not value
+                ):
+                    raise ValueError(
+                        f"{name}: completed manifest "
+                        "has no Part records."
+                    )
+
+                continue
+
+            if isinstance(value, bool):
+                raise ValueError(
+                    f"{name}: invalid {field}."
+                )
+
+            try:
+                actual = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{name}: invalid {field}."
+                ) from exc
+
+            if (
+                expected_parts is not None
+                and actual != expected_parts
+            ):
+                raise ValueError(
+                    f"{name}: {field}={actual}, "
+                    f"expected {expected_parts}."
+                )
+
+            if expected_format == "full" and actual != 1:
+                raise ValueError(
+                    f"{name}: FULL mode requires "
+                    f"{field}=1; found {actual}."
+                )
+
+        if is_tts and status in SUCCESS:
+            if not isinstance(raw_jobs, list) or not raw_jobs:
+                raise ValueError(
+                    "narration_audio: completed manifest "
+                    "contains no completed jobs."
+                )
+
+            if not isinstance(raw_parts, list) or not raw_parts:
+                raise ValueError(
+                    "narration_audio: completed manifest "
+                    "contains no Part audio records."
+                )
+
+            if (
+                type(total_jobs) is not int
+                or len(raw_jobs) != total_jobs
+            ):
+                raise ValueError(
+                    "narration_audio: completed job count "
+                    "does not match total_jobs."
+                )
+
+            completed_jobs = summary.get("completed_jobs")
+
+            if (
+                type(completed_jobs) is not int
+                or completed_jobs != len(raw_jobs)
+            ):
+                raise ValueError(
+                    "narration_audio: summary completed_jobs "
+                    "does not match jobs."
+                )
+
     else:
-        rows = _manifest_rows(data)
+        retryable_narration_audio = False
+
+    if not isinstance(data, dict):
+        retryable_narration_audio = False
+
+    # Validate the identity of every recorded TTS scene.
+    if is_tts and isinstance(raw_jobs, list):
+        seen_scene_ids = set()
+
+        for index, row in enumerate(raw_jobs, 1):
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"narration_audio: job {index} "
+                    "is not an object."
+                )
+
+            scene_id = str(
+                row.get("scene_id") or ""
+            ).strip()
+
+            if not scene_id:
+                raise ValueError(
+                    f"narration_audio: job {index} "
+                    "has no scene_id."
+                )
+
+            if scene_id in seen_scene_ids:
+                raise ValueError(
+                    f"narration_audio: duplicate scene_id "
+                    f"{scene_id!r}."
+                )
+
+            seen_scene_ids.add(scene_id)
+
+            part_number = _row_part_number(row)
+
+            if part_number is None:
+                raise ValueError(
+                    f"narration_audio: job {index} "
+                    "has an invalid Part number."
+                )
+
+            if (
+                expected_parts is not None
+                and part_number > expected_parts
+            ):
+                raise ValueError(
+                    f"narration_audio: job {index} "
+                    "references an unexpected Part."
+                )
+
+            if (
+                expected_format == "full"
+                and part_number != 1
+            ):
+                raise ValueError(
+                    "narration_audio: FULL mode "
+                    "contains a non-Part-1 job."
+                )
+
+            role = str(
+                row.get("role") or "main"
+            ).strip().lower()
+
+            if role not in {
+                "main",
+                "hook",
+                "suspense",
+                "resolution",
+            }:
+                raise ValueError(
+                    f"narration_audio: unsupported "
+                    f"job role {role!r}."
+                )
+
+            row_status = str(
+                row.get("status", "")
+            ).strip().lower()
+
+            if (
+                status in SUCCESS
+                and row_status not in SUCCESS
+            ):
+                raise ValueError(
+                    f"narration_audio: completed manifest "
+                    f"contains unfinished job {scene_id}."
+                )
+
+            if (
+                row_status
+                and row_status not in SUCCESS | NONFINAL | FAILED
+            ):
+                raise ValueError(
+                    f"narration_audio: unknown job status "
+                    f"{row_status!r}."
+                )
+
+    # Validate Part audio records. During a retryable run,
+    # missing Part merges are allowed because TTS recreates them.
+    if is_tts and isinstance(raw_parts, list):
+        seen_part_numbers = set()
+
+        for index, row in enumerate(raw_parts, 1):
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"narration_audio: Part record {index} "
+                    "is not an object."
+                )
+
+            part_number = _row_part_number(row)
+
+            if part_number is None:
+                raise ValueError(
+                    f"narration_audio: Part record {index} "
+                    "has an invalid Part number."
+                )
+
+            if part_number in seen_part_numbers:
+                raise ValueError(
+                    f"narration_audio: duplicate Part "
+                    f"record {part_number}."
+                )
+
+            seen_part_numbers.add(part_number)
+
+            if (
+                expected_parts is not None
+                and part_number > expected_parts
+            ):
+                raise ValueError(
+                    "narration_audio: Part audio record "
+                    "exceeds expected Part count."
+                )
+
+            if (
+                expected_format == "full"
+                and part_number != 1
+            ):
+                raise ValueError(
+                    "narration_audio: FULL mode contains "
+                    "a non-Part-1 audio record."
+                )
+
+            if status in SUCCESS:
+                has_path = any(
+                    isinstance(row.get(key), str)
+                    and row[key].strip()
+                    for key in PATH_KEYS
+                )
+
+                has_hash = any(
+                    isinstance(row.get(key), str)
+                    and row[key].strip()
+                    for key in HASH_KEYS
+                )
+
+                if not has_path or not has_hash:
+                    raise ValueError(
+                        f"narration_audio: completed "
+                        f"Part {part_number} has no "
+                        "verified audio path/hash."
+                    )
+
+        if status in SUCCESS:
+            actual_part_ids = seen_part_numbers
+            expected_part_ids = set(
+                range(1, len(raw_parts) + 1)
+            )
+
+            if actual_part_ids != expected_part_ids:
+                raise ValueError(
+                    "narration_audio: Part audio IDs "
+                    "are not continuous from Part 1."
+                )
+
+    if (
+        is_tts
+        and status in SUCCESS
+        and expected_parts is not None
+        and len(raw_parts) != expected_parts
+    ):
+        raise ValueError(
+            "narration_audio: completed Part audio "
+            "count does not match expected Parts."
+        )
+
+    rows = _manifest_rows(data)
 
     checked_files = 0
     retryable_failed_rows = 0
+    retryable_unavailable_files = 0
 
     for index, row in enumerate(rows, 1):
         row_status = str(
@@ -895,10 +1255,7 @@ def validate_existing_manifest(
         ).strip().lower()
 
         if row_status in FAILED:
-            if (
-                retryable_narration_audio
-                and row_status == "failed"
-            ):
+            if retryable_narration_audio:
                 retryable_failed_rows += 1
                 continue
 
@@ -907,7 +1264,10 @@ def validate_existing_manifest(
                 f"{row_status}."
             )
 
-        if row_status and row_status not in SUCCESS | NONFINAL:
+        if (
+            row_status
+            and row_status not in SUCCESS | NONFINAL
+        ):
             raise ValueError(
                 f"{name}: row {index} has unknown status "
                 f"{row_status!r}."
@@ -923,27 +1283,65 @@ def validate_existing_manifest(
             None,
         )
 
-        if file_value:
+        if not file_value:
+            if (
+                retryable_narration_audio
+                and row_status in SUCCESS
+            ):
+                retryable_unavailable_files += 1
+                continue
+
+            if (
+                name == "narration_audio"
+                and status in SUCCESS
+            ):
+                raise ValueError(
+                    f"{name}: completed audio row {index} "
+                    "has no audio path."
+                )
+
+            continue
+
+        try:
             asset = resolve_output_path(
                 file_value,
                 f"{name} row {index}",
             )
+        except Exception:
+            if retryable_narration_audio:
+                retryable_unavailable_files += 1
+                continue
+            raise
 
-            checked_files += 1
+        checked_files += 1
+        hash_mismatch = False
 
-            for hash_key in HASH_KEYS:
-                declared_hash = row.get(hash_key)
+        for hash_key in HASH_KEYS:
+            declared_hash = row.get(hash_key)
 
-                if declared_hash:
-                    if (
-                        str(declared_hash).strip().lower()
-                        != sha256_file(asset)
-                    ):
-                        raise ValueError(
-                            f"{name}: {asset.name} "
-                            f"{hash_key} mismatch."
-                        )
+            if not declared_hash:
+                continue
+
+            actual_hash = sha256_file(asset)
+
+            if (
+                str(declared_hash).strip().lower()
+                != actual_hash.lower()
+            ):
+                if retryable_narration_audio:
+                    retryable_unavailable_files += 1
+                    hash_mismatch = True
                     break
+
+                raise ValueError(
+                    f"{name}: {asset.name} "
+                    f"{hash_key} mismatch."
+                )
+
+            break
+
+        if hash_mismatch:
+            continue
 
         if row.get("scene_id") is not None:
             if not str(row.get("scene_id")).strip():
@@ -951,25 +1349,144 @@ def validate_existing_manifest(
                     f"{name}: row {index} has empty scene_id."
                 )
 
-    scene_data_source = data
+    scene_data = {
+        "available": False,
+        "part_counts": {},
+    }
 
-    if retryable_narration_audio:
-        scene_data_source = dict(data)
-        scene_data_source["scenes"] = narration_jobs
-
-    scene_ok, scene_detail, scene_data = (
-        validate_actual_scene_counts(
-            name,
-            scene_data_source,
-            scenes_min,
-            scenes_max,
-            expected_parts,
-            expected_format,
+    if legacy_empty_tts_marker:
+        scene_detail = (
+            "Legacy empty TTS failure marker found; "
+            "no completed jobs or audio assets are recorded. "
+            "The current TTS stage may safely replace this marker."
         )
-    )
 
-    if not scene_ok:
-        raise ValueError(scene_detail)
+    elif resumable_tts_manifest:
+        raw_counts = data.get("actual_scene_counts")
+
+        if (
+            not isinstance(raw_counts, list)
+            or not raw_counts
+        ):
+            raise ValueError(
+                "narration_audio: resumable TTS manifest "
+                "has no actual_scene_counts."
+            )
+
+        if (
+            expected_parts is not None
+            and len(raw_counts) != expected_parts
+        ):
+            raise ValueError(
+                "narration_audio: actual_scene_counts "
+                "does not match expected Parts."
+            )
+
+        if (
+            expected_format == "full"
+            and len(raw_counts) != 1
+        ):
+            raise ValueError(
+                "narration_audio: FULL mode must have "
+                "exactly one scene-count entry."
+            )
+
+        normalized_counts = []
+
+        for part_number, value in enumerate(
+            raw_counts, 1
+        ):
+            if isinstance(value, bool):
+                raise ValueError(
+                    f"narration_audio: invalid scene count "
+                    f"for Part {part_number}."
+                )
+
+            try:
+                count = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"narration_audio: invalid scene count "
+                    f"for Part {part_number}."
+                ) from exc
+
+            if not scenes_min <= count <= scenes_max:
+                raise ValueError(
+                    f"narration_audio: Part {part_number} "
+                    f"has {count} Main Scenes; expected "
+                    f"{scenes_min}-{scenes_max}."
+                )
+
+            normalized_counts.append(count)
+
+        declared_main_total = data.get("total_main_scenes")
+
+        if declared_main_total is not None:
+            if (
+                isinstance(declared_main_total, bool)
+                or int(declared_main_total)
+                != sum(normalized_counts)
+            ):
+                raise ValueError(
+                    "narration_audio: total_main_scenes "
+                    "does not match actual_scene_counts."
+                )
+
+        expected_job_total = (
+            sum(normalized_counts)
+            + (len(normalized_counts) * 2)
+        )
+
+        if total_jobs != expected_job_total:
+            raise ValueError(
+                "narration_audio: total_jobs does not "
+                "match Main + Hook + Suspense/Resolution jobs."
+            )
+
+        declared_completed = summary.get("completed_jobs")
+
+        if (
+            declared_completed is not None
+            and (
+                type(declared_completed) is not int
+                or declared_completed != len(raw_jobs)
+            )
+        ):
+            raise ValueError(
+                "narration_audio: completed_jobs does "
+                "not match saved scene jobs."
+            )
+
+        scene_data = {
+            "available": True,
+            "part_counts": {
+                str(index): count
+                for index, count in enumerate(
+                    normalized_counts, 1
+                )
+            },
+        }
+
+        scene_detail = (
+            "TTS manifest is resumable. Planned scene "
+            "counts are valid; completed audio records "
+            "were checked where reusable."
+        )
+
+    else:
+        scene_ok, scene_detail, scene_data = (
+            validate_actual_scene_counts(
+                name,
+                data,
+                scenes_min,
+                scenes_max,
+                expected_parts,
+                expected_format,
+            )
+        )
+
+        if not scene_ok:
+            raise ValueError(scene_detail)
 
     result = {
         "status": (
@@ -988,17 +1505,18 @@ def validate_existing_manifest(
 
     if retryable_narration_audio:
         result["retryable"] = True
+        result["legacy_empty_placeholder"] = (
+            legacy_empty_tts_marker
+        )
         result["retryable_failed_rows"] = (
             retryable_failed_rows
         )
-        result["detail"] = (
-            "Previous TTS failure is retryable. "
-            "Completed scene audio files and checksums "
-            "were validated. Failed jobs can be retried."
+        result["retryable_unavailable_files"] = (
+            retryable_unavailable_files
         )
+        result["detail"] = scene_detail
 
     return result
-
 
 
 def check_artifact_inventory(
