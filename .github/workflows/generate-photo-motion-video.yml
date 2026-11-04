@@ -67,14 +67,13 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Validate required files and input configuration
+      - name: Validate repository files and configuration
         shell: bash
         run: |
           set -euo pipefail
 
           test -s Input/topic.txt
           test -s requirements.txt
-          test -s .github/workflows/generate-photo-motion-video.yml
 
           required_files=(
             scripts/input_config.py
@@ -126,7 +125,7 @@ jobs:
               get_format,
               get_parts_range,
               get_selected_parts,
-              get_scenes,
+              get_scenes_range,
               get_fps,
               get_tts_provider_order,
               get_image_provider_order,
@@ -134,10 +133,11 @@ jobs:
           )
 
           config = load_and_validate(Path("Input/topic.txt"))
-          mode = get_format(config)
-          minimum, maximum = get_parts_range(config)
+
+          mode = str(get_format(config)).strip().lower()
+          parts_min, parts_max = get_parts_range(config)
           selected = get_selected_parts(config, required=False)
-          scenes = get_scenes(config)
+          scenes_min, scenes_max = get_scenes_range(config)
           fps = get_fps(config)
           tts = get_tts_provider_order(config)
           images = get_image_provider_order(config)
@@ -145,19 +145,16 @@ jobs:
           if mode not in {"short", "full"}:
               raise SystemExit(f"Invalid FORMAT: {mode}")
 
-          if minimum < 1 or maximum < minimum:
+          if parts_min < 1 or parts_max < parts_min:
               raise SystemExit("Invalid PARTS range.")
 
-          if selected is not None and not minimum <= selected <= maximum:
+          if selected is not None and not parts_min <= selected <= parts_max:
               raise SystemExit("Selected PARTS is outside configured range.")
 
-          if minimum == maximum and selected not in (None, minimum):
-              raise SystemExit("Fixed PARTS selection mismatch.")
+          if scenes_min < 1 or scenes_max < scenes_min:
+              raise SystemExit("Invalid SCENES range.")
 
-          if scenes < 1:
-              raise SystemExit("SCENES must be positive.")
-
-          if not 1 <= fps <= 60:
+          if not 1 <= int(fps) <= 60:
               raise SystemExit(f"Invalid FPS: {fps}")
 
           if len(tts) < 3 or len(set(tts)) != len(tts):
@@ -171,9 +168,9 @@ jobs:
 
           print("INPUT CONFIGURATION VALID")
           print("FORMAT:", mode)
-          print("PARTS RANGE:", minimum, "-", maximum)
-          print("ACTUAL PARTS:", selected if selected is not None else "pending story selection")
-          print("SCENES:", scenes)
+          print("PARTS RANGE:", parts_min, "-", parts_max)
+          print("SELECTED PARTS:", selected if selected is not None else "pending")
+          print("SCENES RANGE:", scenes_min, "-", scenes_max)
           print("FPS:", fps)
           print("TTS FALLBACK ORDER:", " -> ".join(tts))
           print("IMAGE FALLBACK ORDER:", " -> ".join(images))
@@ -263,8 +260,8 @@ jobs:
               if not infos:
                   raise SystemExit("Empty checkpoint.")
 
-              total_size = 0
               seen = set()
+              total_size = 0
 
               for info in infos:
                   name = info.filename.replace("\\", "/")
@@ -273,6 +270,7 @@ jobs:
                   if (
                       path.is_absolute()
                       or not path.parts
+                      or path.parts[0] != "output"
                       or any(part in {"", ".", ".."} for part in path.parts)
                       or ":" in path.parts[0]
                   ):
@@ -290,7 +288,21 @@ jobs:
                       raise SystemExit("Checkpoint exceeds 8 GiB.")
 
               destination.mkdir(parents=True, exist_ok=True)
-              zf.extractall(destination)
+
+              for info in infos:
+                  target = destination / PurePosixPath(info.filename)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+
+                  if info.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                      continue
+
+                  with zf.open(info) as source, target.open("wb") as output:
+                      while True:
+                          block = source.read(1024 * 1024)
+                          if not block:
+                              break
+                          output.write(block)
           PY
             then
               continue
@@ -323,9 +335,12 @@ jobs:
               get_parts_range,
           )
 
-          context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          context = json.loads(
+              Path(sys.argv[1]).read_text(encoding="utf-8")
+          )
           config = load_and_validate("Input/topic.txt")
-          mode = get_format(config)
+
+          mode = str(get_format(config)).strip().lower()
           minimum, maximum = get_parts_range(config)
 
           if context.get("format") != mode:
@@ -338,10 +353,15 @@ jobs:
               raise SystemExit("Checkpoint PARTS maximum mismatch.")
 
           selected = context.get("actual_parts")
-          if not isinstance(selected, int) or not minimum <= selected <= maximum:
+          if (
+              not isinstance(selected, int)
+              or isinstance(selected, bool)
+              or not minimum <= selected <= maximum
+          ):
               raise SystemExit("Checkpoint actual PARTS is invalid.")
 
-          if not isinstance(context.get("naming_key"), str) or not context["naming_key"]:
+          naming_key = context.get("naming_key")
+          if not isinstance(naming_key, str) or not naming_key.strip():
               raise SystemExit("Checkpoint naming key is missing.")
           PY
             then
@@ -374,8 +394,8 @@ jobs:
 
           ffmpeg -version
           ffprobe -version
-          fc-cache -f
 
+          fc-cache -f
           fc-match "Noto Sans Devanagari"
           fc-match "Mukta"
           fc-match "Hind"
@@ -413,8 +433,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/install_caption_fonts.py
           fc-cache -f
+
           fc-match "Noto Sans Devanagari"
           fc-match "Mukta"
           fc-match "Hind"
@@ -424,90 +446,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          python - <<'PY'
-          import json
-          import os
-          import shutil
-          from pathlib import Path
-
-          def load_object(path):
-              if not path.is_file():
-                  return None
-              try:
-                  value = json.loads(path.read_text(encoding="utf-8-sig"))
-              except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                  print(f"PRE-FLIGHT RECONCILIATION: leave {path}: {exc}")
-                  return None
-              return value if isinstance(value, dict) else None
-
-          def save_with_backup(path, value):
-              backup = path.with_name(path.name + ".preflight-original")
-              if not backup.exists():
-                  shutil.copy2(path, backup)
-              temporary = path.with_name(path.name + ".preflight.tmp")
-              temporary.write_text(
-                  json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-                  encoding="utf-8",
-              )
-              os.replace(temporary, path)
-              print(f"PRE-FLIGHT RECONCILIATION: normalized {path}; backup={backup}")
-
-          story_path = Path("output/story/story.json")
-          story = load_object(story_path)
-          if story and str(story.get("status", "")).lower() == "ready_for_generation":
-              parts = story.get("parts")
-              narration_values = [
-                  story.get("story_text"),
-                  story.get("corrected_complete_story"),
-                  story.get("narration"),
-              ]
-              if isinstance(parts, list):
-                  for part in parts:
-                      if not isinstance(part, dict):
-                          continue
-                      narration_values.extend([
-                          part.get("narration"),
-                          part.get("text"),
-                          part.get("story_text"),
-                      ])
-                      scenes = part.get("scenes", [])
-                      if isinstance(scenes, list):
-                          for scene in scenes:
-                              if isinstance(scene, dict):
-                                  narration_values.extend([
-                                      scene.get("narration"),
-                                      scene.get("text"),
-                                  ])
-              has_story_narration = any(
-                  isinstance(value, str) and value.strip()
-                  for value in narration_values
-              )
-              if isinstance(parts, list) and parts and not has_story_narration:
-                  story["status"] = "pending"
-                  story["preflight_recovery"] = (
-                      "Empty story scaffold; generate_story.py must replace it."
-                  )
-                  save_with_backup(story_path, story)
-
-          audio_path = Path("output/narration/audio_jobs.json")
-          audio = load_object(audio_path)
-          if audio and str(audio.get("status", "")).lower() == "failed":
-              jobs = audio.get("jobs")
-              try:
-                  completed = int(
-                      audio.get("completed_count", audio.get("completed", 0)) or 0
-                  )
-              except (TypeError, ValueError):
-                  completed = -1
-              if isinstance(jobs, list) and not jobs and completed == 0:
-                  audio["status"] = "pending"
-                  audio["rebuild_required"] = True
-                  audio["preflight_recovery"] = (
-                      "Empty failed TTS manifest; generate_tts.py must rebuild it."
-                  )
-                  save_with_backup(audio_path, audio)
-          PY
 
           python scripts/pipeline_preflight.py
 
@@ -540,6 +478,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/preview_caption_fonts.py
           test -s output/captions/caption_font_preview.png
           test -s output/captions/caption_font_preview.json
@@ -550,7 +489,7 @@ jobs:
       - name: Generate story
         run: python scripts/generate_story.py
 
-      - name: Validate exact story length and structure
+      - name: Validate story length and structure
         shell: bash
         run: |
           set -euo pipefail
@@ -561,12 +500,11 @@ jobs:
           import json
           from pathlib import Path
 
-          report_path = Path("output/story/story_length_validation.json")
-
-          if not report_path.is_file():
+          path = Path("output/story/story_length_validation.json")
+          if not path.is_file():
               raise SystemExit("Story length validation report is missing.")
 
-          report = json.loads(report_path.read_text(encoding="utf-8"))
+          report = json.loads(path.read_text(encoding="utf-8"))
           summary = report.get("summary")
 
           if not isinstance(summary, dict):
@@ -663,6 +601,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/generate_flow_music.py
 
           if [ -s output/music/flow_music_manifest.json ]; then
@@ -695,7 +634,7 @@ jobs:
       - name: Render scene audio and video parts
         run: python scripts/render_video.py
 
-      - name: Burn captions into final video
+      - name: Burn captions into Part videos
         run: python scripts/burn_captions.py
 
       - name: Generate story-specific thumbnail
@@ -705,9 +644,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python scripts/generate_youtube_metadata.py
+
           test -s output/youtube_metadata.txt
           test -s output/publish/youtube_metadata.json
+          test -s output/publish/youtube_tags.txt
 
       - name: Validate final video and deliverables
         run: python scripts/validate_final_output.py
@@ -724,16 +666,13 @@ jobs:
           test -s output/package_archive_name.txt
 
           ARCHIVE="$(tr -d '\r\n' < output/package_archive_name.txt)"
-          if [[ ! "$ARCHIVE" =~ ^katha-lok-[[:alnum:]_-]+-(short|full)-output\.zip$ ]]; then
-            echo "::error::Package archive name is not story/FORMAT-specific: $ARCHIVE"
-            exit 1
-          fi
-
+          test -n "$ARCHIVE"
           test -s "$ARCHIVE"
 
           python - "$ARCHIVE" <<'PY'
           import hashlib
           import json
+          import re
           import sys
           import zipfile
           from pathlib import Path, PurePosixPath
@@ -749,24 +688,37 @@ jobs:
 
           if mode not in {"short", "full"}:
               raise SystemExit("Invalid package FORMAT.")
+
           if not isinstance(slug, str) or not slug:
               raise SystemExit("Story slug is missing.")
+
+          if not re.fullmatch(r"[\w-]{1,100}", slug, flags=re.UNICODE):
+              raise SystemExit("Story slug contains invalid characters.")
+
           if root != f"{slug}-{mode}":
               raise SystemExit("Package root does not match story and FORMAT.")
+
           if archive.name != manifest.get("archive"):
               raise SystemExit("Archive name and package manifest disagree.")
+
           if archive.name != f"katha-lok-{slug}-{mode}-output.zip":
               raise SystemExit("Archive name is not story-specific.")
-          if not isinstance(parts, int) or parts < 1:
+
+          if not isinstance(parts, int) or isinstance(parts, bool) or parts < 1:
               raise SystemExit("Invalid actual PARTS.")
+
           if manifest.get("configured_parts") != parts:
               raise SystemExit("Actual PARTS and configured PARTS disagree.")
+
           if manifest.get("status") != "completed":
               raise SystemExit("Package status is not completed.")
+
           if manifest.get("part_videos_only") is not True:
               raise SystemExit("Package must contain Part videos only.")
+
           if manifest.get("combined_video_included") is not False:
               raise SystemExit("Combined video must not be included.")
+
           if manifest.get("format_alias_included") is not False:
               raise SystemExit("Format alias must not be included.")
 
@@ -777,10 +729,13 @@ jobs:
 
           if digest.hexdigest() != manifest.get("archive_sha256"):
               raise SystemExit("Archive SHA256 mismatch.")
+
           if archive.stat().st_size != manifest.get("archive_bytes"):
               raise SystemExit("Archive byte count mismatch.")
+
           if manifest.get("zip_integrity") != "valid":
               raise SystemExit("Package ZIP integrity is not valid.")
+
           if manifest.get("manifest_zip_consistency") != "valid":
               raise SystemExit("Package manifest/ZIP consistency is not valid.")
 
@@ -797,30 +752,50 @@ jobs:
               if any(not name.startswith(prefix) for name in names):
                   raise SystemExit("Every ZIP member must be inside the story root.")
 
+              for name in names:
+                  path = PurePosixPath(name)
+                  if (
+                      path.is_absolute()
+                      or "\\" in name
+                      or any(part in {"", ".", ".."} for part in path.parts)
+                  ):
+                      raise SystemExit(f"Unsafe ZIP member: {name}")
+
               embedded_path = f"{root}/package_manifest.json"
               render_path = f"{root}/scene_renders/render_manifest.json"
+
               if embedded_path not in names or render_path not in names:
                   raise SystemExit("Embedded package/render manifest is missing.")
 
               embedded = json.loads(zf.read(embedded_path).decode("utf-8"))
+
               if embedded.get("status") != "completed":
                   raise SystemExit("Embedded package manifest is incomplete.")
+
               if embedded.get("format") != mode or embedded.get("parts") != parts:
                   raise SystemExit("Embedded package FORMAT/PARTS mismatch.")
-              if embedded.get("story_slug") != slug or embedded.get("package_root") != root:
+
+              if (
+                  embedded.get("story_slug") != slug
+                  or embedded.get("package_root") != root
+              ):
                   raise SystemExit("Embedded package story identity mismatch.")
 
               videos = {
                   name for name in names
-                  if PurePosixPath(name).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+                  if PurePosixPath(name).suffix.lower()
+                  in {".mp4", ".mov", ".mkv", ".webm"}
               }
+
               expected = {
                   f"{root}/parts/{slug}-part-{number:02d}.mp4"
                   for number in range(1, parts + 1)
               }
+
               if videos != expected:
                   raise SystemExit(
-                      f"Story Part videos mismatch: expected={sorted(expected)}, found={sorted(videos)}"
+                      "Story Part videos mismatch: "
+                      f"expected={sorted(expected)}, found={sorted(videos)}"
                   )
 
               if f"{root}/{slug}-thumbnail.jpg" not in names:
@@ -865,26 +840,37 @@ jobs:
 
           if not isinstance(slug, str) or not slug:
               raise SystemExit("Missing story slug.")
+
           if mode not in {"short", "full"} or root != f"{slug}-{mode}":
               raise SystemExit("Invalid package root/FORMAT.")
+
           if archive.name != f"katha-lok-{slug}-{mode}-output.zip":
               raise SystemExit("Final ZIP name does not match story and FORMAT.")
+
           if archive.name != manifest.get("archive"):
               raise SystemExit("Final ZIP and manifest archive names disagree.")
-          if not isinstance(parts, int) or parts < 1:
+
+          if not isinstance(parts, int) or isinstance(parts, bool) or parts < 1:
               raise SystemExit("Invalid actual PARTS.")
+
           if parts != manifest.get("configured_parts"):
               raise SystemExit("Actual PARTS mismatch.")
+
           if manifest.get("status") != "completed":
               raise SystemExit("Package is incomplete.")
+
           if manifest.get("part_videos_only") is not True:
               raise SystemExit("Part-only package guarantee failed.")
+
           if manifest.get("combined_video_included") is not False:
               raise SystemExit("Combined video is forbidden.")
+
           if manifest.get("format_alias_included") is not False:
               raise SystemExit("Format alias is forbidden.")
+
           if manifest.get("zip_integrity") != "valid":
               raise SystemExit("ZIP integrity is invalid.")
+
           if manifest.get("manifest_zip_consistency") != "valid":
               raise SystemExit("Manifest/ZIP consistency is invalid.")
 
@@ -892,8 +878,10 @@ jobs:
           with archive.open("rb") as handle:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
+
           if digest.hexdigest() != manifest.get("archive_sha256"):
               raise SystemExit("Final ZIP SHA256 mismatch.")
+
           if archive.stat().st_size != manifest.get("archive_bytes"):
               raise SystemExit("Final ZIP size mismatch.")
 
@@ -901,18 +889,32 @@ jobs:
               bad = zf.testzip()
               if bad:
                   raise SystemExit(f"Corrupt ZIP member: {bad}")
+
               names = zf.namelist()
+
               if not names or len(names) != len(set(names)):
                   raise SystemExit("ZIP is empty or contains duplicate entries.")
+
               if any(not name.startswith(root + "/") for name in names):
                   raise SystemExit("ZIP contains a file outside the story root.")
 
+              for name in names:
+                  path = PurePosixPath(name)
+                  if (
+                      path.is_absolute()
+                      or "\\" in name
+                      or any(part in {"", ".", ".."} for part in path.parts)
+                  ):
+                      raise SystemExit(f"Unsafe ZIP member: {name}")
+
               embedded_name = f"{root}/package_manifest.json"
               render_name = f"{root}/scene_renders/render_manifest.json"
+
               if embedded_name not in names or render_name not in names:
                   raise SystemExit("Required embedded manifests are missing.")
 
               embedded = json.loads(zf.read(embedded_name).decode("utf-8"))
+
               if (
                   embedded.get("status") != "completed"
                   or embedded.get("format") != mode
@@ -924,14 +926,19 @@ jobs:
 
               videos = {
                   name for name in names
-                  if PurePosixPath(name).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+                  if PurePosixPath(name).suffix.lower()
+                  in {".mp4", ".mov", ".mkv", ".webm"}
               }
+
               expected = {
                   f"{root}/parts/{slug}-part-{number:02d}.mp4"
                   for number in range(1, parts + 1)
               }
+
               if videos != expected:
-                  raise SystemExit("ZIP contains missing, extra or wrongly named Part videos.")
+                  raise SystemExit(
+                      "ZIP contains missing, extra or wrongly named Part videos."
+                  )
 
               if f"{root}/{slug}-thumbnail.jpg" not in names:
                   raise SystemExit("Story-named thumbnail is missing.")
@@ -979,46 +986,55 @@ jobs:
           )
 
           config = load_and_validate("Input/topic.txt")
-          mode = get_format(config)
+          mode = str(get_format(config)).strip().lower()
           minimum, maximum = get_parts_range(config)
+
           try:
               selected = get_selected_parts(config, required=False)
           except Exception as exc:
-              print(f"Checkpoint skipped: cannot read actual PARTS selection: {exc}")
+              print("Checkpoint skipped: cannot read selected PARTS:", exc)
               raise SystemExit(0)
 
           if selected is None:
-              print("Checkpoint skipped: actual PARTS has not been selected yet.")
+              print("Checkpoint skipped: actual PARTS is not selected.")
               raise SystemExit(0)
 
           actual = int(selected)
-
           if not minimum <= actual <= maximum:
               raise SystemExit("Cannot checkpoint invalid actual PARTS.")
 
-          title = str(config.get("TITLE") or config.get("TOPIC") or "").strip()
-          story_path = Path("output/story/story.json")
+          title = str(
+              config.get("TITLE") or config.get("TOPIC") or ""
+          ).strip()
 
+          story_path = Path("output/story/story.json")
           if story_path.is_file():
               try:
-                  story = json.loads(story_path.read_text(encoding="utf-8"))
+                  story = json.loads(
+                      story_path.read_text(encoding="utf-8-sig")
+                  )
                   if isinstance(story, dict):
                       title = str(
-                          story.get("title")
+                          story.get("final_title")
+                          or story.get("generated_title")
                           or story.get("story_title")
+                          or story.get("title")
                           or title
                       ).strip()
               except (OSError, ValueError):
                   pass
 
-          slug = re.sub(r"[^\w-]+", "-", title.lower(), flags=re.UNICODE)
-          slug = re.sub(r"-+", "-", slug).strip("-")[:100]
+          slug = re.sub(
+              r"[^\w\s-]", "", title.lower(), flags=re.UNICODE
+          )
+          slug = re.sub(r"[\s_-]+", "-", slug).strip("-")[:100]
 
           if not slug:
-              raise SystemExit("Cannot checkpoint without story naming key.")
+              print("Checkpoint skipped: story naming key is unavailable.")
+              raise SystemExit(0)
 
           context = {
-              "schema_version": 1,
+              "schema_version": 2,
               "format": mode,
               "parts_min": minimum,
               "parts_max": maximum,
@@ -1027,8 +1043,6 @@ jobs:
           }
 
           destination = Path("output/.resume-context.json")
-          destination.parent.mkdir(parents=True, exist_ok=True)
-
           fd, temporary_name = tempfile.mkstemp(
               prefix=".resume-context-",
               suffix=".tmp",
@@ -1043,7 +1057,6 @@ jobs:
                   os.fsync(handle.fileno())
 
               os.replace(temporary_name, destination)
-
           except Exception:
               Path(temporary_name).unlink(missing_ok=True)
               raise
@@ -1067,11 +1080,9 @@ jobs:
               raise SystemExit("Output directory is unavailable.")
 
           files = []
-
           for path in sorted(root.rglob("*")):
               if path.is_symlink():
                   raise SystemExit(f"Refusing checkpoint symlink: {path}")
-
               if path.is_file():
                   files.append(path)
 
@@ -1087,9 +1098,13 @@ jobs:
           ) as zf:
               for path in files:
                   relative = path.as_posix()
-
-                  if relative.startswith("/") or ".." in Path(relative).parts:
-                      raise SystemExit(f"Unsafe checkpoint path: {relative}")
+                  if (
+                      relative.startswith("/")
+                      or ".." in Path(relative).parts
+                  ):
+                      raise SystemExit(
+                          f"Unsafe checkpoint path: {relative}"
+                      )
 
                   info = zipfile.ZipInfo(relative)
                   info.compress_type = zipfile.ZIP_DEFLATED
@@ -1106,7 +1121,9 @@ jobs:
           with zipfile.ZipFile(temporary, "r") as zf:
               bad = zf.testzip()
               if bad:
-                  raise SystemExit(f"Checkpoint ZIP verification failed: {bad}")
+                  raise SystemExit(
+                      f"Checkpoint ZIP verification failed: {bad}"
+                  )
 
           os.replace(temporary, archive)
 
