@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a source-grounded character bible with gender evidence and scene continuity."""
+"""Build a source-grounded Character Bible and scene continuity maps."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ AI_STORY_FILE = STORY_DIR / "ai_story.json"
 SOURCE_STORY_FILE = STORY_DIR / "story.json"
 OUTPUT_FILE = STORY_DIR / "character_bible.json"
 
-VERSION = "character-bible-v8-evidence-physical-continuity-all-roles"
+VERSION = "character-bible-v9-full-story-physical-evidence-scene-map"
 
 ROLE_FIELDS = (
     ("hook_scene", "hook"),
@@ -31,9 +31,10 @@ ROLE_FIELDS = (
 
 DETAIL_FIELDS = (
     "age", "gender", "appearance", "clothing", "hair", "eyes",
-    "face_features", "skin_tone", "body_features", "distinctive_features",
-    "personality", "role", "voice_description", "character_description",
-    "height", "build", "accessories",
+    "face_features", "skin_tone", "body_features",
+    "distinctive_features", "personality", "role",
+    "voice_description", "character_description", "height",
+    "build", "accessories",
 )
 
 PHYSICAL_FIELDS = (
@@ -48,7 +49,7 @@ NAME_FIELDS = (
 
 CAST_FIELDS = (
     "characters", "character_list", "cast", "main_characters",
-    "character_bible"
+    "character_bible",
 )
 
 DEVANAGARI = r"[\u0900-\u097F]+"
@@ -118,39 +119,38 @@ GENDER_ALIASES = {
     "male": "male", "man": "male", "boy": "male",
     "पुरुष": "male", "आदमी": "male", "लड़का": "male",
     "लड़का": "male", "पुत्र": "male", "बेटा": "male",
-    "father": "male", "son": "male", "he": "male",
-    "him": "male", "his": "male",
+    "father": "male", "son": "male",
     "female": "female", "woman": "female", "girl": "female",
     "महिला": "female", "औरत": "female", "लड़की": "female",
     "लड़की": "female", "पुत्री": "female", "बेटी": "female",
-    "mother": "female", "daughter": "female", "she": "female",
-    "her": "female", "hers": "female",
+    "mother": "female", "daughter": "female",
     "non-binary": "non_binary", "nonbinary": "non_binary",
     "अन्य": "non_binary",
 }
 
-HINDI_MALE_MARKERS = (
-    r"\b(?:वह|वे|उसने|उसका|उसकी|उसके|उन्होंने|उनका|उनकी|"
-    r"उनके)\b.{0,55}\b(?:गया|आया|बैठा|उठा|बोला|कहा|करता|"
-    r"रहा|था|हुआ|चुका|सकता)\b",
-    r"\b(?:गया|आया|बैठा|उठा|बोला|कहा|करता|रहा|था|हुआ|"
-    r"चुका|सकता)\b",
+HINDI_MALE_MARKERS = re.compile(
+    r"(?:गया|आया|बैठा|उठा|बोला|कहा|करता|रहा|था|हुआ|चुका|सकता)"
 )
 
-HINDI_FEMALE_MARKERS = (
-    r"\b(?:वह|वे|उसने|उसका|उसकी|उसके|उन्होंने|उनका|उनकी|"
-    r"उनके)\b.{0,55}\b(?:गई|आई|बैठी|उठी|बोली|कही|करती|"
-    r"रही|थी|हुई|चुकी|सकती)\b",
-    r"\b(?:गई|आई|बैठी|उठी|बोली|कही|करती|रही|थी|हुई|"
-    r"चुकी|सकती)\b",
+HINDI_FEMALE_MARKERS = re.compile(
+    r"(?:गई|आई|बैठी|उठी|बोली|कही|करती|रही|थी|हुई|चुकी|सकती)"
 )
 
 ENGLISH_MALE_MARKERS = re.compile(
-    r"\b(?:he|him|his|himself|man|boy|father|son|husband)\b",
-    re.IGNORECASE,
+    r"\b(?:he|him|his|himself)\b", re.IGNORECASE
 )
+
 ENGLISH_FEMALE_MARKERS = re.compile(
-    r"\b(?:she|her|hers|herself|woman|girl|mother|daughter|wife)\b",
+    r"\b(?:she|her|hers|herself)\b", re.IGNORECASE
+)
+
+PHYSICAL_HINTS = re.compile(
+    r"(?:उम्र|वर्ष|साल|कद|लंबाई|लम्बाई|कद-काठी|"
+    r"चेहरा|आँख|आंख|बाल|दाढ़ी|मूँछ|मूंछ|रंग|त्वचा|"
+    r"शरीर|कद-काठी|कपड़े|पोशाक|जैकेट|साड़ी|साडी|"
+    r"age|years old|height|tall|short|face|eyes|hair|"
+    r"beard|moustache|skin|complexion|body|build|clothing|"
+    r"wearing|dress|jacket|shirt|uniform|scar|mark)",
     re.IGNORECASE,
 )
 
@@ -220,9 +220,7 @@ def valid_name(value: Any) -> bool:
         return False
     if not re.search(r"[A-Za-z\u0900-\u097F]", name):
         return False
-    if any(token in STOP_NAMES for token in name.split()):
-        return False
-    return True
+    return not any(token in STOP_NAMES for token in name.split())
 
 
 def normalize_names(value: Any) -> list[str]:
@@ -244,8 +242,9 @@ def normalize_names(value: Any) -> list[str]:
         else:
             name = normalize_name(item)
 
-        if valid_name(name) and name.casefold() not in seen:
-            seen.add(name.casefold())
+        key = name.casefold()
+        if valid_name(name) and key not in seen:
+            seen.add(key)
             result.append(name)
     return result
 
@@ -302,9 +301,7 @@ def normalize_scene(
         raise RuntimeError(f"Scene {scene_id} has no visual_prompt.")
 
     raw_names = (
-        raw.get("characters")
-        or raw.get("character_names")
-        or raw.get("cast")
+        raw.get("characters") or raw.get("character_names") or raw.get("cast")
     )
     names = normalize_names(raw_names)
 
@@ -313,6 +310,7 @@ def normalize_scene(
         raw_ids = [raw_ids]
     if not isinstance(raw_ids, list):
         raise RuntimeError(f"{scene_id}: character_ids must be a list.")
+
     ids = [clean(value) for value in raw_ids if clean(value)]
 
     return {
@@ -323,6 +321,9 @@ def normalize_scene(
         "title": clean(raw.get("title")),
         "narration": narration,
         "dialogue": dialogue,
+        "story_anchor": clean(raw.get("story_anchor")),
+        "beat": clean(raw.get("beat")),
+        "purpose": clean(raw.get("purpose")),
         "visual_prompt": visual_prompt,
         "location": clean(
             raw.get("location") or raw.get("setting")
@@ -332,6 +333,7 @@ def normalize_scene(
         "characters": names,
         "character_ids": ids,
         "raw": raw,
+        "raw_records": [raw],
     }
 
 
@@ -374,9 +376,7 @@ def collect_scenes(story: dict) -> list[dict]:
             )
 
             if forbidden and raw is not None:
-                raise RuntimeError(
-                    f"Part {part_number} cannot contain {role}."
-                )
+                raise RuntimeError(f"Part {part_number} cannot contain {role}.")
             if required and not isinstance(raw, dict):
                 raise RuntimeError(
                     f"Part {part_number} requires exactly one {role} record."
@@ -399,18 +399,54 @@ def collect_scenes(story: dict) -> list[dict]:
                 raise RuntimeError(
                     f"extra_scenes must be a list in part {part_number}."
                 )
+
             allowed = {
-                row["scene_id"] for row in result
+                row["scene_id"]: row for row in result
                 if row["part"] == part_number
             }
+
             for extra in extras:
                 if not isinstance(extra, dict):
                     raise RuntimeError("Invalid extra scene record.")
+
                 extra_id = clean(extra.get("scene_id"))
                 if extra_id not in allowed:
                     raise RuntimeError(
                         f"Unexpected extra scene record: {extra_id or 'missing ID'}."
                     )
+
+                # Extra records enrich the canonical scene; they do not
+                # create duplicate scene IDs or duplicate scene mappings.
+                canonical = allowed[extra_id]
+                canonical["raw_records"].append(extra)
+
+                for field in (
+                    "characters", "character_names", "cast",
+                    "character_ids", "story_anchor", "beat", "purpose",
+                    "narration", "dialogue", "location", "setting",
+                    "time_period", *DETAIL_FIELDS,
+                ):
+                    if extra.get(field) not in (None, "", [], {}):
+                        if field in {"characters", "character_names", "cast"}:
+                            canonical["characters"] = list(dict.fromkeys(
+                                canonical["characters"]
+                                + normalize_names(extra.get(field))
+                            ))
+                        elif field == "character_ids":
+                            values = extra[field]
+                            if isinstance(values, (str, int)):
+                                values = [values]
+                            if isinstance(values, list):
+                                canonical["character_ids"] = list(dict.fromkeys(
+                                    canonical["character_ids"]
+                                    + [clean(value) for value in values if clean(value)]
+                                ))
+                        elif field in {
+                            "story_anchor", "beat", "purpose", "narration",
+                            "dialogue", "location", "setting", "time_period",
+                        }:
+                            if not canonical.get(field):
+                                canonical[field] = clean(extra[field])
 
     for row in result:
         if row["scene_id"] in seen_ids:
@@ -436,36 +472,46 @@ def collect_scenes(story: dict) -> list[dict]:
 
 
 def source_text(row: dict) -> str:
-    return " ".join(
-        value for value in (
-            clean(row.get("title")),
-            clean(row.get("narration")),
-            clean(row.get("dialogue")),
-        ) if value
-    )
+    values = [
+        clean(row.get("title")),
+        clean(row.get("narration")),
+        clean(row.get("dialogue")),
+        clean(row.get("story_anchor")),
+        clean(row.get("beat")),
+        clean(row.get("purpose")),
+    ]
+
+    for raw in row.get("raw_records", [row.get("raw", {})]):
+        if not isinstance(raw, dict):
+            continue
+        values.extend(
+            clean(raw.get(field))
+            for field in (
+                "title", "narration", "dialogue", "story_anchor",
+                "beat", "purpose", "description", "story_text",
+            )
+        )
+
+    return " ".join(value for value in values if value)
 
 
 def extract_explicit_names(row: dict) -> list[str]:
     text = source_text(row)
     candidates = set()
 
-    for pattern in HINDI_NAME_PATTERNS:
+    for pattern in HINDI_NAME_PATTERNS + ENGLISH_NAME_PATTERNS:
         for match in pattern.findall(text):
             name = normalize_name(match)
             if valid_name(name):
                 candidates.add(name)
 
-    for pattern in ENGLISH_NAME_PATTERNS:
-        for match in pattern.findall(text):
-            name = normalize_name(match)
+    for raw in row.get("raw_records", [row.get("raw", {})]):
+        if not isinstance(raw, dict):
+            continue
+        for field in NAME_FIELDS:
+            name = normalize_name(raw.get(field))
             if valid_name(name):
                 candidates.add(name)
-
-    raw = row["raw"]
-    for field in NAME_FIELDS:
-        name = normalize_name(raw.get(field))
-        if valid_name(name):
-            candidates.add(name)
 
     for name in row.get("characters", []):
         if valid_name(name):
@@ -481,10 +527,30 @@ def collect_global_records(story: dict) -> list[dict]:
         if isinstance(value, dict):
             value = value.get("characters", [])
         if isinstance(value, list):
-            records.extend(
-                item for item in value if isinstance(item, dict)
-            )
+            records.extend(item for item in value if isinstance(item, dict))
     return records
+
+
+def collect_story_text(story: dict | None) -> str:
+    if not isinstance(story, dict):
+        return ""
+
+    fields = (
+        "corrected_complete_story", "story_text", "complete_story",
+        "full_story", "story", "content", "narration",
+    )
+    values = [clean(story.get(field)) for field in fields]
+    return "\n".join(value for value in values if value)
+
+
+def extract_story_names(text: str) -> list[str]:
+    candidates = set()
+    for pattern in HINDI_NAME_PATTERNS + ENGLISH_NAME_PATTERNS:
+        for match in pattern.findall(text):
+            name = normalize_name(match)
+            if valid_name(name):
+                candidates.add(name)
+    return sorted(candidates, key=str.casefold)
 
 
 def new_character(name: str) -> dict:
@@ -496,6 +562,7 @@ def new_character(name: str) -> dict:
         "aliases": [],
         "detail_values": {field: [] for field in DETAIL_FIELDS},
         "scene_details": [],
+        "source_descriptions": [],
         "explicit_gender_values": [],
         "gender_evidence": [],
         "source_character_ids": [],
@@ -503,6 +570,8 @@ def new_character(name: str) -> dict:
 
 
 def add_detail(target: dict, field: str, value: Any) -> None:
+    if field not in DETAIL_FIELDS:
+        return
     value = clean(value)
     if not value:
         return
@@ -511,60 +580,68 @@ def add_detail(target: dict, field: str, value: Any) -> None:
         values.append(value)
 
 
-def gender_evidence_for_name(name: str, text: str, scene_id: str) -> list[dict]:
-    """Use nearby Hindi grammar and English pronouns as evidence, never as certainty."""
-    evidence = []
-    sentences = re.split(r"(?<=[।.!?])\s+|[\n]+", text)
+def sentence_rows(text: str) -> list[str]:
+    return [
+        clean(item)
+        for item in re.split(r"(?<=[।.!?])\s+|[\n]+", text)
+        if clean(item)
+    ]
 
-    name_pattern = re.compile(
+
+def name_pattern(name: str) -> re.Pattern:
+    return re.compile(
         r"(?<![\w])" + re.escape(name) + r"(?![\w])",
         re.IGNORECASE,
     )
 
-    for sentence in sentences:
-        if not name_pattern.search(sentence):
+
+def nearby_gender_evidence(
+    name: str,
+    text: str,
+    scene_id: str,
+    known_names: list[str],
+) -> list[dict]:
+    """Attach gender evidence only when grammatical markers are local to one name."""
+    evidence = []
+    target_pattern = name_pattern(name)
+
+    other_patterns = [
+        name_pattern(other)
+        for other in known_names
+        if other.casefold() != name.casefold()
+    ]
+
+    for sentence in sentence_rows(text):
+        matches = list(target_pattern.finditer(sentence))
+        if not matches:
             continue
 
-        hindi_male = any(
-            re.search(pattern, sentence)
-            for pattern in HINDI_MALE_MARKERS
-        )
-        hindi_female = any(
-            re.search(pattern, sentence)
-            for pattern in HINDI_FEMALE_MARKERS
-        )
-        english_male = bool(ENGLISH_MALE_MARKERS.search(sentence))
-        english_female = bool(ENGLISH_FEMALE_MARKERS.search(sentence))
+        for match in matches:
+            start = max(0, match.start() - 45)
+            end = min(len(sentence), match.end() + 45)
+            window = sentence[start:end]
 
-        if hindi_male and not hindi_female:
-            evidence.append({
-                "value": "male",
-                "source": "Hindi grammatical agreement near named character",
-                "confidence": "contextual",
-                "scene_id": scene_id,
-                "evidence_text": sentence[:240],
-            })
-        elif hindi_female and not hindi_male:
-            evidence.append({
-                "value": "female",
-                "source": "Hindi grammatical agreement near named character",
-                "confidence": "contextual",
-                "scene_id": scene_id,
-                "evidence_text": sentence[:240],
-            })
+            # If another known character is also in this local window,
+            # the marker is ambiguous and is not attributed to either.
+            if any(pattern.search(window) for pattern in other_patterns):
+                continue
 
-        if english_male and not english_female:
+            male = bool(
+                HINDI_MALE_MARKERS.search(window)
+                or ENGLISH_MALE_MARKERS.search(window)
+            )
+            female = bool(
+                HINDI_FEMALE_MARKERS.search(window)
+                or ENGLISH_FEMALE_MARKERS.search(window)
+            )
+
+            if male == female:
+                continue
+
+            value = "male" if male else "female"
             evidence.append({
-                "value": "male",
-                "source": "English pronoun or gendered noun near named character",
-                "confidence": "contextual",
-                "scene_id": scene_id,
-                "evidence_text": sentence[:240],
-            })
-        elif english_female and not english_male:
-            evidence.append({
-                "value": "female",
-                "source": "English pronoun or gendered noun near named character",
+                "value": value,
+                "source": "local grammatical evidence near one named character",
                 "confidence": "contextual",
                 "scene_id": scene_id,
                 "evidence_text": sentence[:240],
@@ -573,61 +650,65 @@ def gender_evidence_for_name(name: str, text: str, scene_id: str) -> list[dict]:
     return evidence
 
 
-def add_occurrence(target: dict, row: dict, name: str) -> None:
-    target["mention_count"] += 1
-    if row["scene_id"] not in target["scene_ids"]:
-        target["scene_ids"].append(row["scene_id"])
+def extract_physical_details(
+    name: str,
+    text: str,
+    target: dict,
+    scene_id: str = "",
+) -> dict:
+    """Keep source wording; never infer an unstated physical attribute."""
+    captured = {}
 
-    scene_key = {
-        "part": row["part"],
-        "scene": row["scene"],
-        "scene_id": row["scene_id"],
-        "role": row["role"],
-    }
-    if scene_key not in target["scene_keys"]:
-        target["scene_keys"].append(scene_key)
+    for sentence in sentence_rows(text):
+        if not name_pattern(name).search(sentence):
+            continue
+        if not PHYSICAL_HINTS.search(sentence):
+            continue
 
-    if name.casefold() != target["name"].casefold():
-        if name not in target["aliases"]:
-            target["aliases"].append(name)
+        if sentence not in target["source_descriptions"]:
+            target["source_descriptions"].append(sentence)
 
-    raw = row["raw"]
-    scene_detail = {
-        "scene_id": row["scene_id"],
-        "part": row["part"],
-        "scene": row["scene"],
-        "role": row["role"],
-        "details": {},
-    }
+        add_detail(target, "character_description", sentence)
+        add_detail(target, "appearance", sentence)
 
-    for field in DETAIL_FIELDS:
-        value = clean(raw.get(field))
-        if value:
-            add_detail(target, field, value)
-            scene_detail["details"][field] = value
-
-    if scene_detail["details"]:
-        target["scene_details"].append(scene_detail)
-
-    declared = explicit_gender(raw.get("gender"))
-    if declared:
-        target["explicit_gender_values"].append(declared)
-        target["gender_evidence"].append({
-            "value": declared,
-            "source": "explicit scene field",
-            "confidence": "explicit",
-            "scene_id": row["scene_id"],
-        })
-
-    target["gender_evidence"].extend(
-        gender_evidence_for_name(
-            target["name"], source_text(row), row["scene_id"]
+        # Explicit age patterns only; no age is calculated or guessed.
+        age_patterns = (
+            r"(?:उम्र|आयु)\s*(?:करीब|लगभग)?\s*(\d{1,3})\s*(?:वर्ष|साल)",
+            r"\b(\d{1,3})[- ]year[- ]old\b",
+            r"\baged\s+(\d{1,3})\b",
         )
-    )
+        for pattern in age_patterns:
+            match = re.search(pattern, sentence, re.IGNORECASE)
+            if match:
+                value = match.group(0)
+                add_detail(target, "age", value)
+                captured["age"] = value
+                break
 
-    for source_id in row.get("character_ids", []):
-        if source_id not in target["source_character_ids"]:
-            target["source_character_ids"].append(source_id)
+        # Preserve exact source sentences under relevant physical fields.
+        field_terms = {
+            "hair": r"(?:बाल|दाढ़ी|मूँछ|मूंछ|hair|beard|moustache)",
+            "eyes": r"(?:आँख|आंख|eyes?)",
+            "face_features": r"(?:चेहरा|नाक|माथा|face|nose|forehead)",
+            "skin_tone": r"(?:त्वचा|रंग|skin|complexion)",
+            "body_features": r"(?:शरीर|कद-काठी|body|build|physique)",
+            "height": r"(?:कद|लंबाई|लम्बाई|height|tall|short)",
+            "clothing": r"(?:कपड़े|पोशाक|साड़ी|साडी|जैकेट|"
+                         r"clothing|wearing|dress|jacket|shirt|uniform)",
+            "distinctive_features": r"(?:निशान|दाग|scar|mark|distinctive)",
+        }
+
+        for field in PHYSICAL_FIELDS:
+            if field not in field_terms:
+                continue
+            if re.search(field_terms[field], sentence, re.IGNORECASE):
+                add_detail(target, field, sentence)
+                captured[field] = sentence
+
+        if scene_id:
+            captured["scene_id"] = scene_id
+
+    return captured
 
 
 def add_global_character_record(
@@ -669,20 +750,97 @@ def add_global_character_record(
         item["source_character_ids"].append(raw_id)
 
 
+def add_occurrence(
+    target: dict,
+    row: dict,
+    name: str,
+    known_names: list[str],
+) -> None:
+    target["mention_count"] += 1
+
+    if row["scene_id"] not in target["scene_ids"]:
+        target["scene_ids"].append(row["scene_id"])
+
+    scene_key = {
+        "part": row["part"],
+        "scene": row["scene"],
+        "scene_id": row["scene_id"],
+        "role": row["role"],
+    }
+    if scene_key not in target["scene_keys"]:
+        target["scene_keys"].append(scene_key)
+
+    if name.casefold() != target["name"].casefold():
+        if name not in target["aliases"]:
+            target["aliases"].append(name)
+
+    scene_detail = {
+        "scene_id": row["scene_id"],
+        "part": row["part"],
+        "scene": row["scene"],
+        "role": row["role"],
+        "details": {},
+    }
+
+    for raw in row.get("raw_records", [row.get("raw", {})]):
+        if not isinstance(raw, dict):
+            continue
+
+        for field in DETAIL_FIELDS:
+            value = clean(raw.get(field))
+            if value:
+                add_detail(target, field, value)
+                scene_detail["details"][field] = value
+
+        declared = explicit_gender(raw.get("gender"))
+        if declared:
+            target["explicit_gender_values"].append(declared)
+            target["gender_evidence"].append({
+                "value": declared,
+                "source": "explicit scene field",
+                "confidence": "explicit",
+                "scene_id": row["scene_id"],
+            })
+
+    text = source_text(row)
+    target["gender_evidence"].extend(
+        nearby_gender_evidence(
+            name, text, row["scene_id"], known_names
+        )
+    )
+
+    physical = extract_physical_details(
+        name, text, target, row["scene_id"]
+    )
+    for field, value in physical.items():
+        if field in DETAIL_FIELDS and value:
+            scene_detail["details"][field] = value
+
+    if scene_detail["details"]:
+        existing = next(
+            (
+                item for item in target["scene_details"]
+                if item.get("scene_id") == row["scene_id"]
+            ),
+            None,
+        )
+        if existing:
+            existing["details"].update(scene_detail["details"])
+        else:
+            target["scene_details"].append(scene_detail)
+
+    for source_id in row.get("character_ids", []):
+        if source_id not in target["source_character_ids"]:
+            target["source_character_ids"].append(source_id)
+
 def aggregate_characters(
     scenes: list[dict],
     story: dict,
     supplemental_story: dict | None,
 ) -> dict[str, dict]:
-    found = {}
+    found: dict[str, dict] = {}
 
-    for row in scenes:
-        for name in extract_explicit_names(row):
-            key = name.casefold()
-            if key not in found:
-                found[key] = new_character(name)
-            add_occurrence(found[key], row, name)
-
+    # Explicit cast records from AI story and original story.
     for raw in collect_global_records(story):
         add_global_character_record(
             found, raw, "explicit AI story cast record"
@@ -694,11 +852,88 @@ def aggregate_characters(
                 found, raw, "explicit source story cast record"
             )
 
+    # Discover names from the complete corrected source story.
+    full_story_text = collect_story_text(supplemental_story)
+    story_names = extract_story_names(full_story_text)
+
+    for name in story_names:
+        key = name.casefold()
+        if key not in found:
+            found[key] = new_character(name)
+
+    # Discover names from every Main, Hook, Suspense and Resolution scene.
+    for row in scenes:
+        for name in extract_explicit_names(row):
+            key = name.casefold()
+            if key not in found:
+                found[key] = new_character(name)
+
+    known_names = []
+    for item in found.values():
+        for name in [item["name"], *item["aliases"]]:
+            if name and name not in known_names:
+                known_names.append(name)
+
+    # Connect complete-story physical descriptions to the exact named person.
+    for item in found.values():
+        names = [item["name"], *item["aliases"]]
+        for name in names:
+            extract_physical_details(
+                name, full_story_text, item
+            )
+
+    # Count only characters explicitly referenced by a scene's source text,
+    # character list, or known source character ID.
+    for row in scenes:
+        scene_text = source_text(row)
+        scene_names = set(
+            name.casefold() for name in row.get("characters", [])
+        )
+
+        for item in found.values():
+            candidates = [item["name"], *item["aliases"]]
+            matched = False
+
+            for candidate in candidates:
+                if name_pattern(candidate).search(scene_text):
+                    matched = True
+                    break
+                if candidate.casefold() in scene_names:
+                    matched = True
+                    break
+
+            if not matched:
+                source_ids = {
+                    str(value).casefold()
+                    for value in item["source_character_ids"]
+                }
+                if any(
+                    str(value).casefold() in source_ids
+                    for value in row.get("character_ids", [])
+                ):
+                    matched = True
+
+            if matched:
+                matched_name = next(
+                    (
+                        candidate for candidate in candidates
+                        if name_pattern(candidate).search(scene_text)
+                        or candidate.casefold() in scene_names
+                    ),
+                    item["name"],
+                )
+                add_occurrence(
+                    item, row, matched_name, known_names
+                )
+
     return found
 
 
 def choose_gender(found: dict) -> tuple[str, str]:
-    explicit = set(found["explicit_gender_values"])
+    explicit = {
+        value for value in found["explicit_gender_values"]
+        if value in {"male", "female", "non_binary"}
+    }
     contextual = {
         item["value"]
         for item in found["gender_evidence"]
@@ -714,10 +949,10 @@ def choose_gender(found: dict) -> tuple[str, str]:
     if len(contextual) == 1:
         return (
             next(iter(contextual)),
-            "consistent Hindi/English grammatical evidence",
+            "consistent local Hindi/English grammatical evidence",
         )
     if len(contextual) > 1:
-        return "unspecified", "conflicting Hindi/English gender evidence"
+        return "unspecified", "conflicting local gender evidence"
 
     return "unspecified", "not established by source evidence"
 
@@ -731,13 +966,14 @@ def supported_detail(values: list[str], fallback: str) -> str:
     if len(unique) == 1:
         return unique[0]
     return (
-        "Scene-specific source variants; apply only to the matching scene: "
-        + " | ".join(unique[:30])
+        "Source-supported variants; apply only where the matching "
+        "story scene supports them: " + " | ".join(unique[:30])
     )
 
 
 def build_visual_identity(found: dict, gender: str) -> str:
     values = found["detail_values"]
+
     labels = {
         "age": "age",
         "gender": "gender",
@@ -751,6 +987,7 @@ def build_visual_identity(found: dict, gender: str) -> str:
         "build": "build",
         "distinctive_features": "distinctive features",
     }
+
     defaults = {
         "age": "Not specified; do not invent.",
         "face_features": "Not specified; preserve source identity.",
@@ -821,6 +1058,10 @@ def build_character(found: dict, index: int) -> dict:
         "appearance": supported_detail(
             values["appearance"], "Not specified in source."
         ),
+        "character_description": supported_detail(
+            values["character_description"],
+            "No explicit physical description found in source.",
+        ),
         "face_features": supported_detail(
             values["face_features"], "Not specified in source."
         ),
@@ -853,6 +1094,7 @@ def build_character(found: dict, index: int) -> dict:
         "distinctive_features": supported_detail(
             values["distinctive_features"], "Not specified in source."
         ),
+        "source_descriptions": found["source_descriptions"][:100],
         "visual_identity": build_visual_identity(found, gender),
         "physical_constraints": physical_constraints,
         "scene_details": found["scene_details"],
@@ -864,11 +1106,13 @@ def build_character(found: dict, index: int) -> dict:
             "Maintain identity across every part and scene role.",
             "Do not add a character to a scene without source evidence.",
             "Keep scene-specific clothing and physical state attached to its scene ID.",
+            "Use the complete-story description as identity evidence, not as permission to invent traits.",
         ],
         "mention_count": found["mention_count"],
         "scene_ids": found["scene_ids"],
         "scene_keys": found["scene_keys"],
     }
+
 
 def build_scene_character_map(
     scenes: list[dict],
@@ -876,9 +1120,7 @@ def build_scene_character_map(
 ) -> list[dict]:
     name_lookup = {}
     source_id_lookup = {}
-    character_by_id = {
-        item["id"]: item for item in characters
-    }
+    character_by_id = {item["id"]: item for item in characters}
 
     for character in characters:
         character_id = character["id"]
@@ -888,14 +1130,15 @@ def build_scene_character_map(
             *character.get("aliases", []),
         ]:
             normalized = normalize_name(name)
-            if normalized:
-                key = normalized.casefold()
-                previous = name_lookup.get(key)
-                if previous and previous != character_id:
-                    raise RuntimeError(
-                        f"Ambiguous character name or alias: {normalized}"
-                    )
-                name_lookup[key] = character_id
+            if not normalized:
+                continue
+            key = normalized.casefold()
+            previous = name_lookup.get(key)
+            if previous and previous != character_id:
+                raise RuntimeError(
+                    f"Ambiguous character name or alias: {normalized}"
+                )
+            name_lookup[key] = character_id
 
         for source_id in character.get("source_character_ids", []):
             key = str(source_id).casefold()
@@ -914,7 +1157,7 @@ def build_scene_character_map(
         references = list(row.get("characters", []))
         resolved_ids = []
 
-        # Resolve exact explicit names and aliases.
+        # Explicit scene character names and aliases.
         for name in references:
             character_id = name_lookup.get(
                 normalize_name(name).casefold()
@@ -922,7 +1165,8 @@ def build_scene_character_map(
             if character_id and character_id not in resolved_ids:
                 resolved_ids.append(character_id)
 
-        # Match complete character names in this scene's source text.
+        # Complete-name matching against narration, dialogue, story anchor,
+        # beat and purpose. Visual prompt is intentionally not identity proof.
         for character in characters:
             candidates = [
                 character.get("name", ""),
@@ -932,20 +1176,16 @@ def build_scene_character_map(
                 candidate = normalize_name(candidate)
                 if not candidate:
                     continue
-
-                pattern = (
-                    r"(?<![\w])"
-                    + re.escape(candidate)
-                    + r"(?![\w])"
-                )
-                if re.search(pattern, text, flags=re.IGNORECASE):
+                if name_pattern(candidate).search(text):
                     if character["id"] not in resolved_ids:
                         resolved_ids.append(character["id"])
                     break
 
-        # Resolve declared source IDs only against known cast records.
+        # Source IDs resolve only to an explicitly declared cast record.
         for source_id in row.get("character_ids", []):
-            character_id = source_id_lookup.get(str(source_id).casefold())
+            character_id = source_id_lookup.get(
+                str(source_id).casefold()
+            )
             if not character_id:
                 raise RuntimeError(
                     f"{scene_id}: source character ID {source_id!r} "
@@ -973,6 +1213,7 @@ def build_scene_character_map(
 
 
 def build_scene_roles(scene_map: list[dict]) -> list[dict]:
+    # Compatibility view generated from the one canonical scene map.
     return [
         {
             "scene_id": row["scene_id"],
@@ -996,8 +1237,11 @@ def build_scene_world_map(scenes: list[dict]) -> list[dict]:
             "role": row["role"],
             "location": row["location"] or "Not specified",
             "time_period": row["time_period"] or "Not specified",
+            "story_anchor": row["story_anchor"],
+            "beat": row["beat"],
+            "purpose": row["purpose"],
             "continuity_rule": (
-                "Use only the source location and time period for this scene. "
+                "Use only the source location, time period and scene context. "
                 "Do not replace them with unrelated settings."
             ),
         }
@@ -1115,29 +1359,18 @@ def validate_bible(bible: dict, scenes: list[dict]) -> None:
         if not clean(item.get("visual_identity")):
             raise RuntimeError(f"Missing visual_identity for {name}.")
 
-        rules = item.get("consistency_rules")
-        constraints = item.get("physical_constraints")
-        evidence = item.get("gender_evidence")
-        scene_details = item.get("scene_details")
-
-        if not isinstance(rules, list) or not rules:
-            raise RuntimeError(f"Missing consistency rules for {name}.")
-        if not isinstance(constraints, list) or not constraints:
-            raise RuntimeError(f"Missing physical constraints for {name}.")
-        if not isinstance(evidence, list):
-            raise RuntimeError(f"Invalid gender evidence for {name}.")
-        if not isinstance(scene_details, list):
-            raise RuntimeError(f"Invalid scene details for {name}.")
+        for field in (
+            "consistency_rules", "physical_constraints",
+            "gender_evidence", "scene_details", "source_descriptions",
+            "scene_ids", "scene_keys", "aliases", "source_character_ids",
+        ):
+            if not isinstance(item.get(field), list):
+                raise RuntimeError(f"Invalid {field} for {name}.")
 
         if item.get("gender") not in {
             "male", "female", "non_binary", "unspecified"
         }:
             raise RuntimeError(f"Invalid gender value for {name}.")
-
-        if not isinstance(item.get("scene_ids"), list):
-            raise RuntimeError(f"Invalid scene_ids for {name}.")
-        if not isinstance(item.get("scene_keys"), list):
-            raise RuntimeError(f"Invalid scene_keys for {name}.")
 
         for source_id in item.get("source_character_ids", []):
             key = str(source_id).casefold()
@@ -1147,7 +1380,7 @@ def validate_bible(bible: dict, scenes: list[dict]) -> None:
                 )
             source_ids.add(key)
 
-        for detail in scene_details:
+        for detail in item.get("scene_details", []):
             if not isinstance(detail, dict):
                 raise RuntimeError(
                     f"Invalid scene-specific detail for {name}."
@@ -1161,7 +1394,7 @@ def validate_bible(bible: dict, scenes: list[dict]) -> None:
                     f"Scene-specific details for {name} are invalid."
                 )
 
-        for evidence_row in evidence:
+        for evidence_row in item.get("gender_evidence", []):
             if not isinstance(evidence_row, dict):
                 raise RuntimeError(
                     f"Invalid gender evidence record for {name}."
@@ -1202,9 +1435,7 @@ def validate_bible(bible: dict, scenes: list[dict]) -> None:
             )
 
             if key in actual:
-                raise RuntimeError(
-                    f"Duplicate {label} mapping: {key}"
-                )
+                raise RuntimeError(f"Duplicate {label} mapping: {key}")
             actual.add(key)
 
             ids = row.get("character_ids", [])
@@ -1237,6 +1468,7 @@ def validate_bible(bible: dict, scenes: list[dict]) -> None:
                 )
                 for character_id in ids
             ]
+
             if names != expected_names:
                 raise RuntimeError(
                     f"Character names/IDs mismatch in {label} row {key}."
@@ -1258,8 +1490,10 @@ def validate_bible(bible: dict, scenes: list[dict]) -> None:
     validate_mapping_rows(scene_map, "scene_character_map")
     validate_mapping_rows(scene_roles, "scene_roles")
 
-    if len(scene_map) != len(scene_roles):
-        raise RuntimeError("scene_roles and scene_character_map count mismatch.")
+    if scene_roles != build_scene_roles(scene_map):
+        raise RuntimeError(
+            "scene_roles must be the compatibility view of scene_character_map."
+        )
 
     if bible.get("character_count") != len(characters):
         raise RuntimeError("Character count metadata mismatch.")
@@ -1300,7 +1534,9 @@ def build_disabled_bible(
         "api_calls": 0,
         "source_file": source_path.relative_to(ROOT).as_posix(),
         "source_fingerprint": fingerprint(story),
-        "topic": clean(get_topic(config) or story.get("topic") or story.get("title")),
+        "topic": clean(
+            get_topic(config) or story.get("topic") or story.get("title")
+        ),
         "title": clean(story.get("title")),
         "format": normalize_format(config),
         "character_count": 0,
@@ -1329,6 +1565,7 @@ def build_bible(
     found = aggregate_characters(
         scenes, story, supplemental_story
     )
+
     ordered = sorted(
         found.values(),
         key=lambda item: (
@@ -1351,7 +1588,9 @@ def build_bible(
         "story": story,
         "supplemental_story": supplemental_story or {},
         "format": normalize_format(config),
-        "character_consistency": config.get("CHARACTER_CONSISTENCY", True),
+        "character_consistency": config.get(
+            "CHARACTER_CONSISTENCY", True
+        ),
         "world_consistency": config.get("WORLD_CONSISTENCY", True),
         "scenes": [
             {
@@ -1361,11 +1600,15 @@ def build_bible(
                 "role": row["role"],
                 "narration": row["narration"],
                 "dialogue": row["dialogue"],
+                "story_anchor": row["story_anchor"],
+                "beat": row["beat"],
+                "purpose": row["purpose"],
                 "visual_prompt": row["visual_prompt"],
                 "characters": row["characters"],
                 "character_ids": row["character_ids"],
                 "location": row["location"],
                 "time_period": row["time_period"],
+                "raw_records": row["raw_records"],
             }
             for row in scenes
         ],
@@ -1381,7 +1624,7 @@ def build_bible(
     if any(item["gender"] == "unspecified" for item in characters):
         warnings.append(
             "Some character genders remain unspecified because evidence "
-            "was missing or conflicting."
+            "was missing, ambiguous or conflicting."
         )
 
     if any(not row["characters"] for row in scene_map):
@@ -1393,9 +1636,13 @@ def build_bible(
     bible = {
         "status": "completed",
         "version": VERSION,
-        "generation_mode": "offline_source_grounded_all_scene_roles",
+        "generation_mode": "offline_full_story_source_grounded",
         "api_calls": 0,
         "source_file": source_path.relative_to(ROOT).as_posix(),
+        "source_story_file": (
+            SOURCE_STORY_FILE.relative_to(ROOT).as_posix()
+            if supplemental_story else None
+        ),
         "source_fingerprint": fingerprint(fingerprint_data),
         "topic": topic,
         "title": clean(story.get("title") or topic),
@@ -1411,14 +1658,16 @@ def build_bible(
         "warnings": warnings,
         "limitations": [
             "No external AI calls are made in this stage.",
-            "Names are taken from explicit scene fields, clear naming phrases and declared cast records.",
-            "Main, Hook, Suspense and Resolution scenes are all examined.",
+            "Names are extracted from explicit scene fields, clear naming phrases and declared cast records.",
+            "The corrected complete source story is also examined for named characters and physical descriptions.",
+            "Scene anchors, beats and purposes are used as source context for character matching.",
             "Visual prompts are not treated as proof of character identity.",
-            "Gender uses explicit fields first, then nearby Hindi/English grammatical evidence.",
-            "Conflicting or insufficient gender evidence remains unspecified.",
-            "Unspecified physical traits are not fabricated.",
+            "Gender uses explicit fields first, then local grammatical evidence tied to one named character.",
+            "Ambiguous or conflicting gender evidence remains unspecified.",
+            "Physical details are preserved only when supported by source text or explicit fields.",
             "Scene-specific clothing and physical changes remain attached to their source scene.",
-            "All scene roles use stable character IDs and identity rules.",
+            "Extra scene records enrich their matching canonical scene and do not create duplicate scene IDs.",
+            "scene_roles is a compatibility view derived from scene_character_map.",
             "Unknown source character IDs are not converted into invented people.",
         ],
     }
@@ -1443,7 +1692,9 @@ def main() -> int:
     scenes = collect_scenes(story)
     supplemental_story = collect_supplemental_source()
 
-    enabled = parse_enabled(config.get("CHARACTER_BIBLE"), default=True)
+    enabled = parse_enabled(
+        config.get("CHARACTER_BIBLE"), default=True
+    )
 
     if not enabled:
         bible = build_disabled_bible(
@@ -1451,7 +1702,7 @@ def main() -> int:
         )
         write_json(OUTPUT_FILE, bible)
         log("Character Bible disabled by Input/topic.txt.")
-        log("Output:", OUTPUT_FILE.relative_to(ROOT))
+        log("Output:", OUTPUT_FILE)
         log("API calls: 0")
         return 0
 
@@ -1483,10 +1734,12 @@ def main() -> int:
 
     write_json(OUTPUT_FILE, bible)
 
-    # Verify the serialized output rather than trusting in-memory data.
+    # Verify serialized output rather than trusting in-memory data.
     written = read_json(OUTPUT_FILE, required=True)
     if written.get("source_fingerprint") != bible["source_fingerprint"]:
-        raise RuntimeError("Character Bible fingerprint read-back mismatch.")
+        raise RuntimeError(
+            "Character Bible fingerprint read-back mismatch."
+        )
 
     validate_bible(written, scenes)
 
