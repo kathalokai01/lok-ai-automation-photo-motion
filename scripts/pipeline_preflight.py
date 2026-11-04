@@ -297,12 +297,15 @@ def check_font(family: str) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+
 def extract_workflow_commands(source: str) -> list[dict]:
     commands = []
     current_step = None
     inside_run = False
 
-    for line_number, raw_line in enumerate(source.splitlines(), 1):
+    for line_number, raw_line in enumerate(
+        source.splitlines(), 1
+    ):
         step_match = STEP_RE.match(raw_line)
 
         if step_match:
@@ -320,38 +323,34 @@ def extract_workflow_commands(source: str) -> list[dict]:
             inside_run = True
             inline = run_match.group(1).strip()
 
-            if inline and inline not in {"|", ">", "|-", ">-"}:
-                for match in SCRIPT_RE.finditer(inline.split("#", 1)[0]):
+            if inline and inline not in {
+                "|", ">", "|-", ">-"
+            }:
+                for match in SCRIPT_RE.finditer(
+                    inline.split("#", 1)[0]
+                ):
                     commands.append({
                         "script": match.group(1),
                         "line": line_number,
                         "step": current_step or "unnamed",
                     })
-            continue
 
-        if inside_run:
-            for match in SCRIPT_RE.finditer(raw_line.split("#", 1)[0]):
-                commands.append({
-                    "script": match.group(1),
-                    "line": line_number,
-                    "step": current_step or "unnamed",
-                })
-
-    return commands
-
-                    })
             continue
 
         if not inside_run:
             continue
 
-        indentation = len(raw_line) - len(raw_line.lstrip())
+        indentation = (
+            len(raw_line) - len(raw_line.lstrip())
+        )
 
         if raw_line.strip() and indentation <= 8:
             inside_run = False
             continue
 
-        for match in SCRIPT_RE.finditer(raw_line):
+        for match in SCRIPT_RE.finditer(
+            raw_line.split("#", 1)[0]
+        ):
             commands.append({
                 "script": match.group(1),
                 "line": line_number,
@@ -359,6 +358,7 @@ def extract_workflow_commands(source: str) -> list[dict]:
             })
 
     return commands
+
 
 
 def check_workflow_order(commands: list[dict]) -> tuple[bool, str]:
