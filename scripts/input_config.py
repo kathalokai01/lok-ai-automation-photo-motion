@@ -90,8 +90,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     "SCENES_SPEC": "1",
     "SCENES": 1,
-    "SCENES_MIN": 1,
-    "SCENES_MAX": 1,
+    "SCENES_MIN": None,
+    "SCENES_MAX": None,
 
     "STORY_LENGTH": "auto",
     "SCENE_DURATION": "auto",
