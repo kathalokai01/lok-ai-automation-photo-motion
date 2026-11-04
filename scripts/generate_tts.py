@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Resumable role-aware Hindi TTS with variable scenes and verified audio."""
 
@@ -816,6 +817,7 @@ def synthesize_provider(
 
         return validate_audio(output_path)
 
+
     if provider == "fish_audio":
         key = (
             os.getenv("FISH_AUDIO_API_KEY")
@@ -977,6 +979,7 @@ def synthesize_provider(
 
         return write_audio_bytes(output_path, data)
 
+
     if provider == "minimax":
         payload = {
             "model": os.getenv(
@@ -1076,6 +1079,7 @@ def synthesize_provider(
     raise RuntimeError(
         f"Unsupported configured TTS provider: {provider}"
     )
+
 
 def extract_jobs(data: Any) -> list[dict]:
     if isinstance(data, list):
@@ -1178,6 +1182,7 @@ def extract_jobs(data: Any) -> list[dict]:
             raise RuntimeError(
                 "Narration part number must be positive."
             )
+
 
         role = text_value(
             merged.get("role")
@@ -2126,9 +2131,12 @@ def main() -> int:
 
     previous_jobs = {}
 
+
     if (
         isinstance(previous_manifest, dict)
-        and previous_manifest.get("status") == "completed"
+        and previous_manifest.get("status") in {
+            "completed", "failed", "running"
+        }
         and previous_manifest.get("source_sha256") == source_hash
         and previous_manifest.get("config_sha256") == config_hash
         and isinstance(previous_manifest.get("jobs"), list)
@@ -2136,7 +2144,11 @@ def main() -> int:
         previous_jobs = {
             row.get("scene_id"): row
             for row in previous_manifest["jobs"]
-            if isinstance(row, dict)
+            if (
+                isinstance(row, dict)
+                and row.get("status") == "completed"
+                and row.get("scene_id")
+            )
         }
 
     blocked_paid_providers: set[str] = set()
@@ -2144,6 +2156,7 @@ def main() -> int:
     manifest = {
         "schema_version": VERSION,
         "status": "running",
+        "retryable": False,
         "format": mode,
         "parts": parts_count,
         "scenes_min": scenes_min,
@@ -2175,6 +2188,10 @@ def main() -> int:
         },
     }
 
+    # Save the current run identity before provider calls.
+    # A failure can then be retried without losing completed jobs.
+    save_json_atomic(MANIFEST_FILE, manifest)
+
     scene_records = []
     checkpoint_records = []
 
@@ -2204,6 +2221,7 @@ def main() -> int:
         reused_scene = reusable_legacy_scene(
             old_record, job
         )
+
 
         if reused_scene is not None:
             reused_scene.update({
@@ -2297,11 +2315,18 @@ def main() -> int:
                         blocked_paid_providers,
                     )
                 )
-
                 manifest["summary"]["generated_chunks"] += 1
+
+
 
             scene_chunk_paths.append(output_path)
             providers_used.append(provider_used)
+
+            chunk_reused = bool(
+                reusable_record is not None
+                and info is not None
+                and provider_used == reusable_record.get("provider")
+            )
 
             chunk_record = {
                 "job_id": job_id,
@@ -2323,6 +2348,7 @@ def main() -> int:
                 "size_bytes": info["size_bytes"],
                 "sha256": info["sha256"],
                 "status": "completed",
+                "reused": chunk_reused,
             }
 
             chunk_records.append(chunk_record)
@@ -2395,6 +2421,9 @@ def main() -> int:
 
         save_json_atomic(MANIFEST_FILE, manifest)
 
+
+
+
     expected_ids = {
         job["scene_id"] for job in jobs
     }
@@ -2424,7 +2453,10 @@ def main() -> int:
 
     manifest["parts"] = part_records
     manifest["status"] = "completed"
+    manifest["retryable"] = False
     manifest["completed_at"] = utc_now()
+    manifest.pop("failure", None)
+    manifest.pop("failure_type", None)
 
     manifest["summary"]["total_duration"] = round(
         sum(
@@ -2476,6 +2508,7 @@ def main() -> int:
             raise RuntimeError(
                 f"Narration write-back missing: {record['scene_id']}"
             )
+
 
         if (
             matching.get("audio_duration_source")
@@ -2538,14 +2571,25 @@ if __name__ == "__main__":
 
             if isinstance(current, dict):
                 current["status"] = "failed"
+                current["retryable"] = True
                 current["completed_at"] = utc_now()
                 current["failure"] = str(exc)[:1000]
+                current["failure_type"] = type(exc).__name__
+                current["retry_hint"] = (
+                    "Rerun generate_tts.py with the same narration "
+                    "and configuration. Verified completed scene audio "
+                    "and checkpoint chunks will be reused."
+                )
 
                 save_json_atomic(
                     MANIFEST_FILE, current
                 )
 
-        except Exception:
-            pass
+        except Exception as manifest_exc:
+            log(
+                "FAILED TO SAVE RETRYABLE TTS MANIFEST:",
+                str(manifest_exc),
+            )
 
         raise SystemExit(1)
+
