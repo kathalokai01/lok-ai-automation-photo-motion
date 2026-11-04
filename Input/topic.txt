@@ -75,6 +75,8 @@ PARTS = "7-11"
 # अगले Part में कहानी के क्रम से भेजे जाएँगे।
 # FULL Mode में पूरी कहानी एक ही Part होगी।
 SCENES = 7-15
+SCENES_MIN = 7
+SCENES_MAX = 15
 
 # auto | short | medium | long
 STORY_LENGTH = "auto"
