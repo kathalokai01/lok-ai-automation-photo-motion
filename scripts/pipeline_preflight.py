@@ -752,37 +752,67 @@ def validate_existing_manifest(
         }
 
     if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
-        raise ValueError(f"{name}: manifest is missing, empty or unsafe.")
+        raise ValueError(
+            f"{name}: manifest is missing, empty or unsafe."
+        )
 
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(
+            path.read_text(encoding="utf-8-sig")
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"{name}: invalid JSON: {exc}") from exc
+        raise ValueError(
+            f"{name}: invalid JSON: {exc}"
+        ) from exc
 
     if not isinstance(data, (dict, list)):
-        raise ValueError(f"{name}: unsupported manifest root type.")
+        raise ValueError(
+            f"{name}: unsupported manifest root type."
+        )
 
     retryable_narration_audio = False
+    narration_jobs = []
 
     if isinstance(data, dict):
-        status = str(data.get("status", "")).strip().lower()
+        status = str(
+            data.get("status", "")
+        ).strip().lower()
+
+        raw_jobs = data.get("jobs")
+
+        # TTS v13 writes scene records under "jobs".
+        # Older checkpoints may not contain retryable=True.
         retryable_narration_audio = (
             name == "narration_audio"
             and status == "failed"
-            and data.get("retryable") is True
+            and isinstance(raw_jobs, list)
+            and bool(str(data.get("source_sha256", "")).strip())
+            and bool(str(data.get("config_sha256", "")).strip())
+            and bool(str(data.get("failure", "")).strip())
         )
 
         if status in FAILED and not retryable_narration_audio:
-            raise ValueError(f"{name}: manifest status is {status}.")
+            raise ValueError(
+                f"{name}: manifest status is {status}."
+            )
 
         if status and status not in SUCCESS | NONFINAL | FAILED:
-            raise ValueError(f"{name}: unknown manifest status {status!r}.")
+            raise ValueError(
+                f"{name}: unknown manifest status {status!r}."
+            )
+
+        if retryable_narration_audio:
+            narration_jobs = [
+                row for row in raw_jobs
+                if isinstance(row, dict)
+            ]
 
         for field in ("format", "mode"):
             declared = data.get(field)
 
             if declared is not None:
                 normalized = str(declared).strip().lower()
+
                 if normalized and normalized != expected_format:
                     raise ValueError(
                         f"{name}: {field}={normalized}, "
@@ -795,13 +825,20 @@ def validate_existing_manifest(
             or data.get("source_input_sha256")
         )
 
-        if declared_input and str(declared_input).lower() != input_fingerprint:
+        if (
+            declared_input
+            and str(declared_input).lower() != input_fingerprint
+        ):
             raise ValueError(
                 f"{name}: artifact belongs to a different input file."
             )
 
         if expected_parts is not None:
-            for field in ("parts", "total_parts", "selected_parts"):
+            for field in (
+                "parts",
+                "total_parts",
+                "selected_parts",
+            ):
                 value = data.get(field)
 
                 if value is None:
@@ -810,36 +847,52 @@ def validate_existing_manifest(
                 try:
                     actual = int(value)
                 except (TypeError, ValueError) as exc:
-                    raise ValueError(f"{name}: invalid {field}.") from exc
+                    raise ValueError(
+                        f"{name}: invalid {field}."
+                    ) from exc
 
                 if actual != expected_parts:
                     raise ValueError(
-                        f"{name}: {field}={actual}, expected {expected_parts}."
+                        f"{name}: {field}={actual}, "
+                        f"expected {expected_parts}."
                     )
 
         if expected_format == "full":
-            for field in ("parts", "total_parts", "selected_parts"):
+            for field in (
+                "parts",
+                "total_parts",
+                "selected_parts",
+            ):
                 value = data.get(field)
-                if value is not None:
-                    try:
-                        actual = int(value)
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"{name}: invalid {field}."
-                        ) from exc
 
-                    if actual != 1:
-                        raise ValueError(
-                            f"{name}: FULL mode requires {field}=1; "
-                            f"found {value}."
-                        )
+                if value is None:
+                    continue
 
-    rows = _manifest_rows(data)
+                try:
+                    actual = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"{name}: invalid {field}."
+                    ) from exc
+
+                if actual != 1:
+                    raise ValueError(
+                        f"{name}: FULL mode requires "
+                        f"{field}=1; found {value}."
+                    )
+
+    if retryable_narration_audio:
+        rows = narration_jobs
+    else:
+        rows = _manifest_rows(data)
+
     checked_files = 0
     retryable_failed_rows = 0
 
     for index, row in enumerate(rows, 1):
-        row_status = str(row.get("status", "")).strip().lower()
+        row_status = str(
+            row.get("status", "")
+        ).strip().lower()
 
         if row_status in FAILED:
             if (
@@ -850,12 +903,14 @@ def validate_existing_manifest(
                 continue
 
             raise ValueError(
-                f"{name}: row {index} has failed status {row_status}."
+                f"{name}: row {index} has failed status "
+                f"{row_status}."
             )
 
         if row_status and row_status not in SUCCESS | NONFINAL:
             raise ValueError(
-                f"{name}: row {index} has unknown status {row_status!r}."
+                f"{name}: row {index} has unknown status "
+                f"{row_status!r}."
             )
 
         file_value = next(
@@ -873,6 +928,7 @@ def validate_existing_manifest(
                 file_value,
                 f"{name} row {index}",
             )
+
             checked_files += 1
 
             for hash_key in HASH_KEYS:
@@ -884,7 +940,8 @@ def validate_existing_manifest(
                         != sha256_file(asset)
                     ):
                         raise ValueError(
-                            f"{name}: {asset.name} {hash_key} mismatch."
+                            f"{name}: {asset.name} "
+                            f"{hash_key} mismatch."
                         )
                     break
 
@@ -894,13 +951,21 @@ def validate_existing_manifest(
                     f"{name}: row {index} has empty scene_id."
                 )
 
-    scene_ok, scene_detail, scene_data = validate_actual_scene_counts(
-        name,
-        data,
-        scenes_min,
-        scenes_max,
-        expected_parts,
-        expected_format,
+    scene_data_source = data
+
+    if retryable_narration_audio:
+        scene_data_source = dict(data)
+        scene_data_source["scenes"] = narration_jobs
+
+    scene_ok, scene_detail, scene_data = (
+        validate_actual_scene_counts(
+            name,
+            scene_data_source,
+            scenes_min,
+            scenes_max,
+            expected_parts,
+            expected_format,
+        )
     )
 
     if not scene_ok:
@@ -916,15 +981,20 @@ def validate_existing_manifest(
         "sha256": sha256_file(path),
         "row_count": len(rows),
         "referenced_files_checked": checked_files,
-        "actual_scene_counts": scene_data.get("part_counts", {}),
+        "actual_scene_counts": scene_data.get(
+            "part_counts", {}
+        ),
     }
 
     if retryable_narration_audio:
         result["retryable"] = True
-        result["retryable_failed_rows"] = retryable_failed_rows
+        result["retryable_failed_rows"] = (
+            retryable_failed_rows
+        )
         result["detail"] = (
-            "Previous TTS failure is retryable; completed artifacts "
-            "remain subject to file and checksum validation."
+            "Previous TTS failure is retryable. "
+            "Completed scene audio files and checksums "
+            "were validated. Failed jobs can be retried."
         )
 
     return result
