@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Story-aware sound design with verified timing, Flow role music and resumable assets."""
+"""Verified, resumable story-aware sound design for photo-motion videos."""
 
 from __future__ import annotations
 
@@ -16,49 +16,72 @@ import wave
 from datetime import datetime, timezone
 from pathlib import Path
 
-from input_config import load_and_validate, get_parts, get_scenes, get_format
-
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "output"
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from input_config import (
+    load_and_validate,
+    get_format,
+    get_parts_range,
+    get_selected_parts,
+    get_scenes_range,
+)
+
+OUT = ROOT / "output"
 INPUT_FILE = ROOT / "Input" / "topic.txt"
+AUDIO_MANIFEST = OUT / "narration" / "audio_jobs.json"
+NARRATION_FILE = OUT / "narration" / "narration.json"
+SCENES_FILE = OUT / "scenes" / "scenes.json"
+FLOW_MANIFEST = OUT / "music" / "flow_music_manifest.json"
 
-AUDIO_MANIFEST = OUTPUT / "narration" / "audio_jobs.json"
-NARRATION_FILE = OUTPUT / "narration" / "narration.json"
-SCENES_FILE = OUTPUT / "scenes" / "scenes.json"
-FLOW_MUSIC_MANIFEST = OUTPUT / "music" / "flow_music_manifest.json"
-
-MUSIC_PATH = OUTPUT / "music" / "background_music.wav"
-AMBIENT_PATH = OUTPUT / "sound" / "ambient_environment.wav"
-SFX_DIR = OUTPUT / "sfx"
-DESIGN_DIR = OUTPUT / "sound_design"
+MUSIC_PATH = OUT / "music" / "background_music.wav"
+AMBIENT_PATH = OUT / "sound" / "ambient_environment.wav"
+SFX_DIR = OUT / "sfx"
+DESIGN_DIR = OUT / "sound_design"
 
 MANIFEST_PATH = DESIGN_DIR / "sound_design_manifest.json"
 CUES_PATH = DESIGN_DIR / "sfx_cues.json"
-CHECKPOINT_PATH = OUTPUT / "checkpoints" / "sound_design_progress.json"
+SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
+CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v22-role-music"
+VERSION = "photo-motion-sound-design-v30-variable-scenes-role-flow-verified"
 RATE = 22050
 SFX_SECONDS = 4.5
-ROLE_ORDER = {"hook": 0, "main": 1, "suspense": 2, "resolution": 3}
-PATH_KEYS = ("output", "audio_path", "audio_file", "path", "file", "audio")
+MIN_AUDIO_BYTES = 100
+ROLE_ORDER = {
+    "hook": 0,
+    "main": 1,
+    "suspense": 2,
+    "resolution": 3,
+}
 
 SFX_TYPES = (
-    "impact", "footsteps", "vehicle", "door", "weather", "water",
-    "fire", "heartbeat", "phone", "crowd", "mystery", "chime",
+    "whoosh", "impact", "footsteps", "vehicle", "door",
+    "weather", "water", "fire", "heartbeat", "phone",
+    "crowd", "mystery", "chime",
 )
 
 SFX_GAINS = {
-    "impact": 0.30, "footsteps": 0.24, "vehicle": 0.25,
-    "door": 0.26, "weather": 0.22, "water": 0.20,
-    "fire": 0.21, "heartbeat": 0.28, "phone": 0.24,
-    "crowd": 0.20, "mystery": 0.23, "chime": 0.23,
+    "whoosh": 0.16,
+    "impact": 0.30,
+    "footsteps": 0.24,
+    "vehicle": 0.25,
+    "door": 0.26,
+    "weather": 0.22,
+    "water": 0.20,
+    "fire": 0.21,
+    "heartbeat": 0.12,
+    "phone": 0.24,
+    "crowd": 0.20,
+    "mystery": 0.12,
+    "chime": 0.23,
 }
 
 EVENT_WORDS = {
     "impact": (
         "crash", "slam", "bang", "explosion", "gunshot", "shot",
         "धमाका", "टक्कर", "टकराया", "गिर पड़ा", "टूट गया",
-        "गोली", "विस्फोट", "जोरदार प्रहार",
+        "गोली", "विस्फोट", "प्रहार",
     ),
     "footsteps": (
         "footstep", "footsteps", "walking", "running",
@@ -66,132 +89,213 @@ EVENT_WORDS = {
         "दौड़ पड़ा", "दौड़ने लगा", "पैरों की आहट",
     ),
     "vehicle": (
-        "car", "truck", "bus", "train", "motorcycle", "vehicle",
-        "engine", "horn", "कार", "ट्रक", "बस", "ट्रेन",
-        "मोटरसाइकिल", "गाड़ी", "वाहन", "इंजन", "हॉर्न",
+        "car", "truck", "bus", "train", "motorcycle",
+        "vehicle", "engine", "horn", "कार", "ट्रक",
+        "बस", "ट्रेन", "मोटरसाइकिल", "गाड़ी", "वाहन",
+        "इंजन", "हॉर्न",
     ),
     "door": (
-        "door", "gate", "knock", "lock", "दरवाजा", "दरवाज़ा",
-        "दरवाजे", "दरवाज़े", "गेट", "ताला", "खटखटाया",
+        "door", "gate", "knock", "lock", "दरवाजा",
+        "दरवाज़ा", "दरवाजे", "दरवाज़े", "गेट", "ताला",
+        "खटखटाया",
     ),
     "weather": (
         "storm", "thunder", "lightning", "rain", "wind",
-        "तूफान", "तूफ़ान", "बिजली", "गरज", "बारिश", "आंधी",
-        "आँधी", "तेज हवा",
+        "तूफान", "तूफ़ान", "बिजली", "गरज", "बारिश",
+        "आंधी", "आँधी", "तेज हवा",
     ),
     "water": (
-        "river", "sea", "ocean", "water", "wave", "जल",
+        "river", "sea", "ocean", "water", "wave",
         "नदी", "समुद्र", "पानी", "लहर", "बाढ़", "झरना",
     ),
     "fire": (
-        "fire", "flame", "burning", "smoke", "आग", "लपट",
-        "जलता", "जलती", "धुआं", "धुआँ",
+        "fire", "flame", "burning", "smoke",
+        "आग", "लपट", "जलता", "जलती", "धुआं", "धुआँ",
     ),
     "heartbeat": (
-        "heartbeat", "heart beat", "pulse", "धड़कन", "धड़कन",
-        "सांसें तेज", "दिल तेजी से", "घबराहट",
+        "heartbeat", "heart beat", "pulse",
+        "धड़कन", "धड़कन", "सांसें तेज",
+        "दिल तेजी से", "घबराहट",
     ),
     "phone": (
-        "phone", "mobile", "telephone", "ringtone", "notification",
-        "फोन", "मोबाइल", "कॉल", "घंटी बजी", "अलार्म", "संदेश आया",
+        "phone", "mobile", "telephone", "ringtone",
+        "notification", "फोन", "मोबाइल", "कॉल",
+        "घंटी बजी", "अलार्म", "संदेश आया",
     ),
     "crowd": (
-        "crowd", "audience", "people shouting", "cheering",
-        "भीड़", "लोग चिल्लाए", "तालियां", "तालियाँ", "नारे",
+        "crowd", "audience", "people shouting",
+        "cheering", "भीड़", "लोग चिल्लाए",
+        "तालियां", "तालियाँ", "नारे",
     ),
     "mystery": (
-        "mystery", "secret", "ghost", "shadow", "unknown voice",
-        "रहस्य", "भूत", "साया", "खौफ", "अनजान आवाज",
-        "परछाई", "परछाईं", "गायब", "रहस्यमय",
+        "mystery", "secret", "ghost", "shadow",
+        "unknown voice", "रहस्य", "भूत", "साया",
+        "खौफ", "अनजान आवाज", "परछाई", "परछाईं",
+        "गायब", "रहस्यमय",
     ),
     "chime": (
-        "bell", "chime", "ring", "घंटी", "मंदिर", "शुभ समाचार",
-        "खुशी की खबर", "सफलता की खबर",
+        "bell", "chime", "ring", "घंटी", "मंदिर",
+        "शुभ समाचार", "खुशी की खबर", "सफलता की खबर",
     ),
 }
 
 AMBIENT_KEYWORDS = {
-    "city": ("city", "street", "traffic", "शहर", "सड़क", "बाजार", "बाज़ार"),
-    "forest": ("forest", "jungle", "woods", "जंगल", "वन", "पेड़"),
-    "village": ("village", "farm", "गांव", "गाँव", "खेत", "किसान"),
-    "office": ("office", "company", "corporate", "दफ्तर", "कार्यालय", "ऑफिस"),
-    "hospital": ("hospital", "clinic", "ward", "अस्पताल", "क्लिनिक"),
-    "home": ("home", "house", "room", "घर", "कमरा", "रसोई"),
-    "rain": ("rain", "storm", "बारिश", "तूफान", "तूफ़ान"),
-    "water": ("river", "sea", "water", "नदी", "समुद्र", "पानी"),
+    "city": (
+        "city", "street", "traffic", "शहर", "सड़क",
+        "बाजार", "बाज़ार",
+    ),
+    "forest": (
+        "forest", "jungle", "woods", "जंगल", "वन", "पेड़",
+    ),
+    "village": (
+        "village", "farm", "गांव", "गाँव", "खेत", "किसान",
+    ),
+    "office": (
+        "office", "company", "corporate", "दफ्तर",
+        "कार्यालय", "ऑफिस",
+    ),
+    "hospital": (
+        "hospital", "clinic", "ward", "अस्पताल", "क्लिनिक",
+    ),
+    "home": (
+        "home", "house", "room", "घर", "कमरा", "रसोई",
+    ),
+    "rain": (
+        "rain", "storm", "बारिश", "तूफान", "तूफ़ान",
+    ),
+    "water": (
+        "river", "sea", "water", "नदी", "समुद्र", "पानी",
+    ),
 }
 
 
-def log(*args):
-    print(*args, flush=True)
+def log(*values):
+    print(*values, flush=True)
 
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def read_json(path, default=None):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError, TypeError):
-        return default
-
-
-def write_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def signature(data):
     raw = json.dumps(
-        data, sort_keys=True, ensure_ascii=False,
-        separators=(",", ":"), default=str,
+        data,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
 def sha256_file(path):
     digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
+
+    with Path(path).open("rb") as handle:
+        for block in iter(
+            lambda: handle.read(1024 * 1024), b""
+        ):
             digest.update(block)
+
     return digest.hexdigest()
 
 
-def run(command, timeout=180):
+def read_json(path, required=True, default=None):
+    path = Path(path)
+
+    if not path.is_file():
+        if required:
+            raise RuntimeError(f"Required JSON missing: {path}")
+        return default
+
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8-sig")
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Invalid JSON file {path}: {exc}"
+        ) from exc
+
+
+def write_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+
+    try:
+        with temporary.open(
+            "w", encoding="utf-8", newline="\n"
+        ) as handle:
+            json.dump(
+                data, handle, ensure_ascii=False, indent=2
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def safe_project_path(value, label="audio", must_exist=True):
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"{label}: path is missing.")
+
+    path = Path(value.strip())
+
+    if not path.is_absolute():
+        path = ROOT / path
+
+    path = path.resolve()
+
+    if not path.is_relative_to(ROOT.resolve()):
+        raise RuntimeError(
+            f"{label}: path escapes project directory."
+        )
+
+    if must_exist and not path.is_file():
+        raise RuntimeError(
+            f"{label}: file does not exist: {path}"
+        )
+
+    return path
+
+
+def run(command, timeout=300):
     result = subprocess.run(
-        command, capture_output=True, text=True,
-        timeout=timeout, check=False,
+        [str(item) for item in command],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
     )
+
     if result.returncode:
-        detail = (result.stderr or result.stdout or "")[-2500:]
-        raise RuntimeError(f"Command failed ({result.returncode}): {detail}")
+        detail = (
+            result.stderr or result.stdout or ""
+        )[-2500:]
+
+        raise RuntimeError(
+            f"Command failed ({result.returncode}): {detail}"
+        )
+
     return result
 
 
-def safe_project_path(value, must_exist=True):
-    if not isinstance(value, str) or not value.strip():
-        raise RuntimeError("A project-relative audio path is missing.")
-    path = Path(value.strip())
-    if not path.is_absolute():
-        path = ROOT / path
-    path = path.resolve()
-    root = ROOT.resolve()
-    if path != root and root not in path.parents:
-        raise RuntimeError("Audio path escapes the project directory.")
-    if must_exist and not path.is_file():
-        raise RuntimeError(f"Audio file does not exist: {value}")
-    return path
+def require_media_tools():
+    missing = [
+        name for name in ("ffmpeg", "ffprobe")
+        if not shutil.which(name)
+    ]
+
+    if missing:
+        raise RuntimeError(
+            "Required media tools missing: " + ", ".join(missing)
+        )
 
 
 def ffprobe_audio(path):
@@ -199,443 +303,810 @@ def ffprobe_audio(path):
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration:stream=codec_type",
         "-of", "json", str(path),
-    ], 90)
+    ], timeout=90)
+
     try:
         data = json.loads(result.stdout)
         duration = float(data["format"]["duration"])
         has_audio = any(
-            item.get("codec_type") == "audio"
-            for item in data.get("streams", [])
+            row.get("codec_type") == "audio"
+            for row in data.get("streams", [])
         )
-    except (ValueError, TypeError, KeyError) as exc:
-        raise RuntimeError(f"Invalid audio metadata: {path}") from exc
-    if not math.isfinite(duration) or duration <= 0 or not has_audio:
-        raise RuntimeError(f"Audio is empty or has no audio stream: {path}")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Invalid audio metadata: {path}"
+        ) from exc
+
+    if (
+        not math.isfinite(duration)
+        or duration <= 0
+        or not has_audio
+    ):
+        raise RuntimeError(
+            f"Audio is empty or has no audio stream: {path}"
+        )
+
     return duration
 
 
 def audio_loudness(path):
     result = run([
-        "ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
-        "-af", "volumedetect", "-f", "null", "-",
-    ], 120)
+        "ffmpeg", "-hide_banner", "-nostats",
+        "-i", str(path),
+        "-af", "volumedetect",
+        "-f", "null", "-",
+    ], timeout=120)
+
     output = result.stderr or ""
     values = {}
+
     for key, marker in (
         ("mean_volume_db", "mean_volume:"),
         ("peak_volume_db", "max_volume:"),
     ):
         for line in output.splitlines():
-            if marker in line:
-                try:
-                    values[key] = float(
-                        line.split(marker, 1)[1].strip().split()[0]
-                    )
-                except (ValueError, IndexError):
-                    pass
+            if marker not in line:
+                continue
+
+            try:
+                values[key] = float(
+                    line.split(marker, 1)[1]
+                    .strip().split()[0]
+                )
+            except (ValueError, IndexError):
+                pass
+
     return values
 
 
 def validate_wav(path, minimum_seconds=0.1):
     path = Path(path)
-    if not path.is_file() or path.stat().st_size < 100:
-        raise RuntimeError(f"WAV missing or too small: {path}")
+
+    if (
+        not path.is_file()
+        or path.stat().st_size < MIN_AUDIO_BYTES
+    ):
+        raise RuntimeError(
+            f"WAV missing or too small: {path}"
+        )
+
     try:
         with wave.open(str(path), "rb") as audio:
-            if audio.getnchannels() != 1 or audio.getsampwidth() != 2:
-                raise RuntimeError("WAV must be mono 16-bit PCM.")
+            if audio.getnchannels() != 1:
+                raise RuntimeError("WAV must be mono.")
+
+            if audio.getsampwidth() != 2:
+                raise RuntimeError(
+                    "WAV must use 16-bit PCM."
+                )
+
             if audio.getframerate() != RATE:
-                raise RuntimeError("WAV sample rate mismatch.")
+                raise RuntimeError(
+                    "WAV sample rate must be 22050 Hz."
+                )
+
             frames = audio.getnframes()
+
             if frames <= 0:
-                raise RuntimeError("WAV contains no frames.")
+                raise RuntimeError(
+                    "WAV contains no audio frames."
+                )
+
             duration = frames / audio.getframerate()
+
     except (wave.Error, EOFError) as exc:
-        raise RuntimeError(f"Invalid WAV: {path}") from exc
+        raise RuntimeError(
+            f"Invalid WAV file: {path}"
+        ) from exc
+
     if duration + 1 / RATE < minimum_seconds:
-        raise RuntimeError(f"WAV is too short: {path}")
+        raise RuntimeError(
+            f"WAV is shorter than required: {path}"
+        )
+
     return duration
 
 
 def write_wav(path, samples, duration):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".building")
+
+    temporary = path.with_name(
+        path.name + ".building"
+    )
+
     expected = int(round(RATE * duration))
     count = 0
+
     try:
         with wave.open(str(temporary), "wb") as audio:
             audio.setnchannels(1)
             audio.setsampwidth(2)
             audio.setframerate(RATE)
+
             block = bytearray()
+
             for sample in samples:
                 if count >= expected:
                     break
-                sample = max(-0.92, min(0.92, float(sample)))
-                block.extend(struct.pack("<h", int(sample * 32767)))
+
+                sample = max(
+                    -0.92, min(0.92, float(sample))
+                )
+
+                block.extend(
+                    struct.pack(
+                        "<h", int(sample * 32767)
+                    )
+                )
+
                 count += 1
+
                 if len(block) >= 32768:
                     audio.writeframesraw(block)
                     block.clear()
+
             if block:
                 audio.writeframesraw(block)
+
             if count != expected:
-                raise RuntimeError(f"Audio frame mismatch: {count}/{expected}.")
-        validate_wav(temporary, min(0.1, duration))
+                raise RuntimeError(
+                    f"Audio frame mismatch: {count}/{expected}."
+                )
+
+        validate_wav(
+            temporary, min(0.1, duration)
+        )
+
         os.replace(temporary, path)
+
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def envelope(t, duration, attack=0.08, release=0.5):
-    return min(1.0, t / max(0.01, attack)) * min(
-        1.0, max(0.0, duration - t) / max(0.01, release)
+    return (
+        min(1.0, t / max(0.01, attack))
+        * min(
+            1.0,
+            max(0.0, duration - t) / max(0.01, release),
+        )
     )
 
 
 def sfx_samples(kind, duration=SFX_SECONDS, seed=771):
     rng = random.Random(seed)
-    low = smooth = 0.0
+    low = 0.0
+    smooth = 0.0
     count = int(round(RATE * duration))
+
     for index in range(count):
         t = index / RATE
-        p = index / max(1, count - 1)
+        progress = index / max(1, count - 1)
         noise = rng.uniform(-1.0, 1.0)
+
         low = low * 0.90 + noise * 0.10
         smooth = smooth * 0.994 + noise * 0.006
+
         fade = envelope(t, duration, 0.025, 0.45)
-        if kind == "impact":
+
+        if kind == "whoosh":
+            swell = math.sin(math.pi * progress) ** 1.5
+            value = swell * (
+                0.24 * smooth + 0.10 * low
+            )
+
+        elif kind == "impact":
             decay = math.exp(-3.2 * t)
-            value = 0.48 * math.sin(2 * math.pi * 52 * t) * decay
+            value = (
+                0.48 * math.sin(2 * math.pi * 52 * t)
+                * decay
+            )
             value += 0.16 * low * math.exp(-4 * t)
+
         elif kind == "footsteps":
             phase = (t * 2.0) % 1.0
-            thump = math.exp(-((phase - 0.08) / 0.055) ** 2)
-            value = 0.30 * thump * math.sin(2 * math.pi * 72 * t)
+            thump = math.exp(
+                -((phase - 0.08) / 0.055) ** 2
+            )
+            value = (
+                0.30 * thump
+                * math.sin(2 * math.pi * 72 * t)
+            )
             value += 0.035 * smooth
+
         elif kind == "vehicle":
-            sweep = 65 + 90 * p
-            value = 0.20 * math.sin(2 * math.pi * sweep * t)
+            sweep = 65 + 90 * progress
+            value = (
+                0.20 * math.sin(2 * math.pi * sweep * t)
+            )
             value += 0.12 * low + 0.05 * smooth
+
         elif kind == "door":
-            value = 0.28 * math.sin(2 * math.pi * 88 * t) * math.exp(-2.5 * t)
+            value = (
+                0.28 * math.sin(2 * math.pi * 88 * t)
+                * math.exp(-2.5 * t)
+            )
             value += 0.09 * low * math.exp(-2 * t)
+
         elif kind == "weather":
             value = 0.20 * low + 0.10 * smooth
-            value += 0.07 * math.sin(2 * math.pi * 43 * t)
+            value += 0.07 * math.sin(
+                2 * math.pi * 43 * t
+            )
+
         elif kind == "water":
             value = 0.16 * smooth + 0.08 * low
-            value += 0.06 * math.sin(2 * math.pi * (170 + 25 * math.sin(t)) * t)
+            value += 0.06 * math.sin(
+                2 * math.pi
+                * (170 + 25 * math.sin(t)) * t
+            )
+
         elif kind == "fire":
             value = 0.17 * low + 0.12 * smooth
-            value += 0.04 * math.sin(2 * math.pi * 120 * t)
+            value += 0.04 * math.sin(
+                2 * math.pi * 120 * t
+            )
+
         elif kind == "heartbeat":
             phase = (t * 1.05) % 1.0
             pulse = (
-                0.82 * math.exp(-((phase - 0.10) / 0.06) ** 2)
-                + 0.45 * math.exp(-((phase - 0.28) / 0.075) ** 2)
+                0.82 * math.exp(
+                    -((phase - 0.10) / 0.06) ** 2
+                )
+                + 0.45 * math.exp(
+                    -((phase - 0.28) / 0.075) ** 2
+                )
             )
-            value = pulse * math.sin(2 * math.pi * 48 * t)
+            value = pulse * math.sin(
+                2 * math.pi * 48 * t
+            )
+
         elif kind == "phone":
-            pulse = 1.0 if int(t * 2.0) % 2 == 0 else 0.0
+            pulse = (
+                1.0 if int(t * 2.0) % 2 == 0 else 0.0
+            )
             value = pulse * (
                 0.22 * math.sin(2 * math.pi * 740 * t)
                 + 0.12 * math.sin(2 * math.pi * 920 * t)
             )
+
         elif kind == "crowd":
             value = 0.13 * low + 0.12 * smooth
-            value += 0.035 * math.sin(2 * math.pi * 260 * t)
+            value += 0.035 * math.sin(
+                2 * math.pi * 260 * t
+            )
+
         elif kind == "mystery":
-            wobble = 4 * math.sin(2 * math.pi * 0.3 * t)
-            value = 0.22 * math.sin(2 * math.pi * (110 + wobble) * t)
-            value += 0.10 * math.sin(2 * math.pi * 164.81 * t)
+            wobble = 4 * math.sin(
+                2 * math.pi * 0.3 * t
+            )
+            value = 0.22 * math.sin(
+                2 * math.pi * (110 + wobble) * t
+            )
+            value += 0.10 * math.sin(
+                2 * math.pi * 164.81 * t
+            )
+
         else:
             decay = math.exp(-1.0 * t)
             value = decay * (
-                0.24 * math.sin(2 * math.pi * 523.25 * t)
-                + 0.15 * math.sin(2 * math.pi * 659.25 * t)
-                + 0.08 * math.sin(2 * math.pi * 783.99 * t)
+                0.24 * math.sin(
+                    2 * math.pi * 523.25 * t
+                )
+                + 0.15 * math.sin(
+                    2 * math.pi * 659.25 * t
+                )
+                + 0.08 * math.sin(
+                    2 * math.pi * 783.99 * t
+                )
             )
+
         yield value * fade
+
+
+def music_samples(duration, seed=2718):
+    roots = (
+        110.0, 130.81, 98.0,
+        146.83, 123.47, 92.5,
+    )
+
+    phase = random.Random(seed).random() * math.tau
+
+    for index in range(int(round(RATE * duration))):
+        t = index / RATE
+        root = roots[int(t // 16) % len(roots)]
+
+        pad = (
+            0.22 * math.sin(2 * math.pi * root * t)
+            + 0.12 * math.sin(
+                2 * math.pi * root * 1.5 * t
+            )
+            + 0.07 * math.sin(
+                2 * math.pi * root * 2.0 * t
+            )
+        )
+
+        pulse = (
+            0.94
+            + 0.06 * math.sin(
+                2 * math.pi * 0.075 * t + phase
+            )
+        )
+
+        yield (
+            pad * pulse
+            * envelope(t, duration, 2.5, 4.0)
+        )
+
+
+def make_local_track(
+    path,
+    duration,
+    old_record,
+    source_sig,
+    track_name,
+    generator,
+):
+    track_signature = signature({
+        "version": VERSION,
+        "track": track_name,
+        "duration": round(duration, 4),
+        "rate": RATE,
+        "source_signature": source_sig,
+    })
+
+    if path.is_file() and isinstance(old_record, dict):
+        try:
+            actual = validate_wav(path, duration)
+            checksum = sha256_file(path)
+
+            if (
+                old_record.get("signature")
+                == track_signature
+                and old_record.get("sha256") == checksum
+                and abs(actual - duration) <= 0.10
+            ):
+                return {
+                    "status": "completed",
+                    "path": path.relative_to(ROOT).as_posix(),
+                    "signature": track_signature,
+                    "sha256": checksum,
+                    "duration_seconds": round(actual, 6),
+                    "generation": "local_deterministic_synthesis",
+                    "provider": "local_synthesis",
+                    "reused": True,
+                }
+
+        except Exception:
+            pass
+
+    write_wav(
+        path,
+        generator(duration),
+        duration,
+    )
+
+    actual = validate_wav(path, duration)
+
+    return {
+        "status": "completed",
+        "path": path.relative_to(ROOT).as_posix(),
+        "signature": track_signature,
+        "sha256": sha256_file(path),
+        "duration_seconds": round(actual, 6),
+        "generation": "local_deterministic_synthesis",
+        "provider": "local_synthesis",
+        "reused": False,
+    }
 
 
 def make_sfx(kind, path, old_record, source_sig):
     path = Path(path)
-    sig = signature({
-        "version": VERSION, "kind": kind, "duration": SFX_SECONDS,
-        "rate": RATE, "source": source_sig,
+
+    track_signature = signature({
+        "version": VERSION,
+        "kind": kind,
+        "duration": SFX_SECONDS,
+        "rate": RATE,
+        "source_signature": source_sig,
     })
+
     if path.is_file() and isinstance(old_record, dict):
         try:
-            duration = validate_wav(path, SFX_SECONDS)
+            duration = validate_wav(
+                path, SFX_SECONDS
+            )
             checksum = sha256_file(path)
-            if old_record.get("signature") == sig and old_record.get("sha256") == checksum:
+
+            if (
+                old_record.get("signature")
+                == track_signature
+                and old_record.get("sha256") == checksum
+                and abs(duration - SFX_SECONDS) <= 0.10
+            ):
                 return {
                     "status": "completed",
                     "path": path.relative_to(ROOT).as_posix(),
-                    "signature": sig, "sha256": checksum,
+                    "signature": track_signature,
+                    "sha256": checksum,
                     "duration_seconds": round(duration, 6),
                     "generation": "local_event_sfx",
+                    "reused": True,
                 }
+
         except Exception:
             pass
-    seed = int(sig[:8], 16)
-    write_wav(path, sfx_samples(kind, SFX_SECONDS, seed), SFX_SECONDS)
-    duration = validate_wav(path, SFX_SECONDS)
+
+    seed = int(track_signature[:8], 16)
+
+    write_wav(
+        path,
+        sfx_samples(kind, SFX_SECONDS, seed),
+        SFX_SECONDS,
+    )
+
+    duration = validate_wav(
+        path, SFX_SECONDS
+    )
+
     return {
         "status": "completed",
         "path": path.relative_to(ROOT).as_posix(),
-        "signature": sig, "sha256": sha256_file(path),
+        "signature": track_signature,
+        "sha256": sha256_file(path),
         "duration_seconds": round(duration, 6),
         "generation": "local_event_sfx",
+        "reused": False,
     }
 
 
-def music_samples(duration, seed=2718):
-    roots = (110.0, 130.81, 98.0, 146.83, 123.47, 92.5)
-    phase = random.Random(seed).random() * math.tau
-    for index in range(int(round(RATE * duration))):
-        t = index / RATE
-        root = roots[int(t // 16) % len(roots)]
-        pad = (
-            0.22 * math.sin(2 * math.pi * root * t)
-            + 0.12 * math.sin(2 * math.pi * root * 1.5 * t)
-            + 0.07 * math.sin(2 * math.pi * root * 2.0 * t)
-        )
-        pulse = 0.94 + 0.06 * math.sin(2 * math.pi * 0.075 * t + phase)
-        yield pad * pulse * envelope(t, duration, 2.5, 4.0)
-
-
-def make_music(duration, old_record, source_sig):
-    sig = signature({
-        "version": VERSION, "source": source_sig,
-        "duration": round(duration, 3), "rate": RATE,
-    })
-    if MUSIC_PATH.is_file() and isinstance(old_record, dict):
-        try:
-            actual = validate_wav(MUSIC_PATH, duration)
-            checksum = sha256_file(MUSIC_PATH)
-            if old_record.get("signature") == sig and old_record.get("sha256") == checksum:
-                return {
-                    "status": "completed",
-                    "path": MUSIC_PATH.relative_to(ROOT).as_posix(),
-                    "signature": sig, "sha256": checksum,
-                    "duration_seconds": round(actual, 6),
-                    "generation": "local_cinematic_music",
-                    "provider": "local_synthesis",
-                }
-        except Exception:
-            pass
-    write_wav(MUSIC_PATH, music_samples(duration), duration)
-    actual = validate_wav(MUSIC_PATH, duration)
-    return {
-        "status": "completed",
-        "path": MUSIC_PATH.relative_to(ROOT).as_posix(),
-        "signature": sig, "sha256": sha256_file(MUSIC_PATH),
-        "duration_seconds": round(actual, 6),
-        "generation": "local_cinematic_music",
-        "provider": "local_synthesis",
-    }
-
-
-def load_flow_music():
-    data = read_json(FLOW_MUSIC_MANIFEST, {})
-    if not isinstance(data, dict) or data.get("status") != "completed":
-        return None
-    try:
-        source = safe_project_path(data.get("path") or data.get("audio_path"))
-        checksum = sha256_file(source)
-        if data.get("sha256") != checksum:
-            raise RuntimeError("Flow Music master SHA256 mismatch.")
-        source_duration = ffprobe_audio(source)
-        declared = data.get("duration_seconds")
-        if declared is not None and abs(float(declared) - source_duration) > 2:
-            raise RuntimeError("Flow Music master duration mismatch.")
-        segments = data.get("role_segments")
-        if not isinstance(segments, list) or not segments:
-            raise RuntimeError("Flow Music role_segments are missing.")
-        return data, source, source_duration, segments
-    except Exception as exc:
-        log("FLOW MUSIC REJECTED:", str(exc))
-        return None
-
-
-def ambient_source_candidates():
+def make_ambient(
+    total_duration,
+    scene_records,
+    old_record,
+    source_sig,
+):
     candidates = [
-        AMBIENT_PATH,
-        OUTPUT / "sound" / "ambient_sources",
+        OUT / "sound" / "ambient_sources",
         ROOT / "assets" / "sounds" / "ambient",
         ROOT / "assets" / "audio" / "ambient",
     ]
-    result = []
+
+    available = []
+
     for candidate in candidates:
         if candidate.is_file():
-            result.append(candidate)
+            available.append(candidate)
+
         elif candidate.is_dir():
-            result.extend(sorted(
-                p for p in candidate.rglob("*")
-                if p.is_file() and p.suffix.lower() in {
-                    ".wav", ".mp3", ".m4a", ".ogg", ".flac"
+            available.extend(sorted(
+                path for path in candidate.rglob("*")
+                if path.is_file()
+                and path.suffix.lower() in {
+                    ".wav", ".mp3", ".m4a",
+                    ".ogg", ".flac",
                 }
             ))
-    return list(dict.fromkeys(result))
 
+    if not available:
+        return {
+            "status": "skipped",
+            "reason": "No real ambient audio asset is available.",
+            "requested_environment": [],
+        }
 
-def choose_ambient_source(scene_records):
     story_text = " ".join(
         str(value or "")
         for row in scene_records.values()
         for value in (
-            row.get("narration"), row.get("text"),
-            row.get("visual_prompt"), row.get("location"),
-            row.get("setting"), row.get("environment"),
+            row.get("narration"),
+            row.get("text"),
+            row.get("visual_prompt"),
+            row.get("location"),
+            row.get("setting"),
+            row.get("environment"),
         )
     ).casefold()
+
     desired = [
-        category for category, words in AMBIENT_KEYWORDS.items()
+        category
+        for category, words in AMBIENT_KEYWORDS.items()
         if any(word in story_text for word in words)
     ]
-    candidates = ambient_source_candidates()
-    if not candidates:
-        return None, desired
+
     ranked = []
-    for path in candidates:
+
+    for path in available:
         name = path.stem.casefold()
-        score = sum(1 for category in desired if category in name)
+        score = sum(
+            1 for category in desired
+            if category in name
+        )
         ranked.append((score, path))
-    ranked.sort(key=lambda item: (-item[0], item[1].as_posix()))
-    return ranked[0][1], desired
 
+    ranked.sort(
+        key=lambda item: (
+            -item[0], item[1].as_posix()
+        )
+    )
 
-def make_ambient(total_duration, scene_records, old_record, source_sig):
-    source, desired = choose_ambient_source(scene_records)
-    if source is None:
-        return {
-            "status": "skipped",
-            "reason": "No real ambient audio asset is available.",
-            "requested_environment": desired,
-        }
+    source = ranked[0][1]
     source_hash = sha256_file(source)
-    sig = signature({
-        "version": VERSION, "source": source_hash,
-        "timeline": round(total_duration, 3),
+
+    track_signature = signature({
+        "version": VERSION,
+        "source_sha256": source_hash,
+        "duration": round(total_duration + 8.0, 3),
         "source_signature": source_sig,
     })
+
     if AMBIENT_PATH.is_file() and isinstance(old_record, dict):
         try:
             actual = ffprobe_audio(AMBIENT_PATH)
             checksum = sha256_file(AMBIENT_PATH)
+
             if (
-                old_record.get("signature") == sig
+                old_record.get("signature")
+                == track_signature
                 and old_record.get("sha256") == checksum
                 and actual + 0.5 >= total_duration
             ):
                 return {
                     "status": "completed",
                     "path": AMBIENT_PATH.relative_to(ROOT).as_posix(),
-                    "signature": sig, "sha256": checksum,
+                    "signature": track_signature,
+                    "sha256": checksum,
                     "duration_seconds": round(actual, 6),
                     "generation": "reused_real_ambient_asset",
                     "source_audio": source.relative_to(ROOT).as_posix(),
                     "source_sha256": source_hash,
                     "environment": desired,
+                    "reused": True,
                 }
+
         except Exception:
             pass
-    temporary = AMBIENT_PATH.with_name("ambient_environment.building.wav")
-    temporary.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary = AMBIENT_PATH.with_name(
+        "ambient_environment.building.wav"
+    )
+
+    temporary.parent.mkdir(
+        parents=True, exist_ok=True
+    )
     temporary.unlink(missing_ok=True)
+
     run([
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-stream_loop", "-1", "-i", str(source),
-        "-t", f"{total_duration + 8.0:.3f}", "-vn",
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-y",
+        "-stream_loop", "-1",
+        "-i", str(source),
+        "-t", f"{total_duration + 8.0:.3f}",
+        "-vn",
         "-af",
         (
-            "aresample=22050,highpass=f=35,lowpass=f=10000,"
+            "aresample=22050,"
+            "highpass=f=35,"
+            "lowpass=f=10000,"
             "loudnorm=I=-29:TP=-4:LRA=12,"
             f"afade=t=out:st={max(0.0, total_duration + 4):.3f}:d=4"
         ),
-        "-ac", "1", "-ar", str(RATE),
-        "-c:a", "pcm_s16le", str(temporary),
+        "-ac", "1",
+        "-ar", str(RATE),
+        "-c:a", "pcm_s16le",
+        str(temporary),
     ], timeout=900)
+
     actual = ffprobe_audio(temporary)
+
+    if actual + 0.5 < total_duration:
+        raise RuntimeError(
+            "Ambient audio is shorter than narration timeline."
+        )
+
     os.replace(temporary, AMBIENT_PATH)
+
     return {
         "status": "completed",
         "path": AMBIENT_PATH.relative_to(ROOT).as_posix(),
-        "signature": sig, "sha256": sha256_file(AMBIENT_PATH),
+        "signature": track_signature,
+        "sha256": sha256_file(AMBIENT_PATH),
         "duration_seconds": round(actual, 6),
         "generation": "real_ambient_asset",
         "source_audio": source.relative_to(ROOT).as_posix(),
         "source_sha256": source_hash,
         "environment": desired,
+        "reused": False,
     }
 
 
 def record_identity(row):
+    if not isinstance(row, dict):
+        raise RuntimeError(
+            "Narration audio record must be an object."
+        )
+
     try:
         part = int(row["part"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError("Narration audio record has invalid part.") from exc
-    role = str(row.get("role", "main")).strip().lower()
+        raise RuntimeError(
+            "Narration audio record has invalid Part."
+        ) from exc
+
+    role = str(
+        row.get("role", "main")
+    ).strip().lower()
+
+    aliases = {
+        "opening": "hook",
+        "intro": "hook",
+        "cliffhanger": "suspense",
+        "ending": "resolution",
+        "final": "resolution",
+    }
+
+    role = aliases.get(role, role)
+
     if role not in ROLE_ORDER:
-        raise RuntimeError(f"Unsupported audio role: {role!r}")
+        raise RuntimeError(
+            f"Unsupported audio role: {role!r}"
+        )
+
     if role == "main":
         try:
             scene = int(row["scene"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("Main narration record has no scene number.") from exc
-        scene_id = str(row.get("scene_id") or f"part_{part:02d}_scene_{scene:02d}").strip()
+            raise RuntimeError(
+                "Main narration record has no Scene number."
+            ) from exc
+
         if scene < 1:
-            raise RuntimeError("Main scene number must be positive.")
+            raise RuntimeError(
+                "Main Scene number must be positive."
+            )
+
+        scene_id = str(
+            row.get("scene_id")
+            or f"part_{part:02d}_scene_{scene:02d}"
+        ).strip()
+
     else:
         scene = None
-        scene_id = str(row.get("scene_id") or f"part_{part:02d}_{role}").strip()
+        scene_id = str(
+            row.get("scene_id")
+            or f"part_{part:02d}_{role}"
+        ).strip()
+
     if part < 1 or not scene_id:
-        raise RuntimeError("Invalid narration record identity.")
+        raise RuntimeError(
+            "Invalid narration record identity."
+        )
+
     return scene_id, part, role, scene
 
 
 def load_audio_records():
     data = read_json(AUDIO_MANIFEST)
-    if not isinstance(data, dict) or data.get("status") != "completed":
-        raise RuntimeError("TTS audio manifest is missing or incomplete.")
+
+    if (
+        not isinstance(data, dict)
+        or data.get("status") != "completed"
+    ):
+        raise RuntimeError(
+            "TTS audio manifest is missing or incomplete."
+        )
+
     jobs = data.get("jobs")
+
     if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError("TTS audio manifest contains no jobs.")
+        raise RuntimeError(
+            "TTS audio manifest contains no jobs."
+        )
+
     records = {}
+
     for row in jobs:
-        if not isinstance(row, dict) or row.get("status") not in {"completed", "reused"}:
-            raise RuntimeError("TTS manifest contains an incomplete job.")
+        if (
+            not isinstance(row, dict)
+            or row.get("status") not in {
+                "completed", "reused"
+            }
+        ):
+            raise RuntimeError(
+                "TTS manifest contains an incomplete job."
+            )
+
         scene_id, part, role, scene = record_identity(row)
+
         if scene_id in records:
-            raise RuntimeError(f"Duplicate narration scene_id: {scene_id}")
+            raise RuntimeError(
+                f"Duplicate narration scene_id: {scene_id}"
+            )
+
         audio_value = next(
-            (row.get(key) for key in PATH_KEYS
-             if isinstance(row.get(key), str) and row[key].strip()),
+            (
+                row.get(key)
+                for key in (
+                    "audio_path", "audio_file",
+                    "path", "file", "audio",
+                )
+                if isinstance(row.get(key), str)
+                and row[key].strip()
+            ),
             None,
         )
-        path = safe_project_path(audio_value)
+
+        path = safe_project_path(
+            audio_value,
+            f"Narration audio {scene_id}",
+        )
+
         duration = ffprobe_audio(path)
         checksum = sha256_file(path)
+
         if row.get("sha256") != checksum:
-            raise RuntimeError(f"Narration SHA256 mismatch: {scene_id}")
-        declared = row.get("actual_audio_duration_seconds", row.get("duration"))
-        if declared is None or abs(float(declared) - duration) > 0.20:
-            raise RuntimeError(f"Measured duration mismatch: {scene_id}")
-        duration_source = row.get("duration_source", row.get("audio_duration_source"))
-        if duration_source not in (None, "ffprobe_measured"):
-            raise RuntimeError(f"Unverified duration source for {scene_id}")
+            raise RuntimeError(
+                f"Narration SHA256 mismatch: {scene_id}"
+            )
+
+        declared = row.get(
+            "actual_audio_duration_seconds",
+            row.get("duration"),
+        )
+
+        try:
+            declared = float(declared)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Missing measured duration: {scene_id}"
+            ) from exc
+
+        if (
+            not math.isfinite(declared)
+            or abs(declared - duration) > 0.20
+        ):
+            raise RuntimeError(
+                f"Measured duration mismatch: {scene_id}"
+            )
+
+        duration_source = (
+            row.get("duration_source")
+            or row.get("audio_duration_source")
+        )
+
+        if duration_source != "ffprobe_measured":
+            raise RuntimeError(
+                f"Unverified audio duration source: {scene_id}"
+            )
+
+        fingerprint = (
+            row.get("tts_fingerprint")
+            or row.get("fingerprint")
+        )
+
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise RuntimeError(
+                f"TTS fingerprint is missing: {scene_id}"
+            )
+
         records[scene_id] = {
-            "scene_id": scene_id, "part": part, "scene": scene,
-            "role": role, "duration": duration, "path": path,
+            "scene_id": scene_id,
+            "part": part,
+            "scene": scene,
+            "role": role,
+            "duration": duration,
+            "path": path,
             "path_relative": path.relative_to(ROOT).as_posix(),
             "sha256": checksum,
-            "text": str(row.get("text", row.get("narration", ""))),
-            "provider": row.get("provider"), "voice": row.get("voice"),
-            "tts_fingerprint": row.get("fingerprint"),
+            "text": str(
+                row.get("text", row.get("narration", ""))
+            ),
+            "provider": row.get("provider"),
+            "voice": row.get("voice"),
+            "tts_fingerprint": fingerprint,
         }
+
     return records
 
 
@@ -643,182 +1114,311 @@ def ordered_audio_records(records):
     return sorted(
         records.values(),
         key=lambda row: (
-            row["part"], ROLE_ORDER[row["role"]],
-            row["scene"] or 0, row["scene_id"],
+            row["part"],
+            ROLE_ORDER[row["role"]],
+            row["scene"] or 0,
+            row["scene_id"],
         ),
     )
 
 
-def validate_record_structure(ordered, expected_parts, scenes_per_part):
-    parts = sorted({row["part"] for row in ordered})
+def validate_record_structure(
+    ordered,
+    expected_parts,
+    scenes_min,
+    scenes_max,
+    actual_scene_counts,
+):
+    parts = sorted({
+        row["part"] for row in ordered
+    })
+
     if len(parts) != expected_parts:
         raise RuntimeError(
-            f"PARTS mismatch: configured {expected_parts}, audio has {len(parts)}."
+            f"PARTS mismatch: selected {expected_parts}, "
+            f"audio has {len(parts)}."
         )
-    if not parts or parts != list(range(parts[0], parts[0] + expected_parts)):
-        raise RuntimeError("Part numbering is not continuous.")
+
+    if parts != list(range(1, expected_parts + 1)):
+        raise RuntimeError(
+            "Part numbering must be continuous from 1."
+        )
+
+    if len(actual_scene_counts) != expected_parts:
+        raise RuntimeError(
+            "actual_scene_counts does not match Part count."
+        )
+
     by_part = {}
+
     for row in ordered:
-        by_part.setdefault(row["part"], []).append(row)
-    final_part = parts[-1]
+        by_part.setdefault(
+            row["part"], []
+        ).append(row)
+
     for part in parts:
         rows = by_part[part]
-        roles = [row["role"] for row in rows]
+        roles = [
+            row["role"] for row in rows
+        ]
+
+        expected_suspense = (
+            1 if part < expected_parts else 0
+        )
+        expected_resolution = (
+            1 if part == expected_parts else 0
+        )
+
         if roles.count("hook") != 1:
-            raise RuntimeError(f"Part {part} must have exactly one Hook.")
-        if roles.count("suspense") != (1 if part != final_part else 0):
-            raise RuntimeError(f"Part {part} has invalid Suspense records.")
-        if roles.count("resolution") != (1 if part == final_part else 0):
-            raise RuntimeError(f"Part {part} has invalid Resolution records.")
-        main = sorted(row["scene"] for row in rows if row["role"] == "main")
-        if main != list(range(1, scenes_per_part + 1)):
-            raise RuntimeError(f"Part {part} main scenes mismatch: {main}")
-    expected = (
-        expected_parts * scenes_per_part
-        + expected_parts + max(0, expected_parts - 1) + 1
-    )
-    if len(ordered) != expected:
+            raise RuntimeError(
+                f"Part {part} must have exactly one Hook."
+            )
+
+        if roles.count("suspense") != expected_suspense:
+            raise RuntimeError(
+                f"Part {part} has invalid Suspense count."
+            )
+
+        if roles.count("resolution") != expected_resolution:
+            raise RuntimeError(
+                f"Part {part} has invalid Resolution count."
+            )
+
+        main = sorted(
+            row["scene"]
+            for row in rows
+            if row["role"] == "main"
+        )
+
+        expected_count = actual_scene_counts[part - 1]
+
+        if not scenes_min <= expected_count <= scenes_max:
+            raise RuntimeError(
+                f"Part {part} Scene count is outside "
+                f"{scenes_min}-{scenes_max}."
+            )
+
+        if main != list(range(1, expected_count + 1)):
+            raise RuntimeError(
+                f"Part {part} Main Scene IDs mismatch: "
+                f"expected 1-{expected_count}, found {main}."
+            )
+
+        expected_records = (
+            expected_count
+            + 1
+            + expected_suspense
+            + expected_resolution
+        )
+
+        if len(rows) != expected_records:
+            raise RuntimeError(
+                f"Part {part} narration record count mismatch."
+            )
+
+    ids = [
+        row["scene_id"] for row in ordered
+    ]
+
+    if len(ids) != len(set(ids)):
         raise RuntimeError(
-            f"Narration record count mismatch: expected {expected}, found {len(ordered)}."
+            "Duplicate narration scene IDs detected."
         )
 
 
 def load_scene_records():
-    data = read_json(SCENES_FILE, {})
+    data = read_json(SCENES_FILE)
+
     if not isinstance(data, dict):
-        raise RuntimeError("scenes.json is missing or invalid.")
+        raise RuntimeError(
+            "scenes.json root must be an object."
+        )
+
     rows = data.get("scenes")
+
     if not isinstance(rows, list):
         rows = []
+
     if not rows and isinstance(data.get("parts"), list):
-        for index, part_data in enumerate(data["parts"], 1):
+        for index, part_data in enumerate(
+            data["parts"], 1
+        ):
             if not isinstance(part_data, dict):
                 continue
+
             part = int(part_data.get("part", index))
-            for scene_index, item in enumerate(part_data.get("scenes", []), 1):
+
+            for scene_index, item in enumerate(
+                part_data.get("scenes", []), 1
+            ):
                 if isinstance(item, dict):
                     row = dict(item)
                     row.setdefault("part", part)
                     row.setdefault("scene", scene_index)
                     row.setdefault("role", "main")
                     rows.append(row)
-            for role in ("hook", "suspense", "resolution"):
+
+            for role in (
+                "hook", "suspense", "resolution"
+            ):
                 item = part_data.get(f"{role}_scene")
+
                 if isinstance(item, dict):
                     row = dict(item)
                     row.setdefault("part", part)
                     row.setdefault("role", role)
-                    row.setdefault("scene_id", f"part_{part:02d}_{role}")
+                    row.setdefault(
+                        "scene_id",
+                        f"part_{part:02d}_{role}",
+                    )
                     rows.append(row)
+
     result = {}
+
     for row in rows:
         if not isinstance(row, dict):
             continue
-        role = str(row.get("role", "main")).strip().lower()
+
+        role = str(
+            row.get("role", "main")
+        ).strip().lower()
+
         if role not in ROLE_ORDER:
             continue
+
         try:
             part = int(row["part"])
         except (KeyError, TypeError, ValueError):
             continue
+
         scene = None
+
         if role == "main":
             try:
-                scene = int(row.get("scene", row.get("local_scene")))
+                scene = int(
+                    row.get(
+                        "scene", row.get("local_scene")
+                    )
+                )
             except (TypeError, ValueError):
                 continue
+
         scene_id = str(
             row.get("scene_id")
-            or (f"part_{part:02d}_scene_{scene:02d}" if role == "main"
-                else f"part_{part:02d}_{role}")
+            or (
+                f"part_{part:02d}_scene_{scene:02d}"
+                if role == "main"
+                else f"part_{part:02d}_{role}"
+            )
         ).strip()
+
         if scene_id in result:
-            raise RuntimeError(f"Duplicate scene record: {scene_id}")
+            raise RuntimeError(
+                f"Duplicate scene record: {scene_id}"
+            )
+
         result[scene_id] = row
+
+    if not result:
+        raise RuntimeError(
+            "scenes.json contains no usable scene records."
+        )
+
     return result
 
 
-def choose_sfx(row, audio):
+def choose_sfx(scene_row, audio):
     text = " ".join(
         str(value or "")
         for value in (
-            row.get("sfx"), row.get("sfx_prompt"), row.get("title"),
-            row.get("narration"), row.get("text"), row.get("mood"),
-            row.get("visual_prompt"), row.get("beat_description"),
-            row.get("suspense_prompt"), row.get("location"), audio.get("text"),
+            scene_row.get("sfx"),
+            scene_row.get("sfx_prompt"),
+            scene_row.get("title"),
+            scene_row.get("narration"),
+            scene_row.get("text"),
+            scene_row.get("mood"),
+            scene_row.get("visual_prompt"),
+            scene_row.get("beat_description"),
+            scene_row.get("suspense_prompt"),
+            scene_row.get("location"),
+            audio.get("text"),
         )
     ).casefold()
+
     matches = []
+
     for kind, words in EVENT_WORDS.items():
-        count = sum(1 for word in words if word.casefold() in text)
+        count = sum(
+            1 for word in words
+            if word.casefold() in text
+        )
+
         if count:
             matches.append((count, kind))
+
     if matches:
-        matches.sort(key=lambda item: (-item[0], item[1]))
+        matches.sort(
+            key=lambda item: (-item[0], item[1])
+        )
         return matches[0][1]
+
     if audio["role"] in {"hook", "suspense"}:
         return "mystery"
+
     resolution_words = (
-        "resolved", "reunited", "safe", "victory", "truth revealed",
-        "समाधान", "मिल गया", "मिल गई", "सच सामने", "जीत", "सुरक्षित", "न्याय मिला",
+        "resolved", "reunited", "safe",
+        "victory", "truth revealed",
+        "समाधान", "मिल गया", "मिल गई",
+        "सच सामने", "जीत", "सुरक्षित",
+        "न्याय मिला",
     )
-    if audio["role"] == "resolution" and any(word in text for word in resolution_words):
+
+    if (
+        audio["role"] == "resolution"
+        and any(word in text for word in resolution_words)
+    ):
         return "chime"
+
     return None
-
-
-def create_cue(audio, scene_row, tracks):
-    kind = choose_sfx(scene_row or {}, audio)
-    if kind is None:
-        return None
-    track = tracks.get(f"sfx_{kind}")
-    if not isinstance(track, dict) or track.get("status") != "completed":
-        raise RuntimeError(f"Required event SFX is missing: {kind}")
-    fraction = {
-        "impact": 0.48, "footsteps": 0.22, "vehicle": 0.25,
-        "door": 0.38, "weather": 0.18, "water": 0.35,
-        "fire": 0.30, "heartbeat": 0.18, "phone": 0.58,
-        "crowd": 0.42, "mystery": 0.32, "chime": 0.62,
-    }[kind]
-    duration = audio["duration"]
-    start = min(duration * fraction, max(0.0, duration - 0.25))
-    cue_duration = min(SFX_SECONDS, max(0.1, duration - start))
-    return {
-        "scene_id": audio["scene_id"], "part": audio["part"],
-        "scene": audio["scene"], "role": audio["role"],
-        "kind": kind, "time": round(start, 3),
-        "start_seconds": round(start, 3),
-        "duration_seconds": round(cue_duration, 3),
-        "file": track["path"], "sha256": track["sha256"],
-        "gain": SFX_GAINS[kind],
-        "selection_basis": "story_event_keywords_and_scene_context",
-        "timing_basis": "measured_tts_audio_duration",
-        "narration_duration_seconds": round(duration, 3),
-        "narration_file": audio["path_relative"],
-        "narration_sha256": audio["sha256"],
-    }
 
 
 def build_timeline(ordered):
     offset = 0.0
     timeline = []
+
     for row in ordered:
         end = offset + row["duration"]
+
         timeline.append({
-            "scene_id": row["scene_id"], "part": row["part"],
-            "scene": row["scene"], "role": row["role"],
+            "scene_id": row["scene_id"],
+            "part": row["part"],
+            "scene": row["scene"],
+            "role": row["role"],
             "start_seconds": round(offset, 4),
             "duration_seconds": round(row["duration"], 4),
             "end_seconds": round(end, 4),
-            "audio": row["path_relative"], "audio_sha256": row["sha256"],
+            "audio": row["path_relative"],
+            "audio_sha256": row["sha256"],
         })
+
         offset = end
+
     return timeline, round(offset, 4)
 
 
 def load_previous_tracks():
-    old = read_json(MANIFEST_PATH, {})
-    tracks = old.get("tracks", {}) if isinstance(old, dict) else {}
+    old = read_json(
+        MANIFEST_PATH,
+        required=False,
+        default={},
+    )
+
+    tracks = (
+        old.get("tracks", {})
+        if isinstance(old, dict)
+        else {}
+    )
+
     return tracks if isinstance(tracks, dict) else {}
 
 
@@ -826,166 +1426,465 @@ def enabled(config, *keys, default=True):
     for key in keys:
         if key not in config:
             continue
+
         value = config[key]
+
         if isinstance(value, bool):
             return value
+
         value = str(value).strip().lower()
-        if value in {"true", "yes", "1", "on", "enabled"}:
+
+        if value in {
+            "true", "yes", "1", "on", "enabled",
+        }:
             return True
-        if value in {"false", "no", "0", "off", "disabled"}:
+
+        if value in {
+            "false", "no", "0", "off", "disabled",
+        }:
             return False
-        raise RuntimeError(f"{key} must be true or false.")
+
+        raise RuntimeError(
+            f"{key} must be true or false."
+        )
+
     return default
 
 
 def validate_track(record, name, minimum_duration):
-    if not isinstance(record, dict) or record.get("status") != "completed":
-        raise RuntimeError(f"{name} track is not completed.")
-    path = safe_project_path(record.get("path"))
+    if (
+        not isinstance(record, dict)
+        or record.get("status") != "completed"
+    ):
+        raise RuntimeError(
+            f"{name} track is not completed."
+        )
+
+    path = safe_project_path(
+        record.get("path"),
+        f"{name} track",
+    )
+
     duration = ffprobe_audio(path)
     checksum = sha256_file(path)
+
     if record.get("sha256") != checksum:
-        raise RuntimeError(f"{name} track SHA256 mismatch.")
+        raise RuntimeError(
+            f"{name} track SHA256 mismatch."
+        )
+
     if duration + 0.5 < minimum_duration:
-        raise RuntimeError(f"{name} track is shorter than required.")
+        raise RuntimeError(
+            f"{name} track is shorter than required."
+        )
+
     record["duration_seconds"] = round(duration, 6)
     record["loudness"] = audio_loudness(path)
+
     return record
 
 
 def validate_cues(cues, ordered):
     seen = set()
-    audio_map = {row["scene_id"]: row for row in ordered}
+    audio_map = {
+        row["scene_id"]: row for row in ordered
+    }
+
     for cue in cues:
         sid = cue.get("scene_id")
+
         if not sid or sid in seen:
-            raise RuntimeError("Duplicate or missing SFX cue scene_id.")
+            raise RuntimeError(
+                "Duplicate or missing SFX cue scene_id."
+            )
+
         seen.add(sid)
-        if cue.get("timing_basis") != "measured_tts_audio_duration":
-            raise RuntimeError(f"Invalid SFX timing basis: {sid}")
+
+        if cue.get("timing_basis") != (
+            "measured_tts_audio_duration"
+        ):
+            raise RuntimeError(
+                f"Invalid SFX timing basis: {sid}"
+            )
+
         audio = audio_map.get(sid)
-        if audio is None or cue.get("narration_sha256") != audio["sha256"]:
-            raise RuntimeError(f"SFX cue narration mapping mismatch: {sid}")
+
+        if (
+            audio is None
+            or cue.get("narration_sha256") != audio["sha256"]
+        ):
+            raise RuntimeError(
+                f"SFX cue narration mapping mismatch: {sid}"
+            )
+
         start = float(cue["start_seconds"])
         duration = float(cue["duration_seconds"])
-        if start < 0 or duration <= 0 or start + duration > audio["duration"] + 0.05:
-            raise RuntimeError(f"Invalid SFX cue timing: {sid}")
+        gain = float(cue["gain"])
+
+        if (
+            not math.isfinite(start)
+            or not math.isfinite(duration)
+            or not math.isfinite(gain)
+            or start < 0
+            or duration <= 0
+            or not 0 <= gain <= 1
+            or start + duration > audio["duration"] + 0.05
+        ):
+            raise RuntimeError(
+                f"Invalid SFX cue timing or gain: {sid}"
+            )
+
+        path = safe_project_path(
+            cue["file"], f"SFX cue {sid}"
+        )
+
+        if sha256_file(path) != cue["sha256"]:
+            raise RuntimeError(
+                f"SFX cue asset checksum mismatch: {sid}"
+            )
+
+        if ffprobe_audio(path) <= 0:
+            raise RuntimeError(
+                f"SFX cue asset has no audio: {sid}"
+            )
 
 
-def build_mix_records(tracks, cues, total_duration):
-    mix = []
-    music = tracks.get("music")
-    if isinstance(music, dict) and music.get("status") == "completed":
-        mix.append({
-            "track_id": "background_music", "role": "music",
-            "path": music["path"], "sha256": music["sha256"],
-            "start_seconds": 0.0,
-            "duration_seconds": music["duration_seconds"],
-            "gain": 0.30,
-            "ducking": {
-                "enabled": True, "target_gain": 0.16,
-                "attack_ms": 180, "release_ms": 650,
-                "controlled_by": "narration",
-            },
-            "music_source": music.get("generation"),
-            "role_segment_count": music.get("role_segment_count", 0),
-        })
-    ambient = tracks.get("ambient")
-    if isinstance(ambient, dict) and ambient.get("status") == "completed":
-        mix.append({
-            "track_id": "environment_ambience", "role": "ambient",
-            "path": ambient["path"], "sha256": ambient["sha256"],
-            "start_seconds": 0.0,
-            "duration_seconds": ambient["duration_seconds"],
-            "gain": 0.20,
-            "ducking": {
-                "enabled": True, "target_gain": 0.13,
-                "attack_ms": 200, "release_ms": 700,
-                "controlled_by": "narration",
-            },
-        })
-    for index, cue in enumerate(cues, 1):
-        mix.append({
-            "track_id": f"sfx_{index:04d}_{cue['scene_id']}",
-            "role": "sound_effect", "scene_id": cue["scene_id"],
-            "part": cue["part"], "scene": cue["scene"],
-            "narration_role": cue["role"], "kind": cue["kind"],
-            "path": cue["file"], "sha256": cue["sha256"],
-            "start_seconds": cue["start_seconds"],
-            "duration_seconds": cue["duration_seconds"],
-            "gain": cue["gain"], "ducking": {"enabled": False},
-        })
-    return mix
+def create_cue(audio, scene_row, tracks):
+    kind = choose_sfx(scene_row or {}, audio)
+
+    if kind is None:
+        return None
+
+    track = tracks.get(f"sfx_{kind}")
+
+    if (
+        not isinstance(track, dict)
+        or track.get("status") != "completed"
+    ):
+        raise RuntimeError(
+            f"Required event SFX is missing: {kind}"
+        )
+
+    fractions = {
+        "whoosh": 0.08,
+        "impact": 0.48,
+        "footsteps": 0.22,
+        "vehicle": 0.25,
+        "door": 0.38,
+        "weather": 0.18,
+        "water": 0.35,
+        "fire": 0.30,
+        "heartbeat": 0.18,
+        "phone": 0.58,
+        "crowd": 0.42,
+        "mystery": 0.32,
+        "chime": 0.62,
+    }
+
+    duration = audio["duration"]
+    requested = duration * fractions[kind]
+
+    cue_duration = min(
+        SFX_SECONDS,
+        duration,
+    )
+
+    if cue_duration < 0.20:
+        return None
+
+    latest_start = max(
+        0.0,
+        duration - cue_duration,
+    )
+
+    start = min(
+        requested,
+        latest_start,
+    )
+
+    usable = min(
+        cue_duration,
+        duration - start,
+    )
+
+    if usable <= 0:
+        return None
+
+    return {
+        "scene_id": audio["scene_id"],
+        "part": audio["part"],
+        "scene": audio["scene"],
+        "role": audio["role"],
+        "kind": kind,
+        "time": round(start, 3),
+        "start_seconds": round(start, 3),
+        "duration_seconds": round(usable, 3),
+        "file": track["path"],
+        "sha256": track["sha256"],
+        "gain": SFX_GAINS[kind],
+        "selection_basis": (
+            "story_event_keywords_and_scene_context"
+        ),
+        "timing_basis": "measured_tts_audio_duration",
+        "narration_duration_seconds": round(
+            duration, 3
+        ),
+        "narration_file": audio["path_relative"],
+        "narration_sha256": audio["sha256"],
+    }
 
 
 def build_part_summary(ordered, cues):
     cue_map = {}
+
     for cue in cues:
-        cue_map.setdefault(cue["scene_id"], []).append(cue)
+        cue_map.setdefault(
+            cue["scene_id"], []
+        ).append(cue)
+
     result = {}
+
     for row in ordered:
         key = str(row["part"])
+
         part = result.setdefault(key, {
-            "part": row["part"], "records": [],
-            "role_counts": {role: 0 for role in ROLE_ORDER},
-            "duration_seconds": 0.0, "sfx_cues": [],
+            "part": row["part"],
+            "records": [],
+            "role_counts": {
+                role: 0 for role in ROLE_ORDER
+            },
+            "duration_seconds": 0.0,
+            "sfx_cues": [],
         })
+
         part["records"].append({
-            "scene_id": row["scene_id"], "scene": row["scene"],
-            "role": row["role"], "duration_seconds": round(row["duration"], 4),
-            "audio": row["path_relative"], "audio_sha256": row["sha256"],
+            "scene_id": row["scene_id"],
+            "scene": row["scene"],
+            "role": row["role"],
+            "duration_seconds": round(
+                row["duration"], 4
+            ),
+            "audio": row["path_relative"],
+            "audio_sha256": row["sha256"],
         })
+
         part["role_counts"][row["role"]] += 1
         part["duration_seconds"] += row["duration"]
-        part["sfx_cues"].extend(cue_map.get(row["scene_id"], []))
+        part["sfx_cues"].extend(
+            cue_map.get(row["scene_id"], [])
+        )
+
     for part in result.values():
-        part["duration_seconds"] = round(part["duration_seconds"], 4)
+        part["duration_seconds"] = round(
+            part["duration_seconds"], 4
+        )
+
     return result
 
-def build_role_music(flow_data, segments, ordered, total_duration, source_sig):
-    timeline, _ = build_timeline(ordered)
-    expected = {row["scene_id"]: row for row in timeline}
+
+def build_mix_records(tracks, cues):
+    mix = []
+
+    for category, role, gain in (
+        ("music", "music", 0.30),
+        ("ambient", "ambient", 0.20),
+    ):
+        record = tracks.get(category)
+
+        if (
+            isinstance(record, dict)
+            and record.get("status") == "completed"
+        ):
+            mix.append({
+                "track_id": (
+                    "background_music"
+                    if category == "music"
+                    else "environment_ambience"
+                ),
+                "role": role,
+                "path": record["path"],
+                "sha256": record["sha256"],
+                "start_seconds": 0.0,
+                "duration_seconds": record["duration_seconds"],
+                "gain": gain,
+                "ducking": {
+                    "enabled": True,
+                    "target_gain": (
+                        0.16 if category == "music"
+                        else 0.13
+                    ),
+                    "attack_ms": 180,
+                    "release_ms": 650,
+                    "controlled_by": "narration",
+                },
+            })
+
+    for index, cue in enumerate(cues, 1):
+        mix.append({
+            "track_id": (
+                f"sfx_{index:04d}_{cue['scene_id']}"
+            ),
+            "role": "sound_effect",
+            "scene_id": cue["scene_id"],
+            "part": cue["part"],
+            "scene": cue["scene"],
+            "narration_role": cue["role"],
+            "kind": cue["kind"],
+            "path": cue["file"],
+            "sha256": cue["sha256"],
+            "start_seconds": cue["start_seconds"],
+            "duration_seconds": cue["duration_seconds"],
+            "gain": cue["gain"],
+            "ducking": {"enabled": False},
+        })
+
+    return mix
+
+
+def validate_flow_manifest(ordered):
+    if not FLOW_MANIFEST.is_file():
+        return None
+
+    data = read_json(
+        FLOW_MANIFEST,
+        required=False,
+        default=None,
+    )
+
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            "Flow Music manifest exists but is invalid JSON."
+        )
+
+    if data.get("status") != "completed":
+        return None
+
+    source = safe_project_path(
+        data.get("path") or data.get("audio_path"),
+        "Flow Music master",
+    )
+
+    master_hash = sha256_file(source)
+
+    if data.get("sha256") != master_hash:
+        raise RuntimeError(
+            "Completed Flow Music master SHA256 mismatch; "
+            "local fallback is prohibited."
+        )
+
+    master_duration = ffprobe_audio(source)
+
+    try:
+        declared = float(data["duration_seconds"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Completed Flow Music manifest has no valid duration."
+        ) from exc
+
+    if abs(declared - master_duration) > 0.30:
+        raise RuntimeError(
+            "Completed Flow Music master duration mismatch."
+        )
+
+    segments = data.get("role_segments")
+
+    if not isinstance(segments, list) or not segments:
+        raise RuntimeError(
+            "Completed Flow Music has no role_segments; "
+            "local fallback is prohibited."
+        )
+
+    expected = {
+        row["scene_id"]: row for row in ordered
+    }
+
     by_id = {}
 
     for item in segments:
         if not isinstance(item, dict):
-            raise RuntimeError("Invalid Flow Music role segment record.")
-        sid = str(item.get("scene_id") or "").strip()
+            raise RuntimeError(
+                "Invalid Flow Music role segment record."
+            )
+
+        sid = str(
+            item.get("scene_id") or ""
+        ).strip()
+
         if not sid or sid in by_id or sid not in expected:
-            raise RuntimeError(f"Unknown or duplicate Flow Music segment: {sid}")
+            raise RuntimeError(
+                f"Unknown or duplicate Flow Music segment: {sid}"
+            )
+
         by_id[sid] = item
 
     if set(by_id) != set(expected):
         missing = sorted(set(expected) - set(by_id))
         extra = sorted(set(by_id) - set(expected))
+
         raise RuntimeError(
-            f"Flow Music segments do not cover narration. Missing={missing[:10]}, extra={extra[:10]}"
+            "Flow Music role segments do not cover all narration. "
+            f"Missing={missing[:10]}, extra={extra[:10]}"
         )
 
-    ordered_segments = []
+    validated = []
+
+    timeline, _ = build_timeline(ordered)
+
     for row in timeline:
         item = by_id[row["scene_id"]]
-        if item.get("role") != row["role"] or int(item.get("part", 0)) != row["part"]:
-            raise RuntimeError(f"Flow Music role/part mismatch: {row['scene_id']}")
+
+        if (
+            item.get("role") != row["role"]
+            or int(item.get("part", 0)) != row["part"]
+        ):
+            raise RuntimeError(
+                f"Flow Music role/Part mismatch: {row['scene_id']}"
+            )
+
         if item.get("narration_sha256") != row["audio_sha256"]:
-            raise RuntimeError(f"Flow Music narration fingerprint mismatch: {row['scene_id']}")
+            raise RuntimeError(
+                f"Flow Music narration hash mismatch: {row['scene_id']}"
+            )
 
-        start = float(item.get("start_seconds", -1))
-        duration = float(item.get("duration_seconds", 0))
-        if abs(start - row["start_seconds"]) > 0.15:
-            raise RuntimeError(f"Flow Music segment start mismatch: {row['scene_id']}")
-        if abs(duration - row["duration_seconds"]) > 0.20:
-            raise RuntimeError(f"Flow Music segment duration mismatch: {row['scene_id']}")
+        try:
+            start = float(item["start_seconds"])
+            duration = float(item["duration_seconds"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid Flow Music timing: {row['scene_id']}"
+            ) from exc
 
-        path = safe_project_path(item.get("path"))
+        if (
+            not math.isfinite(start)
+            or not math.isfinite(duration)
+            or abs(start - row["start_seconds"]) > 0.15
+            or abs(duration - row["duration_seconds"]) > 0.20
+        ):
+            raise RuntimeError(
+                f"Flow Music segment timing mismatch: {row['scene_id']}"
+            )
+
+        path = safe_project_path(
+            item.get("path"),
+            f"Flow Music segment {row['scene_id']}",
+        )
+
         checksum = sha256_file(path)
-        if checksum != item.get("sha256"):
-            raise RuntimeError(f"Flow Music segment SHA256 mismatch: {row['scene_id']}")
-        actual = ffprobe_audio(path)
-        if abs(actual - duration) > 0.30:
-            raise RuntimeError(f"Flow Music segment media duration mismatch: {row['scene_id']}")
 
-        ordered_segments.append({
+        if checksum != item.get("sha256"):
+            raise RuntimeError(
+                f"Flow Music segment SHA256 mismatch: {row['scene_id']}"
+            )
+
+        actual = ffprobe_audio(path)
+
+        if abs(actual - duration) > 0.30:
+            raise RuntimeError(
+                f"Flow Music segment media duration mismatch: "
+                f"{row['scene_id']}"
+            )
+
+        validated.append({
             "scene_id": row["scene_id"],
             "role": row["role"],
             "part": row["part"],
@@ -995,10 +1894,28 @@ def build_role_music(flow_data, segments, ordered, total_duration, source_sig):
             "duration_seconds": duration,
         })
 
+    return data, source, master_hash, validated
+
+
+def build_role_music(
+    flow_data,
+    master_hash,
+    segments,
+    total_duration,
+    source_sig,
+    old_record,
+):
+    role_gains = {
+        "hook": 0.82,
+        "main": 0.70,
+        "suspense": 0.95,
+        "resolution": 0.86,
+    }
+
     segment_signature = signature({
         "version": VERSION,
         "source_signature": source_sig,
-        "master_sha256": flow_data.get("sha256"),
+        "master_sha256": master_hash,
         "segments": [
             {
                 "scene_id": item["scene_id"],
@@ -1007,23 +1924,22 @@ def build_role_music(flow_data, segments, ordered, total_duration, source_sig):
                 "start": item["start_seconds"],
                 "duration": item["duration_seconds"],
             }
-            for item in ordered_segments
+            for item in segments
         ],
     })
 
-    old = read_json(MANIFEST_PATH, {})
-    old_music = (
-        old.get("tracks", {}).get("music")
-        if isinstance(old, dict) and isinstance(old.get("tracks"), dict)
-        else None
-    )
-    if MUSIC_PATH.is_file() and isinstance(old_music, dict):
+    if MUSIC_PATH.is_file() and isinstance(old_record, dict):
         try:
-            actual = validate_wav(MUSIC_PATH, total_duration)
+            actual = validate_wav(
+                MUSIC_PATH, total_duration
+            )
             checksum = sha256_file(MUSIC_PATH)
+
             if (
-                old_music.get("role_segment_signature") == segment_signature
-                and old_music.get("sha256") == checksum
+                old_record.get("role_segment_signature")
+                == segment_signature
+                and old_record.get("sha256") == checksum
+                and actual + 0.15 >= total_duration
             ):
                 return {
                     "status": "completed",
@@ -1031,38 +1947,46 @@ def build_role_music(flow_data, segments, ordered, total_duration, source_sig):
                     "sha256": checksum,
                     "duration_seconds": round(actual, 6),
                     "generation": "google_flow_role_segments_reused",
-                    "provider": flow_data.get("provider", "google_flow"),
+                    "provider": flow_data.get(
+                        "provider", "google_flow"
+                    ),
                     "model": flow_data.get("model"),
-                    "role_segment_count": len(ordered_segments),
+                    "role_segment_count": len(segments),
                     "role_segment_signature": segment_signature,
-                    "source_master_sha256": flow_data.get("sha256"),
-                    "external_api_calls": int(flow_data.get("external_api_calls", 0)),
-                    "paid_services_used": bool(flow_data.get("paid_services_used", False)),
+                    "source_master_sha256": master_hash,
+                    "external_api_calls": int(
+                        flow_data.get("external_api_calls", 0)
+                    ),
+                    "paid_services_used": bool(
+                        flow_data.get("paid_services_used", False)
+                    ),
+                    "role_gains": role_gains,
+                    "reused": True,
                 }
+
         except Exception:
             pass
 
     work_dir = DESIGN_DIR / "flow_role_music_build"
     work_dir.mkdir(parents=True, exist_ok=True)
+
     concat_file = work_dir / "segments.txt"
     converted = []
 
-    role_gain = {
-        "hook": 0.82,
-        "main": 0.70,
-        "suspense": 0.95,
-        "resolution": 0.86,
-    }
-
     try:
-        for index, item in enumerate(ordered_segments, 1):
+        for index, item in enumerate(segments, 1):
             target = work_dir / f"segment_{index:04d}.wav"
-            temporary = target.with_name(target.name + ".tmp.wav")
+            temporary = target.with_name(
+                target.name + ".tmp.wav"
+            )
+
             temporary.unlink(missing_ok=True)
 
-            gain = role_gain[item["role"]]
+            gain = role_gains[item["role"]]
+
             run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-y",
                 "-i", str(item["path"]),
                 "-t", f"{item['duration_seconds']:.4f}",
                 "-vn",
@@ -1074,29 +1998,55 @@ def build_role_music(flow_data, segments, ordered, total_duration, source_sig):
                     f"volume={gain:.4f},"
                     "alimiter=limit=0.92:level=disabled"
                 ),
-                "-ac", "1", "-ar", str(RATE),
-                "-c:a", "pcm_s16le", str(temporary),
-            ], 300)
+                "-ac", "1",
+                "-ar", str(RATE),
+                "-c:a", "pcm_s16le",
+                str(temporary),
+            ], timeout=300)
 
-            actual = validate_wav(temporary, 0.05)
-            if abs(actual - item["duration_seconds"]) > 0.30:
-                raise RuntimeError(f"Converted Flow segment duration mismatch: {item['scene_id']}")
+            actual = validate_wav(
+                temporary, 0.05
+            )
+
+            if abs(
+                actual - item["duration_seconds"]
+            ) > 0.30:
+                raise RuntimeError(
+                    "Converted Flow Music duration mismatch: "
+                    + item["scene_id"]
+                )
+
             os.replace(temporary, target)
             converted.append(target)
 
-        with concat_file.open("w", encoding="utf-8") as handle:
+        with concat_file.open(
+            "w", encoding="utf-8"
+        ) as handle:
             for path in converted:
                 resolved = str(path.resolve())
-                if "\n" in resolved or "\r" in resolved:
-                    raise RuntimeError("Invalid newline in Flow Music segment path.")
-                handle.write("file '" + resolved.replace("'", "'\\''") + "'\n")
 
-        temporary_master = MUSIC_PATH.with_name("background_music.role_building.wav")
+                if "\n" in resolved or "\r" in resolved:
+                    raise RuntimeError(
+                        "Invalid newline in Flow Music segment path."
+                    )
+
+                handle.write(
+                    "file '"
+                    + resolved.replace("'", "'\\''")
+                    + "'\n"
+                )
+
+        temporary_master = MUSIC_PATH.with_name(
+            "background_music.role_building.wav"
+        )
+
         temporary_master.unlink(missing_ok=True)
 
         run([
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "concat", "-safe", "0",
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
             "-i", str(concat_file),
             "-af",
             (
@@ -1105,13 +2055,21 @@ def build_role_music(flow_data, segments, ordered, total_duration, source_sig):
                 f"apad=pad_dur=2,atrim=duration={total_duration:.4f},"
                 f"afade=t=out:st={max(0.0, total_duration - 4):.4f}:d=4"
             ),
-            "-ac", "1", "-ar", str(RATE),
-            "-c:a", "pcm_s16le", str(temporary_master),
-        ], 900)
+            "-ac", "1",
+            "-ar", str(RATE),
+            "-c:a", "pcm_s16le",
+            str(temporary_master),
+        ], timeout=900)
 
-        actual = validate_wav(temporary_master, total_duration)
+        actual = validate_wav(
+            temporary_master, total_duration
+        )
+
         if abs(actual - total_duration) > 0.15:
-            raise RuntimeError("Final role-based Flow Music duration mismatch.")
+            raise RuntimeError(
+                "Final Flow Music timeline duration mismatch."
+            )
+
         os.replace(temporary_master, MUSIC_PATH)
 
         return {
@@ -1120,101 +2078,404 @@ def build_role_music(flow_data, segments, ordered, total_duration, source_sig):
             "sha256": sha256_file(MUSIC_PATH),
             "duration_seconds": round(actual, 6),
             "generation": "google_flow_role_segments",
-            "provider": flow_data.get("provider", "google_flow"),
+            "provider": flow_data.get(
+                "provider", "google_flow"
+            ),
             "model": flow_data.get("model"),
-            "role_segment_count": len(ordered_segments),
+            "role_segment_count": len(segments),
             "role_segment_signature": segment_signature,
-            "source_master_sha256": flow_data.get("sha256"),
-            "external_api_calls": int(flow_data.get("external_api_calls", 0)),
-            "paid_services_used": bool(flow_data.get("paid_services_used", False)),
-            "role_gains": role_gain,
+            "source_master_sha256": master_hash,
+            "external_api_calls": int(
+                flow_data.get("external_api_calls", 0)
+            ),
+            "paid_services_used": bool(
+                flow_data.get("paid_services_used", False)
+            ),
+            "role_gains": role_gains,
+            "reused": False,
         }
+
     finally:
         for path in converted:
             path.unlink(missing_ok=True)
+
         concat_file.unlink(missing_ok=True)
+
         try:
             work_dir.rmdir()
         except OSError:
             pass
 
 
-def build_fallback_music(duration, old_record, source_sig):
-    return make_music(duration, old_record, source_sig)
+def make_fallback_music(
+    duration,
+    old_record,
+    source_sig,
+):
+    return make_local_track(
+        MUSIC_PATH,
+        duration,
+        old_record,
+        source_sig,
+        "background_music",
+        lambda seconds: music_samples(seconds),
+    )
+
+
+def build_cues(ordered, scene_records, tracks):
+    cues = []
+
+    for audio in ordered:
+        scene = scene_records.get(
+            audio["scene_id"]
+        )
+
+        if scene is None:
+            raise RuntimeError(
+                "scenes.json missing narration ID: "
+                + audio["scene_id"]
+            )
+
+        scene_role = str(
+            scene.get("role", audio["role"])
+        ).strip().lower()
+
+        scene_part = int(
+            scene.get("part", audio["part"])
+        )
+
+        if (
+            scene_role != audio["role"]
+            or scene_part != audio["part"]
+        ):
+            raise RuntimeError(
+                "Scene/narration role or Part mismatch: "
+                + audio["scene_id"]
+            )
+
+        if audio["role"] == "main":
+            scene_number = int(
+                scene.get(
+                    "scene",
+                    scene.get("local_scene", 0),
+                )
+            )
+
+            if scene_number != audio["scene"]:
+                raise RuntimeError(
+                    "Scene number mismatch: "
+                    + audio["scene_id"]
+                )
+
+        elif scene.get("scene") not in (None, ""):
+            raise RuntimeError(
+                "Extra role must use scene=None: "
+                + audio["scene_id"]
+            )
+
+        cue = create_cue(
+            audio, scene, tracks
+        )
+
+        if cue is not None:
+            cues.append(cue)
+
+    validate_cues(cues, ordered)
+
+    return cues
+
+
+def validate_tracks_and_cues(
+    tracks,
+    cues,
+    ordered,
+    total_duration,
+    enabled_tracks,
+):
+    if enabled_tracks["music"]:
+        tracks["music"] = validate_track(
+            tracks["music"], "music", total_duration
+        )
+
+    if enabled_tracks["ambient"]:
+        ambient = tracks.get("ambient")
+
+        if (
+            isinstance(ambient, dict)
+            and ambient.get("status") == "completed"
+        ):
+            tracks["ambient"] = validate_track(
+                ambient, "ambient", total_duration
+            )
+
+    if enabled_tracks["sfx"]:
+        for kind in SFX_TYPES:
+            key = f"sfx_{kind}"
+            tracks[key] = validate_track(
+                tracks[key], key, 0.1
+            )
+
+    tracks["sfx"] = (
+        tracks.get("sfx_impact")
+        if enabled_tracks["sfx"]
+        else None
+    )
+
+    validate_cues(cues, ordered)
+
+
+def build_validation_report(
+    fmt,
+    ordered,
+    cues,
+    total_duration,
+    scenes_min,
+    scenes_max,
+    actual_scene_counts,
+):
+    cue_errors = []
+    narration_map = {
+        row["scene_id"]: row for row in ordered
+    }
+
+    seen = set()
+
+    for cue in cues:
+        sid = cue.get("scene_id")
+
+        if sid in seen:
+            cue_errors.append(
+                f"Duplicate cue: {sid}"
+            )
+            continue
+
+        seen.add(sid)
+        audio = narration_map.get(sid)
+
+        if audio is None:
+            cue_errors.append(
+                f"Unknown narration ID: {sid}"
+            )
+            continue
+
+        try:
+            start = float(cue["start_seconds"])
+            duration = float(cue["duration_seconds"])
+            gain = float(cue["gain"])
+
+            if (
+                not math.isfinite(start)
+                or not math.isfinite(duration)
+                or not math.isfinite(gain)
+                or start < 0
+                or duration <= 0
+                or gain < 0
+                or gain > 1
+                or start + duration > audio["duration"] + 0.05
+            ):
+                cue_errors.append(
+                    f"Out-of-range cue: {sid}"
+                )
+
+        except Exception:
+            cue_errors.append(
+                f"Invalid cue timing: {sid}"
+            )
+
+    return {
+        "status": (
+            "completed" if not cue_errors else "failed"
+        ),
+        "version": VERSION,
+        "format": fmt,
+        "timing_basis": "ffprobe_measured_tts_audio",
+        "total_narration_records": len(ordered),
+        "total_narration_seconds": round(
+            total_duration, 4
+        ),
+        "scenes_min": scenes_min,
+        "scenes_max": scenes_max,
+        "actual_scene_counts": actual_scene_counts,
+        "cue_count": len(cues),
+        "invalid_cues": len(cue_errors),
+        "out_of_range_cues": 0,
+        "timing_errors": len(cue_errors),
+        "failed_checks": len(cue_errors),
+        "errors": cue_errors,
+        "sfx": {
+            "status": (
+                "completed" if not cue_errors else "failed"
+            ),
+            "cues": cues,
+            "cue_count": len(cues),
+        },
+        "created_at": utc_now(),
+    }
 
 
 def main():
     if not INPUT_FILE.is_file():
-        raise RuntimeError("Input/topic.txt is missing.")
+        raise RuntimeError(
+            "Input/topic.txt is missing."
+        )
+
+    require_media_tools()
+
     config = load_and_validate(INPUT_FILE)
 
-    fmt = str(get_format(config)).strip().lower()
-    expected_parts = int(get_parts(config))
-    scenes_per_part = int(get_scenes(config))
+    fmt = str(
+        get_format(config)
+    ).strip().lower()
+
+    parts_min, parts_max = get_parts_range(config)
+    selected_parts = get_selected_parts(
+        config, required=True
+    )
+
+    if selected_parts is None:
+        raise RuntimeError(
+            "Selected PARTS count is not available."
+        )
+
+    if not parts_min <= int(selected_parts) <= parts_max:
+        raise RuntimeError(
+            "Selected PARTS count is outside configured range."
+        )
+
+    expected_parts = int(selected_parts)
+
+    scenes_min, scenes_max = get_scenes_range(config)
+
     if fmt not in {"short", "full"}:
-        raise RuntimeError(f"Unsupported FORMAT: {fmt}")
-    if expected_parts < 1 or scenes_per_part < 1:
-        raise RuntimeError("PARTS and SCENES must be positive.")
+        raise RuntimeError(
+            f"Unsupported FORMAT: {fmt}"
+        )
 
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        raise RuntimeError("Both ffmpeg and ffprobe are required.")
+    if fmt == "full" and expected_parts != 1:
+        raise RuntimeError(
+            "FULL format must contain exactly one Part."
+        )
 
-    enabled_tracks = {
-        "music": enabled(
-            config, "MUSIC_ENABLED", "MUSIC", "BACKGROUND_MUSIC",
-            "SOUNDTRACK_ENABLED", default=True,
-        ),
-        "ambient": enabled(
-            config, "AMBIENT_ENABLED", "AMBIENT", "AMBIENT_SOUND",
-            "ENVIRONMENT_SOUND", "AMBIENCE_ENABLED", default=True,
-        ),
-        "sfx": enabled(
-            config, "SFX_ENABLED", "SFX", "SOUND_EFFECTS",
-            "SOUND_EFFECTS_ENABLED", default=True,
-        ),
-    }
+    narration_data = read_json(NARRATION_FILE)
 
-    for directory in (
-        DESIGN_DIR, SFX_DIR, OUTPUT / "music",
-        OUTPUT / "sound", CHECKPOINT_PATH.parent,
+    if not isinstance(narration_data, dict):
+        raise RuntimeError(
+            "narration.json root must be an object."
+        )
+
+    actual_scene_counts = narration_data.get(
+        "actual_scene_counts"
+    )
+
+    if (
+        not isinstance(actual_scene_counts, list)
+        or len(actual_scene_counts) != expected_parts
     ):
-        directory.mkdir(parents=True, exist_ok=True)
+        raise RuntimeError(
+            "Narration actual_scene_counts missing or invalid."
+        )
+
+    normalized_counts = []
+
+    for part, value in enumerate(
+        actual_scene_counts, 1
+    ):
+        if isinstance(value, bool):
+            raise RuntimeError(
+                f"Part {part} actual Scene count is invalid."
+            )
+
+        try:
+            count = int(value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Part {part} actual Scene count is invalid."
+            ) from exc
+
+        if not scenes_min <= count <= scenes_max:
+            raise RuntimeError(
+                f"Part {part} has {count} Main Scenes; "
+                f"allowed range is {scenes_min}-{scenes_max}."
+            )
+
+        normalized_counts.append(count)
+
+    if (
+        int(narration_data.get("scenes_min", -1)) != scenes_min
+        or int(narration_data.get("scenes_max", -1)) != scenes_max
+    ):
+        raise RuntimeError(
+            "Narration SCENES range does not match Input/topic.txt."
+        )
 
     audio_records = load_audio_records()
     ordered = ordered_audio_records(audio_records)
-    validate_record_structure(ordered, expected_parts, scenes_per_part)
 
-    actual_parts = sorted({row["part"] for row in ordered})
+    validate_record_structure(
+        ordered,
+        expected_parts,
+        scenes_min,
+        scenes_max,
+        normalized_counts,
+    )
+
+    actual_parts = sorted({
+        row["part"] for row in ordered
+    })
+
     scene_records = load_scene_records()
 
     missing_scene_ids = [
-        row["scene_id"] for row in ordered
+        row["scene_id"]
+        for row in ordered
         if row["scene_id"] not in scene_records
     ]
+
     if missing_scene_ids:
         raise RuntimeError(
             "scenes.json is missing narration IDs: "
             + ", ".join(missing_scene_ids[:20])
         )
 
-    for row in ordered:
-        scene = scene_records[row["scene_id"]]
-        scene_role = str(scene.get("role", row["role"])).strip().lower()
-        scene_part = int(scene.get("part", row["part"]))
-        if scene_role != row["role"] or scene_part != row["part"]:
-            raise RuntimeError(f"Scene/narration role or part mismatch: {row['scene_id']}")
-        if row["role"] == "main":
-            scene_number = int(scene.get("scene", scene.get("local_scene", 0)))
-            if scene_number != row["scene"]:
-                raise RuntimeError(f"Scene number mismatch: {row['scene_id']}")
-        elif scene.get("scene") not in (None, ""):
-            raise RuntimeError(f"Extra role must use scene=None: {row['scene_id']}")
+    enabled_tracks = {
+        "music": enabled(
+            config,
+            "MUSIC_ENABLED", "MUSIC",
+            "BACKGROUND_MUSIC", "SOUNDTRACK_ENABLED",
+            default=True,
+        ),
+        "ambient": enabled(
+            config,
+            "AMBIENT_ENABLED", "AMBIENT",
+            "AMBIENT_SOUND", "ENVIRONMENT_SOUND",
+            "AMBIENCE_ENABLED",
+            default=True,
+        ),
+        "sfx": enabled(
+            config,
+            "SFX_ENABLED", "SFX",
+            "SOUND_EFFECTS", "SOUND_EFFECTS_ENABLED",
+            default=True,
+        ),
+    }
+
+    for directory in (
+        DESIGN_DIR,
+        SFX_DIR,
+        OUT / "music",
+        OUT / "sound",
+        CHECKPOINT_PATH.parent,
+    ):
+        directory.mkdir(
+            parents=True, exist_ok=True
+        )
 
     source_payload = {
         "version": VERSION,
         "format": fmt,
         "parts": actual_parts,
-        "scenes_per_part": scenes_per_part,
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": normalized_counts,
         "enabled": enabled_tracks,
         "audio_records": [
             {
@@ -1230,79 +2491,65 @@ def main():
         ],
         "scene_manifest_sha256": sha256_file(SCENES_FILE),
     }
+
     source_sig = signature(source_payload)
+
     timeline, total_duration = build_timeline(ordered)
     old_tracks = load_previous_tracks()
-    background_duration = max(30.0, total_duration + 8.0)
+
+    background_duration = max(
+        30.0, total_duration + 8.0
+    )
 
     tracks = {}
 
     if enabled_tracks["music"]:
-        flow_result = load_flow_music()
-        if flow_result:
-            flow_data, _flow_master, _flow_duration, role_segments = flow_result
-            try:
-                tracks["music"] = build_role_music(
-                    flow_data, role_segments, ordered,
-                    total_duration, source_sig,
-                )
-            except Exception as exc:
-                log("FLOW ROLE MUSIC REJECTED:", str(exc))
-                # The verified continuous master remains a valid fallback.
-                tracks["music"] = {
-                    "status": "completed",
-                    "path": MUSIC_PATH.relative_to(ROOT).as_posix(),
-                    "sha256": "",
-                    "duration_seconds": 0,
-                    "generation": "fallback_pending",
-                }
-                try:
-                    temporary = MUSIC_PATH.with_name("background_music.master_building.wav")
-                    run([
-                        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                        "-stream_loop", "-1", "-i", str(_flow_master),
-                        "-t", f"{background_duration:.3f}",
-                        "-vn",
-                        "-af",
-                        (
-                            "aresample=22050,lowpass=f=9000,"
-                            "loudnorm=I=-27:TP=-3:LRA=11,"
-                            f"afade=t=out:st={max(0.0, background_duration - 4):.3f}:d=4"
-                        ),
-                        "-ac", "1", "-ar", str(RATE),
-                        "-c:a", "pcm_s16le", str(temporary),
-                    ], 900)
-                    validate_wav(temporary, background_duration)
-                    os.replace(temporary, MUSIC_PATH)
-                    tracks["music"] = {
-                        "status": "completed",
-                        "path": MUSIC_PATH.relative_to(ROOT).as_posix(),
-                        "sha256": sha256_file(MUSIC_PATH),
-                        "duration_seconds": round(ffprobe_audio(MUSIC_PATH), 6),
-                        "generation": "google_flow_master_fallback",
-                        "provider": flow_data.get("provider", "google_flow"),
-                        "model": flow_data.get("model"),
-                        "role_segment_count": 0,
-                        "external_api_calls": int(flow_data.get("external_api_calls", 0)),
-                        "paid_services_used": bool(flow_data.get("paid_services_used", False)),
-                    }
-                except Exception as fallback_exc:
-                    log("FLOW MASTER FALLBACK FAILED:", str(fallback_exc))
-                    tracks["music"] = build_fallback_music(
-                        background_duration, old_tracks.get("music"), source_sig
-                    )
-        else:
-            tracks["music"] = build_fallback_music(
-                background_duration, old_tracks.get("music"), source_sig
+        if FLOW_MANIFEST.is_file():
+            flow_result = validate_flow_manifest(
+                ordered
             )
+
+            if flow_result is None:
+                tracks["music"] = make_fallback_music(
+                    background_duration,
+                    old_tracks.get("music"),
+                    source_sig,
+                )
+            else:
+                (
+                    flow_data,
+                    _flow_master,
+                    flow_hash,
+                    role_segments,
+                ) = flow_result
+
+                tracks["music"] = build_role_music(
+                    flow_data,
+                    flow_hash,
+                    role_segments,
+                    total_duration,
+                    source_sig,
+                    old_tracks.get("music"),
+                )
+
+        else:
+            tracks["music"] = make_fallback_music(
+                background_duration,
+                old_tracks.get("music"),
+                source_sig,
+            )
+
     else:
         tracks["music"] = None
 
     if enabled_tracks["ambient"]:
         tracks["ambient"] = make_ambient(
-            total_duration, scene_records,
-            old_tracks.get("ambient"), source_sig,
+            total_duration,
+            scene_records,
+            old_tracks.get("ambient"),
+            source_sig,
         )
+
     else:
         tracks["ambient"] = {
             "status": "skipped",
@@ -1311,68 +2558,80 @@ def main():
 
     if enabled_tracks["sfx"]:
         for kind in SFX_TYPES:
-            category = f"sfx_{kind}"
-            tracks[category] = make_sfx(
-                kind, SFX_DIR / f"{kind}.wav",
-                old_tracks.get(category), source_sig,
+            key = f"sfx_{kind}"
+
+            tracks[key] = make_sfx(
+                kind,
+                SFX_DIR / f"{kind}.wav",
+                old_tracks.get(key),
+                source_sig,
             )
+
     else:
         for kind in SFX_TYPES:
             tracks[f"sfx_{kind}"] = None
 
-    tracks["sfx"] = tracks.get("sfx_impact")
+    cues = (
+        build_cues(ordered, scene_records, tracks)
+        if enabled_tracks["sfx"]
+        else []
+    )
 
-    if enabled_tracks["music"]:
-        tracks["music"] = validate_track(
-            tracks["music"], "music", total_duration
-        )
-    if isinstance(tracks.get("ambient"), dict) and tracks["ambient"].get("status") == "completed":
-        tracks["ambient"] = validate_track(
-            tracks["ambient"], "ambient", total_duration
-        )
-
-    for kind in SFX_TYPES:
-        category = f"sfx_{kind}"
-        if enabled_tracks["sfx"]:
-            tracks[category] = validate_track(tracks[category], category, 0.1)
-
-    cues = []
-    if enabled_tracks["sfx"]:
-        for audio in ordered:
-            cue = create_cue(
-                audio, scene_records[audio["scene_id"]], tracks
-            )
-            if cue is not None:
-                cues.append(cue)
-
-    validate_cues(cues, ordered)
-    cue_map = {cue["scene_id"]: cue for cue in cues}
-    part_summary = build_part_summary(ordered, cues)
-    mix_records = build_mix_records(tracks, cues, total_duration)
+    validate_tracks_and_cues(
+        tracks,
+        cues,
+        ordered,
+        total_duration,
+        enabled_tracks,
+    )
 
     role_counts = {
-        role: sum(1 for row in ordered if row["role"] == role)
+        role: sum(
+            1 for row in ordered
+            if row["role"] == role
+        )
         for role in ROLE_ORDER
     }
+
     main_scene_counts = {
         str(part): sum(
             1 for row in ordered
-            if row["part"] == part and row["role"] == "main"
+            if row["part"] == part
+            and row["role"] == "main"
         )
         for part in actual_parts
     }
 
-    music = tracks.get("music")
-    using_flow = (
-        isinstance(music, dict)
-        and str(music.get("generation", "")).startswith("google_flow")
+    cue_map = {
+        cue["scene_id"]: cue
+        for cue in cues
+    }
+
+    part_summary = build_part_summary(
+        ordered, cues
     )
+
+    mix_records = build_mix_records(
+        tracks, cues
+    )
+
+    using_flow = (
+        isinstance(tracks.get("music"), dict)
+        and str(
+            tracks["music"].get("generation", "")
+        ).startswith("google_flow")
+    )
+
+    music = tracks.get("music")
+
     external_api_calls = (
         int(music.get("external_api_calls", 0))
         if using_flow else 0
     )
+
     paid_services_used = bool(
-        using_flow and music.get("paid_services_used", False)
+        using_flow
+        and music.get("paid_services_used", False)
     )
 
     cue_manifest = {
@@ -1382,6 +2641,9 @@ def main():
         "dynamic_parts": True,
         "part_numbers": actual_parts,
         "parts": len(actual_parts),
+        "scenes_min": scenes_min,
+        "scenes_max": scenes_max,
+        "actual_scene_counts": normalized_counts,
         "main_scene_counts": main_scene_counts,
         "role_counts": role_counts,
         "total_audio_records": len(ordered),
@@ -1392,23 +2654,57 @@ def main():
             key: value["sfx_cues"]
             for key, value in part_summary.items()
         },
-        "timing_basis": "Measured TTS audio duration from ffprobe.",
+        "timing_basis": (
+            "Measured TTS audio duration from ffprobe."
+        ),
         "timeline": timeline,
         "source_signature": source_sig,
-        "source_audio_manifest_sha256": sha256_file(AUDIO_MANIFEST),
+        "source_audio_manifest_sha256": sha256_file(
+            AUDIO_MANIFEST
+        ),
         "sfx_policy": (
-            "Only story-event or role-grounded cues are emitted. "
-            "No generic whoosh is forced. Extra roles retain scene=None."
+            "Story-event and scene-context keyword selection; "
+            "no forced generic whoosh on every scene."
         ),
         "external_api_calls": 0,
         "paid_services_used": False,
+        "created_at": utc_now(),
     }
+
     write_json(CUES_PATH, cue_manifest)
+
+    validation_report = build_validation_report(
+        fmt,
+        ordered,
+        cues,
+        total_duration,
+        scenes_min,
+        scenes_max,
+        normalized_counts,
+    )
+
+    if validation_report["status"] != "completed":
+        raise RuntimeError(
+            "SFX timing validation failed: "
+            + json.dumps(
+                validation_report["errors"],
+                ensure_ascii=False,
+            )
+        )
+
+    write_json(
+        SFX_VALIDATION_PATH,
+        validation_report,
+    )
 
     mix_signature = signature({
         "source_signature": source_sig,
         "tracks": {
-            key: value.get("sha256") if isinstance(value, dict) else None
+            key: (
+                value.get("sha256")
+                if isinstance(value, dict)
+                else None
+            )
             for key, value in tracks.items()
         },
         "mix_records": mix_records,
@@ -1419,7 +2715,8 @@ def main():
         "version": VERSION,
         "generation": (
             "google_flow_role_music_with_event_sfx"
-            if using_flow else "local_music_with_event_sfx"
+            if using_flow
+            else "local_music_with_event_sfx"
         ),
         "external_api_calls": external_api_calls,
         "paid_services_used": paid_services_used,
@@ -1428,11 +2725,19 @@ def main():
         "dynamic_parts": True,
         "parts": len(actual_parts),
         "part_numbers": actual_parts,
+        "scenes_min": scenes_min,
+        "scenes_max": scenes_max,
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": normalized_counts,
         "main_scene_counts": main_scene_counts,
         "role_counts": role_counts,
         "total_audio_records": len(ordered),
-        "total_narration_seconds": round(total_duration, 4),
-        "background_duration_seconds": round(background_duration, 3),
+        "total_narration_seconds": round(
+            total_duration, 4
+        ),
+        "background_duration_seconds": round(
+            background_duration, 3
+        ),
         "sfx_duration_seconds": SFX_SECONDS,
         "enabled": enabled_tracks,
         "tracks": tracks,
@@ -1442,58 +2747,115 @@ def main():
         "sfx_cue_map": cue_map,
         "mix_records": mix_records,
         "mix_signature": mix_signature,
-        "flow_music_manifest": FLOW_MUSIC_MANIFEST.relative_to(ROOT).as_posix(),
+        "flow_music_manifest": (
+            FLOW_MANIFEST.relative_to(ROOT).as_posix()
+        ),
         "music_provider": (
             "Google Flow/Lyria role segments"
-            if using_flow else
-            "local_synthesis_fallback" if enabled_tracks["music"] else "disabled"
+            if using_flow
+            else (
+                "local_synthesis_fallback"
+                if enabled_tracks["music"]
+                else "disabled"
+            )
         ),
         "music_role_segments_used": bool(
-            isinstance(music, dict) and music.get("role_segment_count", 0) > 0
+            isinstance(music, dict)
+            and music.get("role_segment_count", 0) > 0
         ),
         "music_role_segment_count": (
             music.get("role_segment_count", 0)
-            if isinstance(music, dict) else 0
+            if isinstance(music, dict)
+            else 0
         ),
-        "ambient_status": tracks.get("ambient", {}).get("status"),
-        "ambient_note": tracks.get("ambient", {}).get("reason"),
-        "sfx_cue_manifest": CUES_PATH.relative_to(ROOT).as_posix(),
+        "ambient_status": (
+            tracks.get("ambient", {}).get("status")
+            if isinstance(tracks.get("ambient"), dict)
+            else "disabled"
+        ),
+        "ambient_note": (
+            tracks.get("ambient", {}).get("reason")
+            if isinstance(tracks.get("ambient"), dict)
+            else None
+        ),
+        "sfx_cue_manifest": (
+            CUES_PATH.relative_to(ROOT).as_posix()
+        ),
+        "sfx_validation_manifest": (
+            SFX_VALIDATION_PATH.relative_to(ROOT).as_posix()
+        ),
         "sfx_cue_count": len(cues),
-        "audio_manifest": AUDIO_MANIFEST.relative_to(ROOT).as_posix(),
-        "narration_manifest": NARRATION_FILE.relative_to(ROOT).as_posix(),
-        "scene_manifest": SCENES_FILE.relative_to(ROOT).as_posix(),
-        "source_audio_manifest_sha256": sha256_file(AUDIO_MANIFEST),
-        "source_narration_sha256": (
-            sha256_file(NARRATION_FILE) if NARRATION_FILE.is_file() else None
+        "audio_manifest": (
+            AUDIO_MANIFEST.relative_to(ROOT).as_posix()
         ),
-        "source_scene_sha256": sha256_file(SCENES_FILE),
+        "narration_manifest": (
+            NARRATION_FILE.relative_to(ROOT).as_posix()
+        ),
+        "scene_manifest": (
+            SCENES_FILE.relative_to(ROOT).as_posix()
+        ),
+        "source_audio_manifest_sha256": sha256_file(
+            AUDIO_MANIFEST
+        ),
+        "source_narration_sha256": sha256_file(
+            NARRATION_FILE
+        ),
+        "source_scene_sha256": sha256_file(
+            SCENES_FILE
+        ),
         "source_signature": source_sig,
         "sound_design_signature": mix_signature,
         "mixing_note": (
-            "Role-aligned Flow Music segments are assembled into one continuous "
-            "global music track in narration order. Hook, Main, Suspense and "
-            "Resolution receive distinct gains. Render Video applies narration "
-            "sidechain ducking. Ambient and SFX remain separate timed tracks."
+            "Role-specific Flow Music segments are independently "
+            "validated and aligned to measured narration timeline. "
+            "Hook, Main, Suspense and Resolution use distinct gains. "
+            "No continuous Flow master fallback is used after a "
+            "completed Flow manifest fails validation. Local music "
+            "is used only when Flow Music has not completed. "
+            "Ambient and SFX remain separate timed tracks."
         ),
         "completed_at": utc_now(),
     }
 
     write_json(MANIFEST_PATH, manifest)
+
     saved_manifest = read_json(MANIFEST_PATH)
     saved_cues = read_json(CUES_PATH)
+    saved_validation = read_json(
+        SFX_VALIDATION_PATH
+    )
 
-    if not isinstance(saved_manifest, dict):
-        raise RuntimeError("Sound design manifest read-back failed.")
-    if saved_manifest.get("status") != "completed":
-        raise RuntimeError("Sound design manifest is not completed.")
-    if saved_manifest.get("sound_design_signature") != mix_signature:
-        raise RuntimeError("Sound design signature mismatch.")
-    if not isinstance(saved_cues, dict):
-        raise RuntimeError("SFX cue manifest read-back failed.")
-    if saved_cues.get("source_signature") != source_sig:
-        raise RuntimeError("SFX cue source signature mismatch.")
-    if len(saved_cues.get("cues", [])) != len(cues):
-        raise RuntimeError("SFX cue count mismatch.")
+    if (
+        not isinstance(saved_manifest, dict)
+        or saved_manifest.get("status") != "completed"
+        or saved_manifest.get("sound_design_signature")
+        != mix_signature
+    ):
+        raise RuntimeError(
+            "Sound design manifest read-back verification failed."
+        )
+
+    if (
+        not isinstance(saved_cues, dict)
+        or saved_cues.get("source_signature") != source_sig
+        or len(saved_cues.get("cues", [])) != len(cues)
+    ):
+        raise RuntimeError(
+            "SFX cue manifest read-back verification failed."
+        )
+
+    if (
+        not isinstance(saved_validation, dict)
+        or saved_validation.get("status") != "completed"
+        or saved_validation.get("format") != fmt
+        or saved_validation.get("invalid_cues") != 0
+        or saved_validation.get("out_of_range_cues") != 0
+        or saved_validation.get("timing_errors") != 0
+        or saved_validation.get("failed_checks") != 0
+    ):
+        raise RuntimeError(
+            "SFX timing validation read-back verification failed."
+        )
 
     write_json(CHECKPOINT_PATH, {
         "status": "completed",
@@ -1502,13 +2864,18 @@ def main():
         "sound_design_signature": mix_signature,
         "total_audio_records": len(ordered),
         "completed_tracks": [
-            key for key, value in tracks.items()
-            if isinstance(value, dict) and value.get("status") == "completed"
+            key
+            for key, value in tracks.items()
+            if (
+                isinstance(value, dict)
+                and value.get("status") == "completed"
+            )
         ],
         "cue_count": len(cues),
         "music_role_segment_count": (
             music.get("role_segment_count", 0)
-            if isinstance(music, dict) else 0
+            if isinstance(music, dict)
+            else 0
         ),
         "updated_at": utc_now(),
     })
@@ -1516,24 +2883,44 @@ def main():
     log("SOUND DESIGN READY")
     log("FORMAT:", fmt)
     log("PARTS:", len(actual_parts))
+    log("SCENES RANGE:", f"{scenes_min}-{scenes_max}")
+    log("ACTUAL SCENE COUNTS:", normalized_counts)
     log("MAIN SCENES:", sum(main_scene_counts.values()))
     log("HOOK:", role_counts["hook"])
     log("SUSPENSE:", role_counts["suspense"])
     log("RESOLUTION:", role_counts["resolution"])
     log("NARRATION SECONDS:", round(total_duration, 2))
-    log("FLOW ROLE MUSIC SEGMENTS:", manifest["music_role_segment_count"])
+    log(
+        "FLOW ROLE MUSIC SEGMENTS:",
+        manifest["music_role_segment_count"],
+    )
     log("SFX CUES:", len(cues))
-    log("AMBIENT:", tracks.get("ambient", {}).get("status"))
+    log(
+        "AMBIENT:",
+        tracks.get("ambient", {}).get("status"),
+    )
+    log(
+        "EXTERNAL API CALLS:",
+        manifest["external_api_calls"],
+    )
+    log(
+        "PAID SERVICES USED:",
+        manifest["paid_services_used"],
+    )
     log("MANIFEST:", MANIFEST_PATH.relative_to(ROOT))
+
     return 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+
     except KeyboardInterrupt:
         log("SOUND DESIGN INTERRUPTED.")
         raise SystemExit(130)
+
     except Exception as exc:
         log("SOUND DESIGN FAILED:", str(exc))
         raise SystemExit(1)
+
