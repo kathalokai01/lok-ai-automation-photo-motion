@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Strict offline preflight for the Katha Lok AI photo-motion pipeline."""
 
@@ -24,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v63-scene-range-full-mode"
+VERSION = "photo-motion-preflight-v64-retryable-narration-audio"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -111,7 +112,13 @@ FONT_FAMILIES = (
 
 SUCCESS = {"completed", "complete", "success", "done", "reused", "valid"}
 FAILED = {"failed", "error", "cancelled", "incomplete", "invalid"}
-NONFINAL = {"pending", "skipped", "disabled", "unavailable"}
+NONFINAL = {
+    "pending",
+    "skipped",
+    "disabled",
+    "unavailable",
+    "ready_for_generation",
+}
 
 ROW_KEYS = (
     "jobs", "visual_jobs", "photo_motion_jobs", "scenes", "items",
@@ -156,6 +163,7 @@ SCRIPT_RE = re.compile(
     r"\s+(?:-u\s+)?scripts/([A-Za-z0-9_.-]+\.py)"
 )
 LEGACY_RE = re.compile(r"\bi2v\b|wan2gp", re.IGNORECASE)
+
 
 
 def log(*items: Any) -> None:
@@ -321,6 +329,19 @@ def extract_workflow_commands(source: str) -> list[dict]:
                     })
             continue
 
+        if inside_run:
+            for match in SCRIPT_RE.finditer(raw_line.split("#", 1)[0]):
+                commands.append({
+                    "script": match.group(1),
+                    "line": line_number,
+                    "step": current_step or "unnamed",
+                })
+
+    return commands
+
+                    })
+            continue
+
         if not inside_run:
             continue
 
@@ -478,6 +499,8 @@ def check_story_length_policy_integration() -> tuple[bool, str]:
     integrated = any(
         name.rsplit(".", 1)[-1] == "story_length_policy"
         for name in references
+
+
     )
 
     if not integrated:
@@ -638,6 +661,8 @@ def validate_actual_scene_counts(
         part = _row_part_number(row)
 
         if part is None:
+
+
             if mode == "full":
                 part = 1
             else:
@@ -707,6 +732,7 @@ def validate_actual_scene_counts(
         "available": True,
         "part_counts": counts,
     }
+
 
 def validate_existing_manifest(
     name: str,
@@ -798,6 +824,8 @@ def validate_existing_manifest(
         row_status = str(row.get("status", "")).strip().lower()
 
         if row_status in FAILED:
+
+
             raise ValueError(
                 f"{name}: row {index} has failed status {row_status}."
             )
@@ -958,6 +986,8 @@ def check_resume_state(
             data.get("input_fingerprint")
             or data.get("input_sha256")
             or data.get("input_hash")
+
+
         )
         saved_pipeline = (
             data.get("pipeline_fingerprint")
@@ -1119,6 +1149,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             "detail": str(detail),
         })
 
+
     if not INPUT_FILE.is_file() or INPUT_FILE.stat().st_size <= 0:
         add("input_file", False, "Input/topic.txt is missing or empty.")
         return config, checks, details
@@ -1278,6 +1309,8 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
                     if scenes_valid
                     else "FULL mode Scene range is invalid."
                 ),
+
+
             )
 
         primary = [
@@ -1439,6 +1472,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             )
         )
 
+
         add(
             "resume_and_checkpoint",
             resume_ok,
@@ -1598,6 +1632,8 @@ def calculate_pipeline_fingerprint() -> tuple[str, dict]:
             continue
 
         relative = path.relative_to(ROOT).as_posix()
+
+
         checksum = sha256_file(path)
         fingerprints[relative] = checksum
         lines.append(f"{checksum}  {relative}\n")
@@ -1758,6 +1794,8 @@ def main() -> int:
     def record(name: str, passed: bool, detail: str) -> None:
         checks.append({
             "name": name,
+
+
             "passed": bool(passed),
             "detail": str(detail),
         })
@@ -1918,6 +1956,8 @@ def main() -> int:
             f"Fingerprint created for {len(source_fingerprints)} source files."
             if source_fingerprints
             else "No source files available for pipeline fingerprint."
+
+
         ),
     )
 
@@ -2078,6 +2118,8 @@ def main() -> int:
         "fps": input_details.get("fps"),
         "caption_font": input_details.get("caption_font"),
         "caption_font_size": input_details.get("caption_font_size"),
+
+
         "tts_provider_order": input_details.get("tts_provider_order"),
         "image_provider_order": input_details.get("image_provider_order"),
         "provider_credentials": credential_details,
@@ -2237,6 +2279,7 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+
 
     except KeyboardInterrupt:
         log("PREFLIGHT CANCELLED")
