@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Role-aware video rendering, verified audio mixing and resumable part output."""
+"""Render role-aware photo-motion clips with verified narration and sound."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from input_config import (
     load_and_validate,
     get_format,
     get_parts,
-    get_scenes,
+    get_scenes_range,
     get_fps,
 )
 
@@ -33,10 +33,12 @@ SFX_VALIDATION = OUT / "sound_design" / "sfx_timing_validation.json"
 
 RENDER_DIR = OUT / "scene_renders"
 PART_DIR = OUT / "parts"
+VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
+PRE_CAPTION_VIDEO = VIDEO_DIR / "pre_caption_render.mp4"
 
-VERSION = "render-video-v60-verified-role-audio-ducking-resume"
+VERSION = "render-video-v61-dynamic-scenes-role-aware"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -67,8 +69,11 @@ def sha256_file(path):
 
 def digest_data(data):
     raw = json.dumps(
-        data, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":"), default=str,
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -76,16 +81,16 @@ def digest_data(data):
 def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
+    temporary = path.with_name(path.name + ".tmp")
     try:
-        with temp.open("w", encoding="utf-8") as stream:
+        with temporary.open("w", encoding="utf-8") as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, path)
+        os.replace(temporary, path)
     finally:
-        temp.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 def read_json(path, label, required=True, default=None):
@@ -95,9 +100,12 @@ def read_json(path, label, required=True, default=None):
             raise RuntimeError(f"{label} missing: {path}")
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         raise RuntimeError(f"Invalid {label}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} must contain a JSON object")
+    return data
 
 
 def safe_path(value, label, must_exist=True):
@@ -107,8 +115,10 @@ def safe_path(value, label, must_exist=True):
     if not path.is_absolute():
         path = ROOT / path
     path = path.resolve()
-    if not path.is_relative_to(ROOT.resolve()):
-        raise RuntimeError(f"{label}: path escapes project directory")
+    try:
+        path.relative_to(ROOT.resolve())
+    except ValueError as exc:
+        raise RuntimeError(f"{label}: path escapes project directory") from exc
     if must_exist and not path.is_file():
         raise RuntimeError(f"{label}: file does not exist: {path}")
     return path
@@ -127,7 +137,7 @@ def require_file(path, label, minimum=MIN_VIDEO_BYTES):
 
 def run(command, label, timeout=1800):
     result = subprocess.run(
-        [str(x) for x in command],
+        [str(value) for value in command],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -161,7 +171,10 @@ def probe(path):
             "format=duration:stream=codec_type,width,height,avg_frame_rate,r_frame_rate",
             "-of", "json", str(path),
         ],
-        capture_output=True, text=True, timeout=90, check=False,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
     )
     if result.returncode:
         raise RuntimeError(
@@ -175,10 +188,12 @@ def probe(path):
         raise RuntimeError(f"Invalid media metadata: {path}") from exc
 
     video = next(
-        (x for x in streams if x.get("codec_type") == "video"), None
+        (item for item in streams if item.get("codec_type") == "video"),
+        None,
     )
     audio = next(
-        (x for x in streams if x.get("codec_type") == "audio"), None
+        (item for item in streams if item.get("codec_type") == "audio"),
+        None,
     )
     if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError(f"Invalid media duration: {path}")
@@ -251,12 +266,19 @@ def validate_completed(data, label):
 
 def normalize_role(row):
     value = str(
-        row.get("role") or row.get("scene_type") or row.get("type") or "main"
+        row.get("role")
+        or row.get("scene_type")
+        or row.get("type")
+        or "main"
     ).strip().lower()
     aliases = {
-        "opening": "hook", "intro": "hook", "part_hook": "hook",
-        "story": "main", "main_scene": "main",
-        "cliffhanger": "suspense", "ending": "resolution",
+        "opening": "hook",
+        "intro": "hook",
+        "part_hook": "hook",
+        "story": "main",
+        "main_scene": "main",
+        "cliffhanger": "suspense",
+        "ending": "resolution",
         "final": "resolution",
     }
     value = aliases.get(value, value)
@@ -272,36 +294,36 @@ def row_scene_id(row, label):
     return value
 
 
-def media_path_from_row(row, keys, label):
+def first_path(row, keys, label):
     for key in keys:
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return safe_path(value, label)
-    raise RuntimeError(f"{label}: no path field found")
+    raise RuntimeError(f"{label}: no valid path field found")
 
 
-def configured_part_numbers(config, manifest, count):
+def selected_part_numbers(config, manifest, count):
     for candidate in (
         manifest.get("part_numbers"),
         config.get("SELECTED_PART_NUMBERS"),
         config.get("PART_NUMBERS"),
     ):
         if isinstance(candidate, list) and candidate:
-            parts = [positive_int(x, "part number") for x in candidate]
-            if len(parts) != count or parts != sorted(set(parts)):
+            numbers = [positive_int(item, "part number") for item in candidate]
+            if (
+                len(numbers) != count
+                or numbers != sorted(set(numbers))
+                or numbers != list(range(numbers[0], numbers[0] + count))
+            ):
                 raise RuntimeError("Selected part number list is inconsistent")
-            if parts != list(range(parts[0], parts[0] + count)):
-                raise RuntimeError("Selected part range must be continuous")
-            return parts
+            return numbers
 
-    start = manifest.get("first_part", manifest.get("start_part"))
-    if start is None:
-        start = config.get("PARTS_START", config.get("PART_START", 1))
+    start = manifest.get("first_part", manifest.get("start_part", 1))
     start = positive_int(start, "first selected part")
     return list(range(start, start + count))
 
 
-def expected_roles(parts):
+def expected_role_sequence(parts):
     return {
         part: (
             ["hook", "main", "suspense"]
@@ -312,15 +334,32 @@ def expected_roles(parts):
     }
 
 
-def expected_main_keys(parts, scenes):
-    return {
-        (part, scene)
-        for part in parts
-        for scene in range(1, scenes + 1)
-    }
+def validate_actual_scene_counts(manifest, parts, minimum, maximum):
+    raw = manifest.get("actual_scene_counts")
+    if not isinstance(raw, dict):
+        raise RuntimeError(
+            "Photo Motion manifest actual_scene_counts is missing"
+        )
+
+    counts = {}
+    for part in parts:
+        candidates = (str(part), f"part_{part:02d}", part)
+        value = next(
+            (raw[key] for key in candidates if key in raw),
+            None,
+        )
+        count = positive_int(value, f"Part {part} actual scene count")
+        if not minimum <= count <= maximum:
+            raise RuntimeError(
+                f"Part {part} has {count} scenes; allowed range is "
+                f"{minimum}-{maximum}"
+            )
+        counts[part] = count
+
+    return counts
 
 
-def load_photo_map(parts, scenes, mode, width, height, fps):
+def load_photo_map(parts, scene_counts, mode, width, height, fps):
     data = read_json(PHOTO_MANIFEST, "Photo Motion manifest")
     validate_completed(data, "Photo Motion manifest")
 
@@ -336,16 +375,17 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
     rows = data.get("scenes")
     if not isinstance(rows, list) or not rows:
         raise RuntimeError("Photo Motion manifest has no scenes")
+
     if int(data.get("completed_count", -1)) != len(rows):
         raise RuntimeError("Photo Motion completed_count mismatch")
 
-    by_id, main_map, role_counts = {}, {}, {
-        role: {} for role in ROLE_ORDER
-    }
+    by_id = {}
+    main_map = {}
+    role_counts = {role: {} for role in ROLE_ORDER}
 
     for index, row in enumerate(rows, 1):
         if not isinstance(row, dict) or row.get("status") != "completed":
-            raise RuntimeError(f"Photo Motion scene {index} is incomplete")
+            raise RuntimeError(f"Photo Motion row {index} is incomplete")
 
         sid = row_scene_id(row, f"Photo Motion row {index}")
         if sid in by_id:
@@ -357,38 +397,45 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
 
         role = normalize_role(row)
         global_scene = positive_int(
-            row.get("global_scene", row.get("scene")),
-            f"{sid} global_scene",
+            row.get("global_scene", row.get("global_scene_number", index)),
+            f"{sid} global scene",
         )
-        local_scene = (
-            positive_int(
-                row.get("local_scene", row.get("scene")),
-                f"{sid} local_scene",
+
+        if role == "main":
+            local_scene = positive_int(
+                row.get(
+                    "local_scene",
+                    row.get("source_scene_number", row.get("scene")),
+                ),
+                f"{sid} local scene",
             )
-            if role == "main" else 0
-        )
+            if local_scene > scene_counts[part]:
+                raise RuntimeError(
+                    f"{sid}: scene exceeds Part {part} actual scene count"
+                )
+            expected_id = f"part_{part:02d}_scene_{local_scene:02d}"
+        else:
+            local_scene = 0
+            expected_id = f"part_{part:02d}_{role}"
 
-        expected_id = (
-            f"part_{part:02d}_scene_{local_scene:02d}"
-            if role == "main"
-            else f"part_{part:02d}_{role}"
-        )
         if sid != expected_id:
-            raise RuntimeError(f"{sid}: expected scene ID {expected_id}")
+            raise RuntimeError(f"{sid}: expected canonical ID {expected_id}")
 
-        video = media_path_from_row(
-            row, ("video", "output", "path"), f"Photo Motion {sid}"
+        video = first_path(
+            row,
+            ("video", "output", "path"),
+            f"Photo Motion {sid}",
         )
         require_file(video, f"Photo Motion {sid}")
         checksum = sha256_file(video)
 
         declared = row.get("video_sha256") or row.get("sha256")
-        if declared != checksum:
-            raise RuntimeError(f"Photo Motion checksum mismatch: {sid}")
+        if not declared or declared != checksum:
+            raise RuntimeError(f"Photo Motion SHA-256 mismatch: {sid}")
 
         info = probe(video)
         if not info["has_video"]:
-            raise RuntimeError(f"Photo Motion {sid} has no video")
+            raise RuntimeError(f"Photo Motion {sid} has no video stream")
         if (info["width"], info["height"]) != (width, height):
             raise RuntimeError(f"Photo Motion {sid} dimensions mismatch")
         validate_fps(info, fps, sid)
@@ -412,51 +459,63 @@ def load_photo_map(parts, scenes, mode, width, height, fps):
         if role == "main":
             key = (part, local_scene)
             if key in main_map:
-                raise RuntimeError(f"Duplicate Photo Motion main scene: {key}")
+                raise RuntimeError(f"Duplicate main scene: {key}")
             main_map[key] = record
 
-    expected = expected_main_keys(parts, scenes)
-    if set(main_map) != expected:
+    expected_main = {
+        (part, scene)
+        for part in parts
+        for scene in range(1, scene_counts[part] + 1)
+    }
+    if set(main_map) != expected_main:
         raise RuntimeError(
-            "Photo Motion main scene mapping mismatch; "
-            f"missing={sorted(expected-set(main_map))}; "
-            f"extra={sorted(set(main_map)-expected)}"
+            "Photo Motion Main scene mapping mismatch; "
+            f"missing={sorted(expected_main - set(main_map))}; "
+            f"extra={sorted(set(main_map) - expected_main)}"
         )
 
-    for part, required in expected_roles(parts).items():
+    expected_roles = expected_role_sequence(parts)
+    for part in parts:
+        required = expected_roles[part]
         for role in required:
-            count = scenes if role == "main" else 1
-            if role_counts[role].get(part, 0) != count:
+            expected_count = scene_counts[part] if role == "main" else 1
+            actual_count = role_counts[role].get(part, 0)
+            if actual_count != expected_count:
                 raise RuntimeError(
-                    f"Part {part} requires {count} {role} clips"
+                    f"Part {part} requires {expected_count} {role} clips; "
+                    f"found {actual_count}"
                 )
         for role in ROLE_ORDER:
             if role not in required and role_counts[role].get(part, 0):
-                raise RuntimeError(f"Part {part} has forbidden {role} clip")
+                raise RuntimeError(
+                    f"Part {part} has an invalid {role} clip"
+                )
 
     ordered = sorted(
         by_id.values(),
-        key=lambda x: (
-            x["part"],
-            ROLE_ORDER[x["role"]],
-            x["local_scene"] if x["role"] == "main" else 0,
-            x["global_scene"],
+        key=lambda item: (
+            item["part"],
+            ROLE_ORDER[item["role"]],
+            item["local_scene"],
+            item["global_scene"],
         ),
     )
-    global_numbers = [x["global_scene"] for x in ordered]
+
+    global_numbers = [item["global_scene"] for item in ordered]
     if global_numbers != list(range(1, len(ordered) + 1)):
-        raise RuntimeError("Photo Motion global scene sequence is not continuous")
+        raise RuntimeError(
+            "Photo Motion global scene sequence is not continuous"
+        )
 
-    return by_id, main_map, ordered, data
+    return by_id, ordered, data
 
-
-def load_audio_map(parts):
+def load_audio_map(parts, scene_counts):
     data = read_json(AUDIO_MANIFEST, "Narration audio manifest")
     validate_completed(data, "Narration audio manifest")
 
     rows = data.get("jobs") or data.get("audio_jobs") or data.get("scenes")
     if not isinstance(rows, list) or not rows:
-        raise RuntimeError("Narration audio manifest has no jobs list")
+        raise RuntimeError("Narration manifest has no audio jobs")
 
     mapping = {}
     for index, row in enumerate(rows, 1):
@@ -467,31 +526,34 @@ def load_audio_map(parts):
         if sid in mapping:
             raise RuntimeError(f"Duplicate narration scene_id: {sid}")
 
-        if str(row.get("status", "")).lower() not in {
-            "completed", "reused"
-        }:
-            raise RuntimeError(f"Narration job {sid} is incomplete")
+        if str(row.get("status", "")).lower() not in {"completed", "reused"}:
+            raise RuntimeError(f"Narration job is incomplete: {sid}")
 
-        part = positive_int(row.get("part"), "Narration part")
+        part = positive_int(row.get("part"), f"{sid} Part")
         if part not in parts:
-            raise RuntimeError(f"Narration {sid}: part outside selected range")
+            raise RuntimeError(f"{sid}: narration Part outside selection")
 
         role = normalize_role(row)
-        scene_value = row.get("scene", row.get("local_scene"))
-        local_scene = (
-            positive_int(scene_value, f"{sid} local scene")
-            if role == "main" else 0
-        )
+        if role == "main":
+            local_scene = positive_int(
+                row.get("scene", row.get("local_scene")),
+                f"{sid} scene number",
+            )
+            if local_scene > scene_counts[part]:
+                raise RuntimeError(
+                    f"{sid}: narration scene exceeds actual scene count"
+                )
+            expected_id = f"part_{part:02d}_scene_{local_scene:02d}"
+        else:
+            local_scene = 0
+            expected_id = f"part_{part:02d}_{role}"
 
-        expected_id = (
-            f"part_{part:02d}_scene_{local_scene:02d}"
-            if role == "main"
-            else f"part_{part:02d}_{role}"
-        )
         if sid != expected_id:
-            raise RuntimeError(f"Narration {sid}: expected ID {expected_id}")
+            raise RuntimeError(
+                f"Narration {sid}: expected canonical ID {expected_id}"
+            )
 
-        audio = media_path_from_row(
+        audio = first_path(
             row,
             ("output", "audio_path", "audio_file", "path", "file", "audio"),
             f"Narration {sid}",
@@ -503,9 +565,37 @@ def load_audio_map(parts):
             raise RuntimeError(f"Narration {sid} has no audio stream")
 
         checksum = sha256_file(audio)
-        declared = row.get("sha256") or row.get("audio_sha256")
-        if declared and declared != checksum:
-            raise RuntimeError(f"Narration checksum mismatch: {sid}")
+        declared = row.get("audio_sha256") or row.get("sha256")
+        if not declared or declared != checksum:
+            raise RuntimeError(f"Narration SHA-256 mismatch: {sid}")
+
+        declared_duration = row.get(
+            "actual_audio_duration_seconds",
+            row.get("audio_duration", row.get("duration")),
+        )
+        if declared_duration is None:
+            raise RuntimeError(f"Narration duration is missing: {sid}")
+
+        declared_duration = finite_number(
+            declared_duration,
+            f"{sid} measured duration",
+            minimum=0.01,
+        )
+        if abs(declared_duration - info["duration"]) > 0.15:
+            raise RuntimeError(
+                f"Narration measured duration mismatch: {sid}; "
+                f"manifest={declared_duration:.3f}, "
+                f"ffprobe={info['duration']:.3f}"
+            )
+
+        duration_source = (
+            row.get("duration_source")
+            or row.get("audio_duration_source")
+        )
+        if duration_source != "ffprobe_measured":
+            raise RuntimeError(
+                f"Narration duration is not ffprobe-measured: {sid}"
+            )
 
         mapping[sid] = {
             "scene_id": sid,
@@ -519,16 +609,36 @@ def load_audio_map(parts):
             "model": row.get("model"),
         }
 
+    expected_ids = set()
+    for part in parts:
+        expected_ids.add(f"part_{part:02d}_hook")
+        expected_ids.update(
+            f"part_{part:02d}_scene_{scene:02d}"
+            for scene in range(1, scene_counts[part] + 1)
+        )
+        if part == parts[-1]:
+            expected_ids.add(f"part_{part:02d}_resolution")
+        else:
+            expected_ids.add(f"part_{part:02d}_suspense")
+
+    if set(mapping) != expected_ids:
+        raise RuntimeError(
+            "Narration scene mapping mismatch; "
+            f"missing={sorted(expected_ids - set(mapping))}; "
+            f"extra={sorted(set(mapping) - expected_ids)}"
+        )
+
     return mapping, data
 
 
 def validate_photo_audio_pairing(photo_by_id, audio_by_id):
-    photo_ids, audio_ids = set(photo_by_id), set(audio_by_id)
+    photo_ids = set(photo_by_id)
+    audio_ids = set(audio_by_id)
     if photo_ids != audio_ids:
         raise RuntimeError(
             "Photo Motion and narration scene IDs differ; "
-            f"missing_audio={sorted(photo_ids-audio_ids)[:20]}; "
-            f"missing_video={sorted(audio_ids-photo_ids)[:20]}"
+            f"missing_audio={sorted(photo_ids - audio_ids)}; "
+            f"missing_video={sorted(audio_ids - photo_ids)}"
         )
 
     for sid, photo in photo_by_id.items():
@@ -538,28 +648,33 @@ def validate_photo_audio_pairing(photo_by_id, audio_by_id):
             or photo["role"] != audio["role"]
             or photo["local_scene"] != audio["local_scene"]
         ):
-            raise RuntimeError(f"{sid}: narration/render mapping mismatch")
+            raise RuntimeError(f"{sid}: Photo Motion/narration mapping mismatch")
 
 
-def load_sound_assets(parts, narration):
+def load_sound_assets(parts, narration, mode, audio_manifest_hash):
     manifest = read_json(SOUND_MANIFEST, "Sound design manifest")
     validate_completed(manifest, "Sound design manifest")
 
-    validation = read_json(SFX_VALIDATION, "SFX validation report")
-    validate_completed(validation, "SFX validation report")
+    validation = read_json(SFX_VALIDATION, "SFX timing validation")
+    validate_completed(validation, "SFX timing validation")
 
-    mode = str(manifest.get("format", "")).lower()
-    if mode not in {"short", "full"}:
-        raise RuntimeError("Sound design FORMAT is invalid")
+    if str(manifest.get("format", "")).lower() != mode:
+        raise RuntimeError("Sound design FORMAT mismatch")
     if str(validation.get("format", "")).lower() != mode:
         raise RuntimeError("SFX validation FORMAT mismatch")
 
     manifest_parts = manifest.get("part_numbers")
     if isinstance(manifest_parts, list):
-        if [int(x) for x in manifest_parts] != parts:
-            raise RuntimeError("Sound design selected part range mismatch")
+        if [int(value) for value in manifest_parts] != parts:
+            raise RuntimeError("Sound design selected Parts mismatch")
     elif int(manifest.get("parts", manifest.get("total_parts", -1))) != len(parts):
-        raise RuntimeError("Sound design part count mismatch")
+        raise RuntimeError("Sound design Part count mismatch")
+
+    source_audio_hash = manifest.get("source_audio_manifest_sha256")
+    if source_audio_hash and source_audio_hash != audio_manifest_hash:
+        raise RuntimeError(
+            "Sound design was generated from a different narration manifest"
+        )
 
     tracks = manifest.get("tracks", {})
     if not isinstance(tracks, dict):
@@ -571,7 +686,7 @@ def load_sound_assets(parts, narration):
         "sfx": {},
         "warnings": [],
     }
-    hashes = {}
+    track_hashes = {}
 
     for category in ("music", "ambient"):
         record = tracks.get(category)
@@ -580,25 +695,28 @@ def load_sound_assets(parts, narration):
         if not isinstance(record, dict) or record.get("status") != "completed":
             raise RuntimeError(f"{category} track is not completed")
 
-        path = safe_path(
-            record.get("path") or record.get("audio_path"),
+        path = first_path(
+            record,
+            ("path", "audio_path", "output"),
             f"{category} track",
         )
         require_file(path, f"{category} track", MIN_AUDIO_BYTES)
+
         info = probe(path)
         if not info["has_audio"]:
             raise RuntimeError(f"{category} track has no audio stream")
 
         checksum = sha256_file(path)
-        if record.get("sha256") and record["sha256"] != checksum:
-            raise RuntimeError(f"{category} track checksum mismatch")
+        declared = record.get("sha256") or record.get("audio_sha256")
+        if declared and declared != checksum:
+            raise RuntimeError(f"{category} track SHA-256 mismatch")
 
         assets[category] = {
             "path": path,
             "sha256": checksum,
             "duration": info["duration"],
         }
-        hashes[category] = checksum
+        track_hashes[category] = checksum
 
     sfx_data = validation.get("sfx", {})
     cues = sfx_data.get("cues", []) if isinstance(sfx_data, dict) else []
@@ -611,20 +729,33 @@ def load_sound_assets(parts, narration):
             raise RuntimeError(f"Invalid SFX cue {index}")
 
         sid = str(cue.get("scene_id") or "").strip()
-        if not sid:
+        if not sid or sid not in narration:
             raise RuntimeError(
-                f"SFX cue {index} must include its exact scene_id"
+                f"SFX cue {index} references an unknown narration scene_id"
             )
-        if sid not in narration:
-            raise RuntimeError(f"SFX cue references unknown scene: {sid}")
 
-        unique = (sid, str(cue.get("kind", "")), str(cue.get("file", "")))
-        if unique in seen_cues:
-            raise RuntimeError(f"Duplicate SFX cue: {sid}")
-        seen_cues.add(unique)
+        narration_row = narration[sid]
+        cue_part = positive_int(cue.get("part"), f"SFX cue {index} Part")
+        if cue_part != narration_row["part"]:
+            raise RuntimeError(f"SFX cue Part mismatch: {sid}")
 
+        cue_role = normalize_role(cue)
+        if cue_role != narration_row["role"]:
+            raise RuntimeError(f"SFX cue role mismatch: {sid}")
+
+        cue_scene = cue.get("scene")
+        if cue_role == "main":
+            if positive_int(cue_scene, f"SFX cue {index} scene") != narration_row["local_scene"]:
+                raise RuntimeError(f"SFX cue scene mismatch: {sid}")
+        elif cue_scene not in (None, "", 0, "0"):
+            raise RuntimeError(f"Extra-role SFX cue must have scene=None: {sid}")
+
+        start_value = cue.get(
+            "start_seconds",
+            cue.get("actual_start_seconds", cue.get("time", cue.get("start"))),
+        )
         start = finite_number(
-            cue.get("start_seconds", cue.get("time", cue.get("start"))),
+            start_value,
             f"SFX cue {index} start",
             minimum=0,
         )
@@ -634,37 +765,48 @@ def load_sound_assets(parts, narration):
             minimum=0,
             maximum=1,
         )
-        scene_duration = narration[sid]["duration"]
-        if start >= scene_duration:
-            raise RuntimeError(f"SFX cue outside narration duration: {sid}")
 
-        path = media_path_from_row(
-            cue, ("file", "path", "audio_path"), f"SFX cue {index}"
+        kind = str(cue.get("kind") or cue.get("type") or "effect").strip()
+        cue_key = (sid, round(start, 6), kind)
+        if cue_key in seen_cues:
+            raise RuntimeError(f"Duplicate SFX cue: {sid} at {start:.3f}s")
+        seen_cues.add(cue_key)
+
+        path = first_path(
+            cue,
+            ("file", "path", "audio_path", "output"),
+            f"SFX cue {index}",
         )
         require_file(path, f"SFX cue {index}", MIN_AUDIO_BYTES)
+
         info = probe(path)
         if not info["has_audio"]:
-            raise RuntimeError(f"SFX cue {index} has no audio")
-        checksum = sha256_file(path)
+            raise RuntimeError(f"SFX cue {index} has no audio stream")
 
-        if cue.get("sha256") and cue["sha256"] != checksum:
-            raise RuntimeError(f"SFX cue checksum mismatch: {index}")
+        checksum = sha256_file(path)
+        declared = cue.get("sha256") or cue.get("audio_sha256")
+        if declared and declared != checksum:
+            raise RuntimeError(f"SFX cue SHA-256 mismatch: {index}")
+
+        duration = narration_row["duration"]
+        if start >= duration:
+            raise RuntimeError(f"SFX cue starts outside narration: {sid}")
 
         latest_start = max(
             0.0,
-            scene_duration - info["duration"] - SFX_END_MARGIN,
+            duration - info["duration"] - SFX_END_MARGIN,
         )
         actual_start = min(start, latest_start)
-        usable = min(info["duration"], scene_duration - actual_start)
+        usable_duration = min(info["duration"], duration - actual_start)
 
-        if usable <= 0:
+        if usable_duration <= 0:
             assets["warnings"].append({
                 "scene_id": sid,
-                "warning": "SFX does not fit narration duration",
+                "warning": "SFX duration does not fit narration",
             })
             continue
 
-        if actual_start < start:
+        if actual_start != start:
             assets["warnings"].append({
                 "scene_id": sid,
                 "declared_start": start,
@@ -676,19 +818,19 @@ def load_sound_assets(parts, narration):
             "path": path,
             "sha256": checksum,
             "start": actual_start,
-            "duration": usable,
+            "duration": usable_duration,
             "gain": min(1.0, gain * SFX_GAIN_MULTIPLIER),
-            "kind": str(cue.get("kind", "effect")),
+            "kind": kind,
         })
-        hashes[f"sfx_{index}"] = checksum
+        track_hashes[f"sfx_{index}"] = checksum
 
     for sid in assets["sfx"]:
-        assets["sfx"][sid].sort(key=lambda x: x["start"])
+        assets["sfx"][sid].sort(key=lambda item: item["start"])
 
     assets["fingerprint"] = digest_data({
-        "sound_manifest": sha256_file(SOUND_MANIFEST),
-        "sfx_validation": sha256_file(SFX_VALIDATION),
-        "track_hashes": hashes,
+        "sound_manifest_sha256": sha256_file(SOUND_MANIFEST),
+        "sfx_validation_sha256": sha256_file(SFX_VALIDATION),
+        "track_hashes": track_hashes,
         "gains": {
             "narration": NARRATION_GAIN,
             "music": MUSIC_GAIN,
@@ -699,9 +841,8 @@ def load_sound_assets(parts, narration):
     })
     return assets, manifest
 
-def scene_fingerprint(
-    photo, audio, sound_assets, mode, width, height, fps
-):
+
+def scene_fingerprint(photo, audio, sound_assets, mode, width, height, fps):
     return digest_data({
         "version": VERSION,
         "format": mode,
@@ -725,10 +866,7 @@ def previous_manifest(mode):
         required=False,
         default={},
     )
-    if (
-        not isinstance(data, dict)
-        or str(data.get("format", "")).lower() != mode
-    ):
+    if not isinstance(data, dict) or str(data.get("format", "")).lower() != mode:
         return {}
 
     rows = (
@@ -738,62 +876,52 @@ def previous_manifest(mode):
         or []
     )
     result = {}
-
     if isinstance(rows, list):
         for row in rows:
             if isinstance(row, dict) and row.get("scene_id"):
                 result[row["scene_id"]] = row
-
     return result
 
 
-def reusable_scene(
-    output, previous, signature,
-    width, height, fps, duration,
-):
-    if not isinstance(previous, dict):
+def reusable_scene(output, old_row, signature, width, height, fps, duration):
+    if not isinstance(old_row, dict):
         return None
-    if previous.get("status") != "completed":
+    if old_row.get("status") != "completed":
         return None
-    if previous.get("fingerprint") != signature:
+    if old_row.get("fingerprint") != signature:
         return None
     if not output.is_file() or output.stat().st_size < MIN_VIDEO_BYTES:
         return None
 
     try:
         checksum = sha256_file(output)
-        if previous.get("sha256") != checksum:
+        if old_row.get("sha256") != checksum:
             return None
-
         info = probe(output)
         if not info["has_video"] or not info["has_audio"]:
             return None
         if (info["width"], info["height"]) != (width, height):
             return None
         validate_fps(info, fps, output.name)
-
         if abs(info["duration"] - duration) > DURATION_TOLERANCE:
             return None
-
         return info, checksum
     except Exception:
         return None
 
 
-def build_audio_filter(
-    photo, audio, sound_assets, timeline_offset,
-):
-    command_inputs = [
+def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, height, fps):
+    inputs = [
         "-stream_loop", "-1", "-i", str(photo["video"]),
         "-i", str(audio["audio"]),
     ]
 
     filters = [
         (
-            f"[0:v]scale={CURRENT_WIDTH}:{CURRENT_HEIGHT}:"
+            f"[0:v]scale={width}:{height}:"
             "force_original_aspect_ratio=increase,"
-            f"crop={CURRENT_WIDTH}:{CURRENT_HEIGHT},setsar=1,"
-            f"fps={CURRENT_FPS},format=yuv420p[v]"
+            f"crop={width}:{height},setsar=1,fps={fps},"
+            "format=yuv420p[v]"
         ),
         (
             f"[1:a]aresample={AUDIO_RATE},"
@@ -802,10 +930,9 @@ def build_audio_filter(
         ),
     ]
 
-    mix_labels = ["[narr]"]
-    duck_inputs = []
-    input_index = 2
     duration = audio["duration"]
+    bed_labels = []
+    input_index = 2
 
     for category, gain in (
         ("music", MUSIC_GAIN),
@@ -816,60 +943,56 @@ def build_audio_filter(
             continue
 
         offset = timeline_offset % track["duration"]
-        command_inputs.extend([
+        inputs.extend([
             "-stream_loop", "-1",
             "-ss", f"{offset:.4f}",
             "-i", str(track["path"]),
         ])
 
-        label = category
+        label = f"bed{input_index}"
         filters.append(
-            f"[{input_index}:a]"
-            f"aresample={AUDIO_RATE},"
+            f"[{input_index}:a]aresample={AUDIO_RATE},"
             f"atrim=duration={duration:.4f},"
             "asetpts=PTS-STARTPTS,"
             f"volume={gain:.3f},"
-            "afade=t=in:st=0:d=0.35,"
-            f"afade=t=out:st={max(0.0, duration-0.45):.4f}:d=0.45"
+            "afade=t=in:st=0:d=0.25,"
+            f"afade=t=out:st={max(0.0, duration - 0.4):.4f}:d=0.4"
             f"[{label}]"
         )
-        mix_labels.append(f"[{label}]")
-        duck_inputs.append(label)
+        bed_labels.append(f"[{label}]")
         input_index += 1
 
+    sfx_labels = []
     for cue_index, cue in enumerate(
         sound_assets["sfx"].get(photo["scene_id"], [])
     ):
-        usable = min(
-            cue["duration"],
-            duration - cue["start"],
-        )
+        usable = min(cue["duration"], duration - cue["start"])
         if usable <= 0:
             continue
 
-        command_inputs.extend(["-i", str(cue["path"])])
+        inputs.extend(["-i", str(cue["path"])])
         label = f"sfx{cue_index}"
         delay = max(0, int(round(cue["start"] * 1000)))
         fade = min(0.4, max(0.05, usable * 0.2))
 
         filters.append(
-            f"[{input_index}:a]"
-            f"aresample={AUDIO_RATE},"
+            f"[{input_index}:a]aresample={AUDIO_RATE},"
             f"atrim=duration={usable:.4f},"
             "asetpts=PTS-STARTPTS,"
             f"volume={cue['gain']:.3f},"
-            f"afade=t=in:st=0:d={min(0.12, usable/3):.4f},"
-            f"afade=t=out:st={max(0.0, usable-fade):.4f}:d={fade:.4f},"
+            f"afade=t=in:st=0:d={min(0.12, usable / 3):.4f},"
+            f"afade=t=out:st={max(0.0, usable - fade):.4f}:d={fade:.4f},"
             f"adelay={delay}|{delay}[{label}]"
         )
-        mix_labels.append(f"[{label}]")
+        sfx_labels.append(f"[{label}]")
         input_index += 1
 
-    if duck_inputs:
-        labels = "".join(f"[{name}]" for name in duck_inputs)
+    mix_labels = ["[narr]"]
+
+    if bed_labels:
         filters.append(
-            f"{labels}amix=inputs={len(duck_inputs)}:"
-            "duration=longest:normalize=0,"
+            "".join(bed_labels)
+            + f"amix=inputs={len(bed_labels)}:duration=longest:normalize=0,"
             "volume=1.0[bed]"
         )
         filters.append(
@@ -877,28 +1000,32 @@ def build_audio_filter(
             "threshold=0.025:ratio=5:attack=180:release=700:"
             "makeup=1[ducked]"
         )
-        mix_labels = [
-            "[narr]" if label == "[narr]" else
-            "[ducked]" if label in {
-                f"[{name}]" for name in duck_inputs
-            } else label
-            for label in mix_labels
-        ]
+        mix_labels.append("[ducked]")
 
+    mix_labels.extend(sfx_labels)
     filters.append(
         "".join(mix_labels)
         + f"amix=inputs={len(mix_labels)}:"
-          "duration=first:dropout_transition=0:normalize=0,"
-        + f"alimiter=limit={MASTER_LIMIT:.3f}:level=disabled,"
-        + f"aresample={AUDIO_RATE}[aout]"
+        "duration=first:dropout_transition=0:normalize=0,"
+        f"alimiter=limit={MASTER_LIMIT:.3f}:level=disabled,"
+        f"aresample={AUDIO_RATE}[aout]"
     )
-
-    return command_inputs, filters
+    return inputs, filters
 
 
 def render_scene(
-    photo, audio, sound_assets, output, signature, old_row,
-    width, height, fps, timeline_offset, resume, skip_completed,
+    photo,
+    audio,
+    sound_assets,
+    output,
+    signature,
+    old_row,
+    width,
+    height,
+    fps,
+    timeline_offset,
+    resume,
+    skip_completed,
 ):
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -916,9 +1043,7 @@ def render_scene(
             log("REUSED:", photo["scene_id"])
             return cached[0], cached[1], True
 
-    temporary = output.with_name(
-        output.stem + ".rendering.mp4"
-    )
+    temporary = output.with_name(output.stem + ".rendering.mp4")
     temporary.unlink(missing_ok=True)
 
     inputs, filters = build_audio_filter(
@@ -926,13 +1051,13 @@ def render_scene(
         audio,
         sound_assets,
         timeline_offset,
+        width,
+        height,
+        fps,
     )
 
     command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         *inputs,
         "-filter_complex", ";".join(filters),
         "-map", "[v]",
@@ -953,114 +1078,46 @@ def render_scene(
 
     try:
         run(command, f"Render {photo['scene_id']}")
-
         require_file(temporary, "Rendered scene")
         info = probe(temporary)
 
         if not info["has_video"] or not info["has_audio"]:
             raise RuntimeError(
-                f"{photo['scene_id']}: output lacks audio/video"
+                f"{photo['scene_id']}: rendered output lacks audio/video"
             )
         if (info["width"], info["height"]) != (width, height):
             raise RuntimeError(
-                f"{photo['scene_id']}: output dimensions mismatch"
+                f"{photo['scene_id']}: rendered dimensions mismatch"
             )
-
         validate_fps(info, fps, photo["scene_id"])
 
         if abs(info["duration"] - audio["duration"]) > DURATION_TOLERANCE:
             raise RuntimeError(
-                f"{photo['scene_id']}: measured duration mismatch"
+                f"{photo['scene_id']}: rendered duration mismatch"
             )
 
         os.replace(temporary, output)
         return probe(output), sha256_file(output), False
-
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
 
 
-CURRENT_WIDTH = 0
-CURRENT_HEIGHT = 0
-CURRENT_FPS = 0
-CURRENT_ORDERED_PHOTOS = []
-CURRENT_SOUND_ASSETS = {}
-CURRENT_TIMELINE_OFFSETS = {}
-
-
-def make_render_row(
-    photo, audio, output, info, checksum, signature, reused,
-):
-    return {
-        "scene_id": photo["scene_id"],
-        "role": photo["role"],
-        "scene_type": photo["role"],
-        "part": photo["part"],
-        "scene": (
-            photo["local_scene"]
-            if photo["role"] == "main" else None
-        ),
-        "local_scene": (
-            photo["local_scene"]
-            if photo["role"] == "main" else None
-        ),
-        "global_scene": photo["global_scene"],
-        "photo_motion_global_scene": photo["global_scene"],
-        "status": "completed",
-        "source_photo_motion_video": relative(photo["video"]),
-        "source_audio": relative(audio["audio"]),
-        "source_photo_sha256": photo["video_sha256"],
-        "source_audio_sha256": audio["audio_sha256"],
-        "source_rendered_video": relative(output),
-        "video": relative(output),
-        "output": relative(output),
-        "duration": round(info["duration"], 5),
-        "width": CURRENT_WIDTH,
-        "height": CURRENT_HEIGHT,
-        "fps": CURRENT_FPS,
-        "fingerprint": signature,
-        "sha256": checksum,
-        "captions_burned": False,
-        "cache_reused": reused,
-        "audio_mix": {
-            "narration": True,
-            "music": bool(CURRENT_SOUND_ASSETS["music"]),
-            "ambient": bool(CURRENT_SOUND_ASSETS["ambient"]),
-            "sfx_count": len(
-                CURRENT_SOUND_ASSETS["sfx"].get(
-                    photo["scene_id"], []
-                )
-            ),
-            "global_timeline_offset": round(
-                CURRENT_TIMELINE_OFFSETS[photo["scene_id"]], 5
-            ),
-        },
-    }
-
-
-def concat_videos(paths, destination, width, height, fps):
+def concat_videos(paths, destination, width, height, fps, minimum=10000):
     if not paths:
         raise RuntimeError(f"No input clips for {destination.name}")
 
     for path in paths:
         require_file(path, f"Concat input {path.name}")
         info = probe(path)
-
         if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(
-                f"Concat input lacks audio/video: {path}"
-            )
+            raise RuntimeError(f"Concat input lacks audio/video: {path}")
         if (info["width"], info["height"]) != (width, height):
-            raise RuntimeError(
-                f"Concat dimensions mismatch: {path}"
-            )
+            raise RuntimeError(f"Concat dimensions mismatch: {path}")
         validate_fps(info, fps, path.name)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(
-        destination.stem + ".joining.mp4"
-    )
+    temporary = destination.with_name(destination.stem + ".joining.mp4")
     list_file = None
 
     try:
@@ -1072,27 +1129,19 @@ def concat_videos(paths, destination, width, height, fps):
             delete=False,
         ) as stream:
             list_file = Path(stream.name)
-
             for path in paths:
                 resolved = str(Path(path).resolve())
                 if "\n" in resolved or "\r" in resolved:
-                    raise RuntimeError(
-                        "Invalid newline in concat path"
-                    )
+                    raise RuntimeError("Invalid newline in concat path")
                 stream.write(
                     "file '" + resolved.replace("'", "'\\''") + "'\n"
                 )
 
         temporary.unlink(missing_ok=True)
-
         run(
             [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-y",
-                "-f", "concat",
-                "-safe", "0",
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "concat", "-safe", "0",
                 "-i", str(list_file),
                 "-r", str(fps),
                 "-fps_mode", "cfr",
@@ -1107,34 +1156,66 @@ def concat_videos(paths, destination, width, height, fps):
                 str(temporary),
             ],
             f"Join {destination.name}",
-            timeout=1800,
+            timeout=2400,
         )
 
-        require_file(temporary, "Joined part video", 10000)
+        require_file(temporary, "Joined video", minimum)
         info = probe(temporary)
-
         if not info["has_video"] or not info["has_audio"]:
-            raise RuntimeError(
-                f"Joined video lacks audio/video: {destination.name}"
-            )
+            raise RuntimeError(f"Joined video lacks audio/video: {destination}")
         if (info["width"], info["height"]) != (width, height):
-            raise RuntimeError(
-                f"Joined video dimensions mismatch: {destination.name}"
-            )
-
+            raise RuntimeError(f"Joined video dimensions mismatch: {destination}")
         validate_fps(info, fps, destination.name)
+
         os.replace(temporary, destination)
         return probe(destination)
-
     finally:
         if list_file:
             list_file.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)
 
 
+def make_render_row(photo, audio, output, info, checksum, signature, reused,
+                    width, height, fps, timeline_offset, sound_assets):
+    return {
+        "scene_id": photo["scene_id"],
+        "role": photo["role"],
+        "scene_type": photo["role"],
+        "part": photo["part"],
+        "scene": photo["local_scene"] if photo["role"] == "main" else None,
+        "local_scene": photo["local_scene"] if photo["role"] == "main" else None,
+        "global_scene": photo["global_scene"],
+        "photo_motion_global_scene": photo["global_scene"],
+        "status": "completed",
+        "source_photo_motion_video": relative(photo["video"]),
+        "source_audio": relative(audio["audio"]),
+        "source_photo_sha256": photo["video_sha256"],
+        "source_audio_sha256": audio["audio_sha256"],
+        "source_rendered_video": relative(output),
+        "video": relative(output),
+        "output": relative(output),
+        "path": relative(output),
+        "duration": round(info["duration"], 5),
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "fingerprint": signature,
+        "sha256": checksum,
+        "captions_burned": False,
+        "cache_reused": reused,
+        "audio_mix": {
+            "narration": True,
+            "music": bool(sound_assets["music"]),
+            "ambient": bool(sound_assets["ambient"]),
+            "sfx_count": len(sound_assets["sfx"].get(photo["scene_id"], [])),
+            "global_timeline_offset": round(timeline_offset, 5),
+        },
+    }
+
+
 def verify_rendered_scene(row, width, height, fps):
     path = safe_path(
-        row.get("video"),
+        row.get("video") or row.get("output") or row.get("path"),
         f"Rendered scene {row.get('scene_id')}",
     )
     require_file(path, "Rendered scene")
@@ -1142,7 +1223,7 @@ def verify_rendered_scene(row, width, height, fps):
     checksum = sha256_file(path)
     if checksum != row.get("sha256"):
         raise RuntimeError(
-            f"Rendered scene checksum mismatch: {row.get('scene_id')}"
+            f"Rendered scene SHA-256 mismatch: {row.get('scene_id')}"
         )
 
     info = probe(path)
@@ -1154,33 +1235,38 @@ def verify_rendered_scene(row, width, height, fps):
         raise RuntimeError(
             f"Rendered scene dimensions mismatch: {row.get('scene_id')}"
         )
-
     validate_fps(info, fps, str(row.get("scene_id")))
 
     if abs(info["duration"] - float(row.get("duration", 0))) > DURATION_TOLERANCE:
         raise RuntimeError(
             f"Rendered scene duration mismatch: {row.get('scene_id')}"
         )
-
     return info
 
 
 def build_manifest(
-    mode, fps, width, height, parts, scenes, part_numbers,
-    completed, part_rows, photo_hash, audio_hash,
-    sound_fingerprint, status, error=None,
+    mode,
+    fps,
+    width,
+    height,
+    parts,
+    part_numbers,
+    scene_counts,
+    completed,
+    part_rows,
+    photo_hash,
+    audio_hash,
+    sound_fingerprint,
+    status,
+    error=None,
 ):
     all_rows = [
         completed[item["scene_id"]]
         for item in CURRENT_ORDERED_PHOTOS
         if item["scene_id"] in completed
     ]
-    main_rows = [
-        row for row in all_rows if row["role"] == "main"
-    ]
-    extra_rows = [
-        row for row in all_rows if row["role"] != "main"
-    ]
+    main_rows = [row for row in all_rows if row["role"] == "main"]
+    extra_rows = [row for row in all_rows if row["role"] != "main"]
 
     result = {
         "status": status,
@@ -1194,13 +1280,13 @@ def build_manifest(
         "part_numbers": part_numbers,
         "first_part": part_numbers[0],
         "last_part": part_numbers[-1],
-        "parts": sorted(
-            part_rows,
-            key=lambda x: int(x["part"]),
-        ),
-        "scenes_per_part": scenes,
-        "expected_scene_count": parts * scenes,
+        "actual_scene_counts": {
+            str(part): scene_counts[part] for part in part_numbers
+        },
+        "scenes_per_part": None,
+        "expected_scene_count": sum(scene_counts.values()),
         "completed_count": len(main_rows),
+        "main_scene_count": len(main_rows),
         "all_completed_scene_count": len(all_rows),
         "extra_scene_count": len(extra_rows),
         "captions_burned": False,
@@ -1215,7 +1301,14 @@ def build_manifest(
         "scenes": main_rows,
         "extra_scenes": extra_rows,
         "all_completed_scenes": all_rows,
-        "part_outputs_only": True,
+        "parts": sorted(part_rows, key=lambda row: int(row["part"])),
+        "part_outputs_only": False,
+        "pre_caption_video": relative(PRE_CAPTION_VIDEO),
+        "pre_caption_video_sha256": (
+            sha256_file(PRE_CAPTION_VIDEO)
+            if PRE_CAPTION_VIDEO.is_file()
+            else None
+        ),
         "audio_mix": {
             "narration_gain": NARRATION_GAIN,
             "music_gain": MUSIC_GAIN,
@@ -1229,16 +1322,13 @@ def build_manifest(
             "sfx_tail_protection": True,
         },
     }
-
     if error:
         result["last_error"] = str(error)[:2000]
-
     return result
 
 
 def build_progress(completed, ordered, status, error=None):
     rows = []
-
     for item in ordered:
         record = completed.get(item["scene_id"])
         rows.append({
@@ -1264,117 +1354,89 @@ def build_progress(completed, ordered, status, error=None):
         "status": status,
         "total_scenes": len(ordered),
         "completed_scenes": sum(
-            x["status"] == "completed" for x in rows
+            row["status"] == "completed" for row in rows
         ),
         "jobs": rows,
     }
-
     if error:
         result["last_error"] = str(error)[:2000]
-
     return result
 
 
+CURRENT_ORDERED_PHOTOS = []
+
+
 def main():
-    global CURRENT_WIDTH, CURRENT_HEIGHT, CURRENT_FPS
-    global CURRENT_ORDERED_PHOTOS, CURRENT_SOUND_ASSETS
-    global CURRENT_TIMELINE_OFFSETS
+    global CURRENT_ORDERED_PHOTOS
 
     for command in ("ffmpeg", "ffprobe"):
         if not shutil.which(command):
-            raise RuntimeError(
-                f"Required command not installed: {command}"
-            )
+            raise RuntimeError(f"Required command not installed: {command}")
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
-
     mode = str(get_format(config)).strip().lower()
-    parts_count = positive_int(get_parts(config), "PARTS")
-    scenes = positive_int(get_scenes(config), "SCENES")
-    fps = positive_int(get_fps(config), "FPS")
-
     if mode not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
+
+    parts_count = positive_int(get_parts(config), "PARTS")
+    scene_minimum, scene_maximum = get_scenes_range(config)
+    fps = positive_int(get_fps(config), "FPS")
     if fps > 60:
         raise RuntimeError("FPS cannot exceed 60")
 
     width, height = (
-        (720, 1280)
-        if mode == "short"
-        else (1280, 720)
+        (720, 1280) if mode == "short" else (1280, 720)
     )
 
-    CURRENT_WIDTH = width
-    CURRENT_HEIGHT = height
-    CURRENT_FPS = fps
-
-    photo_data = read_json(
-        PHOTO_MANIFEST,
-        "Photo Motion manifest",
-    )
-    part_numbers = configured_part_numbers(
-        config,
+    photo_data = read_json(PHOTO_MANIFEST, "Photo Motion manifest")
+    part_numbers = selected_part_numbers(config, photo_data, parts_count)
+    scene_counts = validate_actual_scene_counts(
         photo_data,
-        parts_count,
-    )
-    expected_main_count = parts_count * scenes
-
-    photo_by_id, _, ordered_photos, photo_data = load_photo_map(
         part_numbers,
-        scenes,
+        scene_minimum,
+        scene_maximum,
+    )
+
+    photo_by_id, ordered_photos, photo_data = load_photo_map(
+        part_numbers,
+        scene_counts,
         mode,
         width,
         height,
         fps,
     )
+    CURRENT_ORDERED_PHOTOS = ordered_photos
 
-    audio_by_id, audio_data = load_audio_map(part_numbers)
+    audio_by_id, audio_data = load_audio_map(part_numbers, scene_counts)
     validate_photo_audio_pairing(photo_by_id, audio_by_id)
 
+    audio_manifest_hash = sha256_file(AUDIO_MANIFEST)
     sound_assets, sound_data = load_sound_assets(
         part_numbers,
         audio_by_id,
+        mode,
+        audio_manifest_hash,
     )
 
     if str(sound_data.get("format", "")).lower() != mode:
-        raise RuntimeError(
-            "Sound design FORMAT does not match Input"
-        )
+        raise RuntimeError("Sound design FORMAT does not match Input")
 
     photo_hash = sha256_file(PHOTO_MANIFEST)
-    audio_hash = sha256_file(AUDIO_MANIFEST)
-
-    if (
-        sound_data.get("source_audio_manifest_sha256")
-        and sound_data["source_audio_manifest_sha256"] != audio_hash
-    ):
-        raise RuntimeError(
-            "Sound design was generated from a different audio manifest"
-        )
-
     resume = config_bool(config, "RESUME_ENABLED", True)
-    skip_completed = config_bool(
-        config,
-        "SKIP_COMPLETED_SCENES",
-        True,
-    )
+    skip_completed = config_bool(config, "SKIP_COMPLETED_SCENES", True)
     previous = previous_manifest(mode)
 
     RENDER_DIR.mkdir(parents=True, exist_ok=True)
     PART_DIR.mkdir(parents=True, exist_ok=True)
+    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     timeline_offsets = {}
     total_duration = 0.0
-
     for photo in ordered_photos:
         sid = photo["scene_id"]
         timeline_offsets[sid] = total_duration
         total_duration += audio_by_id[sid]["duration"]
-
-    CURRENT_SOUND_ASSETS = sound_assets
-    CURRENT_TIMELINE_OFFSETS = timeline_offsets
-    CURRENT_ORDERED_PHOTOS = ordered_photos
 
     completed = {}
     part_rows = []
@@ -1390,12 +1452,12 @@ def main():
                 width,
                 height,
                 parts_count,
-                scenes,
                 part_numbers,
+                scene_counts,
                 completed,
                 part_rows,
                 photo_hash,
-                audio_hash,
+                audio_manifest_hash,
                 sound_assets["fingerprint"],
                 status,
                 error,
@@ -1403,46 +1465,36 @@ def main():
         )
         write_json(
             CHECKPOINT_FILE,
-            build_progress(
-                completed,
-                ordered_photos,
-                status,
-                error,
-            ),
+            build_progress(completed, ordered_photos, status, error),
         )
 
     log("RENDER VERSION:", VERSION)
-    log("FORMAT:", mode, "PARTS:", part_numbers)
+    log("FORMAT:", mode)
+    log("PARTS:", part_numbers)
+    log("SCENE RANGE:", f"{scene_minimum}-{scene_maximum}")
+    log("ACTUAL SCENE COUNTS:", scene_counts)
     log("RESOLUTION:", f"{width}x{height}", "FPS:", fps)
-    log("MAIN SCENES:", expected_main_count)
+    log("MAIN SCENES:", sum(scene_counts.values()))
     log("ALL ROLE CLIPS:", len(ordered_photos))
     log("MEASURED NARRATION SECONDS:", round(total_duration, 3))
-    log(
-        "MUSIC:", bool(sound_assets["music"]),
-        "AMBIENT:", bool(sound_assets["ambient"]),
-    )
-    log(
-        "SFX CUES:",
-        sum(len(x) for x in sound_assets["sfx"].values()),
-    )
+    log("MUSIC:", bool(sound_assets["music"]))
+    log("AMBIENT:", bool(sound_assets["ambient"]))
+    log("SFX CUES:", sum(len(items) for items in sound_assets["sfx"].values()))
 
     save_checkpoint()
 
     try:
         for part in part_numbers:
             part_photos = [
-                x for x in ordered_photos
-                if x["part"] == part
+                item for item in ordered_photos if item["part"] == part
             ]
             if not part_photos:
-                raise RuntimeError(f"Part {part} has no clips")
+                raise RuntimeError(f"Part {part} has no render clips")
 
             scene_paths = []
-
             for item in part_photos:
                 sid = item["scene_id"]
                 audio = audio_by_id[sid]
-
                 signature = scene_fingerprint(
                     item,
                     audio,
@@ -1453,18 +1505,11 @@ def main():
                     fps,
                 )
 
-                safe_id = "".join(
-                    ch if ch.isalnum() or ch in "-_" else "_"
-                    for ch in sid
-                ).strip("_")
-
-                if not safe_id:
-                    raise RuntimeError(f"Unsafe scene ID: {sid}")
-
+                global_number = item["global_scene"]
                 output = (
                     RENDER_DIR
                     / f"part_{part:02d}"
-                    / f"{safe_id}.mp4"
+                    / f"scene_{global_number:03d}.mp4"
                 )
 
                 info, checksum, reused = render_scene(
@@ -1481,7 +1526,6 @@ def main():
                     resume,
                     skip_completed,
                 )
-
                 new_renders += int(not reused)
                 reused_renders += int(reused)
 
@@ -1493,11 +1537,14 @@ def main():
                     checksum,
                     signature,
                     reused,
+                    width,
+                    height,
+                    fps,
+                    timeline_offsets[sid],
+                    sound_assets,
                 )
-
                 completed[sid] = row
                 scene_paths.append(output)
-
                 save_checkpoint()
 
                 log(
@@ -1506,7 +1553,6 @@ def main():
                 )
 
             part_output = PART_DIR / f"part_{part:02d}.mp4"
-
             part_info = concat_videos(
                 scene_paths,
                 part_output,
@@ -1516,19 +1562,14 @@ def main():
             )
 
             part_rows = [
-                x for x in part_rows
-                if int(x["part"]) != part
+                row for row in part_rows if int(row["part"]) != part
             ]
-
             part_rows.append({
                 "part": part,
                 "status": "completed",
-                "scene_count": sum(
-                    x["role"] == "main"
-                    for x in part_photos
-                ),
+                "scene_count": scene_counts[part],
                 "total_clip_count": len(part_photos),
-                "roles": [x["role"] for x in part_photos],
+                "roles": [item["role"] for item in part_photos],
                 "path": relative(part_output),
                 "output": relative(part_output),
                 "duration": round(part_info["duration"], 5),
@@ -1537,135 +1578,104 @@ def main():
                 "width": width,
                 "height": height,
             })
-
-            part_rows.sort(key=lambda x: int(x["part"]))
+            part_rows.sort(key=lambda row: int(row["part"]))
             save_checkpoint()
             log("PART COMPLETE:", relative(part_output))
 
         if len(completed) != len(ordered_photos):
             raise RuntimeError(
-                f"Rendered {len(completed)}/{len(ordered_photos)} scene clips"
+                f"Rendered {len(completed)}/{len(ordered_photos)} clips"
             )
 
         for item in ordered_photos:
             row = completed.get(item["scene_id"])
-
-            if (
-                not isinstance(row, dict)
-                or row.get("status") != "completed"
-            ):
+            if not isinstance(row, dict) or row.get("status") != "completed":
                 raise RuntimeError(
                     f"Render manifest row missing: {item['scene_id']}"
                 )
-
-            verify_rendered_scene(
-                row,
-                width,
-                height,
-                fps,
-            )
+            verify_rendered_scene(row, width, height, fps)
 
         if len(part_rows) != parts_count:
             raise RuntimeError(
-                f"Expected {parts_count} part videos, found {len(part_rows)}"
+                f"Expected {parts_count} Part videos, found {len(part_rows)}"
             )
 
         for index, part in enumerate(part_numbers):
             row = part_rows[index]
-
             if int(row["part"]) != part:
                 raise RuntimeError("Part output order mismatch")
 
-            path = safe_path(
-                row["path"],
-                f"Part {part} video",
-            )
-
+            path = safe_path(row["path"], f"Part {part} video")
             if sha256_file(path) != row["sha256"]:
-                raise RuntimeError(
-                    f"Part {part} checksum mismatch"
-                )
+                raise RuntimeError(f"Part {part} SHA-256 mismatch")
 
             info = probe(path)
-
-            if (info["width"], info["height"]) != (width, height):
-                raise RuntimeError(
-                    f"Part {part} resolution mismatch"
-                )
-
-            validate_fps(info, fps, f"part {part}")
-
             if not info["has_video"] or not info["has_audio"]:
-                raise RuntimeError(
-                    f"Part {part} lacks video/audio"
-                )
+                raise RuntimeError(f"Part {part} lacks video/audio")
+            if (info["width"], info["height"]) != (width, height):
+                raise RuntimeError(f"Part {part} dimensions mismatch")
+            validate_fps(info, fps, f"Part {part}")
 
         main_rows = [
-            completed[x["scene_id"]]
-            for x in ordered_photos
-            if x["role"] == "main"
+            completed[item["scene_id"]]
+            for item in ordered_photos
+            if item["role"] == "main"
         ]
         extra_rows = [
-            completed[x["scene_id"]]
-            for x in ordered_photos
-            if x["role"] != "main"
+            completed[item["scene_id"]]
+            for item in ordered_photos
+            if item["role"] != "main"
         ]
 
-        if len(main_rows) != expected_main_count:
+        if len(main_rows) != sum(scene_counts.values()):
             raise RuntimeError("Main scene render count mismatch")
-
         if len(extra_rows) != parts_count * 2:
-            raise RuntimeError(
-                "Hook/Suspense/Resolution render count mismatch"
-            )
+            raise RuntimeError("Hook/Suspense/Resolution count mismatch")
 
         for part in part_numbers:
             roles = [
-                x["role"]
-                for x in ordered_photos
-                if x["part"] == part
+                item["role"] for item in ordered_photos
+                if item["part"] == part
             ]
-            expected = expected_roles(part_numbers)[part]
-
             if roles.count("hook") != 1:
-                raise RuntimeError(
-                    f"Part {part}: Hook count mismatch"
-                )
-
-            if part != part_numbers[-1]:
-                if roles.count("suspense") != 1:
+                raise RuntimeError(f"Part {part}: Hook count mismatch")
+            if part == part_numbers[-1]:
+                if roles.count("resolution") != 1 or "suspense" in roles:
                     raise RuntimeError(
-                        f"Part {part}: Suspense count mismatch"
-                    )
-                if "resolution" in roles:
-                    raise RuntimeError(
-                        f"Non-final part {part} cannot have Resolution"
+                        f"Final Part {part}: Resolution/Suspense mismatch"
                     )
             else:
-                if roles.count("resolution") != 1:
+                if roles.count("suspense") != 1 or "resolution" in roles:
                     raise RuntimeError(
-                        f"Final part {part}: Resolution count mismatch"
-                    )
-                if "suspense" in roles:
-                    raise RuntimeError(
-                        "Final part cannot have Suspense"
+                        f"Part {part}: Suspense/Resolution mismatch"
                     )
 
-            for role in set(roles):
-                if role not in expected:
-                    raise RuntimeError(
-                        f"Part {part}: unexpected role {role}"
-                    )
-
-        stale_combined = [
-            OUT / "videos" / "pre_caption_render.mp4",
-            OUT / "videos" / "katha_lok_ai_final.mp4",
-            OUT / "videos" / "katha_lok_ai_short.mp4",
-            OUT / "videos" / "katha_lok_ai_full.mp4",
+        ordered_part_paths = [
+            safe_path(
+                next(
+                    row["path"] for row in part_rows
+                    if int(row["part"]) == part
+                ),
+                f"Part {part} output",
+            )
+            for part in part_numbers
         ]
 
-        for path in stale_combined:
-            path.unlink(missing_ok=True)
+        concat_videos(
+            ordered_part_paths,
+            PRE_CAPTION_VIDEO,
+            width,
+            height,
+            fps,
+            minimum=10000,
+        )
+
+        pre_caption_info = probe(PRE_CAPTION_VIDEO)
+        if not pre_caption_info["has_video"] or not pre_caption_info["has_audio"]:
+            raise RuntimeError("Pre-caption video lacks audio/video")
+        if (pre_caption_info["width"], pre_caption_info["height"]) != (width, height):
+            raise RuntimeError("Pre-caption video dimensions mismatch")
+        validate_fps(pre_caption_info, fps, "pre-caption video")
 
         final_manifest = build_manifest(
             mode,
@@ -1673,40 +1683,32 @@ def main():
             width,
             height,
             parts_count,
-            scenes,
             part_numbers,
+            scene_counts,
             completed,
             part_rows,
             photo_hash,
-            audio_hash,
+            audio_manifest_hash,
             sound_assets["fingerprint"],
             "completed",
         )
-
         final_manifest.update({
             "captions_burned": False,
-            "part_outputs_only": True,
             "rendered_new": new_renders,
             "rendered_reused": reused_renders,
             "main_scene_count": len(main_rows),
             "extra_scene_count": len(extra_rows),
-            "hook_count": sum(
-                x["role"] == "hook" for x in extra_rows
-            ),
-            "suspense_count": sum(
-                x["role"] == "suspense" for x in extra_rows
-            ),
-            "resolution_count": sum(
-                x["role"] == "resolution" for x in extra_rows
-            ),
-            "narration_duration_seconds": round(
-                total_duration, 5
-            ),
+            "hook_count": sum(row["role"] == "hook" for row in extra_rows),
+            "suspense_count": sum(row["role"] == "suspense" for row in extra_rows),
+            "resolution_count": sum(row["role"] == "resolution" for row in extra_rows),
+            "narration_duration_seconds": round(total_duration, 5),
+            "pre_caption_video_duration": round(pre_caption_info["duration"], 5),
+            "pre_caption_video_sha256": sha256_file(PRE_CAPTION_VIDEO),
             "audio_mix_summary": {
                 "music_included": bool(sound_assets["music"]),
                 "ambient_included": bool(sound_assets["ambient"]),
                 "sfx_cues_included": sum(
-                    len(x) for x in sound_assets["sfx"].values()
+                    len(items) for items in sound_assets["sfx"].values()
                 ),
                 "sfx_adjustments": len(sound_assets["warnings"]),
                 "narration_gain": NARRATION_GAIN,
@@ -1721,35 +1723,22 @@ def main():
                 "sfx_tail_protection": True,
             },
         })
-
         write_json(RENDER_MANIFEST, final_manifest)
 
-        saved = read_json(
-            RENDER_MANIFEST,
-            "Final render manifest",
-        )
+        saved = read_json(RENDER_MANIFEST, "Final render manifest")
         validate_completed(saved, "Final render manifest")
-
         if saved.get("part_numbers") != part_numbers:
-            raise RuntimeError(
-                "Final render manifest part range read-back mismatch"
-            )
+            raise RuntimeError("Final render manifest Part range mismatch")
         if len(saved.get("all_completed_scenes", [])) != len(ordered_photos):
-            raise RuntimeError(
-                "Final render manifest scene count read-back mismatch"
-            )
+            raise RuntimeError("Final render manifest scene count mismatch")
         if len(saved.get("parts", [])) != parts_count:
-            raise RuntimeError(
-                "Final render manifest part output count mismatch"
-            )
+            raise RuntimeError("Final render manifest Part output count mismatch")
+        if saved.get("pre_caption_video_sha256") != sha256_file(PRE_CAPTION_VIDEO):
+            raise RuntimeError("Pre-caption video read-back checksum mismatch")
 
         write_json(
             CHECKPOINT_FILE,
-            build_progress(
-                completed,
-                ordered_photos,
-                "completed",
-            ),
+            build_progress(completed, ordered_photos, "completed"),
         )
 
     except Exception as exc:
@@ -1760,13 +1749,12 @@ def main():
     log("=" * 60)
     log("RENDER AND AUDIO MIX COMPLETED")
     log("FORMAT:", mode, "PARTS:", part_numbers)
-    log("MAIN SCENES:", expected_main_count)
+    log("ACTUAL SCENE COUNTS:", scene_counts)
+    log("MAIN SCENES:", len(main_rows))
     log("ALL ROLE CLIPS:", len(ordered_photos))
-    log(
-        "NEW RENDERS:", new_renders,
-        "REUSED:", reused_renders,
-    )
+    log("NEW RENDERS:", new_renders, "REUSED:", reused_renders)
     log("PART OUTPUTS:", len(part_rows))
+    log("PRE-CAPTION VIDEO:", relative(PRE_CAPTION_VIDEO))
     log("MANIFEST:", relative(RENDER_MANIFEST))
     log("CHECKPOINT:", relative(CHECKPOINT_FILE))
     log("=" * 60)
@@ -1776,10 +1764,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        log(
-            "RENDER INTERRUPTED; "
-            "completed scene checkpoints retained."
-        )
+        log("RENDER INTERRUPTED; completed scene checkpoints retained.")
         sys.exit(130)
     except Exception as exc:
         log("RENDER FAILED:", str(exc))
