@@ -1942,11 +1942,26 @@ def make_story(
         part["main_scene_count"] for part in story_parts
     ]
 
-    if len(all_scenes) > MAX_TOTAL_SCENES:
+    if len(all_scenes) != sum(actual_counts):
         raise RuntimeError(
-            f"Final plan contains {len(all_scenes)} Main Scenes; "
-            f"limit is {MAX_TOTAL_SCENES}."
+            "Actual Main Scene counts do not match the generated Scene list."
         )
+
+    if not isinstance(policy, dict):
+        policy = {}
+
+    policy.update({
+        "actual_parts": len(story_parts),
+        "parts_count": len(story_parts),
+        "selected_parts": len(story_parts),
+        "actual_scene_counts": list(actual_counts),
+        "total_scenes": len(all_scenes),
+        "total_main_scenes": len(all_scenes),
+    })
+
+    write_json(POLICY_FILE, policy)
+
+    if len(all_scenes) > MAX_TOTAL_SCENES:
 
     result = {
         "version": VERSION,
