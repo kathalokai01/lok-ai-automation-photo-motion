@@ -584,37 +584,41 @@ def get_selected_model() -> str:
 
 def get_configured_model_order() -> list[str]:
     data = read_json(MODEL_FILE) or {}
-    candidates = []
-
-    selected = clean(data.get("model"))
-    if selected:
-        candidates.append(selected)
 
     configured = data.get("fallback_order", [])
-    if isinstance(configured, list):
-        candidates.extend(configured)
+    if not isinstance(configured, list):
+        configured = []
 
-    env_fallbacks = os.environ.get("GEMINI_MODEL_FALLBACKS", "")
-    candidates.extend(re.split(r"[,;]", env_fallbacks))
+    env_fallbacks = re.split(
+        r"[,;]",
+        os.environ.get("GEMINI_MODEL_FALLBACKS", ""),
+    )
 
-    result = []
-    for item in candidates:
-        model = clean(item)
+    ordered = []
+    for item in configured + env_fallbacks:
+        model_name = clean(item)
 
         if (
-            model
-            and re.fullmatch(r"[A-Za-z0-9._-]+", model)
-            and model not in result
+            model_name
+            and re.fullmatch(r"[A-Za-z0-9._-]+", model_name)
+            and model_name not in ordered
         ):
-            result.append(model)
+            ordered.append(model_name)
 
-    if not result:
+    selected = clean(data.get("model"))
+
+    if selected in ordered:
+        ordered = ordered[ordered.index(selected):]
+    elif selected and re.fullmatch(r"[A-Za-z0-9._-]+", selected):
+        ordered.insert(0, selected)
+
+    if not ordered:
         raise RuntimeError(
-            "No configured Gemini model or fallback model is available."
+            "No configured Gemini model or fallback is available. "
+            "Set GEMINI_MODEL_FALLBACKS in GitHub Repository Variables."
         )
 
-    return result
-
+    return ordered
 
 def save_selected_model(model: str, reason: str = "") -> None:
     data = read_json(MODEL_FILE) or {}
