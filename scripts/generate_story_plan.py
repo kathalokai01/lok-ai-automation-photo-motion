@@ -31,7 +31,9 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v14-restored-public-api-variable-scenes"
+VERSION = "story-plan-v15-verifier-contract-alignment"
+MAPPING_VERSION = 15
+
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
 MAX_TOTAL_MAIN_SCENES = 1000
@@ -284,7 +286,10 @@ def select_beat(
     return beats[max(0, min(position, len(beats) - 1))]
 
 
-def _coerce_scene_range(config: dict, scenes_per_part: Any) -> tuple[int, int]:
+def _coerce_scene_range(
+    config: dict,
+    scenes_per_part: Any,
+) -> tuple[int, int]:
     configured = get_scenes_range(config)
 
     if isinstance(scenes_per_part, (tuple, list)):
@@ -701,6 +706,9 @@ def build_plan(
             "suspense_scene": suspense,
             "resolution_scene": resolution,
             "extra_scenes": extras,
+            "hook_required": True,
+            "suspense_required": not final_part,
+            "final_resolution": final_part,
         })
 
         all_extra.extend(extras)
@@ -714,7 +722,7 @@ def build_plan(
         "scenes_max": scenes_max,
         "part_texts": [clean_text(item) for item in source_parts],
         "actual_scene_counts": [len(group) for group in scene_groups],
-        "mapping_version": 14,
+        "mapping_version": MAPPING_VERSION,
     }
 
     source_fingerprint = fingerprint(source_payload)
@@ -722,7 +730,8 @@ def build_plan(
     plan = {
         "version": VERSION,
         "script_version": VERSION,
-        "status": "completed",
+        "mapping_version": MAPPING_VERSION,
+        "status": "planned",
         "format": mode,
         "topic": clean_text(topic),
         "parts_count": parts_count,
@@ -737,11 +746,16 @@ def build_plan(
         "total_suspense_scenes": max(0, parts_count - 1),
         "total_resolution_scenes": 1,
         "total_extra_scenes": len(all_extra),
+        "scene_order": "hook_then_main_then_suspense_or_resolution",
+        "main_scene_order": "part_then_scene",
         "parts": parts,
         "scenes": all_main,
         "extra_scenes": all_extra,
         "part_distribution": distribution,
         "source": {
+            "api_calls": 0,
+            "planning_mode": "final_corrected_story",
+            "story_text_provided": True,
             "story_word_count": word_count(story_text),
             "story_sha256": sha256_text(clean_text(story_text)),
         },
@@ -770,8 +784,8 @@ def validate_plan(
     if not isinstance(plan, dict):
         raise RuntimeError("Story Plan is not an object.")
 
-    if plan.get("status") != "completed":
-        raise RuntimeError("Story Plan status is not completed.")
+    if plan.get("status") != "planned":
+        raise RuntimeError("Story Plan status is not planned.")
 
     if clean_text(plan.get("format")).lower() != clean_text(format_type).lower():
         raise RuntimeError("Story Plan FORMAT mismatch.")
@@ -781,6 +795,18 @@ def validate_plan(
 
     if int(plan.get("parts_count", -1)) != int(parts_count):
         raise RuntimeError("Story Plan PARTS count mismatch.")
+
+    if clean_text(plan.get("script_version")) != VERSION:
+        raise RuntimeError("Story Plan script version mismatch.")
+
+    if int(plan.get("mapping_version", -1)) != MAPPING_VERSION:
+        raise RuntimeError("Story Plan mapping version mismatch.")
+
+    if plan.get("scene_order") != "hook_then_main_then_suspense_or_resolution":
+        raise RuntimeError("Story Plan scene order is invalid.")
+
+    if plan.get("main_scene_order") != "part_then_scene":
+        raise RuntimeError("Story Plan Main Scene order is invalid.")
 
     if isinstance(scenes_range, (tuple, list)):
         minimum, maximum = int(scenes_range[0]), int(scenes_range[1])
@@ -804,6 +830,9 @@ def validate_plan(
         if int(part.get("part", -1)) != part_number:
             raise RuntimeError(f"Part {part_number} numbering mismatch.")
 
+        if clean_text(part.get("part_id")) != f"part_{part_number:02d}":
+            raise RuntimeError(f"Part {part_number} ID mismatch.")
+
         narration = clean_text(part.get("narration"))
         scenes = part.get("scenes")
 
@@ -814,6 +843,26 @@ def validate_plan(
             raise RuntimeError(
                 f"Part {part_number} Scene count is outside "
                 f"{minimum}-{maximum}."
+            )
+
+        if part.get("main_scene_count") != len(scenes):
+            raise RuntimeError(
+                f"Part {part_number} Main Scene count mismatch."
+            )
+
+        final_part = part_number == len(parts)
+
+        if part.get("hook_required") is not True:
+            raise RuntimeError(f"Part {part_number} Hook requirement mismatch.")
+
+        if part.get("suspense_required") is not (not final_part):
+            raise RuntimeError(
+                f"Part {part_number} Suspense requirement mismatch."
+            )
+
+        if part.get("final_resolution") is not final_part:
+            raise RuntimeError(
+                f"Part {part_number} Resolution requirement mismatch."
             )
 
         part_anchors = []
@@ -829,6 +878,40 @@ def validate_plan(
 
             if scene.get("role") != "main":
                 raise RuntimeError(f"Invalid Main Scene role: {expected_id}.")
+
+            if scene.get("part") != part_number:
+                raise RuntimeError(f"Main Scene Part mismatch: {expected_id}.")
+
+            if scene.get("scene") != scene_number:
+                raise RuntimeError(f"Main Scene number mismatch: {expected_id}.")
+
+            if not clean_text(scene.get("beat")):
+                raise RuntimeError(f"Main Scene beat is missing: {expected_id}.")
+
+            if not clean_text(scene.get("beat_description")):
+                raise RuntimeError(
+                    f"Main Scene beat description is missing: {expected_id}."
+                )
+
+            if not clean_text(scene.get("purpose")):
+                raise RuntimeError(
+                    f"Main Scene purpose is missing: {expected_id}."
+                )
+
+            if not clean_text(scene.get("continuity_rule")):
+                raise RuntimeError(
+                    f"Main Scene continuity rule is missing: {expected_id}."
+                )
+
+            if not clean_text(scene.get("invention_policy")):
+                raise RuntimeError(
+                    f"Main Scene invention policy is missing: {expected_id}."
+                )
+
+            if not clean_text(scene.get("visual_policy")):
+                raise RuntimeError(
+                    f"Main Scene visual policy is missing: {expected_id}."
+                )
 
             anchor = clean_text(scene.get("story_anchor"))
 
@@ -846,8 +929,6 @@ def validate_plan(
             raise RuntimeError(
                 f"Main Scenes do not reconstruct Part {part_number}."
             )
-
-        final_part = part_number == len(parts)
 
         expected_roles = (
             ("hook_scene", "hook", True),
@@ -880,8 +961,55 @@ def validate_plan(
             if record.get("role") != role:
                 raise RuntimeError(f"Invalid extra Scene role: {expected_id}.")
 
-            if not clean_text(record.get("story_anchor")):
-                raise RuntimeError(f"Empty extra Scene anchor: {expected_id}.")
+            if record.get("kind") != role:
+                raise RuntimeError(f"Invalid extra Scene kind: {expected_id}.")
+
+            if record.get("part") != part_number:
+                raise RuntimeError(f"Invalid extra Scene Part: {expected_id}.")
+
+            if record.get("scene") is not None:
+                raise RuntimeError(f"Extra Scene number must be null: {expected_id}.")
+
+            if record.get("global_scene_number") is not None:
+                raise RuntimeError(
+                    f"Extra Scene global number must be null: {expected_id}."
+                )
+
+            if record.get("separate_from_main_scenes") is not True:
+                raise RuntimeError(
+                    f"Extra Scene must be separate: {expected_id}."
+                )
+
+            if record.get("main_scene_numbering_affected") is not False:
+                raise RuntimeError(
+                    f"Extra Scene must not affect Main numbering: {expected_id}."
+                )
+
+            if record.get("is_final_part") is not final_part:
+                raise RuntimeError(
+                    f"Extra Scene final-Part flag mismatch: {expected_id}."
+                )
+
+            if record.get("source_format") != clean_text(format_type).lower():
+                raise RuntimeError(
+                    f"Extra Scene format mismatch: {expected_id}."
+                )
+
+            for required_field in (
+                "title",
+                "beat",
+                "beat_description",
+                "purpose",
+                "story_anchor",
+                "instruction",
+                "continuity_rule",
+                "invention_policy",
+                "visual_policy",
+            ):
+                if not clean_text(record.get(required_field)):
+                    raise RuntimeError(
+                        f"Extra Scene {expected_id} missing {required_field}."
+                    )
 
             if expected_id in all_extra_ids or expected_id in all_main_ids:
                 raise RuntimeError(f"Duplicate extra Scene ID: {expected_id}")
@@ -899,7 +1027,9 @@ def validate_plan(
 
         if not final_part:
             if clean_text(part["suspense_scene"]["story_anchor"]) != part_anchors[-1]:
-                raise RuntimeError(f"Part {part_number} Suspense anchor mismatch.")
+                raise RuntimeError(
+                    f"Part {part_number} Suspense anchor mismatch."
+                )
         else:
             if clean_text(part["resolution_scene"]["story_anchor"]) != part_anchors[-1]:
                 raise RuntimeError("Final Resolution anchor mismatch.")
@@ -907,10 +1037,19 @@ def validate_plan(
         main_count += len(scenes)
 
     rebuilt = clean_text(" ".join(all_anchors))
-    source = plan.get("source", {})
+    source = plan.get("source")
 
     if not isinstance(source, dict):
         raise RuntimeError("Story Plan source metadata is invalid.")
+
+    if source.get("api_calls") != 0:
+        raise RuntimeError("Story planning must not make external API calls.")
+
+    if source.get("planning_mode") != "final_corrected_story":
+        raise RuntimeError("Story Plan was not built from corrected story.")
+
+    if source.get("story_text_provided") is not True:
+        raise RuntimeError("Complete corrected story text is not recorded.")
 
     if source.get("story_word_count") != word_count(rebuilt):
         raise RuntimeError("Story Plan source word count mismatch.")
@@ -921,9 +1060,12 @@ def validate_plan(
     if plan.get("total_main_scenes") != main_count:
         raise RuntimeError("Story Plan Main Scene count mismatch.")
 
-    if plan.get("actual_scene_counts") != [
-        len(part["scenes"]) for part in parts
-    ]:
+    if plan.get("total_scenes") != main_count:
+        raise RuntimeError("Story Plan total Scene count mismatch.")
+
+    expected_counts = [len(part["scenes"]) for part in parts]
+
+    if plan.get("actual_scene_counts") != expected_counts:
         raise RuntimeError("Story Plan actual Scene counts mismatch.")
 
     if plan.get("total_hook_scenes") != parts_count:
@@ -935,10 +1077,25 @@ def validate_plan(
     if plan.get("total_resolution_scenes") != 1:
         raise RuntimeError("Story Plan Resolution count mismatch.")
 
+    if plan.get("total_extra_scenes") != len(all_extra_ids):
+        raise RuntimeError("Story Plan extra Scene count mismatch.")
+
+    if plan.get("scenes_min") != minimum:
+        raise RuntimeError("Story Plan minimum SCENES mismatch.")
+
+    if plan.get("scenes_max") != maximum:
+        raise RuntimeError("Story Plan maximum SCENES mismatch.")
+
+    if plan.get("total_parts") != parts_count:
+        raise RuntimeError("Story Plan total Parts mismatch.")
+
     payload = plan.get("source_payload")
 
     if not isinstance(payload, dict):
         raise RuntimeError("Story Plan source payload is missing.")
+
+    if payload.get("mapping_version") != MAPPING_VERSION:
+        raise RuntimeError("Story Plan source mapping version mismatch.")
 
     if plan.get("source_fingerprint") != fingerprint(payload):
         raise RuntimeError("Story Plan source fingerprint mismatch.")
@@ -1190,6 +1347,7 @@ def main() -> None:
 
     log("STORY PLAN: SUCCESS")
     log("Version:", VERSION)
+    log("Mapping version:", MAPPING_VERSION)
     log("Format:", mode)
     log("Final title:", title)
     log("Actual PARTS:", parts_count)
