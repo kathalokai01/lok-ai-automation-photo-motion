@@ -25,6 +25,8 @@ jobs:
 
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+      GEMINI_MODEL_FALLBACKS: ${{ vars.GEMINI_MODEL_FALLBACKS }}
 
       FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
       FISH_AUDIO_API_KEY: ${{ secrets.FISH_AUDIO_API_KEY }}
@@ -598,6 +600,7 @@ jobs:
         run: python scripts/generate_tts.py
 
       - name: Generate background music
+
         shell: bash
         run: |
           set -euo pipefail
