@@ -67,7 +67,26 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
+
+      # Restore caches before checking or installing tools.
+      - name: Restore Python environment cache
+        id: python-cache
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-${{ runner.arch }}-python311-${{ hashFiles('requirements.txt') }}-torch-cpu-v1
+
+      - name: Restore Hindi fonts cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/fonts/katha-caption
+          key: ${{ runner.os }}-${{ runner.arch }}-hindi-fonts-v5
+
+      - name: Restore FFmpeg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/katha-photo-motion/ffmpeg-bin
+          key: ${{ runner.os }}-${{ runner.arch }}-ffmpeg-v1
 
       - name: Validate repository files and configuration
         shell: bash
@@ -384,35 +403,126 @@ jobs:
 
           echo "Checkpoint restore scan completed."
 
-      - name: Install FFmpeg and Hindi font tools
+      - name: Check and install only missing system tools
         shell: bash
         run: |
           set -euo pipefail
 
-          sudo apt-get update
-          sudo apt-get install -y \
-            ffmpeg zip unzip fontconfig \
-            fonts-noto-core fonts-noto-extra
+          CACHE_BIN="$HOME/.cache/katha-photo-motion/ffmpeg-bin"
+          mkdir -p "$CACHE_BIN"
 
-          ffmpeg -version
-          ffprobe -version
+          if [ -x "$CACHE_BIN/ffmpeg" ] &&
+             [ -x "$CACHE_BIN/ffprobe" ] &&
+             "$CACHE_BIN/ffmpeg" -version >/dev/null 2>&1 &&
+             "$CACHE_BIN/ffprobe" -version >/dev/null 2>&1; then
+            echo "VALID FFmpeg CACHE REUSED"
+            echo "$CACHE_BIN" >> "$GITHUB_PATH"
+          else
+            rm -f "$CACHE_BIN/ffmpeg" "$CACHE_BIN/ffprobe"
+          fi
 
-          fc-cache -f
-          fc-match "Noto Sans Devanagari"
-          fc-match "Mukta"
-          fc-match "Hind"
+          missing_packages=()
 
-      - name: Install Python dependencies
+          if ! command -v ffmpeg >/dev/null 2>&1 &&
+             [ ! -x "$CACHE_BIN/ffmpeg" ]; then
+            missing_packages+=(ffmpeg)
+          fi
+
+          if ! command -v ffprobe >/dev/null 2>&1 &&
+             [ ! -x "$CACHE_BIN/ffprobe" ]; then
+            missing_packages+=(ffmpeg)
+          fi
+
+          command -v zip >/dev/null 2>&1 || missing_packages+=(zip)
+          command -v unzip >/dev/null 2>&1 || missing_packages+=(unzip)
+
+          if ! command -v fc-cache >/dev/null 2>&1 ||
+             ! command -v fc-match >/dev/null 2>&1 ||
+             ! command -v fc-scan >/dev/null 2>&1; then
+            missing_packages+=(fontconfig)
+          fi
+
+          if [ "${#missing_packages[@]}" -gt 0 ]; then
+            mapfile -t unique_packages < <(
+              printf '%s\n' "${missing_packages[@]}" | sort -u
+            )
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              "${unique_packages[@]}"
+          else
+            echo "SYSTEM TOOLS ALREADY AVAILABLE"
+          fi
+
+          if [ ! -x "$CACHE_BIN/ffmpeg" ] ||
+             ! "$CACHE_BIN/ffmpeg" -version >/dev/null 2>&1; then
+            SYSTEM_FFMPEG="$(command -v ffmpeg || true)"
+            SYSTEM_FFPROBE="$(command -v ffprobe || true)"
+
+            if [ -n "$SYSTEM_FFMPEG" ] && [ -n "$SYSTEM_FFPROBE" ]; then
+              cp "$SYSTEM_FFMPEG" "$CACHE_BIN/ffmpeg"
+              cp "$SYSTEM_FFPROBE" "$CACHE_BIN/ffprobe"
+              chmod 755 "$CACHE_BIN/ffmpeg" "$CACHE_BIN/ffprobe"
+            fi
+          fi
+
+          if [ -x "$CACHE_BIN/ffmpeg" ] &&
+             [ -x "$CACHE_BIN/ffprobe" ] &&
+             "$CACHE_BIN/ffmpeg" -version >/dev/null 2>&1 &&
+             "$CACHE_BIN/ffprobe" -version >/dev/null 2>&1; then
+            echo "$CACHE_BIN" >> "$GITHUB_PATH"
+          else
+            command -v ffmpeg
+            command -v ffprobe
+          fi
+
+          command -v zip
+          command -v unzip
+          fc-cache --version
+          fc-match "sans-serif" >/dev/null
+
+      - name: Restore or install Python dependencies
         shell: bash
         run: |
           set -euo pipefail
 
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install torch \
-            --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -r requirements.txt
+          VENV="$GITHUB_WORKSPACE/.venv"
+          STAMP="$VENV/.katha-dependency-signature"
+          REQUIREMENTS_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
+          SIGNATURE="python311|torch-cpu-v1|${REQUIREMENTS_HASH}"
 
-          python - <<'PY'
+          valid_environment() {
+            [ -x "$VENV/bin/python" ] &&
+            [ -s "$STAMP" ] &&
+            [ "$(cat "$STAMP")" = "$SIGNATURE" ] &&
+            "$VENV/bin/python" - <<'PY'
+          import importlib
+
+          modules = (
+              "cv2", "edge_tts", "gradio_client",
+              "huggingface_hub", "numpy", "PIL",
+              "requests", "torch", "transformers",
+          )
+
+          for module in modules:
+              importlib.import_module(module)
+          PY
+          }
+
+          if valid_environment; then
+            echo "VALID PYTHON ENVIRONMENT CACHE REUSED"
+          else
+            rm -rf "$VENV"
+            python -m venv "$VENV"
+
+            "$VENV/bin/python" -m pip install \
+              --upgrade pip setuptools wheel
+
+            "$VENV/bin/python" -m pip install torch \
+              --index-url https://download.pytorch.org/whl/cpu
+
+            "$VENV/bin/python" -m pip install -r requirements.txt
+
+            "$VENV/bin/python" - <<'PY'
           import cv2
           import edge_tts
           import gradio_client
@@ -431,18 +541,49 @@ jobs:
           print("Transformers:", transformers.__version__)
           PY
 
-      - name: Install Hindi caption fonts
+            printf '%s' "$SIGNATURE" > "$STAMP"
+          fi
+
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+          "$VENV/bin/python" -m pip check
+          echo "PYTHON ENVIRONMENT READY"
+
+      - name: Validate and install only missing Hindi fonts
         shell: bash
         run: |
           set -euo pipefail
 
+          mkdir -p "$HOME/.local/share/fonts/katha-caption"
+
           python scripts/install_caption_fonts.py
-          fc-cache -f
 
           fc-match "Noto Sans Devanagari"
           fc-match "Mukta"
           fc-match "Hind"
           fc-match "Tiro Devanagari Hindi"
+
+          python - <<'PY'
+          import subprocess
+
+          for family in (
+              "Noto Sans Devanagari",
+              "Mukta",
+              "Hind",
+              "Tiro Devanagari Hindi",
+          ):
+              result = subprocess.run(
+                  ["fc-match", "-f", "%{file}", family],
+                  capture_output=True,
+                  text=True,
+                  check=True,
+              )
+              path = result.stdout.strip()
+              if not path:
+                  raise SystemExit(f"Font unavailable: {family}")
+              print(f"FONT AVAILABLE: {family} -> {path}")
+
+          print("HINDI FONT VALIDATION PASSED")
+          PY
 
       - name: Run strict Photo Motion preflight
         shell: bash
@@ -600,7 +741,6 @@ jobs:
         run: python scripts/generate_tts.py
 
       - name: Generate background music
-
         shell: bash
         run: |
           set -euo pipefail
@@ -748,6 +888,7 @@ jobs:
                   raise SystemExit(f"Corrupt ZIP member: {bad}")
 
               names = zf.namelist()
+
               if not names or len(names) != len(set(names)):
                   raise SystemExit("ZIP is empty or contains duplicate members.")
 
