@@ -44,7 +44,7 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
 CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v31-audible-resumable-flow"
+VERSION = "photo-motion-sound-design-v32-ambient-manifest-consistent"
 RATE = 22050
 SFX_SECONDS = 5.0
 MIN_AUDIO_BYTES = 100
@@ -545,11 +545,25 @@ def make_ambient(total_duration, scene_records, old_record, source_sig):
                 if p.is_file() and p.suffix.lower() in extensions
             ))
     if not available:
-        return {
-            "status": "skipped",
-            "reason": "No real ambient audio asset is available.",
-            "requested_environment": [],
-        }
+        # Keep an enabled ambient track valid even when no external ambience
+        # file is bundled. This deterministic local fallback is resumable.
+        fallback = make_local_track(
+            AMBIENT_PATH,
+            total_duration + 3.0,
+            old_record,
+            source_sig,
+            "ambient_fallback",
+            lambda seconds: sfx_samples(
+                "weather", seconds, int(source_sig[:8], 16)
+            ),
+        )
+        fallback.update({
+            "generation": "local_deterministic_ambient_fallback",
+            "provider": "local_synthesis",
+            "reason": "No real ambient audio asset was available; local fallback used.",
+            "environment": [],
+        })
+        return fallback
 
     story_text = " ".join(
         str(value or "")
@@ -635,6 +649,7 @@ def make_ambient(total_duration, scene_records, old_record, source_sig):
         "environment": desired,
         "reused": False,
     }
+
 
 def record_identity(row):
     if not isinstance(row, dict):
@@ -883,7 +898,6 @@ def choose_sfx(scene_row, audio):
     if audio["role"] == "resolution" and any(word in text for word in resolution_words):
         return "chime"
     return None
-
 
 def build_timeline(ordered):
     offset = 0.0
@@ -1541,10 +1555,8 @@ def main():
             total_duration, scene_records, old_tracks.get("ambient"), source_sig
         )
     else:
-        tracks["ambient"] = {
-            "status": "skipped",
-            "reason": "Disabled in Input configuration.",
-        }
+        # Disabled tracks must be represented as null in the manifest.
+        tracks["ambient"] = None
 
     if enabled_tracks["sfx"]:
         for kind in SFX_TYPES:
@@ -1770,7 +1782,7 @@ def main():
     log("NARRATION SECONDS:", round(total_duration, 2))
     log("FLOW ROLE MUSIC SEGMENTS:", manifest["music_role_segment_count"])
     log("SFX CUES:", len(cues))
-    log("AMBIENT:", tracks.get("ambient", {}).get("status"))
+    log("AMBIENT:", (tracks.get("ambient") or {}).get("status", "disabled"))
     log("EXTERNAL API CALLS:", manifest["external_api_calls"])
     log("PAID SERVICES USED:", manifest["paid_services_used"])
     log("MANIFEST:", MANIFEST_PATH.relative_to(ROOT))
