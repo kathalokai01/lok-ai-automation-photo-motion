@@ -2287,13 +2287,15 @@ def main() -> None:
             f"Invalid SCENES range: {scenes_range}."
         )
 
-parts_min, parts_max = get_parts_range(config)
 
-parts_specification = (
-    str(parts_min)
-    if parts_min == parts_max
-    else f"{parts_min}-{parts_max}"
-)
+
+        parts_min, parts_max = get_parts_range(config)
+
+    parts_specification = (
+        str(parts_min)
+        if parts_min == parts_max
+        else f"{parts_min}-{parts_max}"
+    )
 
     source_fingerprint = fingerprint({
         "mode": mode,
