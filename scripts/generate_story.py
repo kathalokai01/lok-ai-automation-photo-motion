@@ -1962,7 +1962,11 @@ def make_story(
     write_json(POLICY_FILE, policy)
 
     if len(all_scenes) > MAX_TOTAL_SCENES:
-
+        raise RuntimeError(
+            f"Final plan contains {len(all_scenes)} Main Scenes; "
+            f"limit is {MAX_TOTAL_SCENES}."
+        )
+        
     result = {
         "version": VERSION,
         "status": "completed",
