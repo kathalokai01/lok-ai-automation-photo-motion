@@ -427,6 +427,7 @@ def load_narration(configured_parts, scenes_min, scenes_max, mode):
 
     return mapping, discovered_parts, actual_counts, role_counts
 
+
 def normalize_scene_counts(value, parts, label):
     if isinstance(value, list):
         if len(value) != parts:
@@ -548,6 +549,7 @@ def validate_sound_manifest(mode, parts, actual_counts, narration, audio_hash):
         raise RuntimeError("Sound-design tracks must be an object.")
 
     total_duration = sum(row["duration"] for row in narration.values())
+
     validated_tracks = {}
 
     for category in ("music", "ambient"):
