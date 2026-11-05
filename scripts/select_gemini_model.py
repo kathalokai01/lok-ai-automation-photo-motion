@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select configured Gemini models without changing their priority order."""
+"""Select Gemini models in configured priority order with safe fallbacks."""
 
 from __future__ import annotations
 
@@ -17,10 +17,26 @@ from typing import Any
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 OUTPUT_FILE = Path("output/config/selected_model.json")
-SELECTOR_VERSION = 4
+SELECTOR_VERSION = 5
 
 REQUEST_TIMEOUT = 45
 MAX_MODEL_PAGES = 20
+
+# Defaults use the model order previously supplied for this repository.
+# GitHub Repository Variables override these defaults.
+DEFAULT_PRIMARY_MODEL = "gemini-3.8-flash"
+
+DEFAULT_FALLBACK_MODELS = (
+    "gemini-4-argon",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+)
 
 
 def log(message: str) -> None:
@@ -59,7 +75,11 @@ def read_existing_selection() -> dict:
 
         return data if isinstance(data, dict) else {}
 
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
         log(f"Previous selection could not be read: {exc}")
         return {}
 
@@ -71,9 +91,9 @@ def previous_selection_is_successful(data: dict) -> bool:
     if data.get("status") != "selected":
         return False
 
-    selected_model = normalize_model(data.get("model"))
+    selected = normalize_model(data.get("model"))
 
-    if not selected_model:
+    if not selected:
         return False
 
     api_test = data.get("api_test")
@@ -82,20 +102,19 @@ def previous_selection_is_successful(data: dict) -> bool:
         if (
             api_test.get("status") == "passed"
             and normalize_model(api_test.get("model"))
-            == selected_model
+            == selected
         ):
             return True
 
-    tested_models = data.get("tested_models", [])
+    tested = data.get("tested_models", [])
 
-    if isinstance(tested_models, list):
-        for item in tested_models:
+    if isinstance(tested, list):
+        for item in tested:
             if not isinstance(item, dict):
                 continue
 
             if (
-                normalize_model(item.get("model"))
-                == selected_model
+                normalize_model(item.get("model")) == selected
                 and item.get("success") is True
             ):
                 return True
@@ -105,33 +124,56 @@ def previous_selection_is_successful(data: dict) -> bool:
 
 def configured_fallbacks(existing: dict) -> list[str]:
     """
-    Preserve the current priority:
-    1. GEMINI_MODEL, when explicitly configured.
-    2. GEMINI_MODEL_FALLBACKS, in its exact declared order.
-    3. Previously API-tested successful model, if not already listed.
+    Priority:
+    1. Explicit GEMINI_MODEL.
+    2. Explicit GEMINI_MODEL_FALLBACKS in declared order.
+    3. Repository's previously supplied default model order,
+       but only when the corresponding environment values are empty.
+    4. A previously API-tested model may be appended last.
 
-    No model is invented or silently substituted.
+    Runtime-selected models never replace the configured priority.
     """
 
-    result: list[str] = []
-
-    primary = normalize_model(
+    primary_env = normalize_model(
         os.environ.get("GEMINI_MODEL", "")
     )
-
-    if primary:
-        result.append(primary)
 
     raw_fallbacks = os.environ.get(
         "GEMINI_MODEL_FALLBACKS",
         "",
-    )
+    ).strip()
 
-    for item in re.split(r"[,;]", raw_fallbacks):
-        model = normalize_model(item)
+    result: list[str] = []
 
-        if model and model not in result:
-            result.append(model)
+    if primary_env:
+        result.append(primary_env)
+
+    if raw_fallbacks:
+        for item in re.split(r"[,;]", raw_fallbacks):
+            model = normalize_model(item)
+
+            if model and model not in result:
+                result.append(model)
+
+        # A configured primary without configured fallbacks
+        # still receives the repository's known fallback order.
+        if not result[1:]:
+            for model in DEFAULT_FALLBACK_MODELS:
+                if model not in result:
+                    result.append(model)
+
+    elif not primary_env:
+        # Both GitHub variables were empty in the failed run.
+        result.append(DEFAULT_PRIMARY_MODEL)
+
+        for model in DEFAULT_FALLBACK_MODELS:
+            if model not in result:
+                result.append(model)
+
+    else:
+        for model in DEFAULT_FALLBACK_MODELS:
+            if model not in result:
+                result.append(model)
 
     if previous_selection_is_successful(existing):
         previous = normalize_model(existing.get("model"))
@@ -146,10 +188,15 @@ def api_request(url: str) -> dict:
     api_key = os.environ.get(
         "GEMINI_API_KEY",
         "",
+    ).strip() or os.environ.get(
+        "GOOGLE_API_KEY",
+        "",
     ).strip()
 
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing.")
+        raise RuntimeError(
+            "GEMINI_API_KEY or GOOGLE_API_KEY is missing."
+        )
 
     request = urllib.request.Request(
         url,
@@ -164,7 +211,10 @@ def api_request(url: str) -> dict:
         request,
         timeout=REQUEST_TIMEOUT,
     ) as response:
-        raw = response.read().decode("utf-8")
+        raw = response.read().decode(
+            "utf-8",
+            errors="replace",
+        )
 
     data = json.loads(raw)
 
@@ -177,7 +227,7 @@ def api_request(url: str) -> dict:
 
 
 def discover_models() -> dict[str, dict]:
-    log("Checking available Gemini models.")
+    log("Checking API-accessible Gemini models.")
 
     available: dict[str, dict] = {}
     page_token = ""
@@ -200,7 +250,7 @@ def discover_models() -> dict[str, dict]:
 
         if not isinstance(models, list):
             raise ValueError(
-                "Gemini model discovery returned an invalid models list."
+                "Gemini API returned an invalid models list."
             )
 
         for item in models:
@@ -243,7 +293,7 @@ def discover_models() -> dict[str, dict]:
 
         if next_token in seen_tokens:
             raise RuntimeError(
-                "Gemini model discovery returned a repeated page token."
+                "Gemini API returned a repeated page token."
             )
 
         seen_tokens.add(next_token)
@@ -255,10 +305,12 @@ def discover_models() -> dict[str, dict]:
             f"{MAX_MODEL_PAGES} pages."
         )
 
-    log(f"Compatible Gemini models discovered: {len(available)}")
+    log(
+        "Compatible models discovered: "
+        + str(len(available))
+    )
 
     return available
-
 
 def atomic_save(data: dict) -> None:
     OUTPUT_FILE.parent.mkdir(
@@ -289,6 +341,7 @@ def atomic_save(data: dict) -> None:
     finally:
         temporary.unlink(missing_ok=True)
 
+
 def save_selection(
     model: str,
     details: dict,
@@ -307,7 +360,7 @@ def save_selection(
         "selected_at": datetime.now(
             timezone.utc
         ).isoformat(),
-        "selection_source": "explicit_configured_fallback",
+        "selection_source": "configured_priority_order",
         "fallback_order": fallback_order,
         "tested_models": (
             previous.get("tested_models", [])
@@ -318,7 +371,6 @@ def save_selection(
         "selector_version": SELECTOR_VERSION,
     }
 
-    # Keep API-test evidence only when it belongs to this same model.
     if previous_model == model:
         api_test = previous.get("api_test")
 
@@ -346,8 +398,8 @@ def reuse_previous(
         existing.get("model")
     )
 
-    # Reuse only when the previous successful model is still
-    # the highest-priority configured candidate.
+    # Reuse only if the old successful model is still first.
+    # Otherwise perform discovery and respect the current order.
     if not fallbacks or previous_model != fallbacks[0]:
         return False
 
@@ -361,23 +413,25 @@ def reuse_previous(
 
     atomic_save(existing)
 
-    log(f"Reusing previously API-tested model: {previous_model}")
-    log("No model discovery or generation test performed.")
+    log(
+        "Reusing previously API-tested model: "
+        + previous_model
+    )
+
+    log("Configured fallback order retained.")
 
     return True
 
 
 def main() -> None:
-    log("Starting strict Gemini model selection.")
+    log("Starting Gemini model selection.")
 
     existing = read_existing_selection()
     fallbacks = configured_fallbacks(existing)
 
     if not fallbacks:
         raise SystemExit(
-            "ERROR: No Gemini model is configured and no "
-            "previously API-tested successful model is available. "
-            "Set GEMINI_MODEL or GEMINI_MODEL_FALLBACKS."
+            "ERROR: No Gemini model candidates are configured."
         )
 
     log(
@@ -398,7 +452,7 @@ def main() -> None:
         )
 
         raise SystemExit(
-            f"Gemini model discovery failed: "
+            "Gemini model discovery failed: "
             f"HTTP {exc.code}: {body[:1000]}"
         ) from exc
 
@@ -411,9 +465,11 @@ def main() -> None:
         RuntimeError,
     ) as exc:
         raise SystemExit(
-            f"Gemini model discovery failed: "
+            "Gemini model discovery failed: "
             f"{type(exc).__name__}: {exc}"
         ) from exc
+
+    selected = None
 
     for position, model in enumerate(
         fallbacks,
@@ -425,7 +481,8 @@ def main() -> None:
 
         if not details:
             log(
-                f"Unavailable or incompatible: {model}"
+                "Unavailable or incompatible: "
+                + model
             )
             continue
 
@@ -436,15 +493,22 @@ def main() -> None:
             previous=existing,
         )
 
-        log("GEMINI MODEL SELECTED")
-        log("Model: " + selected["model"])
-        log("Generation test: not performed")
-        return
+        break
 
-    raise SystemExit(
-        "ERROR: None of the configured Gemini models "
-        "supports generateContent. No substitute model was added."
+    if selected is None:
+        raise SystemExit(
+            "ERROR: None of the configured Gemini models "
+            "supports generateContent. Check model availability "
+            "and API access."
+        )
+
+    log("GEMINI MODEL SELECTED")
+    log("Selected model: " + selected["model"])
+    log(
+        "Runtime fallback order: "
+        + " -> ".join(selected["fallback_order"])
     )
+    log("Generation test: deferred to story generation.")
 
 
 if __name__ == "__main__":
