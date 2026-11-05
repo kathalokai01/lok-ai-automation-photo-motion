@@ -42,7 +42,7 @@ PLAN_FILE = STORY_DIR / "story_plan.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 REPORT_FILE = STORY_DIR / "story_length_validation.json"
 
-REPORT_VERSION = "story-length-validation-v12-compatible-plan"
+REPORT_VERSION = "story-length-validation-v13-planned-contract"
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -457,8 +457,8 @@ def verify_plan(
     if not isinstance(plan, dict):
         fail("story_plan.json must contain a JSON object.")
 
-    if plan.get("status") != "completed":
-        fail("Story Plan status must be completed.")
+    if plan.get("status") != "planned":
+        fail("Story Plan status must be planned.")
 
     if normalize_format(plan.get("format")) != mode:
         fail("Story Plan FORMAT mismatch.")
@@ -545,7 +545,6 @@ def verify_plan(
         fail("Story Plan Parts list is invalid.")
 
     return plan_parts
-
 
 def verify_plan_part(
     plan_part: dict,
@@ -720,6 +719,7 @@ def verify_story_parts(
 
         scenes = part.get("scenes")
         expected_count = actual_counts[part_number - 1]
+
         plan_scenes = verify_plan_part(
             plan_parts[part_number - 1],
             part_number,
@@ -859,9 +859,7 @@ def verify_story_parts(
         fail("Top-level Scenes do not match ordered Part Scene records.")
 
     reconstructed = normalize_text(" ".join(flattened_text))
-    corrected = normalize_text(
-        story_text_from_parts(parts)
-    )
+    corrected = normalize_text(story_text_from_parts(parts))
 
     if reconstructed != corrected:
         fail("Flattened Part narration does not reconstruct complete story.")
