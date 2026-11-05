@@ -582,6 +582,52 @@ def get_selected_model() -> str:
     return model
 
 
+def get_configured_model_order() -> list[str]:
+    data = read_json(MODEL_FILE) or {}
+    candidates = []
+
+    selected = clean(data.get("model"))
+    if selected:
+        candidates.append(selected)
+
+    configured = data.get("fallback_order", [])
+    if isinstance(configured, list):
+        candidates.extend(configured)
+
+    env_fallbacks = os.environ.get("GEMINI_MODEL_FALLBACKS", "")
+    candidates.extend(re.split(r"[,;]", env_fallbacks))
+
+    result = []
+    for item in candidates:
+        model = clean(item)
+
+        if (
+            model
+            and re.fullmatch(r"[A-Za-z0-9._-]+", model)
+            and model not in result
+        ):
+            result.append(model)
+
+    if not result:
+        raise RuntimeError(
+            "No configured Gemini model or fallback model is available."
+        )
+
+    return result
+
+
+def save_selected_model(model: str, reason: str = "") -> None:
+    data = read_json(MODEL_FILE) or {}
+    data["model"] = model
+    data["runtime_fallback"] = {
+        "status": "selected",
+        "reason": reason,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    write_json(MODEL_FILE, data)
+
+
+
 def get_api_key() -> str:
     return (
         os.environ.get("GEMINI_API_KEY", "").strip()
