@@ -694,12 +694,6 @@ def call_model(
     *,
     max_tokens: int = MAX_TOKENS,
 ) -> dict:
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + urllib.parse.quote(model, safe="-._")
-        + ":generateContent"
-    )
-
     payload = {
         "contents": [
             {
@@ -714,94 +708,148 @@ def call_model(
         },
     }
 
-    errors = []
+    configured_models = get_configured_model_order()
 
-    for attempt in range(2):
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(
-                payload,
-                ensure_ascii=False,
-            ).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": api_key,
-            },
-            method="POST",
+    requested_model = clean(model)
+    if requested_model and requested_model not in configured_models:
+        configured_models.insert(0, requested_model)
+
+    failures = []
+
+    retryable_http = {
+        408, 429, 500, 502, 503, 504,
+    }
+
+    for model_index, candidate_model in enumerate(configured_models):
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            + urllib.parse.quote(candidate_model, safe="-._")
+            + ":generateContent"
         )
 
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=TIMEOUT,
-            ) as response:
-                response_data = json.loads(
-                    response.read().decode(
-                        "utf-8",
-                        errors="replace",
+        model_errors = []
+        model_succeeded = False
+
+        for attempt in range(2):
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key,
+                },
+                method="POST",
+            )
+
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=TIMEOUT,
+                ) as response:
+                    response_data = json.loads(
+                        response.read().decode(
+                            "utf-8",
+                            errors="replace",
+                        )
                     )
+
+                candidates = response_data.get("candidates") or []
+
+                if not candidates:
+                    raise ModelError(
+                        f"{candidate_model}: no response candidate."
+                    )
+
+                content_parts = (
+                    candidates[0]
+                    .get("content", {})
+                    .get("parts", [])
                 )
 
-            candidates = response_data.get("candidates") or []
+                response_text = "".join(
+                    item.get("text", "")
+                    for item in content_parts
+                    if isinstance(item, dict)
+                ).strip()
 
-            if not candidates:
-                raise ModelError(
-                    "Configured model returned no candidate."
+                if not response_text:
+                    raise ModelError(
+                        f"{candidate_model}: empty response."
+                    )
+
+                parsed = parse_model_response(response_text)
+
+                if not isinstance(parsed, dict):
+                    raise ModelError(
+                        f"{candidate_model}: invalid parsed response."
+                    )
+
+                if candidate_model != clean(model):
+                    log(
+                        f"Runtime fallback succeeded: "
+                        f"{candidate_model}"
+                    )
+
+                save_selected_model(
+                    candidate_model,
+                    reason=(
+                        "Primary model succeeded."
+                        if model_index == 0
+                        else "Previous configured model failed; "
+                             "this configured fallback succeeded."
+                    ),
                 )
 
-            content_parts = (
-                candidates[0]
-                .get("content", {})
-                .get("parts", [])
-            )
+                return parsed
 
-            response_text = "".join(
-                item.get("text", "")
-                for item in content_parts
-                if isinstance(item, dict)
-            ).strip()
-
-            if not response_text:
-                raise ModelError(
-                    "Configured model returned empty text."
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode(
+                    "utf-8",
+                    errors="replace",
                 )
 
-            return parse_model_response(response_text)
+                message = (
+                    f"HTTP {exc.code}: {body[:1000]}"
+                )
+                model_errors.append(message)
 
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode(
-                "utf-8",
-                errors="replace",
-            )
-            errors.append(
-                f"HTTP {exc.code}: {body[:1200]}"
-            )
+                if exc.code not in retryable_http:
+                    break
 
-            if exc.code not in {
-                408, 429, 500, 502, 503, 504,
-            }:
-                break
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                OSError,
+            ) as exc:
+                model_errors.append(
+                    f"{type(exc).__name__}: {exc}"
+                )
 
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            OSError,
-            json.JSONDecodeError,
-            ModelError,
-        ) as exc:
-            errors.append(str(exc))
+            except (
+                ModelError,
+                json.JSONDecodeError,
+            ):
+                raise
 
-            if isinstance(exc, ModelError):
-                break
+            if attempt == 0:
+                time.sleep(RETRY_DELAYS[0])
 
-        if attempt == 0:
-            time.sleep(RETRY_DELAYS[0])
+        failures.append(
+            f"{candidate_model}: " + " | ".join(model_errors)
+        )
+
+        log(
+            f"Model failed: {candidate_model}. "
+            "Trying the next configured model, if available."
+        )
 
     raise RuntimeError(
-        f"Configured model {model} failed: "
-        + " | ".join(errors)
+        "All configured Gemini models failed. "
+        + " || ".join(failures)
     )
-
 
 def build_story_prompt(
     mode: str,
