@@ -1193,6 +1193,7 @@ def _rebalance_for_merged_count(
 
     return groups
 
+
 def _partition_and_revise(
     complete_story: str,
     mode: str,
@@ -1288,6 +1289,7 @@ def _partition_and_revise(
         revision_rows.append({
             "part": number,
             "attempted": True,
+
             "outcome": (
                 "verified_revision"
                 if evidence
@@ -1710,6 +1712,7 @@ def make_final_plan(
 
     write_json(PLAN_FILE, plan)
     return plan
+
 
 def _visual_prompt(
     scene_text: str,
@@ -2287,9 +2290,7 @@ def main() -> None:
             f"Invalid SCENES range: {scenes_range}."
         )
 
-
-
-        parts_min, parts_max = get_parts_range(config)
+    parts_min, parts_max = get_parts_range(config)
 
     parts_specification = (
         str(parts_min)
