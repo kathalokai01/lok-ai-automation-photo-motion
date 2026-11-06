@@ -306,7 +306,7 @@ def main():
                 "REQUIRED FONT FAILURE:"
                 if details["required"]
                 else "OPTIONAL FONT FAILURE:",
-                details["family],
+                details["family"],
                 "|",
                 exc,
             )
