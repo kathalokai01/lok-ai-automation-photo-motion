@@ -520,7 +520,7 @@ jobs:
             "$VENV/bin/python" -m pip install torch \
               --index-url https://download.pytorch.org/whl/cpu
 
-            "$VENV/bin/python" -m pip install -r requirements.txt
+            $VENV/bin/python -m pip install -r requirements.txt
 
             "$VENV/bin/python" - <<'PY'
           import cv2
