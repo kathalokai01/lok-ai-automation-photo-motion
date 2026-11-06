@@ -14,7 +14,7 @@ from typing import Any
 
 
 OUTPUT_FILE = Path("output/config/selected_model.json")
-SELECTOR_VERSION = 6
+SELECTOR_VERSION = 7
 
 DEFAULT_PRIMARY_MODEL = "gemini-3.8-flash"
 
@@ -123,23 +123,9 @@ def parse_model_list(raw: str, setting_name: str) -> list[str]:
 
     return result
 
-
 def configured_fallbacks(existing: dict) -> list[str]:
-    """
-    Preserve configured priority.
-
-    GEMINI_MODEL:
-        Primary model.
-
-    GEMINI_MODEL_FALLBACKS:
-        Explicit fallback order.
-
-    If no fallback variable is supplied, retain the repository's
-    existing default fallback order.
-
-    A previously successful model may be appended last, but it
-    never moves ahead of the configured models.
-    """
+    """Preserve the saved primary and complete the fallback order."""
+    existing = existing if isinstance(existing, dict) else {}
 
     raw_primary = os.environ.get("GEMINI_MODEL", "").strip()
     raw_fallbacks = os.environ.get(
@@ -153,37 +139,56 @@ def configured_fallbacks(existing: dict) -> list[str]:
             f"Invalid GEMINI_MODEL value: {raw_primary!r}"
         )
 
-    configured = []
-
-    if primary:
-        configured.append(primary)
-
-    explicit_fallbacks = parse_model_list(
+    explicit = parse_model_list(
         raw_fallbacks,
         "GEMINI_MODEL_FALLBACKS",
     )
 
-    if explicit_fallbacks:
-        for model in explicit_fallbacks:
-            if model not in configured:
-                configured.append(model)
+    saved_primary = normalize_model(
+        existing.get("configured_primary_model")
+        or existing.get("model")
+    )
 
-    elif primary:
-        for model in DEFAULT_FALLBACK_MODELS:
-            if model not in configured:
-                configured.append(model)
+    saved_order = []
+    raw_saved = existing.get("fallback_order", [])
 
-    elif not raw_fallbacks:
-        configured.append(DEFAULT_PRIMARY_MODEL)
+    if isinstance(raw_saved, list):
+        for item in raw_saved:
+            model = normalize_model(item)
+            if model and model not in saved_order:
+                saved_order.append(model)
 
-        for model in DEFAULT_FALLBACK_MODELS:
-            if model not in configured:
-                configured.append(model)
-
-    if not configured:
-        raise RuntimeError(
-            "No Gemini model candidates are configured."
+    if primary:
+        configured = [primary]
+        fallback_candidates = (
+            explicit
+            if explicit
+            else list(DEFAULT_FALLBACK_MODELS)
         )
+
+    elif explicit:
+        if saved_primary:
+            configured = [saved_primary]
+            fallback_candidates = explicit
+        else:
+            configured = [explicit[0]]
+            fallback_candidates = explicit[1:]
+
+    else:
+        if saved_primary:
+            configured = [saved_primary]
+        elif saved_order:
+            configured = [saved_order.pop(0)]
+        else:
+            configured = [DEFAULT_PRIMARY_MODEL]
+
+        fallback_candidates = (
+            saved_order + list(DEFAULT_FALLBACK_MODELS)
+        )
+
+    for model in fallback_candidates:
+        if model not in configured:
+            configured.append(model)
 
     if previous_selection_is_successful(existing):
         previous = normalize_model(existing.get("model"))
@@ -191,9 +196,14 @@ def configured_fallbacks(existing: dict) -> list[str]:
         if previous and previous not in configured:
             configured.append(previous)
             log(
-                "Previously successful model retained at the "
-                "end of the fallback order."
+                "Previously successful model retained at "
+                "the end of the fallback order."
             )
+
+    if not configured:
+        raise RuntimeError(
+            "No Gemini model candidates are configured."
+        )
 
     return configured
 
@@ -238,6 +248,7 @@ def atomic_save(data: dict) -> None:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
 
 def build_selection(
     models: list[str],
