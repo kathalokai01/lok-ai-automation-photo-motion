@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v16-preserve-and-verify-existing-plan"
-MAPPING_VERSION = 16
+VERSION = "story-plan-v17-source-fingerprint-fix"
+MAPPING_VERSION = 17
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -570,6 +570,7 @@ def _make_extra_scene(
         ),
     }
 
+
 def build_plan(
     config: dict,
     format_type: str,
@@ -941,7 +942,7 @@ def validate_plan(
     if plan.get("scenes_max") != maximum:
         raise RuntimeError("Story Plan maximum SCENES mismatch.")
     if plan.get("total_parts") != parts_count:
-        raise RuntimeError("Story Plan total Parts mismatch.")
+        raise RuntimeError("Story Plan total Parts count mismatch.")
 
     payload = plan.get("source_payload")
     if not isinstance(payload, dict):
@@ -952,7 +953,6 @@ def validate_plan(
         raise RuntimeError("Story Plan source fingerprint mismatch.")
 
     return True
-
 
 def read_story_from_final_output() -> dict | None:
     data = read_json(STORY_FILE)
@@ -1011,6 +1011,7 @@ def _validate_final_story_parts(
         raise RuntimeError("Final story Parts list is inconsistent.")
 
     rebuilt_parts = []
+
     for part_number, part in enumerate(parts, 1):
         if not isinstance(part, dict):
             raise RuntimeError(f"Invalid final story Part {part_number}.")
@@ -1021,6 +1022,7 @@ def _validate_final_story_parts(
 
         narration = clean_text(part.get("narration"))
         scenes = part.get("scenes")
+
         if not narration:
             raise RuntimeError(f"Part {part_number} narration is empty.")
         if int(part.get("word_count", -1)) != word_count(narration):
@@ -1029,23 +1031,32 @@ def _validate_final_story_parts(
             raise RuntimeError(f"Part {part_number} Scene count is invalid.")
 
         scene_texts = []
+
         for scene_number, scene in enumerate(scenes, 1):
             expected_id = canonical_main_id(part_number, scene_number)
+
             if not isinstance(scene, dict):
                 raise RuntimeError(f"Invalid Scene {expected_id}.")
             if scene.get("scene_id") != expected_id:
                 raise RuntimeError(f"Scene ID mismatch: {expected_id}.")
             if scene.get("role") != "main":
                 raise RuntimeError(f"Scene role mismatch: {expected_id}.")
+            if scene.get("part") != part_number:
+                raise RuntimeError(f"Scene Part mismatch: {expected_id}.")
+            if scene.get("scene") != scene_number:
+                raise RuntimeError(f"Scene number mismatch: {expected_id}.")
+
             scene_text = clean_text(scene.get("narration"))
             if not scene_text:
                 raise RuntimeError(f"Scene narration is empty: {expected_id}.")
+
             scene_texts.append(scene_text)
 
         if clean_text(" ".join(scene_texts)) != narration:
             raise RuntimeError(
                 f"Scene narration does not reconstruct Part {part_number}."
             )
+
         rebuilt_parts.append(narration)
 
     if clean_text(" ".join(rebuilt_parts)) != clean_text(story_text):
@@ -1056,6 +1067,7 @@ def _validate_final_story_parts(
 
 def get_final_story_data(config: dict) -> tuple[str, int, int, str]:
     story = read_story_from_final_output()
+
     if story is None:
         raise RuntimeError(
             "Completed output/story/story.json is required before planning."
@@ -1066,17 +1078,25 @@ def get_final_story_data(config: dict) -> tuple[str, int, int, str]:
         raise RuntimeError("Final story FORMAT does not match Input/topic.txt.")
 
     minimum, maximum = get_parts_range(config)
-    parts_count = _get_actual_part_count(config, story, minimum, maximum)
+    parts_count = _get_actual_part_count(
+        config, story, minimum, maximum
+    )
+
     scenes_min, scenes_max = get_scenes_range(config)
 
     story_text = normalize_text(
         story.get("corrected_complete_story") or story.get("story_text")
     )
+
     if not story_text or word_count(story_text) < 20:
         raise RuntimeError("Final corrected story is empty or too short.")
 
     _validate_final_story_parts(
-        story, story_text, parts_count, scenes_min, scenes_max
+        story,
+        story_text,
+        parts_count,
+        scenes_min,
+        scenes_max,
     )
 
     title = clean_text(
@@ -1084,6 +1104,7 @@ def get_final_story_data(config: dict) -> tuple[str, int, int, str]:
         or story.get("title")
         or get_topic(config)
     )
+
     if not title:
         raise RuntimeError("Final story title is missing.")
 
@@ -1115,10 +1136,13 @@ def verify_plan_matches_story(
         raise RuntimeError("Story/Plan PARTS count mismatch.")
 
     payload = plan.get("source_payload")
+
     if not isinstance(payload, dict):
         raise RuntimeError("Story Plan source payload is missing.")
 
-    if plan.get("source_fingerprint") != fingerprint(payload):
+    calculated_source_fingerprint = fingerprint(payload)
+
+    if plan.get("source_fingerprint") != calculated_source_fingerprint:
         raise RuntimeError("Story Plan source fingerprint is invalid.")
 
     if payload.get("format") != mode:
@@ -1136,16 +1160,20 @@ def verify_plan_matches_story(
 
     story_parts = story.get("parts")
     plan_parts = plan.get("parts")
+
     if not isinstance(story_parts, list) or not isinstance(plan_parts, list):
         raise RuntimeError("Story or Plan Parts list is invalid.")
-    if len(story_parts) != len(plan_parts):
+    if len(story_parts) != parts_count or len(plan_parts) != parts_count:
         raise RuntimeError("Story/Plan Part count mismatch.")
 
     payload_parts = payload.get("part_texts")
+
     if not isinstance(payload_parts, list) or len(payload_parts) != parts_count:
         raise RuntimeError("Story Plan source Part texts are invalid.")
 
     actual_counts = []
+    global_scene_number = 0
+
     for index, (story_part, plan_part) in enumerate(
         zip(story_parts, plan_parts), 1
     ):
@@ -1155,13 +1183,17 @@ def verify_plan_matches_story(
         story_narration = clean_text(story_part.get("narration"))
         plan_narration = clean_text(plan_part.get("narration"))
 
-        if story_narration != plan_narration:
-            raise RuntimeError(f"Part {index} narration mismatch between Story and Plan.")
+        if not story_narration or story_narration != plan_narration:
+            raise RuntimeError(
+                f"Part {index} narration mismatch between Story and Plan."
+            )
+
         if clean_text(payload_parts[index - 1]) != story_narration:
             raise RuntimeError(f"Part {index} source narration mismatch.")
 
         story_scenes = story_part.get("scenes")
         plan_scenes = plan_part.get("scenes")
+
         if not isinstance(story_scenes, list) or not isinstance(plan_scenes, list):
             raise RuntimeError(f"Part {index} Scene list is invalid.")
 
@@ -1180,24 +1212,42 @@ def verify_plan_matches_story(
         for scene_number, (story_scene, plan_scene) in enumerate(
             zip(story_scenes, plan_scenes), 1
         ):
+            global_scene_number += 1
             expected_id = canonical_main_id(index, scene_number)
+
             if not isinstance(story_scene, dict) or not isinstance(plan_scene, dict):
                 raise RuntimeError(f"Invalid Scene record: {expected_id}.")
-            if story_scene.get("scene_id") != expected_id:
-                raise RuntimeError(f"Story Scene ID mismatch: {expected_id}.")
-            if plan_scene.get("scene_id") != expected_id:
-                raise RuntimeError(f"Plan Scene ID mismatch: {expected_id}.")
-            if story_scene.get("role") != "main" or plan_scene.get("role") != "main":
-                raise RuntimeError(f"Scene role mismatch: {expected_id}.")
 
-            for field in ("part", "scene", "global_scene_number"):
-                if story_scene.get(field) != plan_scene.get(field):
+            for row, label in (
+                (story_scene, "Story"),
+                (plan_scene, "Plan"),
+            ):
+                if row.get("scene_id") != expected_id:
                     raise RuntimeError(
-                        f"Story/Plan Scene {field} mismatch: {expected_id}."
+                        f"{label} Scene ID mismatch: {expected_id}."
+                    )
+                if row.get("role") != "main":
+                    raise RuntimeError(
+                        f"{label} Scene role mismatch: {expected_id}."
+                    )
+                if row.get("part") != index or row.get("scene") != scene_number:
+                    raise RuntimeError(
+                        f"{label} Scene numbering mismatch: {expected_id}."
+                    )
+                if row.get("global_scene_number") != global_scene_number:
+                    raise RuntimeError(
+                        f"{label} global Scene order mismatch: {expected_id}."
                     )
 
-            for field in ("narration", "story_anchor", "beat", "purpose"):
-                if clean_text(story_scene.get(field)) != clean_text(plan_scene.get(field)):
+            for field in (
+                "narration",
+                "story_anchor",
+                "beat",
+                "purpose",
+            ):
+                if clean_text(story_scene.get(field)) != clean_text(
+                    plan_scene.get(field)
+                ):
                     raise RuntimeError(
                         f"Story/Plan Scene {field} mismatch: {expected_id}."
                     )
@@ -1208,12 +1258,13 @@ def verify_plan_matches_story(
     if payload.get("actual_scene_counts") != actual_counts:
         raise RuntimeError("Story Plan source actual_scene_counts mismatch.")
 
-    if plan.get("total_main_scenes") != sum(actual_counts):
+    total_main = sum(actual_counts)
+
+    if plan.get("total_main_scenes") != total_main:
         raise RuntimeError("Story Plan total Main Scene count mismatch.")
-    if plan.get("total_scenes") != sum(actual_counts):
+    if plan.get("total_scenes") != total_main:
         raise RuntimeError("Story Plan total Scene count mismatch.")
 
-    # Validate the role records and all other Plan invariants.
     validate_plan(
         plan,
         mode,
@@ -1222,15 +1273,28 @@ def verify_plan_matches_story(
         scenes_range,
     )
 
-    # The Plan fingerprint saved by generate_story.py must match this Plan.
-    expected_fingerprint = story.get("story_plan_fingerprint")
-    if expected_fingerprint and expected_fingerprint != fingerprint(plan):
-        raise RuntimeError("Story's saved Plan fingerprint does not match Plan file.")
+    # generate_story.py stores plan["source_fingerprint"] here.
+    # It does not store fingerprint(plan).
+    expected_fingerprint = clean_text(
+        story.get("story_plan_fingerprint")
+    )
+    actual_fingerprint = clean_text(
+        plan.get("source_fingerprint")
+    )
+
+    if not expected_fingerprint:
+        raise RuntimeError("Story's saved Plan fingerprint is missing.")
+
+    if expected_fingerprint != actual_fingerprint:
+        raise RuntimeError(
+            "Story's saved Plan source fingerprint does not match Plan file."
+        )
 
     plan_title = clean_text(plan.get("final_title"))
     story_title = clean_text(
         story.get("final_title") or story.get("title") or topic
     )
+
     if plan_title and plan_title != story_title:
         raise RuntimeError("Story/Plan title mismatch.")
 
@@ -1250,10 +1314,12 @@ def main() -> None:
     scenes_range = get_scenes_range(config)
 
     story = read_story_from_final_output()
+
     if story is None:
         raise RuntimeError("Final story disappeared before verification.")
 
     plan = read_json(OUTPUT_FILE)
+
     if plan is None:
         raise RuntimeError(
             "story_plan.json is missing or invalid. "
