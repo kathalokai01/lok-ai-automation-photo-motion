@@ -21,6 +21,7 @@ from input_config import (
     get_topic,
     get_story_text,
 )
+from select_gemini_model import configured_fallbacks
 
 ROOT = Path(__file__).resolve().parent.parent
 STORY_FILE = ROOT / "output" / "story" / "story.json"
@@ -31,7 +32,7 @@ MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v15-configured-model-fallback"
+VERSION = "ai-story-v16-selector-fallback-runtime"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -190,21 +191,33 @@ def load_model_order() -> list[str]:
     if not primary:
         raise RuntimeError("Selected Gemini model name is invalid.")
 
-    order = [primary]
-    saved_order = data.get("fallback_order", [])
+    # Selector is the source of truth for configured priority and defaults.
+    # It also preserves saved custom fallback order when env vars are empty.
+    configured_order = configured_fallbacks(data)
 
+    order = []
+    for value in [primary, *configured_order]:
+        model = normalize_model(value)
+        if model and model not in order:
+            order.append(model)
+
+    # Retain any explicitly saved order entries without changing their order.
+    saved_order = data.get("fallback_order", [])
     if isinstance(saved_order, list):
         for value in saved_order:
             model = normalize_model(value)
             if model and model not in order:
                 order.append(model)
 
-    # Use only the fallback models explicitly configured in the workflow.
+    # Explicit workflow fallbacks are appended only if not already present.
     raw_env_fallbacks = os.environ.get("GEMINI_MODEL_FALLBACKS", "")
     for value in re.split(r"[,;]", raw_env_fallbacks):
         model = normalize_model(value)
         if model and model not in order:
             order.append(model)
+
+    if not order:
+        raise RuntimeError("No valid configured Gemini model is available.")
 
     log("Gemini model order:")
     for index, model in enumerate(order, 1):
@@ -706,7 +719,7 @@ negative_prompt, camera_prompt, lighting_prompt, sfx_prompt, music_prompt.
 
 Extra record का scene_id और role source plan से हूबहू मिलना चाहिए।
 जो extra source record मौजूद नहीं है, उसका output record न दें।
-केवल JSON लौटाएँ। JSON के बाहर टिप्पणी न दें।
+केवल JSON लौटाएँ।
 """
 
 
@@ -867,81 +880,6 @@ def validate_extra_record(
     result.update(fields)
     return result
 
-
-def validate_generated_part(
-    generated: Any,
-    source_part: dict,
-    config: dict,
-    total_parts: int,
-) -> dict:
-    if not isinstance(generated, dict):
-        raise ValueError("Model response must be a JSON object.")
-
-    expected_keys = {"scenes", "story_title"}
-
-    for key in ROLE_KEYS:
-        if source_part.get(key) is not None:
-            expected_keys.add(key)
-
-    unexpected = set(generated) - expected_keys
-    missing = expected_keys - set(generated)
-
-    if unexpected:
-        raise ValueError(
-            "Unexpected generated records/fields: "
-            + ", ".join(sorted(unexpected))
-        )
-    if missing:
-        raise ValueError(
-            "Missing generated records/fields: "
-            + ", ".join(sorted(missing))
-        )
-
-    title = clean(generated.get("story_title"))
-    if not title:
-        raise ValueError("Generated story_title cannot be empty.")
-
-    main_scenes = validate_generated_scenes(
-        generated.get("scenes"),
-        source_part,
-        config,
-        total_parts,
-    )
-
-    main_narration = " ".join(
-        item["narration"] for item in main_scenes
-    )
-    part_number = source_part["part"]
-    final_part = part_number == total_parts
-
-    completed = {
-        "part": part_number,
-        "status": "completed",
-        "title": clean(source_part.get("title")),
-        "story_title": title,
-        "narration": main_narration,
-        "word_count": word_count(main_narration),
-        "final_part_merged": bool(source_part.get("final_part_merged")),
-        "scenes": main_scenes,
-    }
-
-    for key, role in ROLE_KEYS.items():
-        source_record = source_part.get(key)
-
-        if key == "suspense_scene" and final_part:
-            source_record = None
-        if key == "resolution_scene" and not final_part:
-            source_record = None
-
-        completed[key] = validate_extra_record(
-            generated.get(key),
-            source_record,
-            role,
-            part_number,
-        )
-
-    return completed
-
 def build_revision_prompt(
     original_prompt: str,
     generated: dict,
@@ -1056,15 +994,13 @@ def generate_part(
                 body = exc.read().decode("utf-8", errors="replace")
                 model_error = f"HTTP {exc.code}: {body[:1000]}"
 
-                log(
-                    f"Model {model} returned HTTP {exc.code}."
-                )
+                log(f"Model {model} returned HTTP {exc.code}.")
 
                 if not retryable_http_error(exc.code):
                     break
 
-                # Server overload/rate limit: don't waste all retries
-                # on one model when another configured model is available.
+                # Rate limits and temporary overloads move to the
+                # next configured model instead of exhausting retries.
                 if exc.code in {429, 503, 504}:
                     break
 
