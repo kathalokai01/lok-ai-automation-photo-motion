@@ -68,7 +68,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Restore caches before checking or installing tools.
       - name: Restore Python environment cache
         id: python-cache
         uses: actions/cache@v4
@@ -346,7 +345,7 @@ jobs:
             [ "$SAVED_INPUT_HASH" = "$CURRENT_INPUT_HASH" ] || continue
             [ "$SAVED_PIPELINE_HASH" = "$CURRENT_PIPELINE_HASH" ] || continue
 
-            if ! python - "$CONTEXT_FILE" <<'PY'
+            if ! python - "$CONTEXT_FILE" "$SAVED_OUTPUT" <<'PY'
           import json
           import sys
           from pathlib import Path
@@ -356,8 +355,11 @@ jobs:
               get_parts_range,
           )
 
+          context_path = Path(sys.argv[1])
+          saved_output = Path(sys.argv[2])
+
           context = json.loads(
-              Path(sys.argv[1]).read_text(encoding="utf-8")
+              context_path.read_text(encoding="utf-8")
           )
           config = load_and_validate("Input/topic.txt")
 
@@ -384,6 +386,33 @@ jobs:
           naming_key = context.get("naming_key")
           if not isinstance(naming_key, str) or not naming_key.strip():
               raise SystemExit("Checkpoint naming key is missing.")
+
+          story_path = saved_output / "story" / "story.json"
+          plan_path = saved_output / "story" / "story_plan.json"
+
+          if not story_path.is_file() or not plan_path.is_file():
+              raise SystemExit("Checkpoint Story or Plan is missing.")
+
+          story = json.loads(story_path.read_text(encoding="utf-8-sig"))
+          plan = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+
+          story_parts = story.get("parts") if isinstance(story, dict) else None
+          plan_parts = plan.get("parts") if isinstance(plan, dict) else None
+
+          if not isinstance(story_parts, list) or len(story_parts) != selected:
+              raise SystemExit("Checkpoint Story Part count mismatch.")
+
+          if not isinstance(plan_parts, list) or len(plan_parts) != selected:
+              raise SystemExit("Checkpoint Plan Part count mismatch.")
+
+          if str(story.get("format", "")).strip().lower() != mode:
+              raise SystemExit("Checkpoint Story FORMAT mismatch.")
+
+          if story.get("configured_parts_min") != minimum:
+              raise SystemExit("Checkpoint Story PARTS minimum mismatch.")
+
+          if story.get("configured_parts_max") != maximum:
+              raise SystemExit("Checkpoint Story PARTS maximum mismatch.")
           PY
             then
               continue
@@ -549,19 +578,21 @@ jobs:
           echo "$VENV/bin" >> "$GITHUB_PATH"
           python -m pip check
 
-
-      - name: Verify story preservation and consistency
-        run: python scripts/verify_story.py
+      - name: Generate or reuse corrected story
+        run: python scripts/generate_story.py
 
       - name: Generate complete story plan
         run: python scripts/generate_story_plan.py
+
+      - name: Verify story preservation and consistency
+        run: python scripts/verify_story.py
 
       - name: Verify actual PARTS selection
         shell: bash
         run: |
           set -euo pipefail
 
-          python - -<<'PY'
+          python - <<'PY'
           from scripts.input_config import (
               load_and_validate,
               get_format,
@@ -1081,7 +1112,6 @@ jobs:
           printf '%s\n' "$PIPELINE_HASH" > output/.resume-pipeline.sha256
 
           python - <<'PY'
-          import os
           import stat
           import zipfile
           from pathlib import Path
@@ -1140,7 +1170,7 @@ jobs:
                       f"Checkpoint ZIP verification failed: {bad}"
                   )
 
-          os.replace(temporary, archive)
+          temporary.replace(archive)
 
           if not archive.is_file() or archive.stat().st_size == 0:
               raise SystemExit("Checkpoint ZIP was not created.")
