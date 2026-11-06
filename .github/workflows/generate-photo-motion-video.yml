@@ -513,16 +513,17 @@ jobs:
           else
             rm -rf "$VENV"
             python -m venv "$VENV"
+            source "$VENV/bin/activate"
 
-            "$VENV/bin/python" -m pip install \
+            python -m pip install \
               --upgrade pip setuptools wheel
 
-            "$VENV/bin/python" -m pip install torch \
+            python -m pip install torch \
               --index-url https://download.pytorch.org/whl/cpu
 
-            $VENV/bin/python -m pip install -r requirements.txt
+            python -m pip install -r requirements.txt
 
-            "$VENV/bin/python" - <<'PY'
+            python - <<'PY'
           import cv2
           import edge_tts
           import gradio_client
@@ -544,8 +545,9 @@ jobs:
             printf '%s' "$SIGNATURE" > "$STAMP"
           fi
 
+          source "$VENV/bin/activate"
           echo "$VENV/bin" >> "$GITHUB_PATH"
-          "$VENV/bin/python" -m pip check
+          python -m pip check
           echo "PYTHON ENVIRONMENT READY"
 
       - name: Validate and install only missing Hindi fonts
@@ -642,6 +644,41 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
+          path = Path("output/story/story_length_validation.json")
+          if not path.is_file():
+              raise SystemExit("Story length validation report is missing.")
+
+          report = json.loads(path.read_text(encoding="utf-8"))
+          summary = report.get("summary")
+
+          if not isinstance(summary, dict):
+              raise SystemExit("Story length summary is missing.")
+
+          if summary.get("valid") is not True:
+              for error in summary.get("structure_errors", []):
+                  print("STORY STRUCTURE ERROR:", error)
+              raise SystemExit("Story length validation failed.")
+
+          expected_parts = summary.get("parts_expected")
+          found_parts = summary.get("parts_found")
+          expected_scenes = summary.get("scenes_expected")
+          found_scenes = summary.get("scenes_found")
+
+          if expected_parts != found_parts:
+              raise SystemExit(
+                  f"PARTS mismatch: expected={expected_parts}, found={found_parts}"
+              )
+
+          if expected_scenes != found_scenes:
+              raise SystemExit(
+                  f"SCENES mismatch: expected={expected_scenes}, found={found_scenes}"
+              )
+
+          print("STORY LENGTH VALIDATION PASSED")
+          print("PARTS:", found_parts)
+          print("SCENES:", found_scenes)
+          print("WORDS:", summary.get("total_words"))
+          PY
 
           path = Path("output/story/story_length_validation.json")
           if not path.is_file():
