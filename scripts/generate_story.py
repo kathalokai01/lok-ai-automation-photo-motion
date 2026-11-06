@@ -23,6 +23,7 @@ from input_config import (
     get_scenes_range, set_selected_parts, load_and_validate,
     get_title_source,
 )
+from select_gemini_model import configured_fallbacks
 from story_length_policy import (
     parse_parts_range, build_length_policy, select_final_part_count,
     update_policy_with_corrected_story, validate_all_parts,
@@ -585,25 +586,9 @@ def get_selected_model() -> str:
 def get_configured_model_order() -> list[str]:
     data = read_json(MODEL_FILE) or {}
 
-    configured = data.get("fallback_order", [])
-    if not isinstance(configured, list):
-        configured = []
-
-    env_fallbacks = re.split(
-        r"[,;]",
-        os.environ.get("GEMINI_MODEL_FALLBACKS", ""),
-    )
-
-    ordered = []
-    for item in configured + env_fallbacks:
-        model_name = clean(item)
-
-        if (
-            model_name
-            and re.fullmatch(r"[A-Za-z0-9._-]+", model_name)
-            and model_name not in ordered
-        ):
-            ordered.append(model_name)
+    # Resolve the complete priority order from the selector. This also
+    # repairs older selected_model.json files without fallback_order.
+    ordered = configured_fallbacks(data)
 
     selected = clean(data.get("model"))
 
@@ -614,11 +599,11 @@ def get_configured_model_order() -> list[str]:
 
     if not ordered:
         raise RuntimeError(
-            "No configured Gemini model or fallback is available. "
-            "Set GEMINI_MODEL_FALLBACKS in GitHub Repository Variables."
+            "No configured Gemini model or fallback is available."
         )
 
     return ordered
+
 
 def save_selected_model(model: str, reason: str = "") -> None:
     data = read_json(MODEL_FILE) or {}
@@ -710,9 +695,8 @@ def call_model(
 
     configured_models = get_configured_model_order()
 
-    requested_model = clean(model)
-    if requested_model and requested_model not in configured_models:
-        configured_models.insert(0, requested_model)
+    # The saved selection is authoritative. Do not reinsert an older
+    # primary after a runtime fallback has already succeeded.
 
     failures = []
 
@@ -730,7 +714,7 @@ def call_model(
         model_errors = []
         model_succeeded = False
 
-        for attempt in range(2):
+        for attempt in range(len(RETRY_DELAYS) + 1):
             request = urllib.request.Request(
                 url,
                 data=json.dumps(
@@ -803,6 +787,7 @@ def call_model(
                     ),
                 )
 
+                parsed["_katha_model_used"] = candidate_model
                 return parsed
 
             except urllib.error.HTTPError as exc:
@@ -831,11 +816,22 @@ def call_model(
             except (
                 ModelError,
                 json.JSONDecodeError,
-            ):
-                raise
+            ) as exc:
+                model_errors.append(
+                    f"{type(exc).__name__}: {exc}"
+                )
+                # A bad response belongs to this model. Continue to
+                # the next configured model instead of aborting fallback.
+                break
 
-            if attempt == 0:
-                time.sleep(RETRY_DELAYS[0])
+            if attempt < len(RETRY_DELAYS):
+                delay = RETRY_DELAYS[attempt]
+                log(
+                    f"Transient failure on {candidate_model}; "
+                    f"retrying in {delay}s "
+                    f"({attempt + 1}/{len(RETRY_DELAYS)})."
+                )
+                time.sleep(delay)
 
         failures.append(
             f"{candidate_model}: " + " | ".join(model_errors)
@@ -850,6 +846,7 @@ def call_model(
         "All configured Gemini models failed. "
         + " || ".join(failures)
     )
+
 
 def build_story_prompt(
     mode: str,
@@ -972,7 +969,11 @@ def generate_complete_story(
         "story_text": complete,
         "title": clean(result.get("title")),
         "generation_method": "configured_gemini",
-        "model": model,
+        "model": (
+            clean(source_verification.get("model"))
+            if source_verification
+            else clean(result.get("_katha_model_used")) or get_selected_model()
+        ),
         "proofreading": {
             "performed": True,
             "method": "configured_gemini_model",
@@ -982,6 +983,7 @@ def generate_complete_story(
             "source_preservation_verification": source_verification,
         },
     }
+
 
 def verify_revision_semantics(
     original: str,
@@ -1061,6 +1063,10 @@ REVISED PART:
             else [str(additions)]
         ),
         "explanation": clean(result.get("explanation")),
+        "model": (
+            clean(result.get("_katha_model_used"))
+            or get_selected_model()
+        ),
     }
 
 
@@ -1395,13 +1401,7 @@ def _partition_and_revise(
             ),
             "before_words": amount,
             "after_words": word_count(revised),
-            "before_sha256": sha256(original),
-            "after_sha256": sha256(revised),
-            "revision_evidence": evidence,
-            "attempts": attempts,
-        })
 
-    if mode == "short":
         if word_count(revised_groups[-1]) < SHORT_MIN:
             if len(revised_groups) < 2:
                 raise RuntimeError(
@@ -2064,7 +2064,7 @@ def make_story(
             f"Final plan contains {len(all_scenes)} Main Scenes; "
             f"limit is {MAX_TOTAL_SCENES}."
         )
-        
+
     result = {
         "version": VERSION,
         "status": "completed",
@@ -2468,6 +2468,8 @@ def main() -> None:
                 corrected_story,
             )
 
+        model = get_selected_model()
+
         policy = cached.get("story_length_policy", {})
         selection = cached.get("parts_selection", {})
         proofreading = cached.get("proofreading", {})
@@ -2560,6 +2562,8 @@ def main() -> None:
             {},
         )
 
+        model = clean(generated.get("model")) or get_selected_model()
+
         generated_title = clean(
             generated.get("title")
         )
@@ -2585,6 +2589,8 @@ def main() -> None:
             or title_source
         ),
     )
+
+    model = get_selected_model()
 
     atomic_write(
         CORRECTED_STORY_FILE,
