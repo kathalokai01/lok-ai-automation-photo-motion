@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict, read-only verification of corrected stories and variable-scene plans."""
+"""Read-only validation of the final story and its matching scene plan."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ PLAN_FILE = ROOT / "output" / "story" / "story_plan.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 REPORT_FILE = ROOT / "output" / "story" / "story_verification.json"
 
-VERSION = "story-verifier-v16-variable-scenes-carry-forward-final-merge"
+VERSION = "story-verifier-v17-plan-fingerprint-and-counts"
 
 SHORT_MIN_WORDS = SHORT_MIN_WORDS_PER_PART
 SHORT_PREFERRED_MAX_WORDS = SHORT_PREFERRED_MAX_WORDS_PER_PART
@@ -81,7 +81,7 @@ def fail(message: str) -> None:
 
 
 def clean(value: Any) -> str:
-    if not isinstance(value, (str, int, float)):
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
         return ""
     return re.sub(r"\s+", " ", str(value)).strip()
 
@@ -98,7 +98,11 @@ def word_count(value: Any) -> int:
     return len(re.findall(r"\S+", normalized_text(value)))
 
 
-def positive_int(value: Any, field: str, allow_zero: bool = False) -> int:
+def positive_int(
+    value: Any,
+    field: str,
+    allow_zero: bool = False,
+) -> int:
     if isinstance(value, bool):
         fail(f"{field} must be an integer.")
 
@@ -128,30 +132,36 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def read_json(path: Path) -> dict:
+    if not path.is_file() or path.stat().st_size <= 0:
+        fail(f"Required file is missing or empty: {path.relative_to(ROOT)}")
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"Cannot read {path.name}: {exc}")
+
+    if not isinstance(data, dict):
+        fail(f"{path.name} must contain a JSON object.")
+
+    return data
+
+
 def write_json(path: Path, data: dict) -> None:
+    """Atomically write the verification report only."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
+
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        temporary.replace(path)
+
+        os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-
-
-def read_json(path: Path) -> dict:
-    if not path.is_file() or path.stat().st_size <= 0:
-        fail(f"Required file is missing or empty: {path.relative_to(ROOT)}")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        fail(f"Cannot read {path.name}: {exc}")
-    if not isinstance(data, dict):
-        fail(f"{path.name} must contain a JSON object.")
-    return data
 
 
 def verify_input() -> dict:
@@ -160,6 +170,7 @@ def verify_input() -> dict:
 
     config = load_and_validate(str(INPUT_FILE))
     mode = clean(get_format(config)).lower()
+
     if mode not in {"short", "full"}:
         fail("FORMAT must be short or full.")
 
@@ -171,10 +182,13 @@ def verify_input() -> dict:
 
     if not 1 <= minimum_parts <= maximum_parts <= MAX_PARTS:
         fail("Configured PARTS range is outside supported limits.")
+
     if not 1 <= scenes_min <= scenes_max <= MAX_SCENES_PER_PART:
         fail("Configured SCENES range is outside supported limits.")
-    if minimum_parts * scenes_min > MAX_TOTAL_SCENES:
-        fail("Minimum configured PARTS × minimum SCENES exceeds safety limit.")
+
+    if maximum_parts * scenes_max > MAX_TOTAL_SCENES:
+        fail("Maximum configured PARTS × SCENES exceeds safety limit.")
+
     if mode == "full" and (minimum_parts, maximum_parts) != (1, 1):
         fail("FULL format must have exactly PARTS=1.")
 
@@ -184,6 +198,7 @@ def verify_input() -> dict:
 
     if not topic and not explicit_title and not source_text:
         fail("Provide TOPIC, TITLE or STORY_TEXT.")
+
     if source_text and word_count(source_text) < 20:
         fail("STORY_TEXT contains fewer than 20 words.")
 
@@ -200,41 +215,60 @@ def verify_input() -> dict:
     }
 
 
-def verify_selected_parts(story: dict, plan: dict, input_data: dict) -> int:
+def verify_selected_parts(
+    story: dict,
+    plan: dict,
+    input_data: dict,
+) -> int:
     minimum = input_data["minimum_parts"]
     maximum = input_data["maximum_parts"]
+
     parts = story.get("parts")
     plan_parts = plan.get("parts")
 
     if not isinstance(parts, list) or not parts:
         fail("story.json must contain a non-empty parts list.")
+
     if not isinstance(plan_parts, list) or not plan_parts:
         fail("story_plan.json must contain a non-empty parts list.")
 
     selected = len(parts)
+
     if not minimum <= selected <= maximum:
-        fail(f"Selected PARTS={selected} is outside configured range {minimum}-{maximum}.")
+        fail(
+            f"Selected PARTS={selected} is outside configured "
+            f"range {minimum}-{maximum}."
+        )
+
     if len(plan_parts) != selected:
-        fail("Story and plan Part counts differ.")
+        fail("Story and Plan Part counts differ.")
 
-    for field in ("total_parts", "parts_count", "selected_parts",
-                  "selected_parts_count"):
+    for field in (
+        "total_parts",
+        "parts_count",
+        "selected_parts",
+        "selected_parts_count",
+    ):
         declared = story.get(field)
-        if declared is not None and positive_int(declared, f"story.json {field}") != selected:
-            fail(f"Story {field} does not match actual Part count.")
+        if declared is not None:
+            if positive_int(declared, f"story.json {field}") != selected:
+                fail(f"Story {field} does not match actual Part count.")
 
-    expected_fields = {
-        "configured_parts_min": minimum,
-        "configured_parts_max": maximum,
-    }
-    for field, expected in expected_fields.items():
+    for field, expected in (
+        ("configured_parts_min", minimum),
+        ("configured_parts_max", maximum),
+    ):
         declared = story.get(field)
-        if declared is not None and positive_int(declared, f"story.json {field}") != expected:
-            fail(f"Story {field} does not match Input/topic.txt.")
+        if declared is not None:
+            if positive_int(declared, f"story.json {field}") != expected:
+                fail(f"Story {field} does not match Input/topic.txt.")
 
     expected_specification = (
-        f"{minimum}-{maximum}" if minimum != maximum else str(minimum)
+        f"{minimum}-{maximum}"
+        if minimum != maximum
+        else str(minimum)
     )
+
     specification = clean(story.get("configured_parts_specification"))
     if specification and specification != expected_specification:
         fail("Story configured_parts_specification does not match Input.")
@@ -245,85 +279,134 @@ def verify_selected_parts(story: dict, plan: dict, input_data: dict) -> int:
     return selected
 
 
-def verify_plan_header(plan: dict, input_data: dict, selected_parts: int) -> list[dict]:
+def verify_plan_header(
+    plan: dict,
+    input_data: dict,
+    selected_parts: int,
+) -> tuple[list[dict], list[int]]:
     mode = input_data["mode"]
     topic = input_data["topic"]
     scenes_min = input_data["scenes_min"]
     scenes_max = input_data["scenes_max"]
 
     if clean(plan.get("status")).lower() != "planned":
-        fail("Story plan status must be planned.")
+        fail("Story Plan status must be planned.")
+
     if clean(plan.get("format")).lower() != mode:
-        fail("Story plan FORMAT does not match Input.")
+        fail("Story Plan FORMAT does not match Input.")
+
     if clean(plan.get("topic")) != topic:
-        fail("Story plan topic does not match Input.")
+        fail("Story Plan topic does not match Input.")
+
     if clean(plan.get("script_version")) != PLAN_VERSION:
-        fail("Story plan was generated by an incompatible planner version.")
+        fail("Story Plan was generated by an incompatible planner version.")
+
     if positive_int(plan.get("mapping_version"), "Plan mapping_version") != MAPPING_VERSION:
-        fail("Story plan mapping_version is incompatible.")
+        fail("Story Plan mapping_version is incompatible.")
 
     if positive_int(plan.get("parts_count"), "Plan parts_count") != selected_parts:
-        fail("Story plan parts_count mismatch.")
+        fail("Story Plan parts_count mismatch.")
+
+    if positive_int(plan.get("total_parts"), "Plan total_parts") != selected_parts:
+        fail("Story Plan total_parts mismatch.")
 
     if positive_int(plan.get("scenes_min"), "Plan scenes_min") != scenes_min:
-        fail("Story plan minimum SCENES does not match Input.")
+        fail("Story Plan minimum SCENES does not match Input.")
+
     if positive_int(plan.get("scenes_max"), "Plan scenes_max") != scenes_max:
-        fail("Story plan maximum SCENES does not match Input.")
+        fail("Story Plan maximum SCENES does not match Input.")
+
+    if plan.get("scenes_range") != [scenes_min, scenes_max]:
+        fail("Story Plan scenes_range does not match Input.")
+
+    if clean(plan.get("scene_order")) != "hook_then_main_then_suspense_or_resolution":
+        fail("Story Plan scene_order is invalid.")
+
+    if clean(plan.get("main_scene_order")) != "part_then_scene":
+        fail("Story Plan main_scene_order is invalid.")
 
     actual_counts = plan.get("actual_scene_counts")
     if not isinstance(actual_counts, list) or len(actual_counts) != selected_parts:
-        fail("Story plan actual_scene_counts is missing or invalid.")
+        fail("Story Plan actual_scene_counts is missing or invalid.")
 
-    normalized_counts = [
+    actual_counts = [
         positive_int(value, f"Plan actual_scene_counts[{index}]")
-        for index, value in enumerate(actual_counts)
+        for index, value in enumerate(actual_counts, 1)
     ]
-    if any(not scenes_min <= value <= scenes_max for value in normalized_counts):
-        fail("At least one planned Part has a Scene count outside configured range.")
 
-    total_main = sum(normalized_counts)
+    if any(not scenes_min <= count <= scenes_max for count in actual_counts):
+        fail("A planned Part has a Scene count outside configured range.")
+
+    total_main = sum(actual_counts)
     if total_main > MAX_TOTAL_SCENES:
-        fail("Story plan exceeds the total Main Scene safety limit.")
+        fail("Story Plan exceeds the total Main Scene safety limit.")
 
-    for field in ("total_scenes", "total_main_scenes"):
+    for field in ("total_main_scenes", "total_scenes"):
         if positive_int(plan.get(field), f"Plan {field}") != total_main:
-            fail(f"Story plan {field} does not match actual Scene counts.")
+            fail(f"Story Plan {field} does not match actual Scene counts.")
 
     expected_role_counts = {
         "total_hook_scenes": selected_parts,
         "total_suspense_scenes": max(0, selected_parts - 1),
         "total_resolution_scenes": 1,
+        "total_extra_scenes": selected_parts * 2 + max(0, selected_parts - 1),
     }
+
     for field, expected in expected_role_counts.items():
-        if positive_int(plan.get(field), f"Plan {field}", allow_zero=True) != expected:
-            fail(f"Story plan {field} mismatch.")
+        if positive_int(
+            plan.get(field),
+            f"Plan {field}",
+            allow_zero=True,
+        ) != expected:
+            fail(f"Story Plan {field} mismatch.")
 
-    if clean(plan.get("scene_order")) != "hook_then_main_then_suspense_or_resolution":
-        fail("Story plan scene_order is invalid.")
-    if clean(plan.get("main_scene_order")) != "part_then_scene":
-        fail("Story plan main_scene_order is invalid.")
+    payload = plan.get("source_payload")
+    if not isinstance(payload, dict):
+        fail("Story Plan source_payload is missing.")
 
-    fingerprint = clean(plan.get("source_fingerprint"))
-    if not re.fullmatch(r"[a-fA-F0-9]{64}", fingerprint):
-        fail("Story plan source_fingerprint is invalid.")
+    if payload.get("mapping_version") != MAPPING_VERSION:
+        fail("Story Plan source mapping_version mismatch.")
+
+    if payload.get("format") != mode:
+        fail("Story Plan source FORMAT mismatch.")
+
+    if clean(payload.get("topic")) != topic:
+        fail("Story Plan source topic mismatch.")
+
+    if payload.get("parts_count") != selected_parts:
+        fail("Story Plan source PARTS mismatch.")
+
+    if payload.get("scenes_min") != scenes_min:
+        fail("Story Plan source SCENES minimum mismatch.")
+
+    if payload.get("scenes_max") != scenes_max:
+        fail("Story Plan source SCENES maximum mismatch.")
+
+    if payload.get("actual_scene_counts") != actual_counts:
+        fail("Story Plan source Scene counts mismatch.")
+
+    expected_fingerprint = sha256_json(payload)
+    if clean(plan.get("source_fingerprint")) != expected_fingerprint:
+        fail("Story Plan source_fingerprint does not match source_payload.")
 
     source = plan.get("source")
     if not isinstance(source, dict):
-        fail("Story plan source metadata is missing.")
+        fail("Story Plan source metadata is missing.")
+
     if source.get("api_calls") != 0:
         fail("Story planning must not make external API calls.")
+
     if source.get("planning_mode") != "final_corrected_story":
-        fail("Plan was not generated from the final corrected story.")
+        fail("Story Plan was not built from the final corrected story.")
+
     if source.get("story_text_provided") is not True:
-        fail("Plan was not built from complete story text.")
-    if positive_int(source.get("story_word_count"), "Plan source story_word_count") <= 0:
-        fail("Plan source story_word_count is invalid.")
+        fail("Story Plan was not built from complete story text.")
 
     plan_parts = plan.get("parts")
     if not isinstance(plan_parts, list) or len(plan_parts) != selected_parts:
-        fail("Story plan Part count does not match selected PARTS.")
+        fail("Story Plan Part list does not match selected PARTS.")
 
-    return plan_parts
+    return plan_parts, actual_counts
 
 
 def verify_extra_scene(
@@ -355,13 +438,21 @@ def verify_extra_scene(
         "is_final_part": final_part,
         "source_format": mode,
     }
+
     for field, expected in expected_values.items():
         if record.get(field) != expected:
             fail(f"{expected_id}: invalid {field}.")
 
     for field in (
-        "title", "beat", "beat_description", "purpose", "story_anchor",
-        "instruction", "continuity_rule", "invention_policy", "visual_policy",
+        "title",
+        "beat",
+        "beat_description",
+        "purpose",
+        "story_anchor",
+        "instruction",
+        "continuity_rule",
+        "invention_policy",
+        "visual_policy",
     ):
         if not clean(record.get(field)):
             fail(f"{expected_id}: required field {field} is missing.")
@@ -373,10 +464,12 @@ def verify_plan_parts(
     plan_parts: list[dict],
     input_data: dict,
     selected_parts: int,
+    declared_counts: list[int],
 ) -> list[dict]:
     scenes_min = input_data["scenes_min"]
     scenes_max = input_data["scenes_max"]
     mode = input_data["mode"]
+
     verified_parts = []
     global_scene = 0
     actual_counts = []
@@ -387,29 +480,55 @@ def verify_plan_parts(
 
         if part.get("part") != part_number:
             fail(f"Plan Part {part_number} numbering mismatch.")
+
         if clean(part.get("part_id")) != f"part_{part_number:02d}":
             fail(f"Plan Part {part_number} ID mismatch.")
 
         scenes = part.get("scenes")
-        if not isinstance(scenes, list) or not scenes_min <= len(scenes) <= scenes_max:
-            fail(f"Plan Part {part_number} must contain {scenes_min}-{scenes_max} Main Scenes.")
+        if not isinstance(scenes, list):
+            fail(f"Plan Part {part_number} Scene list is invalid.")
+
+        if not scenes_min <= len(scenes) <= scenes_max:
+            fail(
+                f"Plan Part {part_number} must contain "
+                f"{scenes_min}-{scenes_max} Main Scenes."
+            )
+
+        if len(scenes) != declared_counts[part_number - 1]:
+            fail(
+                f"Plan actual_scene_counts mismatch in Part {part_number}."
+            )
 
         if part.get("main_scene_count") != len(scenes):
             fail(f"Plan Part {part_number} main_scene_count mismatch.")
+
+        if part.get("actual_scene_count") != len(scenes):
+            fail(f"Plan Part {part_number} actual_scene_count mismatch.")
+
         if part.get("hook_required") is not True:
             fail(f"Plan Part {part_number} must have a Hook.")
-        if part.get("suspense_required") is not (part_number < selected_parts):
+
+        final_part = part_number == selected_parts
+
+        if part.get("suspense_required") is not (not final_part):
             fail(f"Plan Part {part_number} Suspense requirement mismatch.")
-        if part.get("final_resolution") is not (part_number == selected_parts):
+
+        if part.get("final_resolution") is not final_part:
             fail(f"Plan Part {part_number} Resolution requirement mismatch.")
 
+        if not clean(part.get("narration")):
+            fail(f"Plan Part {part_number} narration is empty.")
+
         if not clean(part.get("story_anchor")):
-            fail(f"Plan Part {part_number} has no story anchor.")
+            fail(f"Plan Part {part_number} story anchor is empty.")
+
+        part_anchors = []
 
         for scene_number, scene in enumerate(scenes, 1):
             global_scene += 1
+
             if not isinstance(scene, dict):
-                fail(f"Invalid plan Scene in Part {part_number}.")
+                fail(f"Invalid Plan Scene in Part {part_number}.")
 
             scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
             expected_values = {
@@ -419,39 +538,73 @@ def verify_plan_parts(
                 "scene_id": scene_id,
                 "role": "main",
             }
+
             for field, expected in expected_values.items():
                 if scene.get(field) != expected:
                     fail(f"Plan {field} mismatch: {scene_id}.")
 
             for field in (
-                "beat", "beat_description", "purpose", "story_anchor",
-                "continuity_rule", "invention_policy", "visual_policy",
+                "beat",
+                "beat_description",
+                "purpose",
+                "story_anchor",
+                "continuity_rule",
+                "invention_policy",
+                "visual_policy",
             ):
                 if not clean(scene.get(field)):
                     fail(f"Plan {field} missing: {scene_id}.")
 
-            if clean(scene.get("narration")) != clean(scene.get("story_anchor")):
+            narration = clean(scene.get("narration"))
+            anchor = clean(scene.get("story_anchor"))
+
+            if not narration or narration != anchor:
                 fail(f"Plan Scene narration/anchor mismatch: {scene_id}.")
 
-        expected_anchor = clean(" ".join(clean(scene.get("story_anchor")) for scene in scenes))
-        if expected_anchor != clean(part.get("story_anchor")):
-            fail(f"Plan Part {part_number} anchor differs from ordered Scene anchors.")
+            part_anchors.append(anchor)
 
-        is_final = part_number == selected_parts
-        hook = verify_extra_scene(part.get("hook_scene"), part_number, "hook", True, is_final, mode)
-        suspense = verify_extra_scene(part.get("suspense_scene"), part_number, "suspense", not is_final, False, mode)
-        resolution = verify_extra_scene(part.get("resolution_scene"), part_number, "resolution", is_final, True, mode)
+        if clean(" ".join(part_anchors)) != clean(part.get("narration")):
+            fail(
+                f"Plan Main Scenes do not reconstruct Part {part_number}."
+            )
 
-        expected_extras = [row for row in (hook, suspense, resolution) if isinstance(row, dict)]
-        if part.get("extra_scenes") != expected_extras:
-            fail(f"Plan Part {part_number} extra_scenes does not match role records.")
+        if clean(" ".join(part_anchors)) != clean(part.get("story_anchor")):
+            fail(
+                f"Plan Part {part_number} anchor differs from Scene anchors."
+            )
 
-        if clean(hook.get("story_anchor")) != clean(scenes[0].get("story_anchor")):
-            fail(f"Part {part_number} Hook is not anchored to its opening Scene.")
-        if suspense and clean(suspense.get("story_anchor")) != clean(scenes[-1].get("story_anchor")):
-            fail(f"Part {part_number} Suspense is not anchored to its ending Scene.")
-        if resolution and clean(resolution.get("story_anchor")) != clean(scenes[-1].get("story_anchor")):
-            fail("Final Resolution is not anchored to the final story Scene.")
+        hook = verify_extra_scene(
+            part.get("hook_scene"), part_number, "hook",
+            True, final_part, mode,
+        )
+        suspense = verify_extra_scene(
+            part.get("suspense_scene"), part_number, "suspense",
+            not final_part, False, mode,
+        )
+        resolution = verify_extra_scene(
+            part.get("resolution_scene"), part_number, "resolution",
+            final_part, True, mode,
+        )
+
+        extras = [
+            row for row in (hook, suspense, resolution)
+            if isinstance(row, dict)
+        ]
+
+        if part.get("extra_scenes") != extras:
+            fail(
+                f"Plan Part {part_number} extra_scenes "
+                "does not match role records."
+            )
+
+        if clean(hook.get("story_anchor")) != part_anchors[0]:
+            fail(f"Part {part_number} Hook anchor mismatch.")
+
+        if suspense and clean(suspense.get("story_anchor")) != part_anchors[-1]:
+            fail(f"Part {part_number} Suspense anchor mismatch.")
+
+        if resolution and clean(resolution.get("story_anchor")) != part_anchors[-1]:
+            fail("Final Resolution anchor mismatch.")
 
         actual_counts.append(len(scenes))
         verified_parts.append({
@@ -464,8 +617,8 @@ def verify_plan_parts(
             "main_scene_ids": [scene["scene_id"] for scene in scenes],
         })
 
-    if actual_counts != plan_parts[0].get("_unused_actual_counts", actual_counts):
-        fail("Plan Scene count verification failed.")
+    if actual_counts != declared_counts:
+        fail("Plan Scene counts differ from the declared actual_scene_counts.")
 
     if sum(actual_counts) != global_scene:
         fail("Plan total Main Scene count mismatch.")
@@ -486,24 +639,29 @@ def verify_story_header(
 
     if clean(story.get("status")).lower() != "completed":
         fail("story.json status must be completed.")
+
     if clean(story.get("format")).lower() != mode:
         fail("Story FORMAT does not match Input.")
 
     title = clean(story.get("title"))
     if not title or len(title) > MAX_TITLE_LENGTH:
-        fail("Generated story title is empty or exceeds 180 characters.")
+        fail("Story title is empty or exceeds 180 characters.")
+
     if clean(story.get("final_title")) != title:
         fail("Story final_title does not match story title.")
+
     if explicit_title and title != explicit_title:
         fail("Generated title differs from explicit TITLE in Input.")
+
     if clean(story.get("topic")) != topic:
         fail("Story topic does not match Input.")
 
     if normalized_text(story.get("source_text", "")) != source_text:
-        fail("Story source_text differs from complete STORY_TEXT in Input/topic.txt.")
+        fail("Story source_text differs from complete STORY_TEXT in Input.")
 
     if clean(story.get("scene_order")) != "part_then_scene":
         fail("Story scene_order must be part_then_scene.")
+
     if clean(story.get("role_order")) != "hook_then_main_then_suspense_or_resolution":
         fail("Story role_order is invalid.")
 
@@ -515,6 +673,7 @@ def verify_story_header(
         "scenes_min": scenes_min,
         "scenes_max": scenes_max,
     }
+
     for field, expected in expected_values.items():
         if positive_int(story.get(field), f"Story {field}") != expected:
             fail(f"Story {field} does not match expected value {expected}.")
@@ -522,8 +681,11 @@ def verify_story_header(
     if story.get("scenes_range") != [scenes_min, scenes_max]:
         fail("Story scenes_range does not match Input.")
 
-    if positive_int(story.get("scenes_per_part"), "Story scenes_per_part") != scenes_min:
-        fail("Story scenes_per_part must retain the configured minimum for compatibility.")
+    if positive_int(
+        story.get("scenes_per_part"),
+        "Story scenes_per_part",
+    ) != scenes_min:
+        fail("Story scenes_per_part must retain configured minimum.")
 
     declared_source_words = positive_int(
         story.get("source_word_count"),
@@ -533,8 +695,8 @@ def verify_story_header(
     if declared_source_words != word_count(source_text):
         fail("Story source_word_count does not match complete input source.")
 
-    fingerprint = clean(story.get("source_fingerprint"))
-    if not re.fullmatch(r"[a-fA-F0-9]{64}", fingerprint):
+    source_fingerprint = clean(story.get("source_fingerprint"))
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", source_fingerprint):
         fail("Story source_fingerprint is missing or invalid.")
 
     corrected_story = story.get("corrected_complete_story")
@@ -542,6 +704,7 @@ def verify_story_header(
         fail("Corrected complete story is missing.")
 
     corrected_words = word_count(corrected_story)
+
     if positive_int(
         story.get("corrected_complete_story_word_count"),
         "Story corrected_complete_story_word_count",
@@ -550,7 +713,11 @@ def verify_story_header(
 
     if clean(story.get("story_text")) != clean(corrected_story):
         fail("story_text and corrected_complete_story differ.")
-    if positive_int(story.get("total_story_words"), "Story total_story_words") != corrected_words:
+
+    if positive_int(
+        story.get("total_story_words"),
+        "Story total_story_words",
+    ) != corrected_words:
         fail("Story total_story_words metadata mismatch.")
 
     if not clean(story.get("generation_method")) or not clean(story.get("model")):
@@ -559,33 +726,44 @@ def verify_story_header(
     proofreading = story.get("proofreading")
     if not isinstance(proofreading, dict):
         fail("Story proofreading metadata is missing.")
+
     if source_text and proofreading.get("performed") is not True:
         fail("Supplied story has no confirmed proofreading record.")
 
     parts = story.get("parts")
     all_scenes = story.get("scenes")
+
     if not isinstance(parts, list) or len(parts) != selected_parts:
         fail("Story Part list does not match selected PARTS.")
+
     if not isinstance(all_scenes, list):
         fail("Story top-level Main Scene list is missing.")
+
     if len(all_scenes) > MAX_TOTAL_SCENES:
         fail("Story exceeds the total Main Scene safety limit.")
 
     actual_counts = story.get("actual_scene_counts")
     if not isinstance(actual_counts, list) or len(actual_counts) != selected_parts:
         fail("Story actual_scene_counts is missing or invalid.")
+
     actual_counts = [
         positive_int(value, f"Story actual_scene_counts[{index}]")
-        for index, value in enumerate(actual_counts)
+        for index, value in enumerate(actual_counts, 1)
     ]
+
     if any(not scenes_min <= count <= scenes_max for count in actual_counts):
-        fail("Story contains a Part outside the configured Scene range.")
+        fail("Story contains a Part outside configured Scene range.")
+
     if sum(actual_counts) != len(all_scenes):
         fail("Story actual Scene counts do not equal top-level Scene count.")
 
     if positive_int(story.get("total_scenes"), "Story total_scenes") != len(all_scenes):
         fail("Story total_scenes metadata mismatch.")
-    if positive_int(story.get("total_main_scenes"), "Story total_main_scenes") != len(all_scenes):
+
+    if positive_int(
+        story.get("total_main_scenes"),
+        "Story total_main_scenes",
+    ) != len(all_scenes):
         fail("Story total_main_scenes metadata mismatch.")
 
     return title, parts, all_scenes
@@ -599,7 +777,11 @@ def meaningful_tokens(value: str) -> set[str]:
     }
 
 
-def verify_source_coverage(source_text: str, generated_text: str, mode: str) -> dict:
+def verify_source_coverage(
+    source_text: str,
+    generated_text: str,
+    mode: str,
+) -> dict:
     if not source_text:
         return {
             "performed": False,
@@ -646,7 +828,11 @@ def verify_source_coverage(source_text: str, generated_text: str, mode: str) -> 
     }
 
 
-def verify_revision(part: dict, narration: str, part_number: int) -> dict:
+def verify_revision(
+    part: dict,
+    narration: str,
+    part_number: int,
+) -> dict:
     evidence = part.get("revision_evidence")
     if not isinstance(evidence, dict):
         fail(f"Part {part_number} has no structured revision evidence.")
@@ -660,9 +846,15 @@ def verify_revision(part: dict, narration: str, part_number: int) -> dict:
         try:
             valid = verify_revision_evidence(evidence, narration)
         except Exception as exc:
-            fail(f"Part {part_number} revision evidence cannot be verified: {exc}")
+            fail(
+                f"Part {part_number} revision evidence "
+                f"cannot be verified: {exc}"
+            )
     except Exception as exc:
-        fail(f"Part {part_number} revision evidence cannot be verified: {exc}")
+        fail(
+            f"Part {part_number} revision evidence "
+            f"cannot be verified: {exc}"
+        )
 
     if valid is not True:
         fail(f"Part {part_number} revision evidence is not valid.")
@@ -676,6 +868,7 @@ def verify_story_parts(
     plan_parts: list[dict],
     input_data: dict,
     selected_parts: int,
+    declared_counts: list[int],
 ) -> tuple[list[int], list[dict]]:
     mode = input_data["mode"]
     scenes_min = input_data["scenes_min"]
@@ -692,8 +885,10 @@ def verify_story_parts(
             fail(f"Story Part {part_number} must be an object.")
 
         expected_part_id = f"part_{part_number:02d}"
+
         if positive_int(part.get("part"), f"Part {part_number} number") != part_number:
             fail(f"Story Part numbering mismatch: {part_number}.")
+
         if clean(part.get("part_id")) != expected_part_id:
             fail(f"Story Part ID mismatch: {expected_part_id}.")
 
@@ -702,7 +897,11 @@ def verify_story_parts(
             fail(f"Part {part_number} narration is empty.")
 
         amount = word_count(narration)
-        if positive_int(part.get("word_count"), f"Part {part_number} word_count") != amount:
+
+        if positive_int(
+            part.get("word_count"),
+            f"Part {part_number} word_count",
+        ) != amount:
             fail(f"Part {part_number} word_count metadata mismatch.")
 
         merged_final = (
@@ -712,7 +911,12 @@ def verify_story_parts(
         )
 
         if mode == "short":
-            maximum = SHORT_MERGED_MAX_WORDS if merged_final else SHORT_HARD_MAX_WORDS
+            maximum = (
+                SHORT_MERGED_MAX_WORDS
+                if merged_final
+                else SHORT_HARD_MAX_WORDS
+            )
+
             if amount < SHORT_MIN_WORDS or amount > maximum:
                 fail(
                     f"SHORT Part {part_number} has {amount} words; "
@@ -722,7 +926,8 @@ def verify_story_parts(
             if amount > SHORT_PREFERRED_MAX_WORDS and not merged_final:
                 if part.get("revision_attempted") is not True:
                     fail(
-                        f"SHORT Part {part_number} exceeds 150 words "
+                        f"SHORT Part {part_number} exceeds "
+                        f"{SHORT_PREFERRED_MAX_WORDS} words "
                         "without a recorded revision."
                     )
                 verify_revision(part, narration, part_number)
@@ -731,16 +936,31 @@ def verify_story_parts(
                 fail("Final merged SHORT Part exceeds 239 words.")
 
         if narration[-1] not in BOUNDARY_ENDINGS:
-            fail(f"Part {part_number} ends at an incomplete sentence/clause boundary.")
+            fail(
+                f"Part {part_number} ends at an incomplete "
+                "sentence/clause boundary."
+            )
 
         scenes = part.get("scenes")
         planned_scenes = plan_parts[part_number - 1].get("scenes")
-        if not isinstance(scenes, list) or not scenes_min <= len(scenes) <= scenes_max:
-            fail(f"Part {part_number} must contain {scenes_min}-{scenes_max} Main Scenes.")
+
+        if not isinstance(scenes, list):
+            fail(f"Story Part {part_number} Scene list is invalid.")
+
+        if not scenes_min <= len(scenes) <= scenes_max:
+            fail(
+                f"Part {part_number} must contain "
+                f"{scenes_min}-{scenes_max} Main Scenes."
+            )
+
+        if len(scenes) != declared_counts[part_number - 1]:
+            fail(f"Story actual Scene count mismatch in Part {part_number}.")
+
         if not isinstance(planned_scenes, list) or len(planned_scenes) != len(scenes):
             fail(f"Plan/story Scene count mismatch in Part {part_number}.")
 
-        scene_narrations: list[str] = []
+        scene_narrations = []
+
         for scene_number, scene in enumerate(scenes, 1):
             global_scene += 1
             scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
@@ -755,12 +975,14 @@ def verify_story_parts(
                 "global_scene_number": global_scene,
                 "role": "main",
             }
+
             for field, expected in expected_values.items():
                 if scene.get(field) != expected:
                     fail(f"Story {field} mismatch: {scene_id}.")
 
             if scene_id in seen_ids:
                 fail(f"Duplicate story Scene ID: {scene_id}.")
+
             seen_ids.add(scene_id)
 
             planned = planned_scenes[scene_number - 1]
@@ -768,23 +990,31 @@ def verify_story_parts(
                 fail(f"Plan Scene is invalid: {scene_id}.")
 
             for field in (
-                "scene_id", "part", "scene", "global_scene_number",
-                "role", "beat", "purpose", "story_anchor",
+                "scene_id",
+                "part",
+                "scene",
+                "global_scene_number",
+                "role",
+                "beat",
+                "purpose",
+                "story_anchor",
+                "narration",
             ):
                 if clean(scene.get(field)) != clean(planned.get(field)):
-                    fail(f"Story/plan {field} mismatch: {scene_id}.")
+                    fail(f"Story/Plan {field} mismatch: {scene_id}.")
 
             for field in ("narration", "visual", "visual_prompt"):
                 if not clean(scene.get(field)):
                     fail(f"Story {field} is missing: {scene_id}.")
+
             if clean(scene.get("visual")) != clean(scene.get("visual_prompt")):
                 fail(f"Story visual and visual_prompt differ: {scene_id}.")
+
             if not isinstance(scene.get("dialogue", ""), str):
                 fail(f"Story dialogue must be text: {scene_id}.")
 
             scene_text = clean(scene.get("narration"))
-            if scene_text != clean(planned.get("narration")):
-                fail(f"Story/plan Scene narration mismatch: {scene_id}.")
+
             if scene_text != clean(scene.get("story_anchor")):
                 fail(f"Scene narration/anchor mismatch: {scene_id}.")
 
@@ -792,13 +1022,19 @@ def verify_story_parts(
             flattened.append(scene)
 
         combined = clean(" ".join(scene_narrations))
+
         if combined != narration:
-            fail(f"Part {part_number} narration does not match ordered Scene narration.")
+            fail(
+                f"Part {part_number} narration does not match "
+                "ordered Scene narration."
+            )
+
         if word_count(combined) != amount:
             fail(f"Part {part_number} Scene reconstruction changed word count.")
 
         if part.get("main_scene_count") != len(scenes):
             fail(f"Part {part_number} main_scene_count mismatch.")
+
         if part.get("actual_scene_count") != len(scenes):
             fail(f"Part {part_number} actual_scene_count mismatch.")
 
@@ -818,30 +1054,39 @@ def verify_story_parts(
 
     if flattened != all_scenes:
         fail("Top-level scenes do not match ordered Part Scene records.")
+
     if len(seen_ids) != len(all_scenes):
         fail("Top-level Scene count differs from unique Part Scene IDs.")
 
-    declared_counts = [
-        len(part.get("scenes", [])) for part in parts
-    ]
-    if declared_counts != input_data.get("story_actual_scene_counts", declared_counts):
-        fail("Actual Scene count metadata mismatch.")
+    actual_counts = [len(part.get("scenes", [])) for part in parts]
+    if actual_counts != declared_counts:
+        fail("Story actual_scene_counts does not match Part Scene lists.")
 
     return word_counts, part_results
 
 
-def verify_story_text(story: dict, parts: list[dict], mode: str) -> str:
-    combined = clean(" ".join(clean(part.get("narration")) for part in parts))
+def verify_story_text(
+    story: dict,
+    parts: list[dict],
+    mode: str,
+) -> str:
+    combined = clean(
+        " ".join(clean(part.get("narration")) for part in parts)
+    )
+
     if not combined:
         fail("Combined story narration is empty.")
 
     if clean(story.get("story_text")) != combined:
         fail("story_text does not match ordered Part narrations.")
+
     if clean(story.get("corrected_complete_story")) != combined:
         fail("corrected_complete_story does not match ordered Part narrations.")
 
-    actual_total = word_count(combined)
-    if positive_int(story.get("total_story_words"), "Story total_story_words") != actual_total:
+    if positive_int(
+        story.get("total_story_words"),
+        "Story total_story_words",
+    ) != word_count(combined):
         fail("total_story_words metadata mismatch.")
 
     if mode == "full" and len(parts) != 1:
@@ -850,33 +1095,56 @@ def verify_story_text(story: dict, parts: list[dict], mode: str) -> str:
     return combined
 
 
-def verify_plan_story_match(plan_parts: list[dict], story_parts: list[dict]) -> None:
+def verify_plan_story_match(
+    plan_parts: list[dict],
+    story_parts: list[dict],
+) -> None:
     if len(plan_parts) != len(story_parts):
         fail("Plan/story Part counts differ.")
 
-    for part_number, (planned_part, story_part) in enumerate(zip(plan_parts, story_parts), 1):
+    for part_number, (planned_part, story_part) in enumerate(
+        zip(plan_parts, story_parts), 1
+    ):
+        if clean(planned_part.get("narration")) != clean(story_part.get("narration")):
+            fail(f"Plan/story Part narration mismatch in Part {part_number}.")
+
         plan_scenes = planned_part.get("scenes")
         story_scenes = story_part.get("scenes")
 
         if not isinstance(plan_scenes, list) or not isinstance(story_scenes, list):
             fail(f"Plan/story Scene lists are invalid in Part {part_number}.")
+
         if len(plan_scenes) != len(story_scenes):
             fail(f"Plan/story Scene counts differ in Part {part_number}.")
 
-        for scene_number, (planned, generated) in enumerate(zip(plan_scenes, story_scenes), 1):
+        for scene_number, (planned, generated) in enumerate(
+            zip(plan_scenes, story_scenes), 1
+        ):
             if not isinstance(planned, dict) or not isinstance(generated, dict):
-                fail(f"Invalid plan/story record in Part {part_number}.")
+                fail(f"Invalid Plan/story record in Part {part_number}.")
 
             scene_id = f"part_{part_number:02d}_scene_{scene_number:02d}"
+
             for field in (
-                "scene_id", "scene", "global_scene_number", "role",
-                "beat", "purpose", "story_anchor", "narration",
+                "scene_id",
+                "part",
+                "scene",
+                "global_scene_number",
+                "role",
+                "beat",
+                "purpose",
+                "story_anchor",
+                "narration",
             ):
                 if clean(planned.get(field)) != clean(generated.get(field)):
                     fail(f"Plan/story {field} mismatch: {scene_id}.")
 
 
-def verify_role_records(story: dict, parts: list[dict], selected_parts: int) -> dict:
+def verify_role_records(
+    story: dict,
+    parts: list[dict],
+    selected_parts: int,
+) -> dict:
     hooks = []
     suspenses = []
     resolutions = []
@@ -884,6 +1152,7 @@ def verify_role_records(story: dict, parts: list[dict], selected_parts: int) -> 
     for part_number, part in enumerate(parts, 1):
         is_final = part_number == selected_parts
         scenes = part.get("scenes", [])
+
         if not scenes:
             fail(f"Part {part_number} has no Main Scenes.")
 
@@ -893,6 +1162,7 @@ def verify_role_records(story: dict, parts: list[dict], selected_parts: int) -> 
             ("resolution", "resolution_scene", is_final),
         ):
             record = part.get(field)
+
             if not required:
                 if record is not None:
                     fail(f"Part {part_number} has unexpected {kind} record.")
@@ -902,22 +1172,32 @@ def verify_role_records(story: dict, parts: list[dict], selected_parts: int) -> 
                 fail(f"Part {part_number} is missing {kind} record.")
 
             expected_id = f"part_{part_number:02d}_{kind}"
+
             if record.get("part") != part_number or record.get("role") != kind:
                 fail(f"Part {part_number} {kind} metadata mismatch.")
+
             if record.get("scene_id") != expected_id:
                 fail(f"Part {part_number} {kind} ID mismatch.")
+
             if record.get("separate_from_main_scenes") is not True:
                 fail(f"Part {part_number} {kind} is not a separate record.")
+
             if record.get("main_scene_numbering_affected") is not False:
                 fail(f"Part {part_number} {kind} affects Main Scene numbering.")
+
             if record.get("scene") is not None or record.get("global_scene_number") is not None:
-                fail(f"Part {part_number} {kind} incorrectly has Main Scene numbering.")
+                fail(f"Part {part_number} {kind} has Main Scene numbering.")
+
             if record.get("is_final_part") is not is_final:
                 fail(f"Part {part_number} {kind} final-Part marker mismatch.")
 
             for field in (
-                "story_anchor", "purpose", "instruction",
-                "continuity_rule", "invention_policy", "visual_policy",
+                "story_anchor",
+                "purpose",
+                "instruction",
+                "continuity_rule",
+                "invention_policy",
+                "visual_policy",
             ):
                 if not clean(record.get(field)):
                     fail(f"Part {part_number} {kind} is missing {field}.")
@@ -927,6 +1207,7 @@ def verify_role_records(story: dict, parts: list[dict], selected_parts: int) -> 
                 if kind == "hook"
                 else clean(scenes[-1].get("story_anchor"))
             )
+
             if clean(record.get("story_anchor")) != expected_anchor:
                 fail(f"Part {part_number} {kind} anchor mismatch.")
 
@@ -945,27 +1226,35 @@ def verify_role_records(story: dict, parts: list[dict], selected_parts: int) -> 
             )
             if isinstance(row, dict)
         ]
+
         if part.get("extra_scenes") != expected_extras:
-            fail(f"Part {part_number} extra_scenes does not match role records.")
+            fail(
+                f"Part {part_number} extra_scenes "
+                "does not match role records."
+            )
 
     expected_counts = {
         "total_hook_scenes": selected_parts,
         "total_suspense_scenes": max(0, selected_parts - 1),
         "total_resolution_scenes": 1,
     }
+
     actual_counts = {
         "total_hook_scenes": len(hooks),
         "total_suspense_scenes": len(suspenses),
         "total_resolution_scenes": len(resolutions),
     }
+
     for field, expected in expected_counts.items():
         if actual_counts[field] != expected or story.get(field) != expected:
             fail(f"Story {field} metadata mismatch.")
 
     if story.get("hook_scenes") != hooks:
         fail("Top-level Hook records differ from Part records.")
+
     if story.get("suspense_scenes") != suspenses:
         fail("Top-level Suspense records differ from Part records.")
+
     if story.get("resolution_scenes") != resolutions:
         fail("Top-level Resolution records differ from Part records.")
 
@@ -979,61 +1268,122 @@ def verify_role_records(story: dict, parts: list[dict], selected_parts: int) -> 
 def verify_title_file(title: str) -> None:
     if not TITLE_FILE.is_file():
         fail("final_title.txt is missing.")
+
     try:
         saved_title = clean(TITLE_FILE.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError) as exc:
         fail(f"Cannot read final_title.txt: {exc}")
+
     if not saved_title:
         fail("final_title.txt is empty.")
+
     if saved_title != title:
         fail("final_title.txt does not match story.json title.")
 
 
-def verify_story(story: dict, plan: dict, input_data: dict) -> dict:
+def verify_story(
+    story: dict,
+    plan: dict,
+    input_data: dict,
+) -> dict:
     selected_parts = verify_selected_parts(story, plan, input_data)
-    plan_parts = verify_plan_header(plan, input_data, selected_parts)
-    plan_results = verify_plan_parts(plan_parts, input_data, selected_parts)
+
+    plan_parts, plan_counts = verify_plan_header(
+        plan,
+        input_data,
+        selected_parts,
+    )
+
+    plan_results = verify_plan_parts(
+        plan_parts,
+        input_data,
+        selected_parts,
+        plan_counts,
+    )
 
     title, story_parts, all_scenes = verify_story_header(
-        story, input_data, selected_parts
+        story,
+        input_data,
+        selected_parts,
     )
 
-    input_data["story_actual_scene_counts"] = story.get("actual_scene_counts")
+    story_counts = story.get("actual_scene_counts")
+    if story_counts != plan_counts:
+        fail(
+            "Story/Plan actual Scene counts differ: "
+            f"Story={story_counts}, Plan={plan_counts}."
+        )
+
     word_counts, part_results = verify_story_parts(
-        story_parts, all_scenes, plan_parts, input_data, selected_parts
+        story_parts,
+        all_scenes,
+        plan_parts,
+        input_data,
+        selected_parts,
+        plan_counts,
     )
 
-    combined_story = verify_story_text(story, story_parts, input_data["mode"])
-    role_counts = verify_role_records(story, story_parts, selected_parts)
+    combined_story = verify_story_text(
+        story,
+        story_parts,
+        input_data["mode"],
+    )
+
+    role_counts = verify_role_records(
+        story,
+        story_parts,
+        selected_parts,
+    )
+
     verify_plan_story_match(plan_parts, story_parts)
     verify_title_file(title)
 
+    # generate_story.py stores the Plan source fingerprint, not
+    # a hash of the entire story_plan.json object.
+    story_plan_fingerprint = clean(story.get("story_plan_fingerprint"))
+    plan_source_fingerprint = clean(plan.get("source_fingerprint"))
+
+    if not story_plan_fingerprint:
+        fail("Story story_plan_fingerprint is missing.")
+
+    if story_plan_fingerprint != plan_source_fingerprint:
+        fail("Story/Plan source fingerprint mismatch.")
+
     source_text = input_data["source_text"]
+
     if source_text:
         if normalized_text(story.get("source_text")) != normalized_text(source_text):
             fail("Complete source story was changed in story metadata.")
+
         if word_count(story.get("source_text")) != word_count(source_text):
             fail("Complete source word count was not preserved.")
 
     source_coverage = verify_source_coverage(
-        source_text, combined_story, input_data["mode"]
+        source_text,
+        combined_story,
+        input_data["mode"],
     )
 
     policy = story.get("story_length_policy")
     if not isinstance(policy, dict):
         fail("Story length policy metadata is missing.")
+
     if policy.get("actual_parts") != selected_parts:
         fail("Story length policy actual_parts mismatch.")
-    if policy.get("actual_scene_counts") != story.get("actual_scene_counts"):
+
+    if policy.get("actual_scene_counts") != story_counts:
         fail("Story length policy Scene counts mismatch.")
 
     selection = story.get("parts_selection")
     if not isinstance(selection, dict):
         fail("Story parts_selection metadata is missing.")
+
     if selection.get("selected_parts") != selected_parts:
         fail("Story parts_selection selected_parts mismatch.")
+
     if selection.get("minimum_parts") != input_data["minimum_parts"]:
         fail("Story parts_selection minimum does not match Input.")
+
     if selection.get("maximum_parts") != input_data["maximum_parts"]:
         fail("Story parts_selection maximum does not match Input.")
 
@@ -1042,6 +1392,7 @@ def verify_story(story: dict, plan: dict, input_data: dict) -> dict:
         for part_number, part in enumerate(story_parts, 1)
         if part.get("final_part_merged") is True
     ]
+
     if merged_parts and merged_parts != [selected_parts]:
         fail("Only the final Part may use the final-merge exception.")
 
@@ -1052,11 +1403,25 @@ def verify_story(story: dict, plan: dict, input_data: dict) -> dict:
         for part_number, part in enumerate(story_parts, 1):
             amount = word_count(part.get("narration"))
             merged = part_number == selected_parts and bool(merged_parts)
-            maximum = SHORT_MERGED_MAX_WORDS if merged else SHORT_HARD_MAX_WORDS
+
+            maximum = (
+                SHORT_MERGED_MAX_WORDS
+                if merged
+                else SHORT_HARD_MAX_WORDS
+            )
+
             if not SHORT_MIN_WORDS <= amount <= maximum:
-                fail(f"SHORT Part {part_number} violates its word-count limits.")
+                fail(
+                    f"SHORT Part {part_number} violates "
+                    "its word-count limits."
+                )
+
             if amount > SHORT_PREFERRED_MAX_WORDS and not merged:
-                verify_revision(part, clean(part.get("narration")), part_number)
+                verify_revision(
+                    part,
+                    clean(part.get("narration")),
+                    part_number,
+                )
 
     return {
         "status": "completed",
@@ -1067,13 +1432,14 @@ def verify_story(story: dict, plan: dict, input_data: dict) -> dict:
         "topic": input_data["topic"],
         "story_fingerprint": sha256_json(story),
         "plan_fingerprint": sha256_json(plan),
+        "plan_source_fingerprint": plan_source_fingerprint,
         "summary": {
             "configured_parts_min": input_data["minimum_parts"],
             "configured_parts_max": input_data["maximum_parts"],
             "selected_parts": selected_parts,
             "scenes_min": input_data["scenes_min"],
             "scenes_max": input_data["scenes_max"],
-            "actual_scene_counts": story.get("actual_scene_counts"),
+            "actual_scene_counts": story_counts,
             "total_main_scenes": len(all_scenes),
             "total_story_words": word_count(combined_story),
             "words_per_part": word_counts,
@@ -1092,7 +1458,7 @@ def verify_story(story: dict, plan: dict, input_data: dict) -> dict:
             "selected_parts_in_range": True,
             "configured_scenes_range": True,
             "actual_scene_counts": True,
-            "variable_scene_counts": True,
+            "story_plan_scene_counts_match": True,
             "scene_ids_and_global_order": True,
             "sentence_carry_forward_plan": True,
             "hook_suspense_resolution_roles": True,
@@ -1107,16 +1473,18 @@ def verify_story(story: dict, plan: dict, input_data: dict) -> dict:
             "story_title": True,
             "title_file": True,
             "source_text_integrity": True,
+            "story_plan_fingerprint": True,
             "source_vocabulary_coverage": source_coverage["status"],
             "no_external_api_calls": plan.get("source", {}).get("api_calls") == 0,
         },
         "api_calls_made": 0,
         "story_modified_by_verifier": False,
+        "plan_modified_by_verifier": False,
         "semantic_preservation_proven": False,
         "semantic_preservation_limitation": (
             "The verifier checks source integrity, vocabulary coverage, "
             "ordered narration reconstruction and revision evidence. "
-            "It does not claim that lexical overlap alone proves semantic equivalence."
+            "Lexical overlap alone does not prove semantic equivalence."
         ),
     }
 
@@ -1132,9 +1500,12 @@ def main() -> int:
     plan = read_json(PLAN_FILE)
 
     report = verify_story(story, plan, input_data)
+
+    # Only the verification report is written. Story and Plan are read-only.
     write_json(REPORT_FILE, report)
 
     summary = report["summary"]
+
     log("VALIDATION: SUCCESS")
     log("FORMAT:", report["format"])
     log("TITLE:", report["title"])
@@ -1158,8 +1529,10 @@ def main() -> int:
     log("SOURCE COVERAGE:", summary["source_coverage"]["status"])
     log("API CALLS: 0")
     log("STORY MODIFIED: false")
+    log("PLAN MODIFIED: false")
     log("REPORT:", REPORT_FILE.relative_to(ROOT))
     log("=" * 64)
+
     return 0
 
 
@@ -1172,5 +1545,8 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:
-        log("STORY VALIDATION: FAILED", f"{type(exc).__name__}: {exc}")
+        log(
+            "STORY VALIDATION: FAILED",
+            f"{type(exc).__name__}: {exc}",
+        )
         raise SystemExit(1)
