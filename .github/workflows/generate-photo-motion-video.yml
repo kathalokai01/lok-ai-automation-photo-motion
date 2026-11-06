@@ -80,7 +80,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/share/fonts/katha-caption
-          key: ${{ runner.os }}-${{ runner.arch }}-hindi-fonts-v5
+          key: ${{ runner.os }}-${{ runner.arch }}-hindi-fonts-v6
 
       - name: Restore FFmpeg binary cache
         uses: actions/cache@v4
