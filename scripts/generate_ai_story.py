@@ -880,6 +880,81 @@ def validate_extra_record(
     result.update(fields)
     return result
 
+def validate_generated_part(
+    generated: Any,
+    source_part: dict,
+    config: dict,
+    total_parts: int,
+) -> dict:
+    if not isinstance(generated, dict):
+        raise ValueError("Model response must be a JSON object.")
+
+    expected_keys = {"scenes", "story_title"}
+
+    for key in ROLE_KEYS:
+        if source_part.get(key) is not None:
+            expected_keys.add(key)
+
+    unexpected = set(generated) - expected_keys
+    missing = expected_keys - set(generated)
+
+    if unexpected:
+        raise ValueError(
+            "Unexpected generated records/fields: "
+            + ", ".join(sorted(unexpected))
+        )
+    if missing:
+        raise ValueError(
+            "Missing generated records/fields: "
+            + ", ".join(sorted(missing))
+        )
+
+    title = clean(generated.get("story_title"))
+    if not title:
+        raise ValueError("Generated story_title cannot be empty.")
+
+    main_scenes = validate_generated_scenes(
+        generated.get("scenes"),
+        source_part,
+        config,
+        total_parts,
+    )
+
+    main_narration = " ".join(
+        item["narration"] for item in main_scenes
+    )
+    part_number = source_part["part"]
+    final_part = part_number == total_parts
+
+    completed = {
+        "part": part_number,
+        "status": "completed",
+        "title": clean(source_part.get("title")),
+        "story_title": title,
+        "narration": main_narration,
+        "word_count": word_count(main_narration),
+        "final_part_merged": bool(source_part.get("final_part_merged")),
+        "scenes": main_scenes,
+    }
+
+    for key, role in ROLE_KEYS.items():
+        source_record = source_part.get(key)
+
+        if key == "suspense_scene" and final_part:
+            source_record = None
+        if key == "resolution_scene" and not final_part:
+            source_record = None
+
+        completed[key] = validate_extra_record(
+            generated.get(key),
+            source_record,
+            role,
+            part_number,
+        )
+
+    return completed
+
+
 def build_revision_prompt(
     original_prompt: str,
     generated: dict,
