@@ -349,7 +349,7 @@ def verify_plan_header(
         "total_hook_scenes": selected_parts,
         "total_suspense_scenes": max(0, selected_parts - 1),
         "total_resolution_scenes": 1,
-        "total_extra_scenes": selected_parts * 2 + max(0, selected_parts - 1),
+        "total_extra_scenes": selected_parts * 2,
     }
 
     for field, expected in expected_role_counts.items():
