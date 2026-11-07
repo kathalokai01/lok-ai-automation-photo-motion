@@ -117,7 +117,10 @@ def read_json(path, required=False):
             object_pairs_hook=unique_object,
         )
     except (OSError, ValueError, TypeError) as exc:
-        raise RuntimeError(f"Invalid JSON file {path}: {exc}") from exc
+        if required:
+            raise RuntimeError(f"Invalid JSON file {path}: {exc}") from exc
+        log("IGNORING INVALID OPTIONAL CHECKPOINT/MANIFEST:", path, str(exc)[:300])
+        return {}
     if not isinstance(value, dict):
         raise RuntimeError(f"JSON root must be an object: {path}")
     return value
@@ -454,6 +457,8 @@ def build_role_prompt(title, story_text, summary, role, rows, config):
         "Create original instrumental cinematic music for a Hindi storytelling video. "
         f"Independent {role.upper()} composition. No vocals, lyrics, speech or chanting. "
         "Do not imitate existing songs, artists or soundtracks. Avoid abrupt cuts and silence. "
+        "Use a memorable evolving original motif, varied instrumentation and dynamics; "
+        "avoid a short loop repeated unchanged across the composition. "
         f"{directions[role]} Story title: {title}. Style: {style}. Genre: {genre}. "
         f"Mood: {mood}. Intensity: {intensity}. "
         f"Required role duration: {duration:.2f} seconds. "
@@ -1053,6 +1058,12 @@ def verify_existing(signature, duration, timeline):
         actual = probe_audio(path, MIN_AUDIO_DURATION)
         if previous.get("sha256") != sha256_file(path):
             return False
+        if previous.get("size_bytes") != path.stat().st_size:
+            return False
+        if previous.get("mastering_target_lufs") != MUSIC_TARGET_LUFS:
+            return False
+        if previous.get("mastering_true_peak_limit_dbtp") != MUSIC_TRUE_PEAK_LIMIT:
+            return False
         if abs(actual - duration) > DURATION_TOLERANCE:
             return False
         if abs(float(previous.get("required_duration_seconds")) - duration) > 0.01:
@@ -1087,6 +1098,11 @@ def validate_published_manifest(signature, final_checksum, duration, timeline):
         or published.get("source_fingerprint") != signature
         or published.get("path") != FINAL_AUDIO.relative_to(ROOT).as_posix()
         or published.get("generation_method") != "four_independent_role_compositions"
+        or published.get("size_bytes") != FINAL_AUDIO.stat().st_size
+        or published.get("mastering_target_lufs") != MUSIC_TARGET_LUFS
+        or published.get("mastering_true_peak_limit_dbtp") != MUSIC_TRUE_PEAK_LIMIT
+        or published.get("narration_records") != len(timeline)
+        or published.get("role_segment_count") != len(timeline)
     ):
         raise RuntimeError("Published Flow Music manifest failed verification.")
 
@@ -1270,6 +1286,9 @@ def main():
             "narration_records": len(rows),
             "role_summary": role_summary,
             "role_durations": role_durations,
+            "scenes_min": role_summary["scenes_min"],
+            "scenes_max": role_summary["scenes_max"],
+            "actual_scene_counts": role_summary["actual_scene_counts"],
             "completed_role_compositions": sorted(saved_compositions),
             "role_compositions": saved_compositions,
             "api_calls_started": 0,
@@ -1365,11 +1384,15 @@ def main():
             "role_segment_policy": (
                 "Every narration record receives a verified segment from its matching role composition."
             ),
+            "role_segment_timing_verified": True,
+            "role_segment_checkpointed_per_scene": True,
             "role_segment_timeline": timeline,
             "actual_scene_counts": role_summary["actual_scene_counts"],
             "scenes_min": role_summary["scenes_min"],
             "scenes_max": role_summary["scenes_max"],
             "story_aware_prompt": True,
+            "evolving_original_music_motif": True,
+            "no_unchanged_short_loop_requested": True,
             "story_beginning_considered": True,
             "story_middle_considered": True,
             "story_ending_considered": True,
@@ -1411,8 +1434,6 @@ def main():
                 for role, item in published["role_compositions"].items()
             },
             "role_segment_count": len(published["role_segments"]),
-            "role_segments": published["role_segments"],
-            "completed_role_segments": [item["scene_id"] for item in published["role_segments"]],
             "role_segments": published["role_segments"],
             "completed_role_segments": [item["scene_id"] for item in published["role_segments"]],
             "role_segment_sha256": {
