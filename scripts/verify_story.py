@@ -41,7 +41,7 @@ PLAN_FILE = ROOT / "output" / "story" / "story_plan.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 REPORT_FILE = ROOT / "output" / "story" / "story_verification.json"
 
-VERSION = "story-verifier-v17-plan-fingerprint-and-counts"
+VERSION = "story-verifier-v18-source-payload-and-completeness"
 
 SHORT_MIN_WORDS = SHORT_MIN_WORDS_PER_PART
 SHORT_PREFERRED_MAX_WORDS = SHORT_PREFERRED_MAX_WORDS_PER_PART
@@ -132,12 +132,29 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            fail(f"Duplicate JSON key: {key!r}.")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json(value: str):
+    fail(f"Non-finite JSON value is not permitted: {value!r}.")
+
+
 def read_json(path: Path) -> dict:
     if not path.is_file() or path.stat().st_size <= 0:
         fail(f"Required file is missing or empty: {path.relative_to(ROOT)}")
 
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"Cannot read {path.name}: {exc}")
 
@@ -318,6 +335,10 @@ def verify_plan_header(
 
     if plan.get("scenes_range") != [scenes_min, scenes_max]:
         fail("Story Plan scenes_range does not match Input.")
+    if positive_int(plan.get("configured_parts_min"), "Plan configured_parts_min") != input_data["minimum_parts"]:
+        fail("Story Plan configured PARTS minimum does not match Input.")
+    if positive_int(plan.get("configured_parts_max"), "Plan configured_parts_max") != input_data["maximum_parts"]:
+        fail("Story Plan configured PARTS maximum does not match Input.")
 
     if clean(plan.get("scene_order")) != "hook_then_main_then_suspense_or_resolution":
         fail("Story Plan scene_order is invalid.")
@@ -405,6 +426,13 @@ def verify_plan_header(
     plan_parts = plan.get("parts")
     if not isinstance(plan_parts, list) or len(plan_parts) != selected_parts:
         fail("Story Plan Part list does not match selected PARTS.")
+
+    payload_parts = payload.get("part_texts")
+    if not isinstance(payload_parts, list) or len(payload_parts) != selected_parts:
+        fail("Story Plan source_payload Part texts are missing or incomplete.")
+    for index, payload_text in enumerate(payload_parts, 1):
+        if not isinstance(payload_text, str) or not clean(payload_text):
+            fail(f"Story Plan source_payload Part {index} is empty or invalid.")
 
     return plan_parts, actual_counts
 
@@ -1301,6 +1329,19 @@ def verify_story(
         plan_counts,
     )
 
+    flattened_plan_scenes = [
+        scene for part in plan_parts for scene in part["scenes"]
+    ]
+    if plan.get("scenes") != flattened_plan_scenes:
+        fail("Top-level Plan Scenes do not match ordered Part Scene records.")
+
+    payload_parts = plan.get("source_payload", {}).get("part_texts", [])
+    for part_number, (payload_text, planned_part) in enumerate(
+        zip(payload_parts, plan_parts), 1
+    ):
+        if normalized_text(payload_text) != normalized_text(planned_part.get("narration")):
+            fail(f"Plan source_payload text differs from planned Part {part_number}.")
+
     title, story_parts, all_scenes = verify_story_header(
         story,
         input_data,
@@ -1348,6 +1389,10 @@ def verify_story(
 
     if story_plan_fingerprint != plan_source_fingerprint:
         fail("Story/Plan source fingerprint mismatch.")
+    if story.get("story_plan_version") not in (None, PLAN_VERSION):
+        fail("Story records an incompatible Story Plan version.")
+    if story.get("story_plan_mapping_version") not in (None, MAPPING_VERSION):
+        fail("Story records an incompatible Story Plan mapping version.")
 
     source_text = input_data["source_text"]
 
@@ -1373,6 +1418,12 @@ def verify_story(
 
     if policy.get("actual_scene_counts") != story_counts:
         fail("Story length policy Scene counts mismatch.")
+    if policy.get("format") not in (None, input_data["mode"]):
+        fail("Story length policy FORMAT mismatch.")
+    if policy.get("revision_outcome") == "pending_final_part_recovery":
+        fail("Story still has an unresolved final-Part retry/merge recovery.")
+    if policy.get("final_part_validation_passed") is False:
+        fail("Story length policy final validation is not passed.")
 
     selection = story.get("parts_selection")
     if not isinstance(selection, dict):
@@ -1386,6 +1437,10 @@ def verify_story(
 
     if selection.get("maximum_parts") != input_data["maximum_parts"]:
         fail("Story parts_selection maximum does not match Input.")
+    if selection.get("selected_parts") != selection.get("actual_parts", selected_parts):
+        fail("Story parts_selection selected/actual Part counts differ.")
+    if selection.get("selection_persisted") is False:
+        fail("Story selected PARTS were not persisted in Input configuration.")
 
     merged_parts = [
         part_number
