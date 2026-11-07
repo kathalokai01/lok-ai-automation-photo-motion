@@ -232,12 +232,17 @@ def load_jobs():
         actual = str(image_data.get(key) or "").strip().lower()
         if actual != expected:
             raise RuntimeError(f"image_manifest.json {key} mismatch.")
+    if jobs_manifest.get("total_jobs") != len(rows):
+        raise RuntimeError("visual_jobs_manifest total_jobs does not match visual_jobs.json.")
     if image_data.get("total_scenes") != len(rows):
         raise RuntimeError("image_manifest.json total_scenes does not match visual_jobs.json.")
     if image_data.get("images_ready") != len(rows):
         raise RuntimeError("image_manifest.json does not confirm every image is ready.")
     if image_data.get("images_failed") != 0 or image_data.get("images_pending") != 0:
         raise RuntimeError("image_manifest.json reports failed or pending images.")
+    expected_size = (720, 1280) if format_name == "short" else (1280, 720)
+    if image_data.get("image_size") != f"{expected_size[0]}x{expected_size[1]}":
+        raise RuntimeError("image_manifest.json image_size does not match SHORT/FULL format.")
 
     raw_min = jobs_manifest.get("scenes_min")
     raw_max = jobs_manifest.get("scenes_max")
@@ -342,6 +347,11 @@ def load_jobs():
             raise RuntimeError(f"{scene_id}: visual job and image manifest paths disagree.")
 
         width, height = image_info(image_path, number)
+        if (width, height) != expected_size:
+            raise RuntimeError(
+                f"{scene_id}: image dimensions {width}x{height} do not match "
+                f"{format_name.upper()} dimensions {expected_size[0]}x{expected_size[1]}."
+            )
         image_hash = sha256_file(image_path)
         declared_hash = str(image_row.get("image_sha256") or "").strip().lower()
         if len(declared_hash) != 64 or declared_hash != image_hash:
@@ -355,9 +365,10 @@ def load_jobs():
             ("source_fingerprint", source_fingerprint),
             ("config_signature", config_signature),
         ):
-            declared = str(job.get(key) or image_row.get(key) or "").strip().lower()
-            if declared and declared != expected:
-                raise RuntimeError(f"{scene_id}: {key} mismatch.")
+            job_value = str(job.get(key) or "").strip().lower()
+            image_value = str(image_row.get(key) or "").strip().lower()
+            if job_value != expected or image_value != expected:
+                raise RuntimeError(f"{scene_id}: {key} missing or mismatched.")
         if image_row.get("job_signature") and job.get("job_signature"):
             if image_row["job_signature"] != job["job_signature"]:
                 raise RuntimeError(f"{scene_id}: image job signature mismatch.")
@@ -823,6 +834,9 @@ def save_manifest(entries, metadata, total_scenes, status, error=None):
             "role": row.get("role") if row else None,
             "image_sha256": row.get("image_sha256") if row else None,
             "job_signature": row.get("job_signature") if row else None,
+            "source_fingerprint": row.get("source_fingerprint") if row else metadata.get("source_fingerprint"),
+            "config_signature": row.get("config_signature") if row else metadata.get("config_signature"),
+            "format": row.get("format") if row else metadata.get("format"),
             "depth_map": row.get("depth_map") if row else None,
             "depth_sha256": row.get("depth_sha256") if row else None,
             "size_bytes": row.get("size_bytes") if row else None,
