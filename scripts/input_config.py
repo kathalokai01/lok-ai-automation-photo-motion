@@ -493,6 +493,22 @@ def parse_scenes_range(value: Any) -> tuple[int, int]:
     return minimum, maximum
 
 
+def _explicit_range_bound(value: Any, key: str) -> int:
+    """Parse an explicitly supplied range bound without truncating values."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a positive integer.")
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, str) and re.fullmatch(r"\d+", value.strip()):
+        result = int(value.strip())
+    else:
+        raise ValueError(f"{key} must be a positive integer.")
+    if result < 1:
+        raise ValueError(f"{key} must be greater than zero.")
+    return result
+
+
 def get_scenes_range(config: dict[str, Any]) -> tuple[int, int]:
     """Return validated inclusive (minimum, maximum) SCENES bounds."""
 
@@ -506,13 +522,22 @@ def get_scenes_range(config: dict[str, Any]) -> tuple[int, int]:
     explicit_min = config.get("SCENES_MIN")
     explicit_max = config.get("SCENES_MAX")
 
-    if explicit_min not in (None, "") and explicit_max not in (None, ""):
-        try:
-            supplied = (int(explicit_min), int(explicit_max))
-        except (TypeError, ValueError) as exc:
+    has_explicit_min = explicit_min not in (None, "")
+    has_explicit_max = explicit_max not in (None, "")
+    if has_explicit_min != has_explicit_max:
+        raise ValueError(
+            "SCENES_MIN and SCENES_MAX must be supplied together."
+        )
+
+    if has_explicit_min and has_explicit_max:
+        supplied = (
+            _explicit_range_bound(explicit_min, "SCENES_MIN"),
+            _explicit_range_bound(explicit_max, "SCENES_MAX"),
+        )
+        if supplied[0] > supplied[1]:
             raise ValueError(
-                "SCENES_MIN and SCENES_MAX must be integers."
-            ) from exc
+                "SCENES_MIN cannot be greater than SCENES_MAX."
+            )
 
         if supplied != (minimum, maximum):
             raise ValueError(
@@ -565,13 +590,22 @@ def get_parts_range(config: dict[str, Any]) -> tuple[int, int]:
     explicit_min = config.get("PARTS_MIN")
     explicit_max = config.get("PARTS_MAX")
 
-    if explicit_min not in (None, "") and explicit_max not in (None, ""):
-        try:
-            supplied = (int(explicit_min), int(explicit_max))
-        except (TypeError, ValueError) as exc:
+    has_explicit_min = explicit_min not in (None, "")
+    has_explicit_max = explicit_max not in (None, "")
+    if has_explicit_min != has_explicit_max:
+        raise ValueError(
+            "PARTS_MIN and PARTS_MAX must be supplied together."
+        )
+
+    if has_explicit_min and has_explicit_max:
+        supplied = (
+            _explicit_range_bound(explicit_min, "PARTS_MIN"),
+            _explicit_range_bound(explicit_max, "PARTS_MAX"),
+        )
+        if supplied[0] > supplied[1]:
             raise ValueError(
-                "PARTS_MIN and PARTS_MAX must be integers."
-            ) from exc
+                "PARTS_MIN cannot be greater than PARTS_MAX."
+            )
 
         if supplied != (minimum, maximum):
             raise ValueError(
