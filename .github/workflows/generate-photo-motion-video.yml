@@ -120,6 +120,10 @@ jobs:
             scripts/input_config.py
             scripts/story_length_policy.py
             scripts/select_gemini_model.py
+            scripts/check_gemini_guard.py
+            scripts/gemini_api_guard.py
+            scripts/select_visual_model.py
+            scripts/test_gemini.py
             scripts/llm_provider_client.py
             scripts/select_llm_provider.py
             scripts/test_llm_providers.py
