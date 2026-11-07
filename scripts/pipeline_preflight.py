@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v65-caption-font-fallback-manifest-and-requirements"
+VERSION = "photo-motion-preflight-v66-repository-workflow-dependency-delivery-audit"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -102,6 +102,13 @@ PYTHON_MODULES = (
     "requests", "PIL", "cv2", "numpy", "imageio",
     "imageio_ffmpeg", "gradio_client", "huggingface_hub",
     "edge_tts", "transformers", "safetensors", "accelerate",
+    "librosa", "sentencepiece", "soundfile",
+)
+
+REQUIRED_DISTRIBUTIONS = (
+    "requests", "Pillow", "numpy", "opencv-python-headless",
+    "imageio", "imageio-ffmpeg", "edge-tts", "gradio_client",
+    "huggingface_hub", "transformers", "safetensors", "accelerate",
     "librosa", "sentencepiece", "soundfile",
 )
 
@@ -264,6 +271,43 @@ def check_module(module: str) -> tuple[bool, str]:
         )
     except (ImportError, ValueError, AttributeError) as exc:
         return False, f"Module check failed: {exc}"
+
+
+def check_requirements_manifest() -> tuple[bool, str]:
+    path = ROOT / "requirements.txt"
+    if not path.is_file():
+        return False, "requirements.txt is missing."
+    declared = {}
+    try:
+        for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            match = re.match(r"^([A-Za-z0-9_.-]+)\s*(.*)$", line)
+            if not match:
+                return False, f"Invalid requirements entry: {line!r}"
+            name = re.sub(r"[-_.]+", "-", match.group(1)).casefold()
+            declared[name] = match.group(2).strip()
+    except (OSError, UnicodeError) as exc:
+        return False, f"Cannot read requirements.txt: {exc}"
+
+    missing = []
+    unpinned = []
+    for distribution in REQUIRED_DISTRIBUTIONS:
+        name = re.sub(r"[-_.]+", "-", distribution).casefold()
+        specification = declared.get(name)
+        if specification is None:
+            missing.append(distribution)
+        elif not specification.startswith("=="):
+            unpinned.append(distribution)
+    if missing or unpinned:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if unpinned:
+            details.append("not exactly pinned: " + ", ".join(unpinned))
+        return False, "; ".join(details)
+    return True, f"All {len(REQUIRED_DISTRIBUTIONS)} required distributions are exactly pinned."
 
 
 def check_runtime_command(command: str) -> tuple[bool, str]:
@@ -2156,6 +2200,9 @@ def check_local_dependencies(config: dict) -> list[dict]:
         passed, detail = check_module(module)
         add("python_dependency:" + module, passed, detail)
 
+    passed, detail = check_requirements_manifest()
+    add("requirements_manifest_pinned_and_complete", passed, detail)
+
     for command in RUNTIME_COMMANDS:
         passed, detail = check_runtime_command(command)
         add("runtime_command:" + command, passed, detail)
@@ -2285,6 +2332,9 @@ def check_workflow_structure(source: str) -> list[dict]:
         ),
         "checkout_action": r"(?m)^\s{8}uses:\s*actions/checkout@v4\s*$",
         "python_setup_action": r"(?m)^\s{8}uses:\s*actions/setup-python@v5\s*$",
+        "cpu_torch_install": r"(?s)python -m pip install torch\s+--index-url https://download\.pytorch\.org/whl/cpu",
+        "pip_dependency_check": r"(?m)^\s*python -m pip check\s*$",
+        "caption_font_manifest": r"(?m)^\s*test -s output/fonts/font_manifest\.json\s*$",
         "artifact_upload_action": r"(?m)^\s{8}uses:\s*actions/upload-artifact@v4\s*$",
         "checkpoint_upload": (
             r"(?m)^\s{10}name:\s*"
@@ -2462,6 +2512,61 @@ def main() -> int:
 
     for item in check_workflow_structure(workflow):
         record(item["name"], item["passed"], item["detail"])
+
+    required_block = re.search(
+        r"(?ms)^\s*required_files=\(\s*(.*?)^\s*\)",
+        workflow,
+    )
+    workflow_required = (
+        set(re.findall(r"scripts/([A-Za-z0-9_.-]+\.py)", required_block.group(1)))
+        if required_block
+        else set()
+    )
+    expected_required = set(REQUIRED_SCRIPTS)
+    missing_from_workflow = sorted(expected_required - workflow_required)
+    extra_in_workflow = sorted(workflow_required - expected_required)
+    required_scripts_match = bool(required_block) and not missing_from_workflow and not extra_in_workflow
+    record(
+        "workflow_required_script_inventory",
+        required_scripts_match,
+        (
+            f"Workflow and preflight both require {len(expected_required)} identical scripts."
+            if required_scripts_match
+            else f"Missing from workflow: {missing_from_workflow}; extra in workflow: {extra_in_workflow}."
+        ),
+    )
+
+    installer_text = (SCRIPTS / "install_caption_fonts.py").read_text(encoding="utf-8")
+    package_text = (SCRIPTS / "package_output.py").read_text(encoding="utf-8")
+    validator_text = (SCRIPTS / "validate_final_output.py").read_text(encoding="utf-8")
+    font_contract = (
+        'PROJECT_MANIFEST = ROOT / "output" / "fonts" / "font_manifest.json"' in installer_text
+        and "atomic_json(PROJECT_MANIFEST, manifest_data)" in installer_text
+        and "test -s output/fonts/font_manifest.json" in workflow
+        and 'OUT / "fonts" / "font_manifest.json"' in package_text
+    )
+    record(
+        "caption_font_install_workflow_package_contract",
+        font_contract,
+        "Installer, workflow and package use output/fonts/font_manifest.json."
+        if font_contract
+        else "Caption font manifest paths do not agree across installer/workflow/package.",
+    )
+
+    package_contract = all(
+        marker in package_text
+        for marker in ("scene_image_members", "scene_audio_members", "depth_map_members", "selected_package_files")
+    ) and all(
+        marker in validator_text
+        for marker in ("final_srt_sha256", "caption_timeline", "source_photo_manifest_sha256")
+    )
+    record(
+        "final_media_and_package_contract",
+        package_contract,
+        "Package inventories scene images, narration audio and depth maps; validator binds captions and source manifests."
+        if package_contract
+        else "Final validator and package media contracts are incomplete.",
+    )
 
     commands = extract_workflow_commands(workflow)
 
