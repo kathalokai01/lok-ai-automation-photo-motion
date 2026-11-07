@@ -716,7 +716,7 @@ def validate_settings(config: dict) -> dict:
         ).lower(),
         "parallax_enabled": config.get("PHOTO_MOTION_PARALLAX", True),
         "parallax_strength": float(
-            config.get("PHOTO_MOTION_PARALLAX_STRENGTH", 0.026)
+            config.get("PHOTO_MOTION_PARALLAX_STRENGTH", 0.032)
         ),
         "preserve_subject": config.get(
             "PHOTO_MOTION_PRESERVE_SUBJECT", True
@@ -784,6 +784,8 @@ def read_depth_maps(
     mode: str,
     part_numbers: list[int],
     scene_counts: dict[int, int],
+    scenes_minimum: int,
+    scenes_maximum: int,
 ) -> dict[str, dict]:
     if not enabled:
         log("Depth parallax disabled by configuration; 2D motion only.")
@@ -800,7 +802,7 @@ def read_depth_maps(
         raise RuntimeError("Depth manifest FORMAT does not match Photo Motion FORMAT.")
     if document.get("total_scenes") != len(prepared) or document.get("completed_scenes") != len(prepared):
         raise RuntimeError("Depth manifest does not contain a completed map for every Photo Motion job.")
-    if document.get("scenes_min") != settings_range_min(prepared) or document.get("scenes_max") != settings_range_max(prepared):
+    if document.get("scenes_min") != scenes_minimum or document.get("scenes_max") != scenes_maximum:
         raise RuntimeError("Depth manifest SCENES range does not match prepared jobs.")
     expected_counts = {str(part): count for part, count in scene_counts.items()}
     if document.get("actual_scene_counts") != expected_counts:
@@ -1594,6 +1596,8 @@ def main() -> int:
         mode,
         part_numbers,
         scene_counts,
+        scene_minimum,
+        scene_maximum,
     )
 
     effect_plan = build_effect_plan(
