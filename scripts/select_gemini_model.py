@@ -14,7 +14,7 @@ from typing import Any
 
 
 OUTPUT_FILE = Path("output/config/selected_model.json")
-SELECTOR_VERSION = 7
+SELECTOR_VERSION = 8
 
 DEFAULT_PRIMARY_MODEL = "gemini-3.8-flash"
 
@@ -123,8 +123,20 @@ def parse_model_list(raw: str, setting_name: str) -> list[str]:
 
     return result
 
+def zero_cost_llm_enabled() -> bool:
+    """The selector may prepare models only in explicit zero-cost mode."""
+    raw = os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower()
+    if raw not in {"1", "true", "yes", "on", "enabled"}:
+        raise RuntimeError(
+            "LLM_ZERO_COST_ONLY must be true. "
+            "Paid LLM providers and unconfirmed Gemini usage are blocked."
+        )
+    return True
+
+
 def configured_fallbacks(existing: dict) -> list[str]:
-    """Preserve the saved primary and complete the fallback order."""
+    """Preserve configured primary/fallback priority without reordering it."""
+    zero_cost_llm_enabled()
     existing = existing if isinstance(existing, dict) else {}
 
     raw_primary = os.environ.get("GEMINI_MODEL", "").strip()
@@ -160,11 +172,13 @@ def configured_fallbacks(existing: dict) -> list[str]:
 
     if primary:
         configured = [primary]
-        fallback_candidates = (
-            explicit
-            if explicit
-            else list(DEFAULT_FALLBACK_MODELS)
-        )
+        if explicit:
+            fallback_candidates = explicit
+        else:
+            fallback_candidates = (
+                [model for model in saved_order if model != primary]
+                + list(DEFAULT_FALLBACK_MODELS)
+            )
 
     elif explicit:
         if saved_primary:
@@ -190,15 +204,8 @@ def configured_fallbacks(existing: dict) -> list[str]:
         if model not in configured:
             configured.append(model)
 
-    if previous_selection_is_successful(existing):
-        previous = normalize_model(existing.get("model"))
-
-        if previous and previous not in configured:
-            configured.append(previous)
-            log(
-                "Previously successful model retained at "
-                "the end of the fallback order."
-            )
+    # A previously successful model is reusable only when it is already
+    # present in the configured priority list. Never append it out of order.
 
     if not configured:
         raise RuntimeError(
@@ -301,6 +308,7 @@ def build_selection(
 
 def main() -> None:
     log("Preparing configured Gemini model order.")
+    zero_cost_llm_enabled()
 
     previous = read_existing_selection()
     models = configured_fallbacks(previous)
@@ -332,6 +340,17 @@ def main() -> None:
 
     if saved.get("fallback_signature") != selection_signature(models):
         raise RuntimeError("Saved fallback signature is invalid.")
+
+    if saved.get("configured_primary_model") != models[0]:
+        raise RuntimeError("Saved configured primary model is inconsistent.")
+
+    if saved.get("selection_source") != "configured_priority_order":
+        raise RuntimeError("Unexpected Gemini selection source.")
+
+    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
+        "1", "true", "yes", "on", "enabled",
+    }:
+        raise RuntimeError("Zero-cost LLM restriction changed during selection.")
 
     log("GEMINI MODEL PRIORITY SAVED")
     log("Selected primary: " + models[0])
