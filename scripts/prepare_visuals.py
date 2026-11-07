@@ -1594,15 +1594,18 @@ def main() -> int:
         source_scenes,
         visual_rows,
     )
-    visual_source_fingerprint = clean(visual_metadata.get("source_fingerprint"))
-    visual_config_signature = clean(visual_metadata.get("config_signature"))
+    # generate_visuals.py writes visual_jobs.json as a list; its provenance
+    # metadata is authoritative in visual_jobs_manifest.json.
+    visual_source_fingerprint = clean(visual_manifest.get("source_fingerprint"))
+    visual_config_signature = clean(visual_manifest.get("config_signature"))
     if not visual_source_fingerprint or not visual_config_signature:
-        raise RuntimeError("visual_jobs.json is missing source/config fingerprints.")
-    if (
-        clean(visual_manifest.get("source_fingerprint")) != visual_source_fingerprint
-        or clean(visual_manifest.get("config_signature")) != visual_config_signature
-    ):
-        raise RuntimeError("visual_jobs.json and its manifest fingerprints disagree.")
+        raise RuntimeError("visual_jobs_manifest.json is missing source/config fingerprints.")
+    if isinstance(visual_metadata, dict) and visual_metadata:
+        if (
+            clean(visual_metadata.get("source_fingerprint")) != visual_source_fingerprint
+            or clean(visual_metadata.get("config_signature")) != visual_config_signature
+        ):
+            raise RuntimeError("visual_jobs.json metadata and its manifest fingerprints disagree.")
 
     if isinstance(visual_metadata, dict):
         declared_format = clean(
