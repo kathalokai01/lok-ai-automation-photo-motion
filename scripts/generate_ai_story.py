@@ -32,7 +32,7 @@ MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v17-controlled-word-revision"
+VERSION = "ai-story-v18-anchor-count-integrity"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -339,6 +339,12 @@ def validate_source_plan(plan: dict, expected_format: str):
                     f"Unexpected {key} in part {part_number}."
                 )
 
+    expected_counts = [len(part["scenes"]) for part in parts]
+    if plan.get("actual_scene_counts") != expected_counts:
+        raise RuntimeError("Story-plan actual_scene_counts mismatch.")
+
+    if plan.get("total_main_scenes") not in (None, total_main_scenes):
+        raise RuntimeError("Story-plan total_main_scenes mismatch.")
     if plan.get("total_scenes") not in (None, total_main_scenes):
         raise RuntimeError("Story-plan total_scenes mismatch.")
 
@@ -602,6 +608,7 @@ SHORT FINAL PART:
         else:
             format_rules = """
 SHORT NON-FINAL PART:
+
 - Main narration target is 120–150 words.
 - 151–180 words are allowed only after revision attempts.
 - Below 120 or above 180 words is invalid.
@@ -834,6 +841,7 @@ def validate_generated_scenes(
 
     return result
 
+
 def validate_extra_record(
     generated: Any,
     source: Any,
@@ -982,15 +990,31 @@ def build_revision_prompt(
             "and unclear wording."
         )
     else:
-        word_rule = (
-            f"SHORT main narration: {minimum}–{maximum} words. "
-            "Preferred target: 120–150 words."
+        merged_final = (
+            source_part.get("part") == total_parts
+            and source_part.get("final_part_merged") is True
         )
+        if merged_final:
+            word_rule = (
+                f"SHORT merged final narration: {minimum}–{maximum} words. "
+                "The 181–239 range is permitted for this final merged Part."
+            )
+        else:
+            word_rule = (
+                f"SHORT main narration: {minimum}–{maximum} words. "
+                "Preferred target: 120–150 words."
+            )
 
-        if count > SHORT_TARGET_MAX:
+        if count > maximum:
             correction = (
                 f"The current narration has {count} words. "
-                f"Reduce it toward 135–145 words. Remove repeated "
+                f"Reduce it to at most {maximum} words while preserving "
+                "all remaining story events and the complete ending."
+            )
+        elif count > SHORT_TARGET_MAX and not merged_final:
+            correction = (
+                f"The current narration has {count} words. "
+                "Reduce it toward 135–145 words. Remove repeated "
                 "phrases, redundant explanations and unnecessary "
                 "adjectives. Do not remove essential story events."
             )
@@ -1015,12 +1039,18 @@ def build_revision_prompt(
         + "\nयह नया कहानी-लेखन नहीं है; मौजूदा उत्तर का सुधार है।"
         + "\nकेवल main narration के शब्द गिनें। Hook/Suspense/"
         "Resolution को इस गिनती में शामिल न करें।"
-        + "\nमुख्य narration को 120–150 शब्द में लाने का प्रयास करें।"
-        + "\nयदि 150 से अधिक शब्द हों तो अनावश्यक पुनरावृत्ति हटाएँ।"
-        + "\nयदि 120 से कम हों तो केवल स्रोत-कहानी के प्रासंगिक "
-        "विवरण जोड़ें।"
-        + "\n151–180 शब्द अंतिम revision के बाद ही स्वीकार्य हैं।"
-        + "\n180 से अधिक या 120 से कम शब्द स्वीकार्य नहीं हैं।"
+        + (
+            "\nMerged final Part में 120–239 शब्द स्वीकार्य हैं; "
+            "181–239 शब्दों को 180 तक घटाने के लिए कहानी की घटनाएँ न हटाएँ।"
+            if config["format"] == "short"
+            and source_part.get("part") == total_parts
+            and source_part.get("final_part_merged") is True
+            else "\nमुख्य narration को 120–150 शब्द में लाने का प्रयास करें।"
+            "\nयदि 150 से अधिक शब्द हों तो अनावश्यक पुनरावृत्ति हटाएँ।"
+            "\n151–180 शब्द केवल सभी revision attempts के बाद स्वीकार्य हैं।"
+            "\n180 से अधिक या 120 से कम शब्द स्वीकार्य नहीं हैं।"
+        )
+        + "\nयदि 120 से कम हों तो केवल स्रोत-कहानी के प्रासंगिक विवरण जोड़ें।"
         + "\nसभी scene_id, role और scene क्रम source plan के समान रखें।"
         + "\nHook/Suspense/Resolution अलग records में ही रहें।"
         + "\nअतिरिक्त या अनुपस्थित role record न जोड़ें।"
@@ -1064,6 +1094,8 @@ def generate_part(
             f"trying model {model_index}/{len(models)}: {model}"
         )
 
+        completed_validation_attempts = 0
+
         for attempt in range(1, max_attempts + 1):
             try:
                 log(
@@ -1078,6 +1110,7 @@ def generate_part(
                     schema,
                 )
                 last_generated = generated
+                completed_validation_attempts += 1
 
                 try:
                     completed = validate_generated_part(
@@ -1161,7 +1194,10 @@ def generate_part(
 
         # A non-final SHORT part with 151–180 words may be accepted
         # only after all revision attempts on this model have been used.
-        if last_generated is not None:
+        if (
+            last_generated is not None
+            and completed_validation_attempts >= max_attempts
+        ):
             try:
                 completed = validate_generated_part(
                     last_generated,
@@ -1184,12 +1220,6 @@ def generate_part(
             f"Model {model} exhausted; "
             "moving to the next configured Gemini model."
         )
-
-    raise RuntimeError(
-        f"Part {source_part['part']} failed on all configured Gemini "
-        f"models. " + " | ".join(errors)
-    )
-
 
 def source_part_signature(part: dict) -> str:
     return stable_hash({
@@ -1262,6 +1292,8 @@ def is_completed_part_valid(
                 return False
             if actual.get("scene_id") != source.get("scene_id"):
                 return False
+            if clean(actual.get("story_anchor")) != clean(source.get("story_anchor")):
+                return False
             if actual.get("role") != "main":
                 return False
             if actual.get("status") != "completed":
@@ -1305,6 +1337,8 @@ def is_completed_part_valid(
             if not isinstance(cached, dict):
                 return False
             if cached.get("scene_id") != source.get("scene_id"):
+                return False
+            if clean(cached.get("story_anchor")) != clean(source.get("story_anchor")):
                 return False
             if cached.get("role") != role:
                 return False
@@ -1353,6 +1387,10 @@ def validate_final_output(
             f"{len(output_parts)}/{len(source_parts)}."
         )
 
+    expected_counts = [len(part.get("scenes", [])) for part in source_parts]
+    if ai_story.get("actual_scene_counts") != expected_counts:
+        raise RuntimeError("AI story actual_scene_counts mismatch.")
+
     total_main_scenes = 0
     all_narration = []
     titles = set()
@@ -1399,6 +1437,10 @@ def validate_final_output(
             if actual.get("scene_id") != expected.get("scene_id"):
                 raise RuntimeError(
                     f"Part {index} scene_id mismatch."
+                )
+            if clean(actual.get("story_anchor")) != clean(expected.get("story_anchor")):
+                raise RuntimeError(
+                    f"Part {index} scene story_anchor mismatch."
                 )
             if actual.get("role") != "main":
                 raise RuntimeError(
@@ -1535,9 +1577,9 @@ def main() -> None:
     )
 
     story_text = (
-        clean(get_story_text(input_config))
-        or clean(source_story.get("corrected_complete_story"))
+        clean(source_story.get("corrected_complete_story"))
         or clean(source_story.get("story_text"))
+        or clean(get_story_text(input_config))
     )
 
     if not story_text:
@@ -1601,6 +1643,7 @@ def main() -> None:
             "source_story_signature": source_story_signature,
             "source_plan_signature": source_plan_signature,
             "input_config": config,
+            "actual_scene_counts": [len(part["scenes"]) for part in source_plan["parts"]],
             "parts": reusable_parts,
         }
         write_json(OUTPUT_FILE, ai_story)
@@ -1620,6 +1663,7 @@ def main() -> None:
         "source_story_signature": source_story_signature,
         "source_plan_signature": source_plan_signature,
         "input_config": config,
+        "actual_scene_counts": [len(part["scenes"]) for part in source_plan["parts"]],
     })
 
     log("=" * 58)
@@ -1717,6 +1761,9 @@ def main() -> None:
     ai_story["parts_count"] = completed_parts
     ai_story["total_scenes"] = completed_scenes
     ai_story["total_main_scenes"] = completed_scenes
+    ai_story["actual_scene_counts"] = [
+        len(part["scenes"]) for part in source_plan["parts"]
+    ]
     ai_story["total_extra_scenes"] = sum(
         1
         for part in ai_story["parts"]
