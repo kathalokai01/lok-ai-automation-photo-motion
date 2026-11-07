@@ -400,7 +400,7 @@ def split_phrases(text, max_chars=38, max_words=7):
     return merged or [text]
 
 
-def load_caption_map(part_numbers, scenes):
+def load_caption_map(part_numbers, scene_counts):
     data = read_json(CAPTION_MANIFEST)
 
     if not isinstance(data, dict) or data.get("status") != "completed":
@@ -455,7 +455,7 @@ def load_caption_map(part_numbers, scenes):
     expected = {
         (part, scene)
         for part in part_numbers
-        for scene in range(1, scenes + 1)
+        for scene in range(1, scene_counts[part] + 1)
     }
 
     if set(mapping) != expected:
@@ -614,7 +614,7 @@ def load_audio_map():
     return mapping, data
 
 
-def load_render_scenes(data, part_numbers, scenes, width, height, fps):
+def load_render_scenes(data, part_numbers, scene_counts, width, height, fps):
     if not isinstance(data, dict) or data.get("status") != "completed":
         raise RuntimeError("Render manifest is incomplete")
 
@@ -671,7 +671,7 @@ def load_render_scenes(data, part_numbers, scenes, width, height, fps):
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"{sid}: invalid scene number") from exc
 
-        if role == "main" and not 1 <= local_scene <= scenes:
+        if role == "main" and not 1 <= local_scene <= scene_counts[part]:
             raise RuntimeError(f"{sid}: invalid Main scene number")
 
         if role != "main" and local_scene != 0:
@@ -755,7 +755,7 @@ def load_render_scenes(data, part_numbers, scenes, width, height, fps):
         ]
 
         for role in expected:
-            if roles.count(role) != (scenes if role == "main" else 1):
+            if roles.count(role) != (scene_counts[part] if role == "main" else 1):
                 raise RuntimeError(
                     f"Part {part} requires correct {role} count"
                 )
@@ -777,22 +777,19 @@ def load_render_scenes(data, part_numbers, scenes, width, height, fps):
 
 def resolve_font(family):
     result = run(
-        ["fc-match", "-f", "%{file}\n", family],
+        ["fc-match", "-f", "%{family}|%{file}\\n", family],
         f"Resolve font {family}",
         60,
     )
-
     lines = result.stdout.strip().splitlines()
-
-    if not lines:
+    if not lines or "|" not in lines[0]:
         raise RuntimeError(f"Caption font not found: {family}")
-
-    path = Path(lines[0]).resolve()
-
-    if not path.is_file():
-        raise RuntimeError(f"Font file missing: {path}")
-
-    return path
+    resolved_family, raw_path = lines[0].split("|", 1)
+    resolved_family = clean_text(resolved_family.split(",", 1)[0])
+    path = Path(raw_path).resolve()
+    if not resolved_family or not path.is_file():
+        raise RuntimeError(f"Caption font fallback could not be resolved: {family}")
+    return resolved_family, path
 
 
 def normalize_word(value):
@@ -1428,8 +1425,8 @@ def caption_filter(srt_path, font_path, family, size, style):
         f"FontSize={int(size * style['length_factor'])},"
         f"PrimaryColour={style['primary']},"
         f"OutlineColour={style['outline']},"
-        "BackColour=&H00000000,"
-        "BorderStyle=1,"
+        "BackColour=&H90000000,"
+        "BorderStyle=3,"
         f"Outline={style['outline_width']},"
         f"Shadow={style['shadow']},"
         f"Alignment={style['alignment']},"
@@ -1814,13 +1811,14 @@ def main():
 
     mode = str(get_format(config)).strip().lower()
     configured_parts = int(get_parts(config))
-    scenes = int(get_scenes(config))
+    scenes_min = int(config.get("SCENES_MIN", get_scenes(config)))
+    scenes_max = int(config.get("SCENES_MAX", get_scenes(config)))
     fps = int(get_fps(config))
 
     if mode not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
 
-    if configured_parts < 1 or scenes < 1 or not 1 <= fps <= 60:
+    if configured_parts < 1 or scenes_min < 1 or scenes_max < scenes_min or not 1 <= fps <= 60:
         raise RuntimeError("Invalid PARTS, SCENES or FPS")
 
     width, height = (
@@ -1846,13 +1844,24 @@ def main():
             "Selected part count differs from configured PARTS"
         )
 
+    raw_counts = render_data.get("actual_scene_counts")
+    if not isinstance(raw_counts, dict):
+        raise RuntimeError("Render manifest actual_scene_counts is missing")
+    scene_counts = {}
+    for part in part_numbers:
+        raw = raw_counts.get(str(part), raw_counts.get(part))
+        if isinstance(raw, bool):
+            raise RuntimeError(f"Part {part}: invalid actual Scene count")
+        try:
+            count = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Part {part}: missing actual Scene count") from exc
+        if not scenes_min <= count <= scenes_max:
+            raise RuntimeError(f"Part {part}: {count} Scenes outside configured range {scenes_min}-{scenes_max}")
+        scene_counts[part] = count
+
     render_by_id, ordered = load_render_scenes(
-        render_data,
-        part_numbers,
-        scenes,
-        width,
-        height,
-        fps,
+        render_data, part_numbers, scene_counts, width, height, fps
     )
 
     narration_by_id, narration_data = load_audio_map()
@@ -1861,11 +1870,12 @@ def main():
         render_by_id,
         narration_by_id,
         part_numbers,
+        scene_counts,
     )
 
     main_captions, extra_captions, caption_data = load_caption_map(
         part_numbers,
-        scenes,
+        scene_counts,
     )
 
     family = str(get_caption_font(config)).strip()
@@ -1898,8 +1908,11 @@ def main():
                 "Caption preparation font size differs from configured size"
             )
 
-    font_path = resolve_font(family)
+    requested_family = family
+    family, font_path = resolve_font(requested_family)
     font_hash = sha256_file(font_path)
+    if family.lower() != requested_family.lower():
+        log("CAPTION FONT FALLBACK:", requested_family, "->", family, relative(font_path))
 
     CAPTIONED_DIR.mkdir(parents=True, exist_ok=True)
     PART_DIR.mkdir(parents=True, exist_ok=True)
@@ -1920,11 +1933,12 @@ def main():
     seed = fingerprint({
         "format": mode,
         "parts": part_numbers,
-        "scenes": scenes,
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": scene_counts,
         "main_caption_hashes": {
             f"{part}:{scene}": main_captions[(part, scene)]["sha256"]
             for part in part_numbers
-            for scene in range(1, scenes + 1)
+            for scene in range(1, scene_counts[part] + 1)
         },
         "extra_caption_hashes": {
             key: value["sha256"]
@@ -1951,7 +1965,8 @@ def main():
             "format": mode,
             "part_numbers": part_numbers,
             "total_parts": len(part_numbers),
-            "scenes_per_part": scenes,
+            "scenes_range": [scenes_min, scenes_max],
+            "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
             "total_scenes": len(ordered),
             "completed_count": 0,
             "scenes": cached,
@@ -1960,7 +1975,8 @@ def main():
 
     log("CAPTION BURN VERSION:", VERSION)
     log("FORMAT:", mode, "PARTS:", part_numbers)
-    log("SCENES/PART:", scenes)
+    log("SCENES RANGE:", f"{scenes_min}-{scenes_max}")
+    log("ACTUAL SCENE COUNTS:", scene_counts)
     log("ROLE CLIPS:", len(ordered))
     log("FONT:", family, "SIZE:", size, "FPS:", fps)
 
@@ -2258,7 +2274,7 @@ def main():
         if row["role"] != "main"
     ]
 
-    expected_main_count = len(part_numbers) * scenes
+    expected_main_count = sum(scene_counts.values())
 
     if len(main_rows) != expected_main_count:
         raise RuntimeError("Final Main caption count mismatch")
