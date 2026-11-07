@@ -1027,6 +1027,8 @@ def build_effect_plan(
         recent = recent_by_part.setdefault(item["part"], [])
         recent_effects = set(recent[-4:])
         available = [effect for effect in choices if effect not in recent_effects]
+        if not available and len(choices) > 1 and recent:
+            available = [effect for effect in choices if effect != recent[-1]]
         if not available:
             available = choices
         seed = digest_data({
@@ -1054,7 +1056,8 @@ def make_filter(
 ) -> str:
     denominator = max(frames - 1, 1)
     scale = motion_scale(settings["speed"])
-    zoom_amount = min(0.18 * scale, 0.34)
+    zoom_amount = min(0.15 * scale, 0.27)
+    zoom_out_amount = min(0.14 * scale, 0.24)
     pan_zoom = 1.24
     zoom = "1.06"
     x = "(iw-iw/zoom)/2"
@@ -1064,7 +1067,7 @@ def make_filter(
     if effect == "zoom_in":
         zoom = f"min(1+{zoom_amount:.4f}*{progress},1.28)"
     elif effect == "zoom_out":
-        zoom = f"max(1.24-{zoom_amount:.4f}*{progress},1.0)"
+        zoom = f"max(1.24-{zoom_out_amount:.4f}*{progress},1.0)"
     elif effect in {"pan_left", "pan_right"}:
         zoom = str(pan_zoom)
         direction = f"(1-{progress})" if effect == "pan_left" else progress
@@ -1078,11 +1081,11 @@ def make_filter(
         x = f"(iw-iw/zoom)*{progress}"
         y = f"(ih-ih/zoom)*(1-{progress})"
     elif effect == "diagonal_push":
-        zoom = f"min(1+0.16*{scale:.4f}*{progress},1.25)"
+        zoom = f"min(1+0.12*{scale:.4f}*{progress},1.24)"
         x = f"(iw-iw/zoom)*(0.08+0.84*{progress})"
         y = f"(ih-ih/zoom)*(0.88-0.76*{progress})"
     elif effect.startswith("zoom_pan_"):
-        zoom = f"min(1+0.15*{scale:.4f}*{progress},1.25)"
+        zoom = f"min(1+0.12*{scale:.4f}*{progress},1.24)"
         direction = effect.rsplit("_", 1)[-1]
         if direction == "left":
             x = f"(iw-iw/zoom)*(1-{progress})"
