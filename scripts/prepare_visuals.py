@@ -17,7 +17,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from input_config import load_and_validate, get_format, get_parts, get_scenes
+from input_config import load_and_validate, get_format, get_parts, get_scenes_range
 
 OUTPUT = ROOT / "output"
 VISUALS = OUTPUT / "visuals"
@@ -36,7 +36,7 @@ PHOTO_JOBS_FILE = VISUALS / "photo_motion_jobs.json"
 PHOTO_MANIFEST_FILE = VISUALS / "photo_motion_manifest.json"
 CHECKPOINT_FILE = CHECKPOINTS / "prepare_visuals_progress.json"
 
-VERSION = "prepare-visuals-v13-strict-measured-audio-role-integrity"
+VERSION = "prepare-visuals-v14-variable-scene-range-image-integrity"
 
 ROLE_ORDER = {
     "hook": 0,
@@ -296,166 +296,73 @@ def validate_image_dimensions(
 def normalize_source_scenes(
     document: Any,
     expected_parts: int,
-    scenes_per_part: int,
+    scene_counts: dict[int, int],
+    scenes_min: int,
+    scenes_max: int,
 ) -> tuple[list[dict], list[int]]:
     if not isinstance(document, dict):
         raise RuntimeError("scenes.json root must be an object.")
-
     rows = document.get("scenes")
-
     if not isinstance(rows, list) or not rows:
         raise RuntimeError("scenes.json has no scenes list.")
-
-    prepared = []
-    seen_ids = set()
-    seen_main = set()
-    part_numbers = set()
-
+    prepared, seen_ids, seen_main, part_numbers = [], set(), set(), set()
     counts: dict[int, dict[str, int]] = {}
-
     for index, original in enumerate(rows, 1):
         if not isinstance(original, dict):
             raise RuntimeError(f"Scene record #{index} is not an object.")
-
         part = positive_int(original.get("part"), f"Scene #{index} part")
         part_numbers.add(part)
-
         role = normalize_role(original)
-        raw_scene = original.get(
-            "scene",
-            original.get("local_scene"),
-        )
-
+        raw_scene = original.get("scene", original.get("local_scene"))
         if role == "main":
-            scene_number = positive_int(
-                raw_scene,
-                f"Part {part} main scene number",
-            )
-
-            if scene_number > scenes_per_part:
-                raise RuntimeError(
-                    f"Part {part}: scene {scene_number} exceeds "
-                    f"SCENES={scenes_per_part}."
-                )
-
+            scene_number = positive_int(raw_scene, f"Part {part} main scene number")
+            actual_count = scene_counts.get(part)
+            if actual_count is None or scene_number > actual_count:
+                raise RuntimeError(f"Part {part}: invalid main Scene number {scene_number}.")
             pair = (part, scene_number)
-
             if pair in seen_main:
                 raise RuntimeError(f"Duplicate main scene: {pair}.")
-
             seen_main.add(pair)
-
         else:
             scene_number = None
-
             if raw_scene not in (None, ""):
-                raise RuntimeError(
-                    f"{original.get('scene_id')}: extra role {role} "
-                    "must not use a main scene number."
-                )
-
-        scene_id = normalize_scene_id(
-            original,
-            part,
-            role,
-            scene_number,
-        )
-
+                raise RuntimeError(f"{original.get('scene_id')}: extra role {role} must not use a main scene number.")
+        scene_id = normalize_scene_id(original, part, role, scene_number)
         if scene_id in seen_ids:
             raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
-
         seen_ids.add(scene_id)
-
-        counts.setdefault(
-            part,
-            {name: 0 for name in ROLE_ORDER},
-        )
+        counts.setdefault(part, {name: 0 for name in ROLE_ORDER})
         counts[part][role] += 1
-
-        prepared.append({
-            **dict(original),
-            "part": part,
-            "role": role,
-            "scene_id": scene_id,
-            "source_scene_number": scene_number,
-            "is_extra_scene": role != "main",
-        })
-
+        prepared.append({**dict(original), "part": part, "role": role,
+                         "scene_id": scene_id, "source_scene_number": scene_number,
+                         "is_extra_scene": role != "main"})
     part_numbers = sorted(part_numbers)
-
     if len(part_numbers) != expected_parts:
-        raise RuntimeError(
-            f"Selected PARTS mismatch: expected {expected_parts}, "
-            f"found {part_numbers}."
-        )
-
-    if part_numbers != list(
-        range(part_numbers[0], part_numbers[0] + expected_parts)
-    ):
-        raise RuntimeError(
-            f"Part numbering must be continuous: {part_numbers}."
-        )
-
-    expected_main = {
-        (part, scene)
-        for part in part_numbers
-        for scene in range(1, scenes_per_part + 1)
-    }
-
-    missing = sorted(expected_main - seen_main)
-    extra = sorted(seen_main - expected_main)
-
+        raise RuntimeError(f"Selected PARTS mismatch: expected {expected_parts}, found {part_numbers}.")
+    if part_numbers != list(range(part_numbers[0], part_numbers[0] + expected_parts)):
+        raise RuntimeError(f"Part numbering must be continuous: {part_numbers}.")
+    if set(scene_counts) != set(part_numbers):
+        raise RuntimeError("Actual Scene-count map does not match selected Parts.")
+    if any(not scenes_min <= scene_counts[p] <= scenes_max for p in part_numbers):
+        raise RuntimeError(f"Actual Scene counts must stay within {scenes_min}-{scenes_max}.")
+    expected_main = {(p, n) for p in part_numbers for n in range(1, scene_counts[p] + 1)}
+    missing, extra = sorted(expected_main - seen_main), sorted(seen_main - expected_main)
     if missing or extra:
-        raise RuntimeError(
-            f"Main scene mapping mismatch. "
-            f"Missing={missing[:20]}, extra={extra[:20]}."
-        )
-
+        raise RuntimeError(f"Main Scene mapping mismatch. Missing={missing[:20]}, extra={extra[:20]}.")
     for position, part in enumerate(part_numbers):
-        role_counts = counts.get(part, {})
-
-        if role_counts.get("hook", 0) != 1:
-            raise RuntimeError(
-                f"Part {part} requires exactly one Hook scene."
-            )
-
-        if role_counts.get("main", 0) != scenes_per_part:
-            raise RuntimeError(
-                f"Part {part} requires exactly {scenes_per_part} Main scenes."
-            )
-
+        rc = counts.get(part, {})
+        if rc.get("hook", 0) != 1:
+            raise RuntimeError(f"Part {part} requires exactly one Hook scene.")
+        if rc.get("main", 0) != scene_counts[part]:
+            raise RuntimeError(f"Part {part} requires exactly {scene_counts[part]} Main scenes.")
         if position < len(part_numbers) - 1:
-            if role_counts.get("suspense", 0) != 1:
-                raise RuntimeError(
-                    f"Non-final part {part} requires exactly one Suspense."
-                )
-
-            if role_counts.get("resolution", 0) != 0:
-                raise RuntimeError(
-                    f"Non-final part {part} cannot contain Resolution."
-                )
-        else:
-            if role_counts.get("resolution", 0) != 1:
-                raise RuntimeError(
-                    f"Final part {part} requires exactly one Resolution."
-                )
-
-            if role_counts.get("suspense", 0) != 0:
-                raise RuntimeError(
-                    "Final part cannot contain Suspense."
-                )
-
-    prepared.sort(
-        key=lambda row: (
-            row["part"],
-            ROLE_ORDER[row["role"]],
-            row["source_scene_number"] or 0,
-            row["scene_id"],
-        )
-    )
-
+            if rc.get("suspense", 0) != 1 or rc.get("resolution", 0) != 0:
+                raise RuntimeError(f"Non-final Part {part} requires one Suspense and no Resolution.")
+        elif rc.get("resolution", 0) != 1 or rc.get("suspense", 0) != 0:
+            raise RuntimeError(f"Final Part {part} requires one Resolution and no Suspense.")
+    prepared.sort(key=lambda row: (row["part"], ROLE_ORDER[row["role"]],
+                                   row["source_scene_number"] or 0, row["scene_id"]))
     return prepared, part_numbers
-
 
 def extract_rows(document: Any, label: str) -> tuple[list[dict], dict]:
     if isinstance(document, list):
@@ -1199,7 +1106,9 @@ def prepare_jobs(
     character_map: dict[str, dict],
     format_name: str,
     part_numbers: list[int],
-    scenes_per_part: int,
+    scene_counts: dict[int, int],
+    scenes_min: int,
+    scenes_max: int,
 ) -> tuple[list[dict], dict]:
     jobs = []
     role_counts = {role: 0 for role in ROLE_ORDER}
@@ -1367,7 +1276,7 @@ def prepare_jobs(
         role_counts[role] += 1
         part_role_counts[part][role] += 1
 
-    expected_main = len(part_numbers) * scenes_per_part
+    expected_main = sum(scene_counts[part] for part in part_numbers)
 
     if role_counts["main"] != expected_main:
         raise RuntimeError(
@@ -1378,7 +1287,7 @@ def prepare_jobs(
     for position, part in enumerate(part_numbers):
         counts = part_role_counts[part]
 
-        if counts["hook"] != 1 or counts["main"] != scenes_per_part:
+        if counts["hook"] != 1 or counts["main"] != scene_counts[part]:
             raise RuntimeError(
                 f"Part {part}: Hook/Main scene counts are invalid."
             )
@@ -1418,7 +1327,10 @@ def prepare_jobs(
         "version": VERSION,
         "format": format_name,
         "part_numbers": part_numbers,
-        "scenes_per_part": scenes_per_part,
+        "scenes_min": scenes_min,
+        "scenes_max": scenes_max,
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
         "source_scene_ids": [
             row["scene_id"] for row in source_scenes
         ],
@@ -1442,7 +1354,10 @@ def prepare_jobs(
         "parts": len(part_numbers),
         "part_numbers": part_numbers,
         "total_parts": len(part_numbers),
-        "scenes_per_part": scenes_per_part,
+        "scenes_min": scenes_min,
+        "scenes_max": scenes_max,
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
         "total_jobs": len(jobs),
         "total_scenes": len(jobs),
         "total_main_scenes": role_counts["main"],
@@ -1624,7 +1539,7 @@ def main() -> int:
         )
 
     parts = positive_int(get_parts(config), "PARTS")
-    scenes_per_part = positive_int(get_scenes(config), "SCENES")
+    scenes_min, scenes_max = get_scenes_range(config)
 
     resume_enabled = as_bool(
         config.get("RESUME_ENABLED", True),
@@ -1637,16 +1552,25 @@ def main() -> int:
 
     log("FORMAT:", format_name)
     log("PARTS:", parts)
-    log("MAIN SCENES PER PART:", scenes_per_part)
+    log("SCENES RANGE:", f"{scenes_min}-{scenes_max}")
     log("RESUME ENABLED:", resume_enabled)
     log("SKIP COMPLETED:", skip_completed)
 
     source_document = read_json(SCENES_FILE, required=True)
 
+    raw_counts = source_document.get("actual_scene_counts")
+    if not isinstance(raw_counts, list) or len(raw_counts) != parts:
+        raise RuntimeError("scenes.json actual_scene_counts must contain one count per selected Part.")
+    scene_counts = {
+        part: positive_int(raw_counts[index], f"Part {part} actual Scene count")
+        for index, part in enumerate(range(1, parts + 1))
+    }
+    if any(not scenes_min <= count <= scenes_max for count in scene_counts.values()):
+        raise RuntimeError(f"scenes.json actual Scene counts must stay within {scenes_min}-{scenes_max}.")
+    if source_document.get("scenes_min") != scenes_min or source_document.get("scenes_max") != scenes_max:
+        raise RuntimeError("scenes.json SCENES range does not match Input/topic.txt.")
     source_scenes, part_numbers = normalize_source_scenes(
-        source_document,
-        parts,
-        scenes_per_part,
+        source_document, parts, scene_counts, scenes_min, scenes_max,
     )
 
     expected_ids = {row["scene_id"] for row in source_scenes}
@@ -1670,6 +1594,15 @@ def main() -> int:
         source_scenes,
         visual_rows,
     )
+    visual_source_fingerprint = clean(visual_metadata.get("source_fingerprint"))
+    visual_config_signature = clean(visual_metadata.get("config_signature"))
+    if not visual_source_fingerprint or not visual_config_signature:
+        raise RuntimeError("visual_jobs.json is missing source/config fingerprints.")
+    if (
+        clean(visual_manifest.get("source_fingerprint")) != visual_source_fingerprint
+        or clean(visual_manifest.get("config_signature")) != visual_config_signature
+    ):
+        raise RuntimeError("visual_jobs.json and its manifest fingerprints disagree.")
 
     if isinstance(visual_metadata, dict):
         declared_format = clean(
@@ -1727,6 +1660,14 @@ def main() -> int:
                 f"{label}: format does not match Input configuration."
             )
 
+    for label, manifest_document in (
+        ("image_manifest.json", image_document),
+        ("image_generation_manifest.json", generation_document),
+    ):
+        if clean(manifest_document.get("source_fingerprint")) != visual_source_fingerprint:
+            raise RuntimeError(f"{label}: source fingerprint mismatch.")
+        if clean(manifest_document.get("config_signature")) != visual_config_signature:
+            raise RuntimeError(f"{label}: config signature mismatch.")
     image_by_id = validate_image_manifests(
         image_document,
         generation_document,
@@ -1768,7 +1709,9 @@ def main() -> int:
         character_map=character_map,
         format_name=format_name,
         part_numbers=part_numbers,
-        scenes_per_part=scenes_per_part,
+        scene_counts=scene_counts,
+        scenes_min=scenes_min,
+        scenes_max=scenes_max,
     )
 
     VISUALS.mkdir(parents=True, exist_ok=True)
@@ -1795,7 +1738,10 @@ def main() -> int:
         "parts": len(part_numbers),
         "part_numbers": part_numbers,
         "total_parts": len(part_numbers),
-        "scenes_per_part": scenes_per_part,
+"scenes_min": scenes_min,
+        "scenes_max": scenes_max,
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
         "total_jobs": len(jobs),
         "config_signature": document["config_signature"],
         "visual_jobs_signature": stable_hash(visual_metadata),
@@ -1853,7 +1799,8 @@ def main() -> int:
     log("PHOTO MOTION JOBS PREPARED")
     log("Format:", format_name)
     log("Parts:", part_numbers)
-    log("Main scenes per part:", scenes_per_part)
+    log("SCENES RANGE:", f"{scenes_min}-{scenes_max}")
+    log("ACTUAL SCENE COUNTS:", scene_counts)
     log("Total main scenes:", document["total_main_scenes"])
     log("Total extra scenes:", document["total_extra_scenes"])
     log("Total jobs:", len(jobs))
