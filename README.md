@@ -120,7 +120,7 @@ The workflow and preflight verify required Python modules and system commands be
 
 ## Hindi caption fonts
 
-Font installation checks existing project/system fonts first, verifies font files and fontconfig resolution, and records the selected font in `output/fonts/font_manifest.json`.
+Font installation checks existing project/system fonts first, verifies font files and fontconfig resolution, copies the selected Hindi font to `output/fonts/selected_hindi_caption_font.ttf`, writes its SIL Open Font License 1.1 notice to `output/fonts/OFL-1.1.txt`, and records the selected fallback and SHA-256 in `output/fonts/font_manifest.json`.
 
 Fallback order:
 
