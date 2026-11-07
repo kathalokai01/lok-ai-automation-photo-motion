@@ -2008,8 +2008,6 @@ def make_story(
             or not scenes_min <= len(planned_scenes) <= scenes_max
         ):
             raise RuntimeError(
-
-            raise RuntimeError(
                 f"Plan Scene count is outside {scenes_min}-{scenes_max} "
                 f"for Part {part_number}."
             )
