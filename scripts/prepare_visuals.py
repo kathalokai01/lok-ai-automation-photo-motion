@@ -1062,36 +1062,31 @@ def verify_image_record(
             f"{scene_id}: visual job image SHA256 mismatch."
         )
 
-    prompt_hash = clean(image_record.get("prompt_sha256"))
-    job_prompt_hash = clean(visual_job.get("prompt_sha256"))
+    prompt_hash = clean(image_record.get("prompt_sha256")).lower()
+    generation_prompt_hash = clean(generation_record.get("prompt_sha256")).lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", prompt_hash):
+        raise RuntimeError(f"{scene_id}: image prompt SHA256 is missing or invalid.")
+    if prompt_hash != generation_prompt_hash:
+        raise RuntimeError(f"{scene_id}: image/generation prompt SHA256 mismatch.")
 
-    if prompt_hash and job_prompt_hash and prompt_hash != job_prompt_hash:
-        raise RuntimeError(
-            f"{scene_id}: image prompt SHA256 mismatch."
-        )
+    prompt_signature = clean(image_record.get("prompt_signature"))
+    generation_prompt_signature = clean(generation_record.get("prompt_signature"))
+    job_signature = clean(visual_job.get("prompt_signature"))
+    if not prompt_signature or prompt_signature != generation_prompt_signature:
+        raise RuntimeError(f"{scene_id}: image/generation prompt signature mismatch.")
+    if not job_signature or prompt_signature != job_signature:
+        raise RuntimeError(f"{scene_id}: image/visual-job prompt signature mismatch.")
 
-    prompt_signature = clean(
-        image_record.get("prompt_signature")
-        or image_record.get("job_signature")
-    )
-
-    job_signature = clean(
-        visual_job.get("prompt_signature")
-        or visual_job.get("job_signature")
-    )
-
-    if prompt_signature and job_signature:
-        if prompt_signature != job_signature:
-            raise RuntimeError(
-                f"{scene_id}: image prompt signature mismatch."
-            )
-
-    if clean(image_record.get("source_scene_signature")) != clean(
-        visual_job.get("source_scene_signature")
+    for field, label in (
+        ("source_scene_signature", "source scene"),
+        ("source_fingerprint", "source fingerprint"),
+        ("config_signature", "config signature"),
     ):
-        raise RuntimeError(
-            f"{scene_id}: source scene signature mismatch."
-        )
+        expected = clean(visual_job.get(field))
+        image_value = clean(image_record.get(field))
+        generation_value = clean(generation_record.get(field))
+        if not expected or image_value != expected or generation_value != expected:
+            raise RuntimeError(f"{scene_id}: {label} provenance mismatch.")
 
     return image_path, info
 
