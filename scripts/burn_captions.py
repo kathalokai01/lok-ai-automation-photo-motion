@@ -729,7 +729,7 @@ def load_render_scenes(data, part_numbers, scene_counts, width, height, fps):
     expected_main = {
         (part, scene)
         for part in part_numbers
-        for scene in range(1, scenes + 1)
+        for scene in range(1, scene_counts[part] + 1)
     }
 
     actual_main = {
@@ -1758,6 +1758,7 @@ def validate_manifest_role_sets(
     render_by_id,
     narration_by_id,
     part_numbers,
+    scene_counts,
 ):
     if set(render_by_id) != set(narration_by_id):
         raise RuntimeError(
@@ -1783,17 +1784,7 @@ def validate_manifest_role_sets(
     for part in part_numbers:
         expected_ids.add(f"part_{part:02d}_hook")
 
-        for scene in range(
-            1,
-            max(
-                1,
-                sum(
-                    1
-                    for row in render_by_id.values()
-                    if row["part"] == part and row["role"] == "main"
-                ) + 1,
-            ),
-        ):
+        for scene in range(1, scene_counts[part] + 1):
             expected_ids.add(
                 f"part_{part:02d}_scene_{scene:02d}"
             )
@@ -2187,7 +2178,8 @@ def main():
                 "format": mode,
                 "part_numbers": part_numbers,
                 "total_parts": len(part_numbers),
-                "scenes_per_part": scenes,
+                "scenes_range": [scenes_min, scenes_max],
+                "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
                 "fps": fps,
                 "completed_count": index,
                 "total_scenes": len(ordered),
@@ -2275,6 +2267,11 @@ def main():
     ]
 
     expected_main_count = sum(scene_counts.values())
+
+    for part in part_numbers:
+        actual_part_count = sum(row["part"] == part for row in main_rows)
+        if actual_part_count != scene_counts[part]:
+            raise RuntimeError(f"Part {part}: expected {scene_counts[part]} Main captions, got {actual_part_count}")
 
     if len(main_rows) != expected_main_count:
         raise RuntimeError("Final Main caption count mismatch")
