@@ -348,11 +348,25 @@ def check_font() -> tuple[bool, str]:
         path = Path(path_value)
         if not path.is_file() or path.is_symlink():
             return False, f"Selected font file is missing or unsafe: {path}."
+        if manifest.get("project_font_file") != path_value:
+            return False, "Selected font path differs from the packaged font path."
         if not re.fullmatch(r"[a-f0-9]{64}", declared_hash):
             return False, "Selected font SHA-256 is missing or invalid."
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest != declared_hash:
             return False, "Selected font file SHA-256 differs from its manifest."
+        license_value = str(manifest.get("project_license_file") or "").strip()
+        if not license_value:
+            return False, "Selected font license path is missing."
+        license_path = Path(license_value)
+        if not license_path.is_file() or license_path.is_symlink():
+            return False, "Selected font license file is missing or unsafe."
+        license_text = license_path.read_text(encoding="utf-8")
+        if (
+            "SIL OPEN FONT LICENSE Version 1.1" not in license_text
+            or not license_text.startswith("Copyright")
+        ):
+            return False, "Selected font copyright/OFL license text is invalid."
         scanner = shutil.which("fc-scan")
         if not scanner:
             return False, "fc-scan is not installed."
