@@ -30,7 +30,7 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-lyria-resume-preserve-v15"
+VERSION = "photo-motion-lyria-role-segment-checkpoint-v16"
 
 REQUEST_TIMEOUT = (30, 900)
 RETRY_DELAYS = (8, 20)
@@ -38,7 +38,7 @@ MIN_AUDIO_BYTES = 10000
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 MIN_AUDIO_DURATION = 10.0
 DURATION_TOLERANCE = 0.65
-MUSIC_TARGET_LUFS = -22.0
+MUSIC_TARGET_LUFS = -20.0
 MUSIC_TRUE_PEAK_LIMIT = -3.0
 SAFE_MASTER_PEAK = -1.0
 MASTER_TAIL_SECONDS = 3.0
@@ -54,7 +54,7 @@ AUDIO_PATH_KEYS = ("output", "audio_path", "audio_file", "path", "file", "audio"
 
 API_CALLS = 0
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "KathaLokAI-PhotoMotion/15.0"})
+SESSION.headers.update({"User-Agent": "KathaLokAI-PhotoMotion/16.0"})
 
 
 def log(*values):
@@ -92,14 +92,35 @@ def read_settings():
     return result
 
 
-def read_json(path):
-    try:
-        value = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError, TypeError):
+def read_json(path, required=False):
+    path = Path(path)
+    if not path.is_file():
+        if required:
+            raise RuntimeError(f"Required JSON file is missing: {path}")
         return {}
 
+    def reject_constant(value):
+        raise ValueError(f"Non-finite JSON constant is forbidden: {value}")
 
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"Invalid JSON file {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"JSON root must be an object: {path}")
+    return value
 def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,14 +234,17 @@ def validate_master_loudness(values):
     peak = values.get("true_peak_dbtp")
     if integrated is None or peak is None:
         raise RuntimeError("Master music loudness/peak data is missing.")
-    if integrated > -20.0:
-        raise RuntimeError(f"Music is too loud: {integrated} LUFS.")
+    if not math.isfinite(float(integrated)) or not math.isfinite(float(peak)):
+        raise RuntimeError("Master music loudness/peak data is non-finite.")
+    if integrated < MUSIC_TARGET_LUFS - 2.0 or integrated > MUSIC_TARGET_LUFS + 2.0:
+        raise RuntimeError(
+            f"Music loudness {integrated} LUFS is outside the target window "
+            f"{MUSIC_TARGET_LUFS-2.0:.1f} to {MUSIC_TARGET_LUFS+2.0:.1f} LUFS."
+        )
     if peak > SAFE_MASTER_PEAK:
         raise RuntimeError(f"Music true peak is unsafe: {peak} dBFS.")
-
-
 def read_story():
-    story = read_json(STORY_FILE)
+    story = read_json(STORY_FILE, required=True)
     if not story:
         raise RuntimeError("output/story/story.json is missing or invalid.")
     title = clean(
@@ -242,7 +266,13 @@ def read_story():
 
 
 def parse_scenes_range(config):
-    raw = clean(config.get("SCENES_SPEC") or config.get("SCENES") or "1")
+    raw = clean(config.get("SCENES_SPEC") or config.get("SCENES") or "")
+    supplied_min = config.get("SCENES_MIN")
+    supplied_max = config.get("SCENES_MAX")
+    if not raw:
+        if supplied_min in (None, "") or supplied_max in (None, ""):
+            raise RuntimeError("SCENES or both SCENES_MIN and SCENES_MAX are required.")
+        raw = f"{supplied_min}-{supplied_max}"
     match = re.fullmatch(r"(\d+)\s*(?:-\s*(\d+))?", raw)
     if not match:
         raise RuntimeError(f"Invalid SCENES range: {raw!r}")
@@ -250,9 +280,9 @@ def parse_scenes_range(config):
     maximum = int(match.group(2) or match.group(1))
     if minimum < 1 or maximum < minimum or maximum > 500:
         raise RuntimeError(f"Invalid SCENES range: {raw!r}")
-    supplied_min = config.get("SCENES_MIN")
-    supplied_max = config.get("SCENES_MAX")
-    if supplied_min not in (None, "") and supplied_max not in (None, ""):
+    if (supplied_min in (None, "")) != (supplied_max in (None, "")):
+        raise RuntimeError("SCENES_MIN and SCENES_MAX must be supplied together.")
+    if supplied_min not in (None, ""):
         try:
             supplied = (int(supplied_min), int(supplied_max))
         except (TypeError, ValueError) as exc:
@@ -260,10 +290,8 @@ def parse_scenes_range(config):
         if supplied != (minimum, maximum):
             raise RuntimeError("SCENES range settings do not match.")
     return minimum, maximum
-
-
 def read_narration_jobs():
-    manifest = read_json(AUDIO_JOBS)
+    manifest = read_json(AUDIO_JOBS, required=True)
     if manifest.get("status") != "completed":
         raise RuntimeError("TTS audio_jobs.json is not completed.")
     jobs = manifest.get("jobs")
@@ -288,6 +316,12 @@ def read_narration_jobs():
             raise RuntimeError(f"Invalid narration identity: {scene_id}") from exc
         if part < 1 or (role == "main" and (scene is None or scene < 1)):
             raise RuntimeError(f"Invalid narration identity: {scene_id}")
+        expected_id = (
+            f"part_{part:02d}_scene_{scene:02d}" if role == "main"
+            else f"part_{part:02d}_{role}"
+        )
+        if scene_id != expected_id:
+            raise RuntimeError(f"Non-canonical narration Scene ID: {scene_id}; expected {expected_id}.")
 
         audio_value = next((
             row.get(key) for key in AUDIO_PATH_KEYS
@@ -296,7 +330,8 @@ def read_narration_jobs():
         path = project_path(audio_value)
         duration = probe_audio(path)
         checksum = sha256_file(path)
-        if clean(row.get("sha256")).lower() != checksum.lower():
+        declared_hash = clean(row.get("sha256") or row.get("audio_sha256")).lower()
+        if declared_hash != checksum.lower():
             raise RuntimeError(f"TTS SHA256 mismatch: {scene_id}")
         declared = row.get("actual_audio_duration_seconds", row.get("duration"))
         try:
@@ -322,8 +357,6 @@ def read_narration_jobs():
         item["scene"] or 0, item["scene_id"],
     ))
     return rows
-
-
 def validate_role_structure(rows, config):
     if not rows:
         raise RuntimeError("No completed narration records.")
@@ -356,14 +389,25 @@ def validate_role_structure(rows, config):
     expected = sum(counts.values()) + len(parts) + max(0, len(parts) - 1) + 1
     if len(rows) != expected:
         raise RuntimeError(f"Narration record count mismatch: {expected} expected, {len(rows)} found.")
+
+    manifest = read_json(AUDIO_JOBS, required=True)
+    if manifest.get("actual_scene_counts") is not None:
+        declared = manifest["actual_scene_counts"]
+        if not isinstance(declared, dict) or {str(k): int(v) for k, v in declared.items()} != counts:
+            raise RuntimeError("TTS manifest actual_scene_counts do not match narration records.")
+    if manifest.get("scenes_min") is not None and manifest.get("scenes_min") != scenes_min:
+        raise RuntimeError("TTS manifest scenes_min does not match Input/topic.txt.")
+    if manifest.get("scenes_max") is not None and manifest.get("scenes_max") != scenes_max:
+        raise RuntimeError("TTS manifest scenes_max does not match Input/topic.txt.")
+    if manifest.get("total_jobs") is not None and manifest.get("total_jobs") != len(rows):
+        raise RuntimeError("TTS manifest total_jobs does not match narration records.")
+
     return {
         "parts": parts, "scenes_min": scenes_min, "scenes_max": scenes_max,
         "actual_scene_counts": counts, "main_count": sum(counts.values()),
         "hook_count": len(parts), "suspense_count": max(0, len(parts) - 1),
         "resolution_count": 1,
     }
-
-
 def build_timeline(rows):
     offset, timeline = 0.0, []
     for row in rows:
@@ -625,12 +669,22 @@ def valid_composition(item, role, signature):
 
 def save_composition_checkpoint(signature, compositions, status="in_progress", reason=None):
     previous = read_json(CHECKPOINT)
+    saved_segments = (
+        previous.get("role_segments", [])
+        if previous.get("source_fingerprint") == signature
+        and isinstance(previous.get("role_segments"), list)
+        else []
+    )
     record = {
         "status": status,
         "version": VERSION,
         "source_fingerprint": signature,
         "completed_role_compositions": sorted(compositions),
         "role_compositions": compositions,
+        "role_segments": saved_segments,
+        "completed_role_segments": [
+            item.get("scene_id") for item in saved_segments if isinstance(item, dict)
+        ],
         "api_calls": API_CALLS,
         "paid_services_used": API_CALLS > 0,
         "updated_at": time.time(),
@@ -638,8 +692,6 @@ def save_composition_checkpoint(signature, compositions, status="in_progress", r
     if reason:
         record["last_error"] = str(reason)[:2000]
     write_json(CHECKPOINT, record)
-
-
 def build_role_compositions(api_key, model, prompts, role_durations, role_rows, signature):
     checkpoint = read_json(CHECKPOINT)
     manifest = read_json(MANIFEST)
@@ -742,15 +794,18 @@ def build_role_segments(compositions, timeline, signature):
     segments = []
     grouped = {role: [] for role in SEGMENT_ROLES}
     previous = read_json(MANIFEST)
-    old_segments = previous.get("role_segments", [])
-    if previous.get("source_fingerprint") != signature or not isinstance(old_segments, list):
-        old_segments = []
+    checkpoint = read_json(CHECKPOINT)
+    old_segments = []
+    for candidate in (previous, checkpoint):
+        if candidate.get("source_fingerprint") == signature:
+            value = candidate.get("role_segments", [])
+            if isinstance(value, list):
+                old_segments.extend(value)
 
-    old_by_id = {
-        item.get("scene_id"): item
-        for item in old_segments
-        if isinstance(item, dict) and item.get("scene_id")
-    }
+    old_by_id = {}
+    for item in old_segments:
+        if isinstance(item, dict) and item.get("scene_id"):
+            old_by_id[item["scene_id"]] = item
 
     for row in timeline:
         role = row["role"]
@@ -761,14 +816,12 @@ def build_role_segments(compositions, timeline, signature):
         source = project_path(composition["path"])
         offset = offsets[role]
         duration = row["duration_seconds"]
-
-        if offset + duration > composition["duration_seconds"] + 0.30:
+        if offset + duration > composition["duration_seconds"] + 0.05:
             raise RuntimeError(f"{role} composition is too short for {row['scene_id']}.")
 
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", row["scene_id"]).strip("_")
         if not safe_name:
             raise RuntimeError("Invalid narration scene ID.")
-
         target = SEGMENT_DIR / f"{safe_name}.mp3"
         segment_signature = fingerprint({
             "source_fingerprint": signature,
@@ -782,13 +835,14 @@ def build_role_segments(compositions, timeline, signature):
         old = old_by_id.get(row["scene_id"])
         reused = False
         item = None
-
         if isinstance(old, dict) and old.get("segment_fingerprint") == segment_signature:
             try:
                 old_path = project_path(old.get("path"))
                 if (
                     old_path.is_file()
                     and sha256_file(old_path) == old.get("sha256")
+                    and old.get("composition_sha256") == composition["sha256"]
+                    and abs(float(old.get("role_source_start_seconds", -999)) - offset) <= 0.01
                     and abs(probe_audio(old_path, 0.05) - duration) <= DURATION_TOLERANCE
                 ):
                     item = dict(old)
@@ -806,6 +860,8 @@ def build_role_segments(compositions, timeline, signature):
             "scene": row["scene"],
             "narration_sha256": row["audio_sha256"],
             "start_seconds": row["start_seconds"],
+            "end_seconds": row["end_seconds"],
+            "duration_seconds": row["duration_seconds"],
             "role_source_start_seconds": round(offset, 4),
             "composition_sha256": composition["sha256"],
             "segment_fingerprint": segment_signature,
@@ -816,6 +872,23 @@ def build_role_segments(compositions, timeline, signature):
         segments.append(item)
         grouped[role].append(item)
         offsets[role] += duration
+
+        current = read_json(CHECKPOINT)
+        if current.get("source_fingerprint") != signature:
+            current = {}
+        saved_compositions = current.get("role_compositions", compositions)
+        write_json(CHECKPOINT, {
+            "status": "in_progress",
+            "version": VERSION,
+            "source_fingerprint": signature,
+            "role_compositions": saved_compositions if isinstance(saved_compositions, dict) else compositions,
+            "completed_role_compositions": sorted(compositions),
+            "role_segments": segments,
+            "completed_role_segments": [entry["scene_id"] for entry in segments],
+            "api_calls": API_CALLS,
+            "paid_services_used": API_CALLS > 0,
+            "updated_at": time.time(),
+        })
 
     summaries = {}
     for role, items in grouped.items():
@@ -831,8 +904,6 @@ def build_role_segments(compositions, timeline, signature):
         }
 
     return segments, summaries
-
-
 def build_master_from_segments(segments, duration):
     if not segments:
         raise RuntimeError("Cannot build master music without role segments.")
@@ -890,40 +961,64 @@ def build_master_from_segments(segments, duration):
         concat_file.unlink(missing_ok=True)
 
 
-def verify_segment_records(segments, timeline, narration_by_id):
-    expected_ids = {row["scene_id"] for row in timeline}
+def verify_segment_records(segments, timeline, narration_by_id, compositions=None):
+    expected_ids = [row["scene_id"] for row in timeline]
     actual_ids = [item.get("scene_id") for item in segments]
-    if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != expected_ids:
-        raise RuntimeError("Music segments do not cover every narration record.")
+    if len(actual_ids) != len(set(actual_ids)) or actual_ids != expected_ids:
+        raise RuntimeError("Music segments must cover narration exactly once and in timeline order.")
 
     timeline_by_id = {row["scene_id"]: row for row in timeline}
+    role_offsets = {role: 0.0 for role in SEGMENT_ROLES}
     for item in segments:
         scene_id = item["scene_id"]
         narration = narration_by_id.get(scene_id)
         timeline_row = timeline_by_id.get(scene_id)
         if narration is None or timeline_row is None:
             raise RuntimeError(f"Music segment has no narration: {scene_id}")
-        if item.get("narration_sha256") != narration["audio_sha256"]:
-            raise RuntimeError(f"Music narration hash mismatch: {scene_id}")
-        if item.get("role") != narration["role"]:
-            raise RuntimeError(f"Music role mismatch: {scene_id}")
-        if int(item.get("part", 0)) != narration["part"]:
-            raise RuntimeError(f"Music Part mismatch: {scene_id}")
-        if abs(float(item.get("start_seconds", -999)) - timeline_row["start_seconds"]) > 0.05:
-            raise RuntimeError(f"Music timeline mismatch: {scene_id}")
+        for key, expected in (
+            ("narration_sha256", narration["audio_sha256"]),
+            ("role", narration["role"]),
+            ("part", narration["part"]),
+            ("start_seconds", timeline_row["start_seconds"]),
+            ("duration_seconds", narration["duration_seconds"]),
+        ):
+            actual = item.get(key)
+            try:
+                matches = abs(float(actual) - float(expected)) <= 0.05 if key in {"start_seconds", "duration_seconds"} else actual == expected
+            except (TypeError, ValueError):
+                matches = False
+            if not matches:
+                raise RuntimeError(f"Music segment {key} mismatch: {scene_id}")
+        role = narration["role"]
+        expected_offset = role_offsets[role]
+        try:
+            actual_offset = float(item.get("role_source_start_seconds"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Music role-source offset missing: {scene_id}") from exc
+        if not math.isfinite(actual_offset) or abs(actual_offset - expected_offset) > 0.05:
+            raise RuntimeError(f"Music role-source timeline is discontinuous: {scene_id}")
+        role_offsets[role] += narration["duration_seconds"]
 
+        if compositions is not None:
+            composition = compositions.get(role)
+            if not isinstance(composition, dict) or item.get("composition_sha256") != composition.get("sha256"):
+                raise RuntimeError(f"Music composition provenance mismatch: {scene_id}")
         path = project_path(item.get("path"))
         if not path.is_file() or sha256_file(path) != item.get("sha256"):
             raise RuntimeError(f"Music segment SHA256 mismatch: {scene_id}")
         actual = probe_audio(path, 0.05)
         if abs(actual - narration["duration_seconds"]) > DURATION_TOLERANCE:
             raise RuntimeError(f"Music is not narration-aligned: {scene_id}")
-
-
+        if item.get("size_bytes") is not None and item.get("size_bytes") != path.stat().st_size:
+            raise RuntimeError(f"Music segment byte size mismatch: {scene_id}")
 def verify_compositions(compositions):
+    if not isinstance(compositions, dict) or not compositions:
+        raise RuntimeError("Role compositions are missing.")
     for role, item in compositions.items():
-        if role not in SEGMENT_ROLES:
-            raise RuntimeError(f"Unknown role composition: {role}")
+        if role not in SEGMENT_ROLES or not isinstance(item, dict):
+            raise RuntimeError(f"Unknown or invalid role composition: {role}")
+        if item.get("role") != role or not item.get("role_fingerprint"):
+            raise RuntimeError(f"{role} composition role/signature is missing.")
         source = project_path(item.get("source_path"))
         prepared = project_path(item.get("path"))
         if not source.is_file() or not prepared.is_file():
@@ -932,10 +1027,14 @@ def verify_compositions(compositions):
             raise RuntimeError(f"{role} source hash mismatch.")
         if sha256_file(prepared) != item.get("sha256"):
             raise RuntimeError(f"{role} composition hash mismatch.")
-        probe_audio(source, MIN_AUDIO_DURATION)
-        probe_audio(prepared, MIN_AUDIO_DURATION)
-
-
+        if item.get("size_bytes") is not None and item.get("size_bytes") != prepared.stat().st_size:
+            raise RuntimeError(f"{role} composition byte size mismatch.")
+        actual_source = probe_audio(source, MIN_AUDIO_DURATION)
+        actual_prepared = probe_audio(prepared, MIN_AUDIO_DURATION)
+        if abs(actual_prepared - float(item.get("duration_seconds", -999))) > DURATION_TOLERANCE:
+            raise RuntimeError(f"{role} prepared composition duration mismatch.")
+        if abs(actual_source - float(item.get("source_duration_seconds", -999))) > DURATION_TOLERANCE:
+            raise RuntimeError(f"{role} source composition duration mismatch.")
 def verify_existing(signature, duration, timeline):
     previous = read_json(MANIFEST)
     if (
@@ -968,7 +1067,7 @@ def verify_existing(signature, duration, timeline):
 
         verify_compositions(compositions)
         narration_by_id = {row["scene_id"]: row for row in timeline}
-        verify_segment_records(segments, timeline, narration_by_id)
+        verify_segment_records(segments, timeline, narration_by_id, compositions)
         loudness = measure_loudness(path)
         validate_master_loudness(loudness)
 
@@ -1004,7 +1103,7 @@ def validate_published_manifest(signature, final_checksum, duration, timeline):
 
     verify_compositions(compositions)
     narration_by_id = {row["scene_id"]: row for row in timeline}
-    verify_segment_records(segments, timeline, narration_by_id)
+    verify_segment_records(segments, timeline, narration_by_id, compositions)
     if len(segments) != len(timeline):
         raise RuntimeError("Published role segment count mismatch.")
 
@@ -1042,6 +1141,8 @@ def write_unavailable(reason, model=None, duration=None, signature=None):
         "source_fingerprint": signature,
         "role_compositions": saved,
         "completed_role_compositions": sorted(saved),
+        "role_segments": checkpoint.get("role_segments", []) if isinstance(checkpoint.get("role_segments"), list) else [],
+        "completed_role_segments": checkpoint.get("completed_role_segments", []) if isinstance(checkpoint.get("completed_role_segments"), list) else [],
         "api_calls": API_CALLS,
         "paid_services_used": API_CALLS > 0,
         "updated_at": time.time(),
@@ -1204,7 +1305,7 @@ def main():
             compositions, timeline, source_sig,
         )
         narration_by_id = {row["scene_id"]: row for row in rows}
-        verify_segment_records(role_segments, timeline, narration_by_id)
+        verify_segment_records(role_segments, timeline, narration_by_id, compositions)
 
         required_roles = {
             "hook": role_summary["hook_count"],
@@ -1243,6 +1344,8 @@ def main():
             "required_duration_seconds": target_duration,
             "narration_duration_seconds": round(narration_duration, 3),
             "music_tail_seconds": MASTER_TAIL_SECONDS,
+            "mastering_target_lufs": MUSIC_TARGET_LUFS,
+            "mastering_true_peak_limit_dbtp": MUSIC_TRUE_PEAK_LIMIT,
             "sha256": final_checksum,
             "source_sha256": source_checksum,
             "source_fingerprint": source_sig,
@@ -1308,6 +1411,10 @@ def main():
                 for role, item in published["role_compositions"].items()
             },
             "role_segment_count": len(published["role_segments"]),
+            "role_segments": published["role_segments"],
+            "completed_role_segments": [item["scene_id"] for item in published["role_segments"]],
+            "role_segments": published["role_segments"],
+            "completed_role_segments": [item["scene_id"] for item in published["role_segments"]],
             "role_segment_sha256": {
                 item["scene_id"]: item["sha256"]
                 for item in published["role_segments"]
@@ -1337,6 +1444,8 @@ def main():
             "source_fingerprint": source_sig,
             "role_compositions": saved if isinstance(saved, dict) else {},
             "completed_role_compositions": sorted(saved) if isinstance(saved, dict) else [],
+            "role_segments": checkpoint.get("role_segments", []) if isinstance(checkpoint.get("role_segments"), list) else [],
+            "completed_role_segments": checkpoint.get("completed_role_segments", []) if isinstance(checkpoint.get("completed_role_segments"), list) else [],
             "api_calls": API_CALLS,
             "updated_at": time.time(),
         })
