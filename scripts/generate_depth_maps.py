@@ -284,10 +284,17 @@ def load_jobs():
             raise RuntimeError(f"image_manifest contains a missing or duplicate scene_id: {scene_id!r}.")
         image_by_id[scene_id] = row
 
+    if image_data.get("scenes_min") != raw_min or image_data.get("scenes_max") != raw_max:
+        raise RuntimeError("image_manifest.json SCENES range disagrees with visual_jobs_manifest.json.")
+    if image_data.get("actual_scene_counts") != jobs_manifest.get("actual_scene_counts"):
+        raise RuntimeError("image_manifest.json actual_scene_counts disagree with visual_jobs_manifest.json.")
+
     prepared = []
     seen_numbers = set()
     seen_ids = set()
     seen_paths = set()
+    seen_local_slots = set()
+    main_source_numbers = {part: set() for part in normalized_counts}
     part_main_counts = {part: 0 for part in normalized_counts}
     role_counts = {}
     for index, job in enumerate(rows, start=1):
@@ -327,6 +334,9 @@ def load_jobs():
             raise RuntimeError(f"{scene_id}: invalid local Scene number.") from exc
         if local_scene < 1:
             raise RuntimeError(f"{scene_id}: local Scene number must be positive.")
+        if (part, local_scene) in seen_local_slots:
+            raise RuntimeError(f"{scene_id}: duplicate local Photo Motion slot.")
+        seen_local_slots.add((part, local_scene))
 
         image_value = job.get("image_path") or job.get("image") or job.get("output_path")
         image_path = safe_path(image_value, f"source image for {scene_id}", must_exist=True)
@@ -374,9 +384,16 @@ def load_jobs():
                 raise RuntimeError(f"{scene_id}: image job signature mismatch.")
 
         if role == "main":
+            try:
+                source_scene_number = int(job.get("source_scene_number"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"{scene_id}: main Scene source_scene_number is invalid.") from exc
+            if not 1 <= source_scene_number <= normalized_counts[part]:
+                raise RuntimeError(f"{scene_id}: source Scene number is outside the Part's actual Scene count.")
+            if source_scene_number in main_source_numbers[part]:
+                raise RuntimeError(f"Part {part}: duplicate main source Scene number {source_scene_number}.")
+            main_source_numbers[part].add(source_scene_number)
             part_main_counts[part] += 1
-            if local_scene > normalized_counts[part]:
-                raise RuntimeError(f"{scene_id}: main Scene exceeds the Part's actual Scene count.")
         role_counts[(part, role)] = role_counts.get((part, role), 0) + 1
 
         prepared.append({
@@ -409,7 +426,9 @@ def load_jobs():
             f"expected={normalized_counts}, found={part_main_counts}."
         )
 
-    for part in normalized_counts:
+    for part, expected_count in normalized_counts.items():
+        if main_source_numbers[part] != set(range(1, expected_count + 1)):
+            raise RuntimeError(f"Part {part}: main source Scene numbers are incomplete or duplicated.")
         if role_counts.get((part, "hook"), 0) != 1:
             raise RuntimeError(f"Part {part}: exactly one Hook image is required.")
         if part < len(normalized_counts):
@@ -422,6 +441,13 @@ def load_jobs():
                 raise RuntimeError(f"Final Part {part}: exactly one Resolution image is required.")
             if role_counts.get((part, "suspense"), 0) != 0:
                 raise RuntimeError(f"Final Part {part}: Suspense image is not allowed.")
+
+    expected_total_jobs = sum(normalized_counts.values()) + 2 * len(normalized_counts)
+    if len(prepared) != expected_total_jobs:
+        raise RuntimeError(
+            f"Visual job total mismatch: expected {expected_total_jobs} "
+            f"(Main + Hook + Suspense/Resolution), found {len(prepared)}."
+        )
 
     return prepared, {
         "source_fingerprint": source_fingerprint,
