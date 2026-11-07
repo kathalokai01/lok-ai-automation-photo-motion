@@ -680,34 +680,6 @@ def verify_revision_evidence(
         and evidence.get("semantic_preservation_verified") is True
     )
 
-def verify_revision_evidence(
-    evidence: Any,
-    revised_text: Any,
-) -> bool:
-    """A flag alone is not evidence; hashes and changed returned text are required."""
-    if not isinstance(evidence, dict):
-        return False
-
-    original_hash = str(evidence.get("original_sha256") or "").strip().lower()
-    revised_hash = str(evidence.get("revised_sha256") or "").strip().lower()
-    declared_attempts = evidence.get("attempt_count", 0)
-
-    try:
-        attempts = int(declared_attempts)
-    except (TypeError, ValueError):
-        return False
-
-    actual_hash = sha256_text(revised_text)
-
-    return bool(
-        attempts >= 1
-        and re.fullmatch(r"[0-9a-f]{64}", original_hash)
-        and re.fullmatch(r"[0-9a-f]{64}", revised_hash)
-        and original_hash != revised_hash
-        and revised_hash == actual_hash
-        and evidence.get("returned_text_verified") is True
-    )
-
 def _extract_part_text(part: Any) -> str:
     if isinstance(part, str):
         return part
