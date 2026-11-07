@@ -265,9 +265,7 @@ def load_job_document() -> tuple[dict, list[dict]]:
             "Run prepare_visuals.py before Photo Motion."
         )
 
-    document = read_json(JOBS_FILE, required=True) if False else read_json(
-        JOBS_FILE
-    )
+    document = read_json(JOBS_FILE)
 
     if isinstance(document, list):
         rows = document
@@ -823,6 +821,11 @@ def read_depth_maps(
         raise RuntimeError("Depth manifest model_signature is missing or invalid.")
     if image_manifest.get("total_scenes") != len(prepared) or image_manifest.get("images_ready") != len(prepared):
         raise RuntimeError("Image manifest does not confirm all prepared source images.")
+    for manifest in (visual_manifest, image_manifest):
+        if manifest.get("scenes_min") != scenes_minimum or manifest.get("scenes_max") != scenes_maximum:
+            raise RuntimeError("Upstream image/visual SCENES range does not match Photo Motion.")
+        if manifest.get("actual_scene_counts") != expected_counts:
+            raise RuntimeError("Upstream image/visual actual_scene_counts do not match Photo Motion.")
 
     rows = document.get("scenes")
     if not isinstance(rows, list) or len(rows) != len(prepared):
@@ -860,6 +863,14 @@ def read_depth_maps(
         ai_flag = row.get("is_ai_estimated")
         if not isinstance(ai_flag, bool):
             raise RuntimeError(f"{scene_id}: is_ai_estimated must be an explicit boolean.")
+        if ai_flag:
+            if model == "content-aware-pseudo-depth-v9" or status in {"fallback_pseudo_depth", "fallback_reused", "pseudo_depth"}:
+                raise RuntimeError(f"{scene_id}: AI depth flag conflicts with fallback model/status.")
+        else:
+            if model != "content-aware-pseudo-depth-v9" or status not in {"fallback_pseudo_depth", "fallback_reused", "pseudo_depth"}:
+                raise RuntimeError(f"{scene_id}: approximate depth flag conflicts with model/status.")
+            if document.get("ai_required") is True or document.get("fallback_allowed") is not True:
+                raise RuntimeError(f"{scene_id}: pseudo-depth fallback is forbidden by the depth manifest.")
         try:
             path = safe_path(row.get("depth_map") or row.get("depth_path"), f"{scene_id} depth map")
             expected_path = (depth_root / f"depth_{item['number']:04d}.png").resolve()
@@ -876,6 +887,8 @@ def read_depth_maps(
         except Exception as exc:
             raise RuntimeError(f"{scene_id}: depth map failed integrity validation: {exc}") from exc
 
+        if ai_flag and status not in {"generated", "reused"}:
+            raise RuntimeError(f"{scene_id}: AI depth status is invalid.")
         result[scene_id] = {
             "path": path,
             "depth_sha256": checksum,
