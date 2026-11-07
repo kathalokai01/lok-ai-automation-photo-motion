@@ -679,12 +679,14 @@ def validate_prepared_records(
     extra_records: list[dict],
     audio_map: dict[str, dict],
     parts: int,
-    scenes_per_part: int,
+    actual_counts: list[int],
 ) -> None:
+    if len(actual_counts) != parts:
+        raise RuntimeError("Prepared caption actual Scene counts do not match PARTS.")
     expected_main = {
         (part, scene)
-        for part in range(1, parts + 1)
-        for scene in range(1, scenes_per_part + 1)
+        for part, count in enumerate(actual_counts, 1)
+        for scene in range(1, count + 1)
     }
     actual_main = set()
     all_ids: set[str] = set()
