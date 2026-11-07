@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-POLICY_VERSION = "story-length-policy-v9-final-part-merge"
+POLICY_VERSION = "story-length-policy-v10-verified-final-merge"
 
 SHORT_MIN_WORDS_PER_PART = 120
 SHORT_TARGET_WORDS_PER_PART = 135
@@ -521,7 +521,6 @@ def build_length_policy(
         ),
     }
 
-
 def validate_story_length(
     narration_text: Any,
     policy: dict[str, Any],
@@ -530,6 +529,7 @@ def validate_story_length(
     revision_attempted: bool = False,
     revision_evidence: dict[str, Any] | None = None,
     is_final_part: bool = False,
+    final_part_merged: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(policy, dict):
         raise TypeError("Story length policy must be a dictionary.")
@@ -538,10 +538,14 @@ def validate_story_length(
     actual = word_count(text)
     fmt = normalize_format(policy.get("format", "short"))
     number = _strict_integer(
-        part_number, name="part_number", minimum=1, maximum=MAX_PARTS
+        part_number,
+        name="part_number",
+        minimum=1,
+        maximum=MAX_PARTS,
     )
 
     if fmt == "full":
+        passed = bool(text)
         return {
             "part_number": 1,
             "format": "full",
@@ -553,44 +557,66 @@ def validate_story_length(
             "hard_maximum_words": None,
             "revision_attempted": False,
             "revision_evidence_verified": False,
-            "status": "valid_full_story" if actual else "missing_narration",
-            "needs_revision": not bool(text),
-            "retry_required": not bool(text),
-            "passed": bool(text),
-            "final_validation_passed": bool(text),
+            "final_part_merged": False,
+            "status": "valid_full_story" if passed else "missing_narration",
+            "needs_revision": not passed,
+            "retry_required": not passed,
+            "passed": passed,
+            "final_validation_passed": passed,
             "text_modified": False,
         }
+
+    evidence_ok = verify_revision_evidence(
+        revision_evidence,
+        text,
+    )
 
     if not text:
         status = "missing_narration"
         passed = False
         needs_revision = True
+
+    elif final_part_merged:
+        if not is_final_part:
+            status = "merge_exception_not_final_part"
+            passed = False
+            needs_revision = True
+        elif SHORT_MIN_WORDS_PER_PART <= actual <= SHORT_FINAL_MERGED_MAX_WORDS:
+            status = "valid_final_merge_exception"
+            passed = True
+            needs_revision = False
+        else:
+            status = "final_merge_outside_120_239"
+            passed = False
+            needs_revision = True
+
     elif actual < SHORT_MIN_WORDS_PER_PART:
-        status = "final_part_below_minimum" if is_final_part else "below_minimum"
+        status = (
+            "final_part_below_minimum"
+            if is_final_part
+            else "below_minimum"
+        )
         passed = False
         needs_revision = True
+
     elif actual > SHORT_HARD_MAX_WORDS_PER_PART:
         status = "above_hard_maximum"
         passed = False
         needs_revision = True
+
     elif actual > SHORT_PREFERRED_MAX_WORDS_PER_PART:
-        evidence_ok = verify_revision_evidence(
-            revision_evidence, text
-        )
         status = (
             "within_hard_limit_after_verified_revision"
-            if evidence_ok else "revision_required_above_150"
+            if evidence_ok
+            else "revision_required_above_150"
         )
         passed = evidence_ok
         needs_revision = not evidence_ok
+
     else:
         status = "within_target"
         passed = True
         needs_revision = False
-
-    evidence_verified = verify_revision_evidence(
-        revision_evidence, text
-    )
 
     return {
         "part_number": number,
@@ -599,10 +625,19 @@ def validate_story_length(
         "target_words": SHORT_TARGET_WORDS_PER_PART,
         "minimum_words": SHORT_MIN_WORDS_PER_PART,
         "preferred_maximum_words": SHORT_PREFERRED_MAX_WORDS_PER_PART,
-        "maximum_words": SHORT_HARD_MAX_WORDS_PER_PART,
-        "hard_maximum_words": SHORT_HARD_MAX_WORDS_PER_PART,
-        "revision_attempted": bool(revision_attempted or evidence_verified),
-        "revision_evidence_verified": evidence_verified,
+        "maximum_words": (
+            SHORT_FINAL_MERGED_MAX_WORDS
+            if final_part_merged
+            else SHORT_HARD_MAX_WORDS_PER_PART
+        ),
+        "hard_maximum_words": (
+            SHORT_FINAL_MERGED_MAX_WORDS
+            if final_part_merged
+            else SHORT_HARD_MAX_WORDS_PER_PART
+        ),
+        "revision_attempted": bool(revision_attempted or evidence_ok),
+        "revision_evidence_verified": evidence_ok,
+        "final_part_merged": bool(final_part_merged),
         "status": status,
         "needs_revision": needs_revision,
         "retry_required": needs_revision,
@@ -611,6 +646,39 @@ def validate_story_length(
         "text_modified": False,
     }
 
+
+def verify_revision_evidence(
+    evidence: Any,
+    revised_text: Any,
+) -> bool:
+    """Require changed text, matching hashes and semantic-preservation proof."""
+    if not isinstance(evidence, dict):
+        return False
+
+    original_hash = str(
+        evidence.get("original_sha256") or ""
+    ).strip().lower()
+
+    revised_hash = str(
+        evidence.get("revised_sha256") or ""
+    ).strip().lower()
+
+    try:
+        attempts = int(evidence.get("attempt_count", 0))
+    except (TypeError, ValueError):
+        return False
+
+    actual_hash = sha256_text(revised_text)
+
+    return bool(
+        attempts >= 1
+        and re.fullmatch(r"[0-9a-f]{64}", original_hash)
+        and re.fullmatch(r"[0-9a-f]{64}", revised_hash)
+        and original_hash != revised_hash
+        and revised_hash == actual_hash
+        and evidence.get("returned_text_verified") is True
+        and evidence.get("semantic_preservation_verified") is True
+    )
 
 def verify_revision_evidence(
     evidence: Any,
@@ -789,6 +857,7 @@ def validate_all_parts(
         raise TypeError("Story length policy must be a dictionary.")
 
     fmt = normalize_format(policy.get("format", "short"))
+
     expected = _strict_integer(
         policy.get("parts_count", 1),
         name="policy.parts_count",
@@ -802,6 +871,7 @@ def validate_all_parts(
         minimum=1,
         maximum=MAX_PARTS,
     )
+
     maximum_parts = _strict_integer(
         policy.get("configured_parts_max", expected),
         name="configured_parts_max",
@@ -813,6 +883,7 @@ def validate_all_parts(
     retry_parts = []
     results = []
     final_part_action = None
+    merge_proposal = None
 
     if fmt == "full":
         if expected != 1 or len(parts) != 1:
@@ -827,6 +898,7 @@ def validate_all_parts(
                 part_number=index,
             )
             results.append(result)
+
             if not result["passed"]:
                 errors.append("FULL story narration is empty.")
 
@@ -847,6 +919,7 @@ def validate_all_parts(
             "parts": results,
             "errors": errors,
             "final_part_exception": None,
+            "final_part_merge_proposal": None,
         }
 
     if not minimum_parts <= expected <= maximum_parts:
@@ -862,8 +935,16 @@ def validate_all_parts(
 
     for index, part in enumerate(parts, 1):
         is_final = index == len(parts)
+
+        final_part_merged = bool(
+            isinstance(part, dict)
+            and part.get("final_part_merged") is True
+        )
+
         evidence = _part_revision_evidence(
-            part, index, revision_attempted
+            part,
+            index,
+            revision_attempted,
         )
 
         result = validate_story_length(
@@ -873,6 +954,7 @@ def validate_all_parts(
             revision_attempted=False,
             revision_evidence=evidence,
             is_final_part=is_final,
+            final_part_merged=final_part_merged,
         )
 
         results.append(result)
@@ -882,8 +964,12 @@ def validate_all_parts(
                 "part_number": index,
                 "word_count": result["actual_words"],
                 "required_first_action": "retry_or_rebalance_final_part",
-                "fallback_action": "merge_all_remaining_final_text_into_preceding_part",
-                "preceding_part_maximum_words": SHORT_FINAL_MERGED_MAX_WORDS,
+                "fallback_action": (
+                    "merge_all_remaining_final_text_into_preceding_part"
+                ),
+                "preceding_part_maximum_words": (
+                    SHORT_FINAL_MERGED_MAX_WORDS
+                ),
                 "must_not_fail_only_for_final_part_under_120": True,
             }
             continue
@@ -896,16 +982,16 @@ def validate_all_parts(
                 f"{result['maximum_words']}; status={result['status']}."
             )
 
-    merge_proposal = None
-
     if final_part_action is not None:
         merge_proposal = plan_final_part_merge(parts)
 
+        final_part_action["merge_proposal"] = merge_proposal
+
         if merge_proposal.get("required"):
-            final_part_action["merge_proposal"] = merge_proposal
-            final_part_action["status"] = "retry_then_merge_if_retry_fails"
+            final_part_action["status"] = (
+                "retry_then_merge_if_retry_fails"
+            )
         else:
-            final_part_action["merge_proposal"] = merge_proposal
             final_part_action["status"] = (
                 "retry_required_merge_unavailable"
                 if merge_proposal.get("error")
@@ -924,13 +1010,16 @@ def validate_all_parts(
         "valid": valid,
         "passed": valid,
         "final_validation_passed": valid,
-        "retry_required": bool(retry_parts or final_part_action),
+        "retry_required": bool(
+            retry_parts or final_part_action
+        ),
         "retry_parts": retry_parts,
         "parts": results,
         "errors": errors,
         "final_part_exception": final_part_action,
         "final_part_merge_proposal": merge_proposal,
     }
+
 
 
 def select_final_part_count(
