@@ -122,7 +122,10 @@ def read_json(path, required=False):
         log("IGNORING INVALID OPTIONAL CHECKPOINT/MANIFEST:", path, str(exc)[:300])
         return {}
     if not isinstance(value, dict):
-        raise RuntimeError(f"JSON root must be an object: {path}")
+        if required:
+            raise RuntimeError(f"JSON root must be an object: {path}")
+        log("IGNORING OPTIONAL JSON WITH NON-OBJECT ROOT:", path)
+        return {}
     return value
 def write_json(path, data):
     path = Path(path)
