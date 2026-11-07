@@ -993,20 +993,48 @@ def verify_revision_semantics(
     api_key: str,
 ) -> dict:
     prompt = f"""
-You are a strict Hindi story continuity auditor.
-Compare the ORIGINAL PART and REVISED PART against the COMPLETE STORY.
-Do not rewrite either text.
+You are an evidence-based Hindi story continuity auditor.
 
-Return JSON only with boolean fields:
-all_events_preserved,
-chronology_preserved,
-characters_and_relationships_preserved,
-locations_and_objects_preserved,
-no_new_facts,
-ending_and_consequences_preserved;
+Compare ORIGINAL PART with REVISED PART.
+Use COMPLETE STORY only as context.
 
-Also return arrays omitted_events and added_events,
-and a concise explanation.
+IMPORTANT LANGUAGE RULES:
+1. Hindi words written in Devanagari and their Roman transliterations
+   must be treated as equivalent when their meaning is unchanged.
+2. Common Hindi-English code-switching is not an event omission.
+3. Spelling, matra, punctuation, grammar and sentence restructuring
+   are not semantic changes by themselves.
+4. Never report a missing event based only on different wording.
+5. Do not interpret a transliteration as a changed character, action,
+   object, relationship or event.
+6. Do not invent omissions or additions.
+
+A genuine omission means a meaningful source event, action, clue,
+character, relationship, location, object, motivation, chronology,
+consequence or ending detail is absent from the revised text.
+
+A genuine addition means a new story fact or event appears in the
+revised text without support in the original.
+
+For EVERY alleged omission or addition, provide:
+- exact_original_quote
+- exact_revised_quote (empty only if genuinely absent)
+- reason
+
+If you cannot quote exact evidence, do not report that item.
+
+Return valid JSON only:
+{{
+  "all_events_preserved": true,
+  "chronology_preserved": true,
+  "characters_and_relationships_preserved": true,
+  "locations_and_objects_preserved": true,
+  "no_new_facts": true,
+  "ending_and_consequences_preserved": true,
+  "omitted_events": [],
+  "added_events": [],
+  "explanation": "..."
+}}
 
 All six booleans must be true and both arrays must be empty to pass.
 
@@ -1024,7 +1052,7 @@ REVISED PART:
         prompt,
         model,
         api_key,
-        max_tokens=2500,
+        max_tokens=3500,
     )
 
     keys = (
@@ -1039,11 +1067,15 @@ REVISED PART:
     omissions = result.get("omitted_events", [])
     additions = result.get("added_events", [])
 
+    if not isinstance(omissions, list):
+        omissions = [str(omissions)]
+
+    if not isinstance(additions, list):
+        additions = [str(additions)]
+
     passed = (
         all(result.get(key) is True for key in keys)
-        and isinstance(omissions, list)
         and not omissions
-        and isinstance(additions, list)
         and not additions
     )
 
@@ -1054,14 +1086,8 @@ REVISED PART:
             key: result.get(key) is True
             for key in keys
         },
-        "omitted_events": (
-            omissions if isinstance(omissions, list)
-            else [str(omissions)]
-        ),
-        "added_events": (
-            additions if isinstance(additions, list)
-            else [str(additions)]
-        ),
+        "omitted_events": omissions,
+        "added_events": additions,
         "explanation": clean(result.get("explanation")),
         "model": (
             clean(result.get("_katha_model_used"))
@@ -1070,6 +1096,94 @@ REVISED PART:
     }
 
 
+def generate_complete_story(
+    mode: str,
+    topic: str,
+    title: str,
+    source_text: str,
+    config: dict,
+    model: str,
+    api_key: str,
+) -> dict:
+    if not api_key:
+        raise RuntimeError(
+            "Story correction/generation requires the configured Gemini API key."
+        )
+
+    result = call_model(
+        build_story_prompt(
+            mode,
+            topic,
+            title,
+            source_text,
+            config,
+        ),
+        model,
+        api_key,
+    )
+
+    complete = normalize_text(
+        result.get("story_text")
+        or result.get("story")
+        or result.get("narration")
+        or result.get("text")
+    )
+
+    if not complete and isinstance(result.get("parts"), list):
+        complete = normalize_text(
+            "\n\n".join(
+                str(
+                    row.get("text", "")
+                    if isinstance(row, dict)
+                    else row
+                )
+                for row in result["parts"]
+            )
+        )
+
+    if word_count(complete) < 20:
+        raise RuntimeError(
+            "Model did not return a complete usable story."
+        )
+
+    source_verification = None
+
+    if source_text:
+        source_verification = verify_revision_semantics(
+            source_text,
+            complete,
+            source_text,
+            model,
+            api_key,
+        )
+
+        if not source_verification.get("passed"):
+            raise RuntimeError(
+                "Corrected full story failed event/chronology "
+                "preservation verification: "
+                + clean(
+                    source_verification.get("explanation")
+                )
+            )
+
+    return {
+        "story_text": complete,
+        "title": clean(result.get("title")),
+        "generation_method": "configured_gemini",
+        "model": (
+            clean(source_verification.get("model"))
+            if source_verification
+            else clean(result.get("_katha_model_used")) or get_selected_model()
+        ),
+        "proofreading": {
+            "performed": True,
+            "method": "configured_gemini_model",
+            "complete_story_reviewed": True,
+            "source_story_word_count": word_count(source_text),
+
+
+
+            
 def repair_short_part(
     part_text: str,
     part_number: int,
