@@ -30,6 +30,10 @@ VERSION = "photo-motion-preflight-v66-repository-workflow-dependency-delivery-au
 REQUIRED_SCRIPTS = (
     "input_config.py",
     "pipeline_preflight.py",
+    "check_gemini_guard.py",
+    "gemini_api_guard.py",
+    "select_visual_model.py",
+    "test_gemini.py",
     "story_length_policy.py",
     "select_gemini_model.py",
     "llm_provider_client.py",
