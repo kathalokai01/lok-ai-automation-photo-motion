@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-POLICY_VERSION = "story-length-policy-v10-verified-final-merge"
+POLICY_VERSION = "story-length-policy-v11-final-retry-merge-integrity"
 
 SHORT_MIN_WORDS_PER_PART = 120
 SHORT_TARGET_WORDS_PER_PART = 135
@@ -956,16 +956,15 @@ def validate_all_parts(
 
     if final_part_action is not None:
         merge_proposal = plan_final_part_merge(parts)
-
         final_part_action["merge_proposal"] = merge_proposal
+        final_part_action["retry_attempts_allowed"] = MAX_REVISION_ATTEMPTS
+        final_part_action["rebalance_required_if_merge_exceeds_limit"] = True
 
         if merge_proposal.get("required"):
-            final_part_action["status"] = (
-                "retry_then_merge_if_retry_fails"
-            )
+            final_part_action["status"] = "retry_then_merge_if_retry_fails"
         else:
             final_part_action["status"] = (
-                "retry_required_merge_unavailable"
+                "retry_then_rebalance_required"
                 if merge_proposal.get("error")
                 else "retry_required"
             )
@@ -985,6 +984,11 @@ def validate_all_parts(
         "retry_required": bool(
             retry_parts or final_part_action
         ),
+        "retry_attempt_limit": MAX_REVISION_ATTEMPTS,
+        "short_target_words_per_part": SHORT_TARGET_WORDS_PER_PART,
+        "short_preferred_maximum_words_per_part": SHORT_PREFERRED_MAX_WORDS_PER_PART,
+        "short_hard_maximum_words_per_part": SHORT_HARD_MAX_WORDS_PER_PART,
+        "final_merged_maximum_words": SHORT_FINAL_MERGED_MAX_WORDS,
         "retry_parts": retry_parts,
         "parts": results,
         "errors": errors,
@@ -1120,6 +1124,14 @@ def update_policy_with_corrected_story(
         "selection_source": "corrected_complete_story",
         "selected_parts": selected_parts,
         "actual_parts": selected_parts,
+        "selection_feasibility": {
+            "minimum_parts": minimum,
+            "maximum_parts": maximum,
+            "selected_parts": selected_parts,
+            "minimum_total_words": updated.get("minimum_total_words"),
+            "maximum_total_words": updated.get("maximum_total_words"),
+            "within_configured_range": minimum <= selected_parts <= maximum,
+        },
     })
 
     return updated
@@ -1131,7 +1143,14 @@ def record_revision_results(
     revised_parts: Any,
     *,
     attempted_parts: Any,
+    revision_evidence: Any = None,
 ) -> dict[str, Any]:
+    """Record revisions without fabricating semantic-verification evidence.
+
+    A final Part below 120 words is a recoverable state: it remains pending
+    retry/rebalance and then an exact merge proposal, not a successful
+    validation and not an immediate hard failure.
+    """
     if not isinstance(policy, dict):
         raise TypeError("Story length policy must be a dictionary.")
     if not isinstance(original_parts, list) or not isinstance(revised_parts, list):
@@ -1175,9 +1194,13 @@ def record_revision_results(
         )
     if any(number > expected for number in attempted):
         raise ValueError("Revision record contains an invalid Part number.")
+    if revision_evidence is not None and not isinstance(revision_evidence, dict):
+        raise TypeError("revision_evidence must map Part numbers to evidence objects.")
 
     results = []
     errors = []
+    final_part_pending = None
+    evidence_by_part = {}
 
     for index, (original, revised) in enumerate(
         zip(original_parts, revised_parts), 1
@@ -1188,15 +1211,31 @@ def record_revision_results(
         new_hash = sha256_text(new_text)
         was_attempted = index in attempted
 
-        evidence = {
+        supplied = None
+        if isinstance(revision_evidence, dict):
+            supplied = revision_evidence.get(
+                index, revision_evidence.get(str(index))
+            )
+        if supplied is None and isinstance(revised, dict):
+            supplied = revised.get("revision_evidence")
+
+        # Hash-only evidence is deliberately insufficient to prove semantic
+        # preservation. Only caller-supplied structured evidence can pass.
+        evidence = supplied if isinstance(supplied, dict) else {
             "original_sha256": old_hash,
             "revised_sha256": new_hash,
             "attempt_count": 1 if was_attempted else 0,
             "returned_text_verified": bool(
                 was_attempted and old_hash != new_hash and new_text
             ),
+            "semantic_preservation_verified": False,
         }
+        evidence_by_part[index] = evidence
 
+        merged_final = bool(
+            isinstance(revised, dict)
+            and revised.get("final_part_merged") is True
+        )
         result = validate_story_length(
             new_text,
             policy,
@@ -1204,6 +1243,7 @@ def record_revision_results(
             revision_attempted=was_attempted,
             revision_evidence=evidence,
             is_final_part=index == len(revised_parts),
+            final_part_merged=merged_final,
         )
 
         result.update({
@@ -1216,7 +1256,16 @@ def record_revision_results(
             "revision_evidence": evidence,
         })
 
-        if result["needs_revision"] and result["status"] != "final_part_below_minimum":
+        if result["status"] == "final_part_below_minimum":
+            final_part_pending = {
+                "part_number": index,
+                "word_count": result["actual_words"],
+                "required_first_action": "retry_or_rebalance_final_part",
+                "fallback_action": "merge_all_remaining_final_text_into_preceding_part",
+                "preceding_part_maximum_words": SHORT_FINAL_MERGED_MAX_WORDS,
+                "must_not_fail_only_for_final_part_under_120": True,
+            }
+        elif result["needs_revision"]:
             errors.append(
                 f"Part {index} remains invalid: {result['status']} "
                 f"({result['actual_words']} words)."
@@ -1224,15 +1273,36 @@ def record_revision_results(
 
         results.append(result)
 
+    merge_proposal = (
+        plan_final_part_merge(revised_parts)
+        if final_part_pending is not None
+        else None
+    )
+    if final_part_pending is not None:
+        final_part_pending["merge_proposal"] = merge_proposal
+        final_part_pending["status"] = (
+            "retry_then_merge_if_retry_fails"
+            if merge_proposal and merge_proposal.get("required")
+            else "retry_or_rebalance_required"
+        )
+
+    valid = not errors and final_part_pending is None
     policy["revision_attempted"] = bool(attempted)
     policy["revision_parts"] = sorted(attempted)
     policy["revision_results"] = results
+    policy["revision_evidence_by_part"] = evidence_by_part
     policy["revision_errors"] = errors
-    policy["revision_outcome"] = "passed" if not errors else "failed"
+    policy["revision_outcome"] = (
+        "pending_final_part_recovery"
+        if final_part_pending is not None
+        else ("passed" if valid else "failed")
+    )
     policy["revision_completed_at_utc"] = datetime.now(
         timezone.utc
     ).isoformat()
-    policy["final_part_validation_passed"] = not errors
+    policy["final_part_validation_passed"] = valid
+    policy["final_part_exception"] = final_part_pending
+    policy["final_part_merge_proposal"] = merge_proposal
 
     if errors:
         raise ValueError(
@@ -1240,13 +1310,16 @@ def record_revision_results(
         )
 
     return {
-        "valid": True,
-        "passed": True,
-        "final_validation_passed": True,
+        "valid": valid,
+        "passed": valid,
+        "final_validation_passed": valid,
+        "retry_required": final_part_pending is not None,
         "revision_attempted": bool(attempted),
         "revision_parts": sorted(attempted),
         "parts": results,
-        "errors": [],
+        "errors": errors,
+        "final_part_exception": final_part_pending,
+        "final_part_merge_proposal": merge_proposal,
     }
 
 
