@@ -21,7 +21,7 @@ from input_config import (
     load_and_validate,
     get_format,
     get_selected_parts,
-    get_scenes,
+    get_scenes_range,
     get_fps,
 )
 
@@ -29,12 +29,14 @@ OUTPUT = ROOT / "output"
 VISUALS = OUTPUT / "visuals"
 JOBS_FILE = VISUALS / "photo_motion_jobs.json"
 DEPTH_FILE = VISUALS / "depth_maps" / "depth_manifest.json"
+VISUAL_JOBS_MANIFEST = VISUALS / "visual_jobs_manifest.json"
+IMAGE_MANIFEST = VISUALS / "image_manifest.json"
 
 RENDER_DIR = OUTPUT / "photo_motion"
 MANIFEST_FILE = RENDER_DIR / "photo_motion_manifest.json"
 CHECKPOINT_FILE = OUTPUT / "checkpoints" / "photo_motion_progress.json"
 
-VERSION = "photo-motion-v21-verified-role-motion-resume"
+VERSION = "photo-motion-v22-variable-scenes-faster-motion-strict-depth"
 
 MIN_IMAGE_BYTES = 1000
 MIN_DEPTH_BYTES = 100
@@ -62,7 +64,7 @@ EFFECTS = (
     "diagonal_drift", "diagonal_push",
     "zoom_pan_left", "zoom_pan_right",
     "zoom_pan_up", "zoom_pan_down",
-    "cinematic_sweep",
+    "cinematic_sweep", "parallax",
 )
 
 
@@ -97,16 +99,28 @@ def sha256_file(path: Path) -> str:
 
 def read_json(path: Path, default: Any = None) -> Any:
     path = Path(path)
-
     if not path.is_file():
         return default
 
+    def reject_constant(value):
+        raise ValueError(f"Non-finite JSON constant is forbidden: {value}")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        return json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Invalid JSON {path}: {exc}") from exc
-
-
 def write_json(path: Path, data: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -463,130 +477,123 @@ def resolve_output_target(part: int, scene_id: str) -> Path:
 def prepare_jobs(
     rows: list[dict],
     expected_parts: int,
-    scenes_per_part: int,
+    scenes_minimum: int,
+    scenes_maximum: int,
     mode: str,
     ffprobe: str,
-) -> tuple[list[dict], list[int]]:
+    metadata: dict,
+) -> tuple[list[dict], list[int], dict[int, int]]:
+    if not isinstance(metadata, dict) or metadata.get("status") != "completed":
+        raise RuntimeError("Photo Motion jobs metadata is missing or incomplete.")
+    if text(metadata.get("stage")) != "photo_motion_jobs_prepared":
+        raise RuntimeError("Photo Motion jobs metadata stage is invalid.")
+    if text(metadata.get("format")).lower() != mode:
+        raise RuntimeError("Photo Motion jobs FORMAT does not match Input.")
+    if metadata.get("scenes_min") != scenes_minimum or metadata.get("scenes_max") != scenes_maximum:
+        raise RuntimeError("Prepared SCENES range does not match Input/topic.txt.")
+
+    raw_parts = metadata.get("part_numbers")
+    raw_counts = metadata.get("actual_scene_counts")
+    if not isinstance(raw_parts, list) or len(raw_parts) != expected_parts:
+        raise RuntimeError("Photo Motion part_numbers must match selected PARTS.")
+    if not isinstance(raw_counts, dict):
+        raise RuntimeError("Photo Motion actual_scene_counts is missing.")
+    part_numbers = [positive_int(value, "prepared Part number") for value in raw_parts]
+    if len(set(part_numbers)) != len(part_numbers) or part_numbers != sorted(part_numbers):
+        raise RuntimeError("Photo Motion Part numbers must be unique and ascending.")
+    if part_numbers != list(range(part_numbers[0], part_numbers[0] + expected_parts)):
+        raise RuntimeError(f"Part numbering must be continuous: {part_numbers}.")
+
+    scene_counts = {}
+    for part in part_numbers:
+        raw_count = raw_counts.get(str(part), raw_counts.get(part))
+        count = positive_int(raw_count, f"Part {part} actual Scene count")
+        if not scenes_minimum <= count <= scenes_maximum:
+            raise RuntimeError(
+                f"Part {part}: actual Scene count {count} is outside "
+                f"{scenes_minimum}-{scenes_maximum}."
+            )
+        scene_counts[part] = count
+    if set(str(key) for key in raw_counts) != {str(part) for part in part_numbers}:
+        raise RuntimeError("actual_scene_counts contains missing or unexpected Parts.")
+
     prepared = []
     seen_ids = set()
     seen_global = set()
+    seen_local_slots = set()
     main_mapping = set()
     role_counts = {role: {} for role in ROLE_ORDER}
 
     for index, row in enumerate(rows, 1):
         if not isinstance(row, dict):
             raise RuntimeError(f"Photo Motion job #{index} is not an object.")
-
         part = positive_int(row.get("part"), "part")
+        if part not in scene_counts:
+            raise RuntimeError(f"Job #{index}: unexpected Part {part}.")
         role = normalize_role(row)
-
         scene_id = text(row.get("scene_id") or row.get("id"))
-
-        if not scene_id:
-            raise RuntimeError(f"Job #{index}: scene_id is missing.")
-
+        if not scene_id or not all(char.isalnum() or char in "_.-" for char in scene_id):
+            raise RuntimeError(f"Job #{index}: invalid scene_id {scene_id!r}.")
         if scene_id in seen_ids:
             raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
-
         seen_ids.add(scene_id)
 
-        expected_id = (
-            f"part_{part:02d}_scene_{positive_int(row.get('source_scene_number'), scene_id + ' source scene'):02d}"
-            if role == "main"
-            else f"part_{part:02d}_{role}"
-        )
-
+        source_scene = row.get("source_scene_number")
+        if role == "main":
+            source_scene = positive_int(source_scene, f"{scene_id} source scene number")
+            if source_scene > scene_counts[part]:
+                raise RuntimeError(f"{scene_id}: source Scene exceeds Part {part} actual count.")
+            pair = (part, source_scene)
+            if pair in main_mapping:
+                raise RuntimeError(f"Duplicate main Scene mapping: {pair}.")
+            main_mapping.add(pair)
+            expected_id = f"part_{part:02d}_scene_{source_scene:02d}"
+        else:
+            if source_scene not in (None, ""):
+                raise RuntimeError(f"{scene_id}: extra role must not have a main Scene number.")
+            source_scene = None
+            expected_id = f"part_{part:02d}_{role}"
         if scene_id != expected_id:
-            raise RuntimeError(
-                f"{scene_id}: expected canonical ID {expected_id}."
-            )
+            raise RuntimeError(f"{scene_id}: expected canonical ID {expected_id}.")
 
         global_number = positive_int(
             row.get("global_scene", row.get("global_scene_number", index)),
             "global scene number",
         )
-
         if global_number in seen_global:
-            raise RuntimeError(
-                f"Duplicate global scene number: {global_number}."
-            )
-
+            raise RuntimeError(f"Duplicate global scene number: {global_number}.")
         seen_global.add(global_number)
 
         local_slot = positive_int(
             row.get("local_scene", row.get("scene", index)),
             "local Photo Motion scene slot",
         )
-
-        source_scene = row.get("source_scene_number")
-
-        if role == "main":
-            source_scene = positive_int(
-                source_scene,
-                f"{scene_id} source scene number",
-            )
-
-            if source_scene > scenes_per_part:
-                raise RuntimeError(
-                    f"{scene_id}: source scene exceeds SCENES."
-                )
-
-            pair = (part, source_scene)
-
-            if pair in main_mapping:
-                raise RuntimeError(
-                    f"Duplicate main scene mapping: {pair}."
-                )
-
-            main_mapping.add(pair)
-
-        elif source_scene not in (None, ""):
-            raise RuntimeError(
-                f"{scene_id}: extra role must not have a main scene number."
-            )
-        else:
-            source_scene = None
+        if (part, local_slot) in seen_local_slots:
+            raise RuntimeError(f"{scene_id}: duplicate local Photo Motion scene slot.")
+        seen_local_slots.add((part, local_slot))
 
         image_path = safe_path(
             row.get("image_path") or row.get("image") or row.get("output_path"),
             f"{scene_id} image",
         )
-
-        image_width, image_height = image_dimensions(
-            image_path,
-            scene_id,
-        )
-
+        image_width, image_height = image_dimensions(image_path, scene_id)
+        expected_dimensions = (720, 1280) if mode == "short" else (1280, 720)
+        if (image_width, image_height) != expected_dimensions:
+            raise RuntimeError(
+                f"{scene_id}: image dimensions {image_width}x{image_height} "
+                f"do not match {mode.upper()} {expected_dimensions[0]}x{expected_dimensions[1]}."
+            )
         image_hash = sha256_file(image_path)
         declared_image_hash = text(row.get("image_sha256")).lower()
-
         if not declared_image_hash or declared_image_hash != image_hash:
-            raise RuntimeError(
-                f"{scene_id}: image SHA256 missing or mismatched."
-            )
+            raise RuntimeError(f"{scene_id}: image SHA256 missing or mismatched.")
 
-        audio_path, audio_hash, duration = resolve_audio(
-            row,
-            scene_id,
-            ffprobe,
-        )
-
+        audio_path, audio_hash, duration = resolve_audio(row, scene_id, ffprobe)
         prompt = text(row.get("prompt") or row.get("image_prompt"))
-
         if len(prompt) < 24:
-            raise RuntimeError(
-                f"{scene_id}: story visual prompt is missing or too short."
-            )
-
-        if not text(row.get("source_scene_signature")):
-            raise RuntimeError(
-                f"{scene_id}: source scene signature is missing."
-            )
-
-        if not text(row.get("prompt_signature")):
-            raise RuntimeError(
-                f"{scene_id}: prompt signature is missing."
-            )
+            raise RuntimeError(f"{scene_id}: story visual prompt is missing or too short.")
+        if not text(row.get("source_scene_signature")) or not text(row.get("prompt_signature")):
+            raise RuntimeError(f"{scene_id}: source/prompt signatures are missing.")
 
         prepared.append({
             "number": global_number,
@@ -606,141 +613,90 @@ def prepare_jobs(
             "target": resolve_output_target(part, scene_id),
             "source_job": dict(row),
         })
-
         role_counts[role][part] = role_counts[role].get(part, 0) + 1
 
-    if not prepared:
-        raise RuntimeError("No Photo Motion jobs were prepared.")
-
-    part_numbers = sorted({item["part"] for item in prepared})
-
-    if len(part_numbers) != expected_parts:
-        raise RuntimeError(
-            f"PARTS mismatch: expected {expected_parts}, "
-            f"found {part_numbers}."
-        )
-
-    if part_numbers != list(
-        range(part_numbers[0], part_numbers[0] + expected_parts)
+    if len(prepared) != positive_int(metadata.get("total_jobs"), "prepared total_jobs"):
+        raise RuntimeError("Prepared job count does not match actual jobs.")
+    if set(item["scene_id"] for item in prepared) != set(
+        row.get("scene_id") for row in metadata.get("jobs", []) if isinstance(row, dict)
     ):
-        raise RuntimeError(
-            f"Part numbering must be continuous: {part_numbers}."
-        )
+        raise RuntimeError("Prepared job IDs do not match the metadata's embedded jobs.")
+    expected_global = list(range(1, len(prepared) + 1))
+    if sorted(seen_global) != expected_global:
+        raise RuntimeError("Global Photo Motion Scene numbers must be continuous from 1.")
 
     expected_main = {
         (part, scene)
-        for part in part_numbers
-        for scene in range(1, scenes_per_part + 1)
+        for part, count in scene_counts.items()
+        for scene in range(1, count + 1)
     }
-
     if main_mapping != expected_main:
         raise RuntimeError(
-            "Main scene mapping mismatch. "
-            f"Missing={sorted(expected_main - main_mapping)[:20]}, "
-            f"extra={sorted(main_mapping - expected_main)[:20]}."
+            "Main Scene mapping mismatch. "
+            f"Missing={sorted(expected_main-main_mapping)[:20]}, "
+            f"extra={sorted(main_mapping-expected_main)[:20]}."
         )
 
     for position, part in enumerate(part_numbers):
-        counts = {
-            role: role_counts[role].get(part, 0)
-            for role in ROLE_ORDER
-        }
-
-        if counts["hook"] != 1:
-            raise RuntimeError(
-                f"Part {part} requires exactly one Hook."
-            )
-
-        if counts["main"] != scenes_per_part:
-            raise RuntimeError(
-                f"Part {part} requires exactly {scenes_per_part} Main scenes."
-            )
-
+        counts = {role: role_counts[role].get(part, 0) for role in ROLE_ORDER}
+        if counts["hook"] != 1 or counts["main"] != scene_counts[part]:
+            raise RuntimeError(f"Part {part}: Hook/Main role counts are invalid.")
         if position < len(part_numbers) - 1:
             if counts["suspense"] != 1 or counts["resolution"] != 0:
-                raise RuntimeError(
-                    f"Non-final part {part} requires one Suspense "
-                    "and no Resolution."
-                )
-        else:
-            if counts["resolution"] != 1 or counts["suspense"] != 0:
-                raise RuntimeError(
-                    "Final part requires one Resolution and no Suspense."
-                )
+                raise RuntimeError(f"Part {part}: requires one Suspense and no Resolution.")
+        elif counts["resolution"] != 1 or counts["suspense"] != 0:
+            raise RuntimeError(f"Final Part {part}: requires one Resolution and no Suspense.")
 
-    prepared.sort(
+    prepared.sort(key=lambda item: item["number"])
+    role_sorted = sorted(
+        prepared,
         key=lambda item: (
             item["part"],
             ROLE_ORDER[item["role"]],
             item["source_scene_number"] or item["local_scene"],
             item["number"],
-        )
+        ),
     )
-
-    if [item["number"] for item in prepared] != list(
-        range(1, len(prepared) + 1)
-    ):
-        raise RuntimeError(
-            "Global Photo Motion scene numbers must be continuous "
-            "after role-aware ordering."
-        )
-
-    return prepared, part_numbers
-
-
+    if prepared != role_sorted:
+        raise RuntimeError("Photo Motion jobs are not in canonical Part/role/Scene order.")
+    return prepared, part_numbers, scene_counts
 def validate_job_metadata(
     metadata: dict,
     parts: int,
-    scenes: int,
+    scenes_minimum: int,
+    scenes_maximum: int,
     mode: str,
     prepared: list[dict],
+    part_numbers: list[int],
+    scene_counts: dict[int, int],
 ) -> None:
-    if not isinstance(metadata, dict):
-        raise RuntimeError("Photo Motion metadata is invalid.")
-
-    if metadata.get("status") != "completed":
-        raise RuntimeError(
-            "Photo Motion preparation manifest is not completed."
-        )
-
+    if not isinstance(metadata, dict) or metadata.get("status") != "completed":
+        raise RuntimeError("Photo Motion preparation manifest is not completed.")
     if text(metadata.get("format")).lower() != mode:
-        raise RuntimeError(
-            "Photo Motion job FORMAT does not match Input/topic.txt."
-        )
-
-    declared_parts = positive_int(
-        metadata.get("parts", metadata.get("total_parts")),
-        "prepared PARTS",
-    )
-
-    declared_scenes = positive_int(
-        metadata.get("scenes_per_part"),
-        "prepared SCENES",
-    )
-
-    if declared_parts != parts or declared_scenes != scenes:
-        raise RuntimeError(
-            "Prepared PARTS/SCENES do not match Input configuration."
-        )
-
-    if positive_int(metadata.get("total_jobs"), "prepared total_jobs") != len(
-        prepared
-    ):
-        raise RuntimeError(
-            "Prepared job count does not match actual jobs."
-        )
-
-    declared_ids = metadata.get("scene_ids")
-
-    if declared_ids is not None:
-        actual_ids = [item["scene_id"] for item in prepared]
-
-        if declared_ids != actual_ids:
-            raise RuntimeError(
-                "Prepared manifest scene ID order does not match jobs."
-            )
-
-
+        raise RuntimeError("Photo Motion job FORMAT does not match Input/topic.txt.")
+    if positive_int(metadata.get("parts", metadata.get("total_parts")), "prepared PARTS") != parts:
+        raise RuntimeError("Prepared PARTS do not match Input configuration.")
+    if metadata.get("part_numbers") != part_numbers:
+        raise RuntimeError("Prepared Part numbers do not match selected PARTS.")
+    if metadata.get("scenes_min") != scenes_minimum or metadata.get("scenes_max") != scenes_maximum:
+        raise RuntimeError("Prepared SCENES range does not match Input configuration.")
+    expected_counts = {str(part): count for part, count in scene_counts.items()}
+    if metadata.get("actual_scene_counts") != expected_counts:
+        raise RuntimeError("Prepared actual_scene_counts do not match the jobs.")
+    if positive_int(metadata.get("total_jobs"), "prepared total_jobs") != len(prepared):
+        raise RuntimeError("Prepared job count does not match actual jobs.")
+    signature = text(metadata.get("config_signature")).lower()
+    if len(signature) != 64 or any(char not in "0123456789abcdef" for char in signature):
+        raise RuntimeError("Photo Motion config_signature is missing or invalid.")
+    declared_jobs = metadata.get("jobs")
+    if not isinstance(declared_jobs, list) or len(declared_jobs) != len(prepared):
+        raise RuntimeError("Photo Motion metadata embedded jobs are missing or incomplete.")
+    declared_ids = [text(row.get("scene_id")) for row in declared_jobs if isinstance(row, dict)]
+    actual_ids = [item["scene_id"] for item in prepared]
+    if declared_ids != actual_ids:
+        raise RuntimeError("Prepared manifest Scene ID order does not match jobs.")
+    if metadata.get("pending_audio_measurement_count") != 0 or metadata.get("measured_audio_count") != len(prepared):
+        raise RuntimeError("Photo Motion preparation metadata does not confirm measured TTS for every job.")
 def validate_output_dimensions(mode: str) -> tuple[int, int]:
     if mode == "short":
         return 720, 1280
@@ -802,146 +758,146 @@ def validate_depth_image(
 
     if not path.is_file() or path.stat().st_size < MIN_DEPTH_BYTES:
         raise RuntimeError("Depth map missing or incomplete.")
-
     try:
         with Image.open(path) as image:
+            if (image.format or "").upper() != "PNG":
+                raise RuntimeError("Depth map must be a PNG file.")
             image.verify()
-
         with Image.open(path) as image:
             image.load()
             width, height = image.size
-            image_format = (image.format or "").upper()
-            image_mode = image.mode
-
+            gray = image.convert("L")
+            extrema = gray.getextrema()
+            if not extrema or extrema[1] - extrema[0] < 2:
+                raise RuntimeError("Depth map is uniform and cannot drive parallax.")
     except Exception as exc:
-        raise RuntimeError(f"Depth map cannot be decoded: {exc}") from exc
-
+        raise RuntimeError(f"Depth map cannot be decoded or is invalid: {exc}") from exc
     if (width, height) != source_dimensions:
         raise RuntimeError(
             f"Depth map dimensions {width}x{height} do not match "
             f"source image {source_dimensions[0]}x{source_dimensions[1]}."
         )
-
-    if image_format not in {"PNG", "JPEG", "WEBP"}:
-        raise RuntimeError("Unsupported depth map image format.")
-
-    if image_mode not in {"L", "I", "I;16", "F", "RGB", "RGBA"}:
-        raise RuntimeError(f"Unsupported depth map mode: {image_mode}.")
-
     return width, height
-
-
 def read_depth_maps(
     prepared: list[dict],
     enabled: bool,
+    mode: str,
+    part_numbers: list[int],
+    scene_counts: dict[int, int],
 ) -> dict[str, dict]:
     if not enabled:
-        log("Depth parallax disabled; all clips use 2D motion.")
+        log("Depth parallax disabled by configuration; 2D motion only.")
         return {}
 
     document = read_json(DEPTH_FILE)
-
     if not isinstance(document, dict):
-        log("Depth manifest missing or invalid; using 2D motion.")
-        return {}
+        raise RuntimeError("Depth manifest is missing or invalid; cannot silently downgrade to 2D.")
+    if document.get("status") != "completed" or document.get("stage") != "depth_maps":
+        raise RuntimeError("Depth manifest is not a completed depth_maps artifact.")
+    if document.get("version") != "photo-motion-depth-v9-manifest-bound-resume-integrity":
+        raise RuntimeError("Depth manifest version is incompatible; regenerate depth maps.")
+    if document.get("format") != mode:
+        raise RuntimeError("Depth manifest FORMAT does not match Photo Motion FORMAT.")
+    if document.get("total_scenes") != len(prepared) or document.get("completed_scenes") != len(prepared):
+        raise RuntimeError("Depth manifest does not contain a completed map for every Photo Motion job.")
+    if document.get("scenes_min") != settings_range_min(prepared) or document.get("scenes_max") != settings_range_max(prepared):
+        raise RuntimeError("Depth manifest SCENES range does not match prepared jobs.")
+    expected_counts = {str(part): count for part, count in scene_counts.items()}
+    if document.get("actual_scene_counts") != expected_counts:
+        raise RuntimeError("Depth manifest actual_scene_counts do not match prepared jobs.")
 
-    if document.get("status") != "completed":
-        log("Depth manifest is not completed; using 2D motion.")
-        return {}
+    visual_manifest = read_json(VISUAL_JOBS_MANIFEST)
+    image_manifest = read_json(IMAGE_MANIFEST)
+    if not isinstance(visual_manifest, dict) or visual_manifest.get("status") != "completed":
+        raise RuntimeError("Visual jobs manifest is missing or incomplete.")
+    if not isinstance(image_manifest, dict) or image_manifest.get("status") != "completed":
+        raise RuntimeError("Image manifest is missing or incomplete.")
+    for key in ("source_fingerprint", "config_signature", "format"):
+        expected_value = visual_manifest.get(key)
+        if not expected_value or document.get(key) != expected_value or image_manifest.get(key) != expected_value:
+            raise RuntimeError(f"Depth/image manifest {key} provenance mismatch.")
+    model_signature = text(document.get("model_signature")).lower()
+    if len(model_signature) != 64 or any(char not in "0123456789abcdef" for char in model_signature):
+        raise RuntimeError("Depth manifest model_signature is missing or invalid.")
+    if image_manifest.get("total_scenes") != len(prepared) or image_manifest.get("images_ready") != len(prepared):
+        raise RuntimeError("Image manifest does not confirm all prepared source images.")
 
     rows = document.get("scenes")
-
-    if not isinstance(rows, list):
-        log("Depth manifest has no scenes list; using 2D motion.")
-        return {}
-
+    if not isinstance(rows, list) or len(rows) != len(prepared):
+        raise RuntimeError("Depth manifest scene rows are missing or incomplete.")
     expected = {item["scene_id"]: item for item in prepared}
     result = {}
+    depth_root = (VISUALS / "depth_maps").resolve()
 
     for row in rows:
         if not isinstance(row, dict):
-            continue
-
+            raise RuntimeError("Depth manifest contains a non-object Scene record.")
         scene_id = text(row.get("scene_id"))
         item = expected.get(scene_id)
-
-        if item is None:
-            continue
-
-        if scene_id in result:
-            raise RuntimeError(
-                f"Depth manifest contains duplicate scene ID: {scene_id}."
-            )
-
-        if text(row.get("image_sha256")).lower() != item["image_sha256"]:
-            log("STALE DEPTH — 2D fallback:", scene_id)
-            continue
-
-        model = text(row.get("model"))
+        if item is None or scene_id in result:
+            raise RuntimeError(f"Depth manifest contains unexpected or duplicate Scene ID: {scene_id!r}.")
+        for key, expected_value in (
+            ("image_sha256", item["image_sha256"]),
+            ("part", item["part"]),
+            ("role", item["role"]),
+            ("local_scene", item["local_scene"]),
+            ("global_scene", item["number"]),
+            ("source_fingerprint", visual_manifest.get("source_fingerprint")),
+            ("config_signature", visual_manifest.get("config_signature")),
+            ("model_signature", model_signature),
+            ("format", mode),
+        ):
+            if row.get(key) != expected_value:
+                raise RuntimeError(f"{scene_id}: depth manifest {key} mismatch.")
         status = text(row.get("status")).lower()
-
-        if status not in {
-            "generated", "reused", "fallback_pseudo_depth",
-            "fallback_reused", "pseudo_depth",
-        }:
-            log("UNVERIFIED DEPTH — 2D fallback:", scene_id)
-            continue
-
+        if status not in {"generated", "reused", "fallback_pseudo_depth", "fallback_reused", "pseudo_depth"}:
+            raise RuntimeError(f"{scene_id}: depth status is not completed: {status!r}.")
+        model = text(row.get("model"))
         if not model:
-            log("DEPTH MODEL MISSING — 2D fallback:", scene_id)
-            continue
-
+            raise RuntimeError(f"{scene_id}: depth model is missing.")
+        ai_flag = row.get("is_ai_estimated")
+        if not isinstance(ai_flag, bool):
+            raise RuntimeError(f"{scene_id}: is_ai_estimated must be an explicit boolean.")
         try:
-            path = safe_path(
-                row.get("depth_map") or row.get("depth_path"),
-                f"{scene_id} depth map",
-            )
-
-            validate_depth_image(
-                path,
-                (item["image_width"], item["image_height"]),
-            )
-
+            path = safe_path(row.get("depth_map") or row.get("depth_path"), f"{scene_id} depth map")
+            expected_path = (depth_root / f"depth_{item['number']:04d}.png").resolve()
+            if path.resolve() != expected_path:
+                raise RuntimeError(f"{scene_id}: depth-map path is not canonical.")
+            validate_depth_image(path, (item["image_width"], item["image_height"]))
             checksum = sha256_file(path)
-            declared = text(row.get("depth_sha256")).lower()
-
-            if not declared or checksum != declared:
-                raise RuntimeError("Depth SHA256 mismatch.")
-
-            ai_flag = row.get("is_ai_estimated")
-
-            if not isinstance(ai_flag, bool):
-                ai_flag = (
-                    model != "content-aware-pseudo-depth-v8"
-                    and "pseudo" not in model.lower()
-                    and "fallback" not in status
-                )
-
-            result[scene_id] = {
-                "path": path,
-                "depth_sha256": checksum,
-                "model": model,
-                "status": status,
-                "is_ai_depth": ai_flag,
-                "image_sha256": item["image_sha256"],
-            }
-
+            if checksum != text(row.get("depth_sha256")).lower():
+                raise RuntimeError(f"{scene_id}: depth SHA256 missing or mismatched.")
+            if row.get("size_bytes") != path.stat().st_size:
+                raise RuntimeError(f"{scene_id}: depth file size mismatch.")
+            if row.get("width") != item["image_width"] or row.get("height") != item["image_height"]:
+                raise RuntimeError(f"{scene_id}: depth map dimensions do not match source image.")
         except Exception as exc:
-            log("INVALID DEPTH — 2D fallback:", scene_id, str(exc))
+            raise RuntimeError(f"{scene_id}: depth map failed integrity validation: {exc}") from exc
 
+        result[scene_id] = {
+            "path": path,
+            "depth_sha256": checksum,
+            "model": model,
+            "status": status,
+            "is_ai_depth": ai_flag,
+            "image_sha256": item["image_sha256"],
+            "source_fingerprint": visual_manifest["source_fingerprint"],
+            "config_signature": visual_manifest["config_signature"],
+            "model_signature": model_signature,
+        }
+    if set(result) != set(expected):
+        missing = sorted(set(expected) - set(result))
+        raise RuntimeError(f"Depth manifest is missing Scene maps: {missing[:20]}.")
     log("Verified depth maps:", len(result))
-    log("2D fallback scenes:", len(prepared) - len(result))
+    log("2.5D Parallax available for every scene.")
     return result
-
 def motion_scale(speed: str) -> float:
     return {
-        "slow": 0.85,
-        "normal": 1.05,
-        "fast": 1.30,
-        "very_fast": 1.50,
+        "slow": 1.0,
+        "normal": 1.35,
+        "fast": 1.75,
+        "very_fast": 2.15,
     }[speed]
-
-
 def effect_choices(
     role: str,
     style: str,
@@ -1039,14 +995,11 @@ def build_effect_plan(
 ) -> dict[str, str]:
     plan = {}
     recent_by_part: dict[int, list[str]] = {}
-
     for item in prepared:
         scene_id = item["scene_id"]
         depth = depth_maps.get(scene_id)
-
         if item["duration"] > MAX_PARALLAX_SECONDS:
             depth = None
-
         choices = effect_choices(
             role=item["role"],
             style=settings["style"],
@@ -1054,33 +1007,28 @@ def build_effect_plan(
             has_depth=depth is not None,
             preserve_subject=settings["preserve_subject"],
         )
-
         if "parallax" in choices and depth is None:
             choices.remove("parallax")
-
         recent = recent_by_part.setdefault(item["part"], [])
-        available = [
-            effect for effect in choices
-            if effect not in recent
-        ] or choices
-
+        recent_effects = set(recent[-4:])
+        available = [effect for effect in choices if effect not in recent_effects]
+        if not available:
+            available = choices
         seed = digest_data({
             "scene_id": scene_id,
+            "part": item["part"],
+            "local_scene": item["local_scene"],
             "image_sha256": item["image_sha256"],
             "audio_sha256": item["audio_sha256"],
             "role": item["role"],
             "settings": settings,
+            "renderer_version": VERSION,
         })
-
         rng = random.Random(int(seed[:16], 16))
         selected = rng.choice(available)
-
         plan[scene_id] = selected
-        recent_by_part[item["part"]] = (recent + [selected])[-3:]
-
+        recent_by_part[item["part"]] = (recent + [selected])[-4:]
     return plan
-
-
 def make_filter(
     effect: str,
     frames: int,
@@ -1091,58 +1039,36 @@ def make_filter(
 ) -> str:
     denominator = max(frames - 1, 1)
     scale = motion_scale(settings["speed"])
-
-    zoom_amount = min(0.12 * scale, 0.16)
-    pan_zoom = 1.12
-
-    zoom = "1.05"
+    zoom_amount = min(0.18 * scale, 0.34)
+    pan_zoom = 1.24
+    zoom = "1.06"
     x = "(iw-iw/zoom)/2"
     y = "(ih-ih/zoom)/2"
-
     progress = f"on/{denominator}"
 
     if effect == "zoom_in":
-        zoom = (
-            f"min(1+{zoom_amount:.4f}*{progress},1.12)"
-        )
-
+        zoom = f"min(1+{zoom_amount:.4f}*{progress},1.28)"
     elif effect == "zoom_out":
-        zoom = (
-            f"max(1.12-{zoom_amount:.4f}*{progress},1.0)"
-        )
-
+        zoom = f"max(1.24-{zoom_amount:.4f}*{progress},1.0)"
     elif effect in {"pan_left", "pan_right"}:
         zoom = str(pan_zoom)
-        direction = (
-            f"(1-{progress})"
-            if effect == "pan_left"
-            else progress
-        )
+        direction = f"(1-{progress})" if effect == "pan_left" else progress
         x = f"(iw-iw/zoom)*{direction}"
-
     elif effect in {"pan_up", "pan_down"}:
         zoom = str(pan_zoom)
-        direction = (
-            f"(1-{progress})"
-            if effect == "pan_up"
-            else progress
-        )
+        direction = f"(1-{progress})" if effect == "pan_up" else progress
         y = f"(ih-ih/zoom)*{direction}"
-
     elif effect == "diagonal_drift":
         zoom = str(pan_zoom)
         x = f"(iw-iw/zoom)*{progress}"
         y = f"(ih-ih/zoom)*(1-{progress})"
-
     elif effect == "diagonal_push":
-        zoom = f"min(1+0.11*{scale:.4f}*{progress},1.12)"
-        x = f"(iw-iw/zoom)*(0.12+0.76*{progress})"
-        y = f"(ih-ih/zoom)*(0.82-0.64*{progress})"
-
+        zoom = f"min(1+0.16*{scale:.4f}*{progress},1.25)"
+        x = f"(iw-iw/zoom)*(0.08+0.84*{progress})"
+        y = f"(ih-ih/zoom)*(0.88-0.76*{progress})"
     elif effect.startswith("zoom_pan_"):
-        zoom = f"min(1+0.10*{scale:.4f}*{progress},1.12)"
+        zoom = f"min(1+0.15*{scale:.4f}*{progress},1.25)"
         direction = effect.rsplit("_", 1)[-1]
-
         if direction == "left":
             x = f"(iw-iw/zoom)*(1-{progress})"
         elif direction == "right":
@@ -1151,41 +1077,23 @@ def make_filter(
             y = f"(ih-ih/zoom)*(1-{progress})"
         elif direction == "down":
             y = f"(ih-ih/zoom)*{progress}"
-
     elif effect == "cinematic_sweep":
-        zoom = (
-            f"1.045+0.065*sin(PI*{progress})"
-        )
-        x = (
-            f"(iw-iw/zoom)*(0.5-0.43*cos(PI*{progress}))"
-        )
-        y = (
-            f"(ih-ih/zoom)*(0.5+0.25*sin(PI*{progress}))"
-        )
-
+        zoom = f"1.08+0.12*sin(PI*{progress})"
+        x = f"(iw-iw/zoom)*(0.5-0.45*cos(PI*{progress}))"
+        y = f"(ih-ih/zoom)*(0.5+0.32*sin(PI*{progress}))"
     else:
         raise RuntimeError(f"Unsupported 2D effect: {effect}.")
 
     source_width = width * 2
     source_height = height * 2
-
     filters = [
-        (
-            f"scale={source_width}:{source_height}:"
-            "force_original_aspect_ratio=increase"
-        ),
+        f"scale={source_width}:{source_height}:force_original_aspect_ratio=increase",
         f"crop={source_width}:{source_height}",
-        (
-            f"zoompan=z='{zoom}':x='{x}':y='{y}':"
-            f"d=1:s={width}x{height}:fps={fps}"
-        ),
+        f"zoompan=z='{zoom}':x='{x}':y='{y}':d=1:s={width}x{height}:fps={fps}",
         "setsar=1",
         "format=yuv420p",
     ]
-
     return ",".join(filters)
-
-
 def probe_clip(
     path: Path,
     ffprobe: str,
@@ -1511,12 +1419,7 @@ def build_manifest(
     status: str,
     error: str | None = None,
 ) -> dict:
-    rows = [
-        entries[item["scene_id"]]
-        for item in prepared
-        if item["scene_id"] in entries
-    ]
-
+    rows = [entries[item["scene_id"]] for item in prepared if item["scene_id"] in entries]
     result = {
         "version": VERSION,
         "status": status,
@@ -1527,46 +1430,27 @@ def build_manifest(
         "height": height,
         "fps": fps,
         "settings": settings,
+        "scenes_min": settings["scenes_min"],
+        "scenes_max": settings["scenes_max"],
+        "actual_scene_counts": settings["actual_scene_counts"],
         "expected_scene_count": len(prepared),
-        "completed_count": sum(
-            row.get("status") == "completed"
-            for row in rows
-        ),
+        "completed_count": sum(row.get("status") == "completed" for row in rows),
         "total_scenes": len(prepared),
         "scene_role_counts": {
-            role: sum(
-                item["role"] == role
-                for item in prepared
-            )
+            role: sum(item["role"] == role for item in prepared)
             for role in ROLE_ORDER
         },
         "scenes": rows,
-        "depth_parallax_count": sum(
-            row.get("effect_is_depth_guided") is True
-            for row in rows
-        ),
-        "ai_depth_parallax_count": sum(
-            row.get("effect_uses_ai_depth") is True
-            for row in rows
-        ),
-        "approximate_depth_parallax_count": sum(
-            row.get("depth_is_approximate_fallback") is True
-            for row in rows
-        ),
-        "two_d_motion_count": sum(
-            row.get("effect_is_depth_guided") is False
-            for row in rows
-        ),
+        "depth_parallax_count": sum(row.get("effect_is_depth_guided") is True for row in rows),
+        "ai_depth_parallax_count": sum(row.get("effect_uses_ai_depth") is True for row in rows),
+        "approximate_depth_parallax_count": sum(row.get("depth_is_approximate_fallback") is True for row in rows),
+        "two_d_motion_count": sum(row.get("effect_is_depth_guided") is False for row in rows),
         "part_outputs_only": True,
         "combined_video_created": False,
     }
-
     if error:
         result["last_error"] = str(error)[:2000]
-
     return result
-
-
 def build_checkpoint(
     entries: dict[str, dict],
     prepared: list[dict],
@@ -1574,49 +1458,31 @@ def build_checkpoint(
     error: str | None = None,
 ) -> dict:
     rows = []
-
     for item in prepared:
         row = entries.get(item["scene_id"])
-
         rows.append({
             "scene_id": item["scene_id"],
             "part": item["part"],
             "role": item["role"],
-            "status": (
-                row.get("status", "pending")
-                if isinstance(row, dict)
-                else "pending"
-            ),
-            "video": (
-                row.get("video")
-                if isinstance(row, dict)
-                else None
-            ),
-            "video_sha256": (
-                row.get("video_sha256")
-                if isinstance(row, dict)
-                else None
-            ),
+            "global_scene": item["number"],
+            "image_sha256": item["image_sha256"],
+            "audio_sha256": item["audio_sha256"],
+            "cache_signature": row.get("cache_signature") if isinstance(row, dict) else None,
+            "status": row.get("status", "pending") if isinstance(row, dict) else "pending",
+            "video": row.get("video") if isinstance(row, dict) else None,
+            "video_sha256": row.get("video_sha256") if isinstance(row, dict) else None,
         })
-
     result = {
         "version": VERSION,
         "stage": "photo_motion",
         "status": status,
         "total_jobs": len(prepared),
-        "completed_jobs": sum(
-            row["status"] == "completed"
-            for row in rows
-        ),
+        "completed_jobs": sum(row["status"] == "completed" for row in rows),
         "jobs": rows,
     }
-
     if error:
         result["last_error"] = str(error)[:2000]
-
     return result
-
-
 def validate_final_outputs(
     prepared: list[dict],
     entries: dict[str, dict],
@@ -1626,69 +1492,34 @@ def validate_final_outputs(
     fps: int,
 ) -> list[dict]:
     if len(entries) != len(prepared):
-        raise RuntimeError(
-            f"Photo Motion manifest mismatch: "
-            f"{len(entries)}/{len(prepared)}."
-        )
-
+        raise RuntimeError(f"Photo Motion manifest mismatch: {len(entries)}/{len(prepared)}.")
     verified = []
-
     for item in prepared:
         scene_id = item["scene_id"]
         row = entries.get(scene_id)
-
-        if not isinstance(row, dict):
-            raise RuntimeError(f"{scene_id}: manifest row missing.")
-
-        if row.get("status") != "completed":
-            raise RuntimeError(f"{scene_id}: render incomplete.")
-
-        if row.get("part") != item["part"]:
-            raise RuntimeError(f"{scene_id}: part mapping mismatch.")
-
-        if row.get("role") != item["role"]:
-            raise RuntimeError(f"{scene_id}: role mapping mismatch.")
-
-        if row.get("image_sha256") != item["image_sha256"]:
-            raise RuntimeError(f"{scene_id}: image checksum mismatch.")
-
-        if row.get("audio_sha256") != item["audio_sha256"]:
-            raise RuntimeError(f"{scene_id}: audio checksum mismatch.")
-
-        target = safe_path(
-            row.get("video"),
-            f"{scene_id} rendered video",
-        )
-
+        if not isinstance(row, dict) or row.get("status") != "completed":
+            raise RuntimeError(f"{scene_id}: completed render manifest row missing.")
+        for key, expected in (
+            ("part", item["part"]),
+            ("role", item["role"]),
+            ("image_sha256", item["image_sha256"]),
+            ("audio_sha256", item["audio_sha256"]),
+            ("global_scene", item["number"]),
+            ("local_scene", item["local_scene"]),
+        ):
+            if row.get(key) != expected:
+                raise RuntimeError(f"{scene_id}: final render {key} mismatch.")
+        target = safe_path(row.get("video"), f"{scene_id} rendered video")
         if target != item["target"]:
             raise RuntimeError(f"{scene_id}: unexpected output path.")
-
-        checksum = sha256_file(target)
-
-        if checksum != row.get("video_sha256"):
-            raise RuntimeError(f"{scene_id}: video checksum mismatch.")
-
+        if target.stat().st_size < MIN_VIDEO_BYTES or sha256_file(target) != row.get("video_sha256"):
+            raise RuntimeError(f"{scene_id}: video missing, incomplete or checksum mismatch.")
         frames = max(1, round(item["duration"] * fps))
-        expected_duration = frames / fps
-
-        probe_clip(
-            target,
-            ffprobe,
-            width,
-            height,
-            expected_duration,
-            frames,
-            fps,
-        )
-
+        probe_clip(target, ffprobe, width, height, frames / fps, frames, fps)
         verified.append(row)
-
     if len(verified) != len(prepared):
         raise RuntimeError("Final Photo Motion clip count mismatch.")
-
     return verified
-
-
 def main() -> int:
     config = load_and_validate(ROOT / "Input" / "topic.txt")
 
@@ -1702,10 +1533,7 @@ def main() -> int:
         "selected PARTS",
     )
 
-    scenes_per_part = positive_int(
-        get_scenes(config),
-        "SCENES",
-    )
+    scene_minimum, scene_maximum = get_scenes_range(config)
 
     fps = positive_int(get_fps(config), "FPS")
 
@@ -1723,20 +1551,25 @@ def main() -> int:
 
     metadata, rows = load_job_document()
 
-    prepared, part_numbers = prepare_jobs(
+    prepared, part_numbers, scene_counts = prepare_jobs(
         rows=rows,
         expected_parts=configured_parts,
-        scenes_per_part=scenes_per_part,
+        scenes_minimum=scene_minimum,
+        scenes_maximum=scene_maximum,
         mode=mode,
         ffprobe=ffprobe,
+        metadata=metadata,
     )
 
     validate_job_metadata(
         metadata,
         configured_parts,
-        scenes_per_part,
+        scene_minimum,
+        scene_maximum,
         mode,
         prepared,
+        part_numbers,
+        scene_counts,
     )
 
     for item in prepared:
@@ -1750,9 +1583,17 @@ def main() -> int:
     RENDER_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+    settings.update({
+        "scenes_min": scene_minimum,
+        "scenes_max": scene_maximum,
+        "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
+    })
     depth_maps = read_depth_maps(
         prepared,
         settings["parallax_enabled"],
+        mode,
+        part_numbers,
+        scene_counts,
     )
 
     effect_plan = build_effect_plan(
@@ -1837,7 +1678,8 @@ def main() -> int:
     log("RESOLUTION:", f"{width}x{height}")
     log("FPS:", fps)
     log("PARTS:", part_numbers)
-    log("MAIN SCENES PER PART:", scenes_per_part)
+    log("SCENES RANGE:", f"{scene_minimum}-{scene_maximum}")
+    log("ACTUAL SCENE COUNTS:", scene_counts)
     log("TOTAL ROLE CLIPS:", len(prepared))
     log("SETTINGS:", settings)
     log("VERIFIED DEPTH MAPS:", len(depth_maps))
@@ -2049,7 +1891,10 @@ def main() -> int:
         final_manifest.update({
             "part_numbers": part_numbers,
             "total_parts": configured_parts,
-            "scenes_per_part": scenes_per_part,
+            "scenes_per_part": None,
+            "scenes_min": scene_minimum,
+            "scenes_max": scene_maximum,
+            "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
             "generated_count": generated,
             "reused_count": reused,
             "ai_depth_parallax_count": final_manifest[
@@ -2062,6 +1907,9 @@ def main() -> int:
             "part_outputs_only": True,
             "combined_video_created": False,
             "scene_ids": [item["scene_id"] for item in prepared],
+            "effect_plan": effect_plan,
+            "motion_speed_profile": motion_scale(settings["speed"]),
+            "depth_manifest_sha256": sha256_file(DEPTH_FILE) if settings["parallax_enabled"] else None,
         })
 
         write_json(MANIFEST_FILE, final_manifest)
