@@ -47,13 +47,14 @@ SOUND = OUT / "sound_design" / "sound_design_manifest.json"
 SFX_VALIDATION = OUT / "sound_design" / "sfx_timing_validation.json"
 CAPTIONS_JSON = OUT / "captions" / "captions.json"
 FINAL_SRT = OUT / "captions" / "final_captions.srt"
+SFX_CUES = OUT / "sound_design" / "sfx_cues.json"
 THUMBNAIL = OUT / "thumbnail.jpg"
 THUMBNAIL_MANIFEST = OUT / "thumbnail" / "thumbnail_manifest.json"
 METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v101-story-project-scene-assets-complete"
+VERSION = "output-packager-v102-hash-verified-scene-media-depth-and-project-assets"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
@@ -88,6 +89,7 @@ PROJECT_FILES = (
     OUT / "visuals" / "image_generation_manifest.json",
     OUT / "visuals" / "photo_motion_jobs.json",
     OUT / "visuals" / "depth_maps" / "depth_manifest.json",
+    SFX_CUES,
 )
 REQUIRED_FILES = (
     VALIDATION, RENDER, PHOTO, AUDIO, SOUND, SFX_VALIDATION,
@@ -1065,11 +1067,88 @@ def selected_package_files(render: dict) -> list[Path]:
             fail(f"Scene image is not a supported image file: {sid}")
         if audio_path.suffix.lower() not in AUDIO_SUFFIXES:
             fail(f"Scene narration is not a supported audio file: {sid}")
+
+        declared_image_hash = clean(photo_row.get("image_sha256")).lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", declared_image_hash):
+            fail(f"Scene image SHA-256 is missing or invalid: {sid}")
+        if declared_image_hash != sha256_file(image_path):
+            fail(f"Scene image SHA-256 mismatch: {sid}")
+
+        declared_audio_hash = clean(
+            audio_row.get("audio_sha256") or audio_row.get("sha256")
+        ).lower()
+        photo_audio_hash = clean(photo_row.get("audio_sha256")).lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", declared_audio_hash):
+            fail(f"Scene narration SHA-256 is missing or invalid: {sid}")
+        if declared_audio_hash != sha256_file(audio_path):
+            fail(f"Scene narration SHA-256 mismatch: {sid}")
+        if photo_audio_hash != declared_audio_hash:
+            fail(f"Photo Motion/narration audio hashes differ: {sid}")
+
+        declared_duration = audio_row.get(
+            "actual_audio_duration_seconds",
+            audio_row.get("audio_duration", audio_row.get("duration")),
+        )
+        try:
+            declared_duration = float(declared_duration)
+        except (TypeError, ValueError):
+            fail(f"Measured narration duration is missing: {sid}")
+        if not math.isfinite(declared_duration) or declared_duration <= 0:
+            fail(f"Measured narration duration is invalid: {sid}")
+        if (
+            audio_row.get("duration_source") != "ffprobe_measured"
+            and audio_row.get("audio_duration_source") != "ffprobe_measured"
+        ):
+            fail(f"Narration duration is not ffprobe-measured: {sid}")
+        if abs(float(photo_row.get("duration", 0)) - declared_duration) > 0.2:
+            fail(f"Photo Motion/narration duration mismatch: {sid}")
+
+        try:
+            from PIL import Image
+            with Image.open(image_path) as image:
+                image.verify()
+            with Image.open(image_path) as image:
+                if image.size != (
+                    int(photo_data.get("width", 0)),
+                    int(photo_data.get("height", 0)),
+                ):
+                    fail(f"Scene image dimensions mismatch: {sid}")
+        except Exception as exc:
+            fail(f"Scene image integrity check failed: {sid}: {exc}")
+
         scene_image_paths.add(image_path.resolve())
         scene_audio_paths.add(audio_path.resolve())
 
+    if len(scene_image_paths) != len(expected_scene_ids):
+        fail("Multiple scenes reference the same source image")
+    if len(scene_audio_paths) != len(expected_scene_ids):
+        fail("Multiple scenes reference the same narration audio")
+
     selected.update(scene_image_paths)
     selected.update(scene_audio_paths)
+
+    depth_data = read_json(OUT / "visuals" / "depth_maps" / "depth_manifest.json")
+    depth_rows = depth_data.get("scenes")
+    if not isinstance(depth_rows, list) or len(depth_rows) != len(expected_scene_ids):
+        fail("Depth manifest does not contain one record for every scene")
+    depth_paths = set()
+    for row in depth_rows:
+        if not isinstance(row, dict):
+            fail("Invalid depth-map record")
+        sid = clean(row.get("scene_id"))
+        if sid not in expected_scene_ids:
+            fail(f"Depth map references unknown scene: {sid}")
+        value = row.get("depth_map") or row.get("depth_path")
+        depth_path = safe_output(value, f"Depth map {sid}", 100)
+        declared = clean(row.get("depth_sha256")).lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", declared) or declared != sha256_file(depth_path):
+            fail(f"Depth map SHA-256 mismatch: {sid}")
+        if depth_path.suffix.lower() not in IMAGE_SUFFIXES:
+            fail(f"Depth map is not a supported image file: {sid}")
+        depth_paths.add(depth_path.resolve())
+    if len(depth_paths) != len(expected_scene_ids):
+        fail("Depth map files are missing or shared between scenes")
+    selected.update(depth_paths)
 
     sound_data = read_json(SOUND)
     tracks = sound_data.get("tracks", {})
@@ -1084,7 +1163,7 @@ def selected_package_files(render: dict) -> list[Path]:
                 fail(f"Unsupported sound-design track type: {track_path}")
             selected.add(track_path.resolve())
 
-    sfx_data = read_json(OUT / "sound_design" / "sfx_cues.json")
+    sfx_data = read_json(SFX_CUES)
     cue_rows = sfx_data.get("cues") or sfx_data.get("sfx_cues") or sfx_data.get("jobs") or []
     if not isinstance(cue_rows, list):
         fail("SFX cue manifest rows are invalid")
@@ -1113,33 +1192,30 @@ def selected_package_files(render: dict) -> list[Path]:
             item.resolve() for item in render["part_paths"]
         }:
             fail(f"Non-Part video is forbidden in package: {path}")
-        if suffix in IMAGE_SUFFIXES and path not in scene_image_paths and path != THUMBNAIL.resolve():
+        allowed_audio = set(scene_audio_paths)
+        allowed_audio.update(
+            safe_output(
+                row.get("path") or row.get("audio_path") or row.get("audio") or row.get("output") or row.get("file"),
+                "Sound-design track",
+                100,
+            ).resolve()
+            for row in track_rows
+            if isinstance(row, dict)
+            and (row.get("path") or row.get("audio_path") or row.get("audio") or row.get("output") or row.get("file"))
+        )
+        allowed_audio.update(
+            safe_output(
+                row.get("path") or row.get("audio_path") or row.get("audio") or row.get("file") or row.get("output"),
+                "SFX cue audio",
+                100,
+            ).resolve()
+            for row in cue_rows
+            if isinstance(row, dict)
+            and (row.get("path") or row.get("audio_path") or row.get("audio") or row.get("file") or row.get("output"))
+        )
+        if suffix in IMAGE_SUFFIXES and path not in scene_image_paths and path not in depth_paths and path != THUMBNAIL.resolve():
             fail(f"Unreferenced image is forbidden in package: {path}")
-        if suffix in AUDIO_SUFFIXES and path not in scene_audio_paths and path not in {
-            item.resolve()
-            for item in (
-                safe_output(
-                    row.get("path") or row.get("audio_path") or row.get("audio") or row.get("output") or row.get("file"),
-                    "Sound-design track",
-                    100,
-                )
-                for row in track_rows
-                if isinstance(row, dict)
-                and (row.get("path") or row.get("audio_path") or row.get("audio") or row.get("output") or row.get("file"))
-            )
-        } and path not in {
-            item.resolve()
-            for item in (
-                safe_output(
-                    row.get("path") or row.get("audio_path") or row.get("audio") or row.get("file") or row.get("output"),
-                    "SFX cue audio",
-                    100,
-                )
-                for row in cue_rows
-                if isinstance(row, dict)
-                and (row.get("path") or row.get("audio_path") or row.get("audio") or row.get("file") or row.get("output"))
-            )
-        }:
+        if suffix in AUDIO_SUFFIXES and path not in allowed_audio:
             fail(f"Unreferenced audio file is forbidden in package: {path}")
         if suffix == ".zip":
             fail(f"Nested ZIP is forbidden: {path}")
@@ -1197,6 +1273,7 @@ def build_embedded_manifest(
     root_name: str,
     archive_name: str,
     part_records: list[dict],
+    package_files: list[Path],
     validation: dict,
     thumbnail_info: dict,
     metadata_info: dict,
@@ -1227,6 +1304,21 @@ def build_embedded_manifest(
         "combined_video_included": False,
         "format_alias_included": False,
         "part_files": packaged_parts,
+        "scene_image_members": sorted(
+            package_member(root_name, output_relative(path), slug)
+            for path in package_files
+            if path.suffix.lower() in IMAGE_SUFFIXES and path.resolve() != THUMBNAIL.resolve()
+        ),
+        "scene_audio_members": sorted(
+            package_member(root_name, output_relative(path), slug)
+            for path in package_files
+            if path.suffix.lower() in AUDIO_SUFFIXES
+        ),
+        "project_files": sorted(
+            package_member(root_name, output_relative(path), slug)
+            for path in package_files
+            if path in {item.resolve() for item in PROJECT_FILES}
+        ),
         "thumbnail": package_member(root_name, "thumbnail.jpg", slug),
         "thumbnail_info": thumbnail_info,
         "metadata": metadata_info,
@@ -1421,6 +1513,24 @@ def verify_archive(
 
         if embedded.get("thumbnail") != thumbnail_member:
             fail("Embedded thumbnail path is invalid")
+        actual_image_members = sorted(
+            name for name in names
+            if PurePosixPath(name).suffix.lower() in IMAGE_SUFFIXES
+            and name != thumbnail_member
+        )
+        actual_audio_members = sorted(
+            name for name in names
+            if PurePosixPath(name).suffix.lower() in AUDIO_SUFFIXES
+        )
+        if embedded.get("scene_image_members") != actual_image_members:
+            fail("ZIP scene image inventory differs from embedded manifest")
+        if embedded.get("scene_audio_members") != actual_audio_members:
+            fail("ZIP scene audio inventory differs from embedded manifest")
+        declared_project_files = embedded.get("project_files")
+        if not isinstance(declared_project_files, list) or any(
+            name not in names for name in declared_project_files
+        ):
+            fail("ZIP project-file inventory is incomplete")
 
         render_member = f"{root_name}/scene_renders/render_manifest.json"
         if render_member not in names:
@@ -1597,6 +1707,7 @@ def main() -> int:
         root_name=root_name,
         archive_name=archive_name,
         part_records=render["parts"],
+        package_files=files,
         validation=validation,
         thumbnail_info=thumbnail_info,
         metadata_info=metadata_info,
@@ -1698,6 +1809,18 @@ def main() -> int:
         "archive_bytes": archive_path.stat().st_size,
         "archive_sha256": archive_hash,
         "file_count": len(records),
+        "scene_image_count": sum(
+            path.suffix.lower() in IMAGE_SUFFIXES and path.resolve() != THUMBNAIL.resolve()
+            for path in files
+        ),
+        "scene_audio_count": sum(
+            path.suffix.lower() in AUDIO_SUFFIXES
+            for path in files
+        ),
+        "project_file_count": sum(
+            path.resolve() in {item.resolve() for item in PROJECT_FILES}
+            for path in files
+        ),
         "files": records,
         "zip_integrity": "valid",
         "manifest_zip_consistency": "valid",
