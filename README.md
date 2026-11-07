@@ -52,7 +52,7 @@ PARTS = "12-18"
 - एक संख्या fixed Part count है.
 - `A-B` inclusive range है; चुना हुआ Part count corrected story की word count के अनुसार range के भीतर तय होता है.
 - उलटी range, जैसे `11-8`, invalid है.
-- SHORT mode में Part word-count policy लागू होती है. अंतिम छोटे Part के लिए saved merge exception भी लागू हो सकती है.
+- SHORT mode में हर Part का लक्ष्य 120–150 शब्द है; 150 से अधिक होने पर retry होता है और 180 तक स्वीकार्य सीमा है. 120 से कम अंतिम Part को पहले rebalance किया जाता है; जरूरत पर उसे पिछले Part में merge किया जा सकता है, जिसमें अंतिम merged Part की सीमा 239 शब्द तक हो सकती है.
 - FULL mode में PARTS हमेशा 1 होता है; दिए गए दूसरे PARTS मान को लागू नहीं किया जाता.
 - Range selection persist होती है ताकि बाद के workflow steps में Part count एक जैसा रहे.
 
