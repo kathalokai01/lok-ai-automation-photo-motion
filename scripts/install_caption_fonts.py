@@ -16,8 +16,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FONT_DIR = Path.home() / ".local" / "share" / "fonts" / "katha-caption"
 MANIFEST = FONT_DIR / "font_install_manifest.json"
+PROJECT_MANIFEST = ROOT / "output" / "fonts" / "font_manifest.json"
 
-VERSION = "caption-font-installer-v6-correct-google-font-paths"
+VERSION = "caption-font-installer-v7-output-manifest-fallback-path-verified"
 MAX_BYTES = 20 * 1024 * 1024
 MIN_BYTES = 1024
 SIGNATURES = {b"\x00\x01\x00\x00", b"OTTO", b"true", b"typ1"}
@@ -341,25 +342,35 @@ def main():
             + json.dumps(failures, ensure_ascii=False)
         )
 
-    atomic_json(MANIFEST, {
+    manifest_data = {
         "status": "completed",
         "version": VERSION,
         "font_directory": str(FONT_DIR),
+        "project_manifest": PROJECT_MANIFEST.relative_to(ROOT).as_posix(),
+        "fallback_order": list(fallback_order),
         "fonts": records,
         "selected_hindi_font": selected,
         "font_failures": failures,
         "external_api_calls": 0,
         "paid_services_used": False,
         "note": (
-            "Fonts are accepted only after font-file and fontconfig "
-            "verification. Existing valid project/system fonts are reused."
+            "Font files are accepted only after file-signature, family, "
+            "SHA-256 and fontconfig verification. The selected fallback "
+            "family and its absolute file path are recorded."
         ),
-    })
+    }
+    atomic_json(MANIFEST, manifest_data)
+    atomic_json(PROJECT_MANIFEST, manifest_data)
+
+    if not PROJECT_MANIFEST.is_file() or PROJECT_MANIFEST.stat().st_size <= 0:
+        raise RuntimeError("Project caption-font manifest was not written.")
 
     log("CAPTION FONT INSTALLATION COMPLETE")
     log("Verified project font records:", len(records))
     log("Selected Hindi font:", selected["family"])
-    log("Manifest:", MANIFEST)
+    log("Selected font path:", selected["path"])
+    log("Cache manifest:", MANIFEST)
+    log("Project manifest:", PROJECT_MANIFEST)
     log("External API calls: 0")
     log("Paid services used: false")
 
