@@ -81,6 +81,7 @@ PROJECT_FILES = (
     STORY_VERIFICATION,
     OUT / "story" / "story_plan.json",
     OUT / "story" / "character_bible.json",
+    OUT / "fonts" / "font_manifest.json",
     OUT / "scenes" / "scenes.json",
     OUT / "narration" / "narration.json",
     OUT / "visuals" / "visual_jobs.json",
