@@ -1478,6 +1478,19 @@ def verify_story(
                     part_number,
                 )
 
+    part_text_hashes = [
+        sha256_text(clean(part.get("narration")))
+        for part in story_parts
+    ]
+    scene_text_hashes = [
+        sha256_text(clean(scene.get("narration")))
+        for scene in all_scenes
+    ]
+    duplicate_scene_text_hashes = sorted({
+        item for item in scene_text_hashes
+        if scene_text_hashes.count(item) > 1
+    })
+
     return {
         "status": "completed",
         "verification_version": VERSION,
@@ -1504,6 +1517,9 @@ def verify_story(
             "resolution_count": role_counts["resolution_count"],
             "source_story_provided": bool(source_text),
             "source_coverage": source_coverage,
+            "part_text_sha256": part_text_hashes,
+            "scene_text_sha256": scene_text_hashes,
+            "duplicate_scene_text_hashes": duplicate_scene_text_hashes,
         },
         "parts": part_results,
         "plan_parts": plan_results,
@@ -1529,6 +1545,9 @@ def verify_story(
             "title_file": True,
             "source_text_integrity": True,
             "story_plan_fingerprint": True,
+            "plan_source_payload_matches_parts": True,
+            "plan_top_level_scenes_match_parts": True,
+            "strict_json_duplicate_key_check": True,
             "source_vocabulary_coverage": source_coverage["status"],
             "no_external_api_calls": plan.get("source", {}).get("api_calls") == 0,
         },
