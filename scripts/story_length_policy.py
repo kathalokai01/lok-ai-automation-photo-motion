@@ -1334,6 +1334,15 @@ def validate_corrected_story_parts(
     )
 
     if not result["valid"]:
+        # A short final Part is an actionable recovery state, not a terminal
+        # validation failure. The caller must retry/rebalance it and then
+        # apply the exact merge proposal when the retry cannot reach 120.
+        if (
+            result.get("final_part_exception") is not None
+            and not result.get("errors")
+        ):
+            return result
+
         raise ValueError(
             "Final story part validation failed: "
             + " ".join(result["errors"])
