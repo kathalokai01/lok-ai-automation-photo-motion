@@ -658,9 +658,9 @@ def load_story_metadata() -> dict:
 def validate_ai_story(
     story: dict,
     settings: dict,
-) -> tuple[list[int] | None, dict[str, str]]:
+) -> tuple[list[int], dict[str, str]]:
     if not story:
-        return None, {}
+        raise RuntimeError("ai_story.json is empty.")
 
     if story.get("status") != "completed":
         raise RuntimeError(
