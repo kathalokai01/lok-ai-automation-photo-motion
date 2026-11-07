@@ -19,7 +19,7 @@ from input_config import (
     load_and_validate,
     get_format,
     get_parts,
-    get_scenes,
+    get_scenes_range,
     get_caption_font,
     get_caption_font_size,
 )
@@ -300,12 +300,14 @@ def validate_narration_records(
     main_rows: list[dict],
     extra_rows: list[dict],
     parts: int,
-    scenes_per_part: int,
+    actual_counts: list[int],
 ) -> tuple[list[dict], list[dict]]:
+    if len(actual_counts) != parts:
+        raise RuntimeError("Narration actual_scene_counts does not match PARTS.")
     expected_main = {
         (part, scene)
-        for part in range(1, parts + 1)
-        for scene in range(1, scenes_per_part + 1)
+        for part, count in enumerate(actual_counts, 1)
+        for scene in range(1, count + 1)
     }
     main_map: dict[tuple[int, int], dict] = {}
     extra_map: dict[str, dict] = {}
@@ -360,8 +362,8 @@ def validate_narration_records(
 
     ordered_main = [
         main_map[(part, scene)]
-        for part in range(1, parts + 1)
-        for scene in range(1, scenes_per_part + 1)
+        for part, count in enumerate(actual_counts, 1)
+        for scene in range(1, count + 1)
     ]
     ordered_extra = [
         extra_map[sid] for sid in expected_extra
@@ -419,7 +421,10 @@ def validate_audio_manifest(
         if job.get("status") != "completed":
             raise RuntimeError(f"{sid}: TTS audio is not completed.")
 
-        output = clean_text(job.get("output"))
+        output = clean_text(
+            job.get("output") or job.get("output_path")
+            or job.get("audio_path") or job.get("audio")
+        )
         if not output:
             raise RuntimeError(f"{sid}: TTS output path is missing.")
 
@@ -433,14 +438,20 @@ def validate_audio_manifest(
         if not audio_path.is_file() or audio_path.stat().st_size < MIN_AUDIO_BYTES:
             raise RuntimeError(f"{sid}: TTS audio file is missing or too small.")
 
-        declared_hash = clean_text(job.get("sha256"))
+        declared_hash = clean_text(
+            job.get("sha256") or job.get("audio_sha256") or job.get("audio_hash")
+        )
         actual_hash = sha256_file(audio_path)
         if not declared_hash or declared_hash != actual_hash:
             raise RuntimeError(f"{sid}: TTS audio SHA-256 mismatch.")
 
+        raw_duration = (
+            job.get("duration") or job.get("actual_audio_duration_seconds")
+            or job.get("audio_duration")
+        )
         try:
-            duration = float(job["duration"])
-        except (KeyError, TypeError, ValueError) as exc:
+            duration = float(raw_duration)
+        except (TypeError, ValueError) as exc:
             raise RuntimeError(f"{sid}: TTS measured duration is invalid.") from exc
 
         if not math.isfinite(duration) or duration <= 0:
@@ -448,7 +459,10 @@ def validate_audio_manifest(
         if job.get("duration_source") != "ffprobe_measured":
             raise RuntimeError(f"{sid}: TTS duration is not ffprobe-measured.")
 
-        if not job.get("fingerprint"):
+        fingerprint = clean_text(
+            job.get("fingerprint") or job.get("tts_fingerprint")
+        )
+        if not fingerprint:
             raise RuntimeError(f"{sid}: TTS fingerprint is missing.")
 
         audio_map[sid] = {
@@ -457,7 +471,7 @@ def validate_audio_manifest(
             "duration": round(duration, 5),
             "provider": job.get("provider"),
             "model": job.get("model"),
-            "fingerprint": job["fingerprint"],
+            "fingerprint": fingerprint,
             "size_bytes": audio_path.stat().st_size,
         }
 
@@ -762,12 +776,12 @@ def main() -> int:
 
     video_format = str(get_format(config)).strip().lower()
     parts = int(get_parts(config))
-    scenes_per_part = int(get_scenes(config))
+    scenes_min, scenes_max = get_scenes_range(config)
 
     if video_format not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {video_format!r}.")
-    if parts < 1 or scenes_per_part < 1:
-        raise RuntimeError("PARTS and SCENES must be positive integers.")
+    if parts < 1 or scenes_min < 1 or scenes_max < scenes_min:
+        raise RuntimeError("PARTS or SCENES min-max range is invalid.")
 
     mode = normalize_language(config.get("CAPTIONS", "hindi"))
     if mode not in {"hindi", "english", "hinglish"}:
@@ -788,28 +802,44 @@ def main() -> int:
     if not isinstance(narration_data, dict):
         raise RuntimeError("Narration manifest must be a JSON object.")
 
-    for field, expected in (
-        ("total_parts", parts),
-        ("scenes_per_part", scenes_per_part),
-    ):
-        declared = narration_data.get(field)
-        if declared is not None:
-            try:
-                declared = int(declared)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(f"Narration {field} is invalid.") from exc
-            if declared != expected:
-                raise RuntimeError(
-                    f"Narration {field} mismatch: "
-                    f"configured={expected}, narration={declared}."
-                )
+    declared_parts = narration_data.get("total_parts")
+    if declared_parts is not None and int(declared_parts) != parts:
+        raise RuntimeError(
+            f"Narration total_parts mismatch: configured={parts}, narration={declared_parts}."
+        )
+    try:
+        source_min = int(narration_data["scenes_min"])
+        source_max = int(narration_data["scenes_max"])
+        raw_counts = narration_data["actual_scene_counts"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Narration SCENES range/actual_scene_counts metadata is missing.") from exc
+    if (source_min, source_max) != (scenes_min, scenes_max):
+        raise RuntimeError(
+            f"Narration SCENES range {source_min}-{source_max} differs from input "
+            f"{scenes_min}-{scenes_max}."
+        )
+    if not isinstance(raw_counts, list) or len(raw_counts) != parts:
+        raise RuntimeError("Narration actual_scene_counts does not match selected PARTS.")
+    actual_counts = []
+    for part_number, raw_count in enumerate(raw_counts, 1):
+        if isinstance(raw_count, bool):
+            raise RuntimeError(f"Part {part_number} has invalid actual Scene count.")
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Part {part_number} has invalid actual Scene count.") from exc
+        if not scenes_min <= count <= scenes_max:
+            raise RuntimeError(
+                f"Part {part_number} has {count} Scenes; allowed range is {scenes_min}-{scenes_max}."
+            )
+        actual_counts.append(count)
 
     main_rows, extra_rows = narration_rows(narration_data)
     ordered_main, ordered_extras = validate_narration_records(
         main_rows,
         extra_rows,
         parts,
-        scenes_per_part,
+        actual_counts,
     )
 
     all_rows = ordered_main + ordered_extras
@@ -823,7 +853,8 @@ def main() -> int:
         "format": video_format,
         "mode": mode,
         "parts": parts,
-        "scenes_per_part": scenes_per_part,
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": actual_counts,
         "font": font,
         "font_size": font_size,
     }
@@ -889,7 +920,7 @@ def main() -> int:
         prepared_extras,
         audio_map,
         parts,
-        scenes_per_part,
+        actual_counts,
     )
 
     narration_hash = canonical_hash(narration_data)
@@ -919,8 +950,9 @@ def main() -> int:
         ),
         "configured_parts": parts,
         "parts": parts,
-        "dynamic_short_parts": False,
-        "scenes_per_part": scenes_per_part,
+        "dynamic_short_parts": video_format == "short",
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": actual_counts,
         "total_scenes": len(prepared_main),
         "total_extra_scenes": len(prepared_extras),
         "total_caption_records": len(prepared_main) + len(prepared_extras),
@@ -959,7 +991,8 @@ def main() -> int:
     log("CAPTION PREPARATION COMPLETED")
     log("Format:", video_format)
     log("Parts:", parts)
-    log("Scenes per part:", scenes_per_part)
+    log("SCENES range:", f"{scenes_min}-{scenes_max}")
+    log("Actual Scene counts:", actual_counts)
     log("Main captions:", len(prepared_main))
     log("Extra-role captions:", len(prepared_extras))
     log("Role counts:", role_counts)
