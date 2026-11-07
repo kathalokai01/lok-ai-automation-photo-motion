@@ -192,6 +192,19 @@ def atomic_json(path, data):
         temporary.unlink(missing_ok=True)
 
 
+def atomic_text(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def load_manifest():
     try:
         value = json.loads(MANIFEST.read_text(encoding="utf-8"))
