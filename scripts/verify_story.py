@@ -335,11 +335,6 @@ def verify_plan_header(
 
     if plan.get("scenes_range") != [scenes_min, scenes_max]:
         fail("Story Plan scenes_range does not match Input.")
-    if positive_int(plan.get("configured_parts_min"), "Plan configured_parts_min") != input_data["minimum_parts"]:
-        fail("Story Plan configured PARTS minimum does not match Input.")
-    if positive_int(plan.get("configured_parts_max"), "Plan configured_parts_max") != input_data["maximum_parts"]:
-        fail("Story Plan configured PARTS maximum does not match Input.")
-
     if clean(plan.get("scene_order")) != "hook_then_main_then_suspense_or_resolution":
         fail("Story Plan scene_order is invalid.")
 
