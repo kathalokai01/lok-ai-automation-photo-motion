@@ -50,7 +50,7 @@ TITLE_FILE = STORY_DIR / "final_title.txt"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v33-zero-cost-and-story-integrity"
+VERSION = "story-builder-v34-final-part-recovery-and-strict-story-cache"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -695,6 +695,23 @@ def _load_zero_cost_provider_order() -> list[str]:
 
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ModelError(
+                f"Model JSON contains duplicate key: {key!r}."
+            )
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json(value: str):
+    raise ModelError(
+        f"Model JSON contains unsupported non-finite value: {value}."
+    )
+
+
 def parse_model_response(raw: str) -> dict:
     value = str(raw or "").strip()
     value = re.sub(
@@ -704,14 +721,26 @@ def parse_model_response(raw: str) -> dict:
         flags=re.IGNORECASE,
     ).strip()
 
+    if not value:
+        raise ModelError("Model returned an empty response.")
+
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(
+            value,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json,
+        )
         if isinstance(parsed, dict):
             return parsed
+    except ModelError:
+        raise
     except json.JSONDecodeError:
         pass
 
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=_reject_nonfinite_json,
+    )
 
     for index, char in enumerate(value):
         if char != "{":
@@ -721,11 +750,17 @@ def parse_model_response(raw: str) -> dict:
             parsed, _ = decoder.raw_decode(value[index:])
             if isinstance(parsed, dict):
                 return parsed
+        except ModelError:
+            raise
         except json.JSONDecodeError:
             continue
 
-    plain = normalize_text(value)
+    # A response that starts like JSON but is malformed must not be
+    # mistaken for plain-text narration and saved as the complete story.
+    if value.startswith(("{", "[")):
+        raise ModelError("Model returned malformed or unsupported JSON.")
 
+    plain = normalize_text(value)
     if not plain:
         raise ModelError(
             "Model returned neither usable JSON nor plain text."
@@ -1457,16 +1492,36 @@ def _partition_and_revise(
             })
             continue
 
-        revised, attempts, evidence = repair_short_part(
-            original,
-            number,
-            complete_story,
-            title,
-            model,
-            api_key,
-            final_merged=bool(is_final and merged_fallback),
-            return_evidence=True,
-        )
+        try:
+            revised, attempts, evidence = repair_short_part(
+                original,
+                number,
+                complete_story,
+                title,
+                model,
+                api_key,
+                final_merged=bool(is_final and merged_fallback),
+                return_evidence=True,
+            )
+        except RuntimeError as exc:
+            # A final Part below 120 words must reach the explicit
+            # retry-then-merge recovery below. repair_short_part raises
+            # after exhausting retries, so preserve the untouched final
+            # text here instead of aborting before that recovery can run.
+            if not (is_final and amount < SHORT_MIN):
+                raise
+            revised = original
+            attempts = [{
+                "attempt": REVISION_ATTEMPTS,
+                "attempted": True,
+                "outcome": "final_part_retry_exhausted_merge_required",
+                "error": str(exc),
+                "before_words": amount,
+                "after_words": amount,
+                "before_sha256": sha256(original),
+                "after_sha256": sha256(original),
+            }]
+            evidence = None
 
         revised_groups.append(revised)
         attempted_parts.append(number)
@@ -1480,7 +1535,11 @@ def _partition_and_revise(
             "outcome": (
                 "verified_revision"
                 if evidence
-                else "retried_no_verified_change"
+                else (
+                    "final_part_retry_exhausted_merge_required"
+                    if is_final and word_count(revised) < SHORT_MIN
+                    else "retried_no_verified_change"
+                )
             ),
             "before_words": amount,
             "after_words": word_count(revised),
@@ -2282,10 +2341,35 @@ def validate_story(
     ]:
         raise RuntimeError("Actual Scene count metadata mismatch.")
 
+    selection = story.get("parts_selection")
+    if not isinstance(selection, dict):
+        raise RuntimeError("Story Part-selection metadata is missing.")
+
+    minimum_parts = selection.get("minimum_parts")
+    maximum_parts = selection.get("maximum_parts")
+    if (
+        isinstance(minimum_parts, bool)
+        or not isinstance(minimum_parts, int)
+        or isinstance(maximum_parts, bool)
+        or not isinstance(maximum_parts, int)
+        or minimum_parts < 1
+        or maximum_parts < minimum_parts
+        or not minimum_parts <= expected_parts <= maximum_parts
+    ):
+        raise RuntimeError("Story selected Part count is outside its configured range.")
+
+    if story.get("parts_count") != expected_parts:
+        raise RuntimeError("Story Parts-count metadata mismatch.")
+
+    if story.get("total_story_words") != word_count(reconstructed_story):
+        raise RuntimeError("Total story word-count metadata mismatch.")
+
+    for number, part in enumerate(parts, 1):
+        if part.get("part") != number or part.get("part_id") != f"part_{number:02d}":
+            raise RuntimeError(f"Part {number} ID/order metadata mismatch.")
+
     if mode == "short":
-        merged = bool(
-            story.get("parts_selection", {}).get("final_part_merged")
-        )
+        merged = bool(selection.get("final_part_merged"))
 
         for number, part in enumerate(parts, 1):
             count = word_count(part["narration"])
@@ -2315,7 +2399,21 @@ def cache_is_valid(
         if cached.get("status") != "completed":
             return False
 
+        if cached.get("version") != VERSION:
+            return False
+
         if cached.get("source_fingerprint") != source_fingerprint:
+            return False
+
+        selection = cached.get("parts_selection")
+        policy = cached.get("story_length_policy")
+        if not isinstance(selection, dict) or not isinstance(policy, dict):
+            return False
+        if not isinstance(selection.get("minimum_parts"), int):
+            return False
+        if not isinstance(selection.get("maximum_parts"), int):
+            return False
+        if selection["minimum_parts"] < 1 or selection["maximum_parts"] < selection["minimum_parts"]:
             return False
 
         parts = cached.get("parts")
@@ -2360,10 +2458,9 @@ def reusable_corrected_story_checkpoint(
 
             stored_fingerprint = data.get("source_fingerprint")
 
-            if (
-                stored_fingerprint
-                and stored_fingerprint != source_fingerprint
-            ):
+            # A checkpoint without an exact source fingerprint cannot be
+            # proven to belong to the current input and is never reusable.
+            if stored_fingerprint != source_fingerprint:
                 continue
 
             log(
@@ -2523,6 +2620,24 @@ def main() -> None:
             normalize_text(part["narration"])
             for part in cached["parts"]
         ]
+
+        cached_selection = cached["parts_selection"]
+        cached_minimum = int(cached_selection["minimum_parts"])
+        cached_maximum = int(cached_selection["maximum_parts"])
+        if not cached_minimum <= len(parts) <= cached_maximum:
+            raise RuntimeError(
+                "Cached selected Part count is outside the current configured range."
+            )
+        persisted_parts = set_selected_parts(
+            config,
+            len(parts),
+            source="validated_story_cache_reuse",
+            story_word_count=word_count(cached["corrected_complete_story"]),
+        )
+        if persisted_parts != len(parts):
+            raise RuntimeError(
+                "Could not persist the validated cached Part selection."
+            )
 
         title = clean(
             cached.get("final_title")
