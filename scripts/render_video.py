@@ -348,7 +348,7 @@ def story_output_slug():
         story = read_json(STORY_FILE, "Story manifest")
         title = str(story.get("final_title") or story.get("title") or story.get("topic") or "").strip()
     title = title or "photo-motion-story"
-    slug = re.sub(r"[^\\w-]+", "-", title, flags=re.UNICODE).strip("-_")
+    slug = re.sub(r"[^\w-]+", "-", title, flags=re.UNICODE).strip("-_")
     slug = re.sub(r"-{2,}", "-", slug)[:72].strip("-_")
     if not slug:
         raise RuntimeError("Could not derive a safe story-based output filename")
@@ -986,11 +986,21 @@ def reusable_scene(output, old_row, signature, width, height, fps, duration):
         return None
     if old_row.get("fingerprint") != signature:
         return None
-    if not output.is_file() or output.stat().st_size < MIN_VIDEO_BYTES:
+    source = output
+    if not source.is_file():
+        old_value = old_row.get("video") or old_row.get("output") or old_row.get("path")
+        if isinstance(old_value, str) and old_value.strip():
+            try:
+                source = safe_path(old_value, "Previous rendered scene")
+            except Exception:
+                return None
+        else:
+            return None
+    if source.stat().st_size < MIN_VIDEO_BYTES:
         return None
 
     try:
-        checksum = sha256_file(output)
+        checksum = sha256_file(source)
         if old_row.get("sha256") != checksum:
             return None
         info = probe(output)
@@ -1001,6 +1011,14 @@ def reusable_scene(output, old_row, signature, width, height, fps, duration):
         validate_fps(info, fps, output.name)
         if abs(info["duration"] - duration) > DURATION_TOLERANCE:
             return None
+        if source != output:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = output.with_name(output.stem + ".reuse.tmp.mp4")
+            shutil.copy2(source, temporary)
+            if sha256_file(temporary) != checksum:
+                temporary.unlink(missing_ok=True)
+                return None
+            os.replace(temporary, output)
         return info, checksum
     except Exception:
         return None
