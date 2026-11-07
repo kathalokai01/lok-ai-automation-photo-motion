@@ -1,6 +1,6 @@
 # Katha Lok AI — Photo Motion Automation
 
-यह repository generated still images को **2D/2.5D Photo Motion** में बदलती है: camera zoom, pan और depth-map parallax. यह character/body/face animation या image-to-video (I2V) project नहीं है.
+यह repository generated still images को **2D/2.5D Photo Motion** में बदलती है: camera zoom, pan और depth-map parallax. यह character/body/face animation project नहीं है.
 
 ## Output modes
 
