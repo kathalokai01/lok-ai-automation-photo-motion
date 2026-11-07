@@ -23,10 +23,33 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_INPUT: "1"
 
+      # Gemini is first only when the account's free tier is explicitly confirmed.
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
       GEMINI_MODEL_FALLBACKS: ${{ vars.GEMINI_MODEL_FALLBACKS }}
+      GEMINI_FREE_TIER_CONFIRMED: ${{ vars.GEMINI_FREE_TIER_CONFIRMED }}
+
+      # Zero-cost LLM fallback configuration.
+      LLM_ZERO_COST_ONLY: "true"
+      LLM_PROVIDER_ORDER: ${{ vars.LLM_PROVIDER_ORDER }}
+      LLM_ZERO_COST_PROVIDERS: ${{ vars.LLM_ZERO_COST_PROVIDERS }}
+
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+      GROQ_FREE_TIER_CONFIRMED: ${{ vars.GROQ_FREE_TIER_CONFIRMED }}
+
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
+
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_MODEL: ${{ vars.CLOUDFLARE_MODEL }}
+      CLOUDFLARE_FREE_TIER_CONFIRMED: ${{ vars.CLOUDFLARE_FREE_TIER_CONFIRMED }}
+
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      MISTRAL_MODEL: ${{ vars.MISTRAL_MODEL }}
+      MISTRAL_FREE_MODE_CONFIRMED: ${{ vars.MISTRAL_FREE_MODE_CONFIRMED }}
 
       FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
       FISH_AUDIO_API_KEY: ${{ secrets.FISH_AUDIO_API_KEY }}
@@ -99,6 +122,9 @@ jobs:
             scripts/input_config.py
             scripts/story_length_policy.py
             scripts/select_gemini_model.py
+            scripts/llm_provider_client.py
+            scripts/select_llm_provider.py
+            scripts/test_llm_providers.py
             scripts/generate_story.py
             scripts/validate_story_length.py
             scripts/verify_story.py
@@ -195,6 +221,49 @@ jobs:
           print("TTS FALLBACK ORDER:", " -> ".join(tts))
           print("IMAGE FALLBACK ORDER:", " -> ".join(images))
           print("BILLABLE PROVIDERS: enabled")
+          print("LLM ZERO-COST MODE:", "enabled")
+          PY
+
+      - name: Test zero-cost LLM provider safeguards
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/test_llm_providers.py
+
+      - name: Select configured zero-cost LLM fallbacks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/select_llm_provider.py
+
+          test -s output/config/selected_llm_provider.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/config/selected_llm_provider.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          if data.get("zero_cost_only") is not True:
+              raise SystemExit("Provider selection is not zero-cost-only.")
+
+          if data.get("api_calls_made") != 0:
+              raise SystemExit("Provider selector unexpectedly made API calls.")
+
+          if data.get("generation_performed") is not False:
+              raise SystemExit("Provider selector must not generate content.")
+
+          order = data.get("provider_order")
+          if not isinstance(order, list):
+              raise SystemExit("Provider order is invalid.")
+
+          print("ZERO-COST PROVIDER SELECTION VERIFIED")
+          print("STATUS:", data.get("status"))
+          print("ORDER:", " -> ".join(order) if order else "none")
+          print("API CALLS: 0")
           PY
 
       - name: Calculate input and pipeline fingerprints
