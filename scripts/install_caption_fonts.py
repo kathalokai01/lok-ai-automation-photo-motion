@@ -478,7 +478,7 @@ def main():
         copyright_notice + "\n\n" + OFL_LICENSE_BODY,
     )
 
-    selected["source_path"] = str(source_font_path)
+    selected["source_path"] = source_font_path.name
     selected["path"] = PROJECT_FONT_FILE.relative_to(ROOT).as_posix()
     selected["sha256"] = copied_record["sha256"]
     selected["bytes"] = copied_record["bytes"]
@@ -488,7 +488,7 @@ def main():
     manifest_data = {
         "status": "completed",
         "version": VERSION,
-        "font_directory": str(FONT_DIR),
+        "font_directory": "~/.local/share/fonts/katha-caption",
         "project_manifest": PROJECT_MANIFEST.relative_to(ROOT).as_posix(),
         "project_font_file": PROJECT_FONT_FILE.relative_to(ROOT).as_posix(),
         "project_license_file": PROJECT_LICENSE_FILE.relative_to(ROOT).as_posix(),
