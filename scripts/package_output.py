@@ -54,7 +54,7 @@ METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v102-hash-verified-scene-media-depth-and-project-assets"
+VERSION = "output-packager-v103-ffprobe-verified-complete-scene-asset-package"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
@@ -218,6 +218,42 @@ def parse_fps(value: Any, label: str) -> float:
     if not math.isfinite(result) or result <= 0:
         fail(f"{label}: invalid FPS")
     return result
+
+
+def probe_audio_duration(path: Path) -> float:
+    executable = shutil.which("ffprobe")
+    if not executable:
+        fail("ffprobe is required but unavailable")
+    try:
+        result = subprocess.run(
+            [
+                executable, "-v", "error",
+                "-show_entries", "format=duration:stream=codec_type",
+                "-of", "json", str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        fail(f"ffprobe timed out for audio: {path.name}")
+    if result.returncode:
+        fail(f"ffprobe failed for audio {path.name}: {(result.stderr or '')[-700:]}")
+    try:
+        data = json.loads(result.stdout)
+        duration = float(data["format"]["duration"])
+        streams = data["streams"]
+    except (ValueError, TypeError, KeyError) as exc:
+        fail(f"Invalid audio probe for {path.name}: {exc}")
+    if (
+        not math.isfinite(duration)
+        or duration <= 0
+        or not isinstance(streams, list)
+        or not any(isinstance(row, dict) and row.get("codec_type") == "audio" for row in streams)
+    ):
+        fail(f"Invalid or silent narration audio: {path.name}")
+    return duration
 
 
 def probe_video(
@@ -1084,6 +1120,17 @@ def selected_package_files(render: dict) -> list[Path]:
             fail(f"Scene narration SHA-256 mismatch: {sid}")
         if photo_audio_hash != declared_audio_hash:
             fail(f"Photo Motion/narration audio hashes differ: {sid}")
+        photo_audio_path = (
+            photo_row.get("audio_path")
+            or photo_row.get("narration_audio")
+        )
+        if not isinstance(photo_audio_path, str) or safe_output(
+            photo_audio_path, f"Photo Motion narration path {sid}", 100
+        ).resolve() != audio_path.resolve():
+            fail(f"Photo Motion/narration audio paths differ: {sid}")
+        measured_audio_duration = probe_audio_duration(audio_path)
+        if abs(measured_audio_duration - declared_duration) > 0.2:
+            fail(f"Scene narration file duration differs from TTS manifest: {sid}")
 
         declared_duration = audio_row.get(
             "actual_audio_duration_seconds",
@@ -1307,7 +1354,15 @@ def build_embedded_manifest(
         "scene_image_members": sorted(
             package_member(root_name, output_relative(path), slug)
             for path in package_files
-            if path.suffix.lower() in IMAGE_SUFFIXES and path.resolve() != THUMBNAIL.resolve()
+            if path.suffix.lower() in IMAGE_SUFFIXES
+            and path.resolve() != THUMBNAIL.resolve()
+            and "visuals/images/" in output_relative(path)
+        ),
+        "depth_map_members": sorted(
+            package_member(root_name, output_relative(path), slug)
+            for path in package_files
+            if path.suffix.lower() in IMAGE_SUFFIXES
+            and "visuals/depth_maps/" in output_relative(path)
         ),
         "scene_audio_members": sorted(
             package_member(root_name, output_relative(path), slug)
@@ -1516,7 +1571,12 @@ def verify_archive(
         actual_image_members = sorted(
             name for name in names
             if PurePosixPath(name).suffix.lower() in IMAGE_SUFFIXES
-            and name != thumbnail_member
+            and "visuals/images/" in name
+        )
+        actual_depth_members = sorted(
+            name for name in names
+            if PurePosixPath(name).suffix.lower() in IMAGE_SUFFIXES
+            and "visuals/depth_maps/" in name
         )
         actual_audio_members = sorted(
             name for name in names
@@ -1524,6 +1584,8 @@ def verify_archive(
         )
         if embedded.get("scene_image_members") != actual_image_members:
             fail("ZIP scene image inventory differs from embedded manifest")
+        if embedded.get("depth_map_members") != actual_depth_members:
+            fail("ZIP depth-map inventory differs from embedded manifest")
         if embedded.get("scene_audio_members") != actual_audio_members:
             fail("ZIP scene audio inventory differs from embedded manifest")
         declared_project_files = embedded.get("project_files")
