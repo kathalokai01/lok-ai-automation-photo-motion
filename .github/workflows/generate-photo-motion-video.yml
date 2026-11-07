@@ -23,14 +23,12 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_INPUT: "1"
 
-      # Gemini is first only when the account's free tier is explicitly confirmed.
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
       GEMINI_MODEL_FALLBACKS: ${{ vars.GEMINI_MODEL_FALLBACKS }}
       GEMINI_FREE_TIER_CONFIRMED: ${{ vars.GEMINI_FREE_TIER_CONFIRMED }}
 
-      # Zero-cost LLM fallback configuration.
       LLM_ZERO_COST_ONLY: "true"
       LLM_PROVIDER_ORDER: ${{ vars.LLM_PROVIDER_ORDER }}
       LLM_ZERO_COST_PROVIDERS: ${{ vars.LLM_ZERO_COST_PROVIDERS }}
@@ -224,48 +222,6 @@ jobs:
           print("LLM ZERO-COST MODE:", "enabled")
           PY
 
-      - name: Test zero-cost LLM provider safeguards
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python scripts/test_llm_providers.py
-
-      - name: Select configured zero-cost LLM fallbacks
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python scripts/select_llm_provider.py
-
-          test -s output/config/selected_llm_provider.json
-
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path("output/config/selected_llm_provider.json")
-          data = json.loads(path.read_text(encoding="utf-8"))
-
-          if data.get("zero_cost_only") is not True:
-              raise SystemExit("Provider selection is not zero-cost-only.")
-
-          if data.get("api_calls_made") != 0:
-              raise SystemExit("Provider selector unexpectedly made API calls.")
-
-          if data.get("generation_performed") is not False:
-              raise SystemExit("Provider selector must not generate content.")
-
-          order = data.get("provider_order")
-          if not isinstance(order, list):
-              raise SystemExit("Provider order is invalid.")
-
-          print("ZERO-COST PROVIDER SELECTION VERIFIED")
-          print("STATUS:", data.get("status"))
-          print("ORDER:", " -> ".join(order) if order else "none")
-          print("API CALLS: 0")
-          PY
-
       - name: Calculate input and pipeline fingerprints
         id: fingerprints
         shell: bash
@@ -418,6 +374,7 @@ jobs:
           import json
           import sys
           from pathlib import Path
+
           from scripts.input_config import (
               load_and_validate,
               get_format,
@@ -647,14 +604,175 @@ jobs:
           echo "$VENV/bin" >> "$GITHUB_PATH"
           python -m pip check
 
+      - name: Install and verify Hindi caption fonts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/install_caption_fonts.py
+
+          test -s output/fonts/font_manifest.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/fonts/font_manifest.json")
+          if not path.is_file():
+              path = Path("output/font_manifest.json")
+
+          if not path.is_file():
+              raise SystemExit("Caption font manifest was not created.")
+
+          data = json.loads(path.read_text(encoding="utf-8"))
+          if data.get("status") != "completed":
+              raise SystemExit("Caption font installation is incomplete.")
+
+          selected = data.get("selected_hindi_font")
+          if not isinstance(selected, dict) or not selected.get("family"):
+              raise SystemExit("No verified Hindi caption font was selected.")
+
+          print("VERIFIED HINDI FONT:", selected["family"])
+          PY
+
+      - name: Test zero-cost LLM provider safeguards
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/test_llm_providers.py
+
+      - name: Run strict Photo Motion preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/pipeline_preflight.py
+
+          test -s output/preflight_report.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/preflight_report.json")
+          report = json.loads(path.read_text(encoding="utf-8"))
+
+          if report.get("ready_to_run") is not True:
+              failures = report.get("failures", [])
+              for item in failures:
+                  print(
+                      "PREFLIGHT BLOCKER:",
+                      item.get("name"),
+                      "-",
+                      item.get("detail"),
+                  )
+              raise SystemExit("Photo Motion preflight blocked generation.")
+
+          if report.get("api_calls_made") != 0:
+              raise SystemExit("Preflight must not make API calls.")
+
+          if report.get("generation_performed") is not False:
+              raise SystemExit("Preflight must not perform generation.")
+
+          print("PHOTO MOTION PREFLIGHT PASSED")
+          print("CHECKS:", report.get("checks_total"))
+          print("API CALLS: 0")
+          PY
+
+      - name: Select configured Gemini model priority
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/select_gemini_model.py
+
+          test -s output/config/selected_model.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/config/selected_model.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          if data.get("status") != "selected":
+              raise SystemExit("Gemini model selection failed.")
+
+          model = data.get("model")
+          order = data.get("fallback_order")
+
+          if not isinstance(model, str) or not model.strip():
+              raise SystemExit("Gemini primary model is missing.")
+
+          if not isinstance(order, list) or not order or order[0] != model:
+              raise SystemExit("Gemini fallback order is invalid.")
+
+          if data.get("generation_test_performed") is not False:
+              raise SystemExit("Gemini selector must not generate content.")
+
+          print("GEMINI PRIORITY VERIFIED")
+          print("PRIMARY:", model)
+          print("FALLBACK COUNT:", len(order) - 1)
+          print("NO GENERATION TEST PERFORMED")
+          PY
+
+      - name: Select configured zero-cost LLM fallbacks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/select_llm_provider.py
+
+          test -s output/config/selected_llm_provider.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("output/config/selected_llm_provider.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          if data.get("zero_cost_only") is not True:
+              raise SystemExit("Provider selection is not zero-cost-only.")
+
+          if data.get("api_calls_made") != 0:
+              raise SystemExit("Provider selector unexpectedly made API calls.")
+
+          if data.get("generation_performed") is not False:
+              raise SystemExit("Provider selector must not generate content.")
+
+          order = data.get("provider_order")
+          if not isinstance(order, list):
+              raise SystemExit("Provider order is invalid.")
+
+          if data.get("status") not in {
+              "ready",
+              "no_provider_ready",
+              "disabled",
+          }:
+              raise SystemExit(
+                  "Unexpected zero-cost provider selector status: "
+                  + str(data.get("status"))
+              )
+
+          print("ZERO-COST PROVIDER SELECTION VERIFIED")
+          print("STATUS:", data.get("status"))
+          print("ORDER:", " -> ".join(order) if order else "none")
+          print("API CALLS: 0")
+          PY
+
       - name: Generate or reuse corrected story
         run: python scripts/generate_story.py
 
-      - name: Generate complete story plan
-        run: python scripts/generate_story_plan.py
+      - name: Validate story length and part boundaries
+        run: python scripts/validate_story_length.py
 
       - name: Verify story preservation and consistency
         run: python scripts/verify_story.py
+
+      - name: Generate complete story plan
+        run: python scripts/generate_story_plan.py
 
       - name: Verify actual PARTS selection
         shell: bash
@@ -937,6 +1055,7 @@ jobs:
           test -s output/package_manifest.json
 
           python - "$ARCHIVE" <<'PY'
+
           import hashlib
           import json
           import sys
