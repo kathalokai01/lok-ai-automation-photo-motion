@@ -59,12 +59,6 @@ DANGLING_ENDINGS = {
     "में", "पर", "तक", "लिए", "साथ", "अथवा", "तथा",
 }
 
-DANGLING_STARTERS = {
-    "और", "या", "लेकिन", "मगर", "क्योंकि", "इसलिए",
-    "तथा", "अथवा", "कि", "जो", "जिससे", "जिसका",
-    "जिसकी", "जिसके", "जब", "जहाँ", "जहां", "ताकि",
-}
-
 
 def log(*values: Any) -> None:
     print(*values, flush=True)
@@ -202,7 +196,6 @@ def validate_sentence_boundary(text: str, scene_id: str) -> None:
         raise RuntimeError(f"{scene_id}: narration has no readable words.")
 
     last = tokens[-1].casefold()
-    first = tokens[0].casefold()
 
     if last in DANGLING_ENDINGS:
         raise RuntimeError(
@@ -210,11 +203,10 @@ def validate_sentence_boundary(text: str, scene_id: str) -> None:
             f"({last}). Complete the sentence or meaningful clause."
         )
 
-    if first in DANGLING_STARTERS:
-        raise RuntimeError(
-            f"{scene_id}: narration starts with a dangling connector "
-            f"({first})."
-        )
+    # Hindi conjunctions such as "और", "लेकिन" and "इसलिए" can
+    # legitimately begin a complete sentence or narration scene.
+    # Do not reject a scene only because its first word is a conjunction.
+    # The ending check above still rejects clearly unfinished clauses.
 
 
 def validate_source_record(
@@ -823,6 +815,7 @@ def build_visual_prompt(
     ):
         pieces.append(
             "Use intentional cinematic framing and physically plausible "
+
             "camera perspective."
         )
 
