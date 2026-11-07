@@ -33,7 +33,7 @@ FREE_PROVIDER_FILE = ROOT / "output/config/selected_llm_provider.json"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v20-zero-cost-provider-fallback"
+VERSION = "ai-story-v21-strict-zero-cost-json-validation"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -157,6 +157,21 @@ def normalize_model(value: Any) -> str:
     return model
 
 
+def validate_free_provider_model(provider: str, model: str) -> str:
+    """Validate a selected provider/model pair before any network request."""
+    provider = clean(provider).lower()
+    model = clean(model)
+    if provider not in {"groq", "openrouter", "cloudflare", "mistral"}:
+        raise RuntimeError(f"Unsupported zero-cost LLM provider: {provider!r}.")
+    if not model or len(model) > 200 or any(ch.isspace() for ch in model):
+        raise RuntimeError(f"Invalid model identifier for {provider}.")
+    if provider == "openrouter" and not model.endswith(":free"):
+        raise RuntimeError("Only OpenRouter :free models are permitted.")
+    if provider == "cloudflare" and not model.startswith("@cf/"):
+        raise RuntimeError("Cloudflare model must use the @cf/ namespace.")
+    return model
+
+
 def load_free_provider_order() -> list[str]:
     if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
         "1", "true", "yes", "on", "enabled",
@@ -184,24 +199,35 @@ def load_free_provider_order() -> list[str]:
     if not isinstance(order, list) or not isinstance(records, list):
         raise RuntimeError("Invalid zero-cost provider selection schema.")
 
-    model_by_provider = {
-        clean(item.get("provider")).lower(): clean(item.get("model"))
-        for item in records
-        if isinstance(item, dict)
-        and item.get("ready") is True
-        and clean(item.get("provider"))
-        and clean(item.get("model"))
-    }
+    model_by_provider = {}
+    for item in records:
+        if not isinstance(item, dict):
+            raise RuntimeError("Invalid provider record in zero-cost selector.")
+        name = clean(item.get("provider")).lower()
+        if name not in {"groq", "openrouter", "cloudflare", "mistral"}:
+            raise RuntimeError(f"Unsupported provider record: {name!r}.")
+        if item.get("ready") is True:
+            if name in model_by_provider:
+                raise RuntimeError(f"Duplicate ready provider record: {name}.")
+            model_by_provider[name] = validate_free_provider_model(
+                name, item.get("model")
+            )
 
     result = []
+    seen = set()
     for provider in order:
         name = clean(provider).lower()
+        if name not in {"groq", "openrouter", "cloudflare", "mistral"}:
+            raise RuntimeError(f"Invalid provider order entry: {name!r}.")
+        if name in seen:
+            continue
+        seen.add(name)
         model = model_by_provider.get(name)
-        if name and model and name not in {
-            item.split("|", 1)[0] for item in result
-        }:
+        if model:
             result.append(f"{name}|{model}")
 
+    if data.get("status") == "ready" and not result:
+        log("Zero-cost provider selector has no ready providers.")
     return result
 
 
@@ -220,28 +246,31 @@ def load_model_order() -> list[str]:
         data = read_json(MODEL_FILE, required=False)
         if isinstance(data, dict) and data.get("status") == "selected":
             primary = normalize_model(data.get("model"))
-            if primary:
-                for value in [primary, *configured_fallbacks(data)]:
-                    model = normalize_model(value)
-                    if model and model not in order:
-                        order.append(f"gemini|{model}")
+            saved_order = data.get("fallback_order")
+            if not primary:
+                raise RuntimeError("Selected Gemini primary model is invalid.")
+            if (
+                not isinstance(saved_order, list)
+                or not saved_order
+                or normalize_model(saved_order[0]) != primary
+            ):
+                raise RuntimeError(
+                    "Selected Gemini fallback_order is invalid or reordered."
+                )
 
-                saved = data.get("fallback_order", [])
-                if isinstance(saved, list):
-                    for value in saved:
-                        model = normalize_model(value)
-                        item = f"gemini|{model}"
-                        if model and item not in order:
-                            order.append(item)
+            configured = configured_fallbacks(data)
+            if configured[0] != primary:
+                raise RuntimeError(
+                    "Configured Gemini priority differs from selector output."
+                )
 
-                for value in re.split(
-                    r"[,;]",
-                    os.environ.get("GEMINI_MODEL_FALLBACKS", ""),
-                ):
-                    model = normalize_model(value)
-                    item = f"gemini|{model}"
-                    if model and item not in order:
-                        order.append(item)
+            for value in configured:
+                model = normalize_model(value)
+                if not model:
+                    raise RuntimeError("Invalid model in configured Gemini order.")
+                item = f"gemini|{model}"
+                if item not in order:
+                    order.append(item)
         else:
             log("Gemini model selection file unavailable; skipping Gemini.")
     elif api_key:
@@ -480,6 +509,11 @@ def extract_response_text(result: dict) -> str:
 
 
 def parse_json_response(response_text: str) -> dict:
+    if not isinstance(response_text, str) or not response_text.strip():
+        raise ValueError("Model response is empty or not text.")
+    if len(response_text) > MAX_RESPONSE_CHARS:
+        raise ValueError("Model response exceeded the configured size limit.")
+
     value = re.sub(
         r"^\s*```(?:json)?\s*|\s*```\s*$",
         "",
@@ -487,20 +521,35 @@ def parse_json_response(response_text: str) -> dict:
         flags=re.IGNORECASE,
     ).strip()
 
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key!r}.")
+            result[key] = item
+        return result
+
+    def reject_nonfinite(value):
+        raise ValueError(f"Invalid non-finite JSON number: {value}.")
+
+    decoder_options = {
+        "object_pairs_hook": reject_duplicate_keys,
+        "parse_constant": reject_nonfinite,
+    }
     try:
-        result = json.loads(value)
+        result = json.loads(value, **decoder_options)
     except json.JSONDecodeError:
         start = value.find("{")
         end = value.rfind("}")
-
         if start < 0 or end <= start:
             raise ValueError("Model response contains no JSON object.")
-
-        result = json.loads(value[start:end + 1])
+        result = json.loads(
+            value[start:end + 1],
+            **decoder_options,
+        )
 
     if not isinstance(result, dict):
         raise ValueError("Model response JSON root must be an object.")
-
     return result
 
 
@@ -978,11 +1027,28 @@ def request_selected_model(
         )
 
     if provider == "gemini":
+        if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
+            "1", "true", "yes", "on", "enabled",
+        }:
+            raise RuntimeError("Gemini is blocked unless LLM_ZERO_COST_ONLY=true.")
+        if os.environ.get("GEMINI_FREE_TIER_CONFIRMED", "").strip().lower() not in {
+            "1", "true", "yes", "on", "enabled",
+        }:
+            raise RuntimeError(
+                "Gemini is blocked until GEMINI_FREE_TIER_CONFIRMED=true."
+            )
         if not api_key:
             raise RuntimeError(
                 "Gemini was selected but no Gemini API key is configured."
             )
-        return request_gemini(api_key, model, prompt, schema)
+        parsed = request_gemini(api_key, model, prompt, schema)
+        return parsed
+
+    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
+        "1", "true", "yes", "on", "enabled",
+    }:
+        raise RuntimeError("Non-Gemini LLM calls require LLM_ZERO_COST_ONLY=true.")
+    validate_free_provider_model(provider, model)
 
     result = generate_free_provider_text(
         provider=provider,
