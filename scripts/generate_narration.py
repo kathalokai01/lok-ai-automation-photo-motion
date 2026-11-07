@@ -1090,7 +1090,7 @@ def validate_scene_collection(
     for field, expected in (
         ("total_parts", settings["parts"]),
         ("total_main_scenes", sum(actual_counts)),
-        ("total_scenes", sum(actual_counts)),
+        ("total_scenes", sum(actual_counts) + len(ordered_extras)),
         ("total_extra_scenes", len(ordered_extras)),
     ):
         value = data.get(field)
@@ -1107,6 +1107,19 @@ def validate_scene_collection(
         or not re.fullmatch(r"[0-9a-f]{64}", generation_signature)
     ):
         raise RuntimeError("scenes.json generation_signature is invalid.")
+
+    if str(data.get("format", "")).strip().lower() != settings["format"]:
+        raise RuntimeError("scenes.json FORMAT does not match Input.")
+
+    if data.get("scene_order") != (
+        "part_then_hook_then_main_then_suspense_or_resolution"
+    ):
+        raise RuntimeError("scenes.json scene_order is invalid.")
+
+    if data.get("source_story_signature") != stable_hash(ai_story):
+        raise RuntimeError(
+            "scenes.json was not generated from the current ai_story.json."
+        )
 
     total_records = (
         sum(actual_counts)
