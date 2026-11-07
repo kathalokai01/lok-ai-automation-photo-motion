@@ -296,8 +296,18 @@ def get_jobs():
     if not jobs:
         raise RuntimeError("visual_jobs.json contains no image jobs.")
 
-    if jobs_manifest and jobs_manifest.get("status") not in {"completed", "ready"}:
+    if not isinstance(jobs_manifest, dict) or not jobs_manifest:
+        raise RuntimeError("visual_jobs_manifest.json is missing or invalid.")
+    if jobs_manifest.get("status") != "completed":
         raise RuntimeError("Visual jobs manifest is not completed.")
+    if clean(jobs_manifest.get("stage")) != "visual_jobs_prepared":
+        raise RuntimeError("Visual jobs manifest has an unexpected stage.")
+    if clean(jobs_manifest.get("format")).lower() not in ALLOWED_FORMATS:
+        raise RuntimeError("Visual jobs manifest has an invalid SHORT/FULL format.")
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", clean(jobs_manifest.get("source_fingerprint"))):
+        raise RuntimeError("Visual jobs manifest source fingerprint is missing or invalid.")
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", clean(jobs_manifest.get("config_signature"))):
+        raise RuntimeError("Visual jobs manifest config signature is missing or invalid.")
 
     prepared = []
     seen_global = set()
@@ -441,18 +451,95 @@ def get_jobs():
         raise RuntimeError("Global image job numbering must be continuous from 1.")
 
     expected_count = jobs_manifest.get("total_jobs")
-    if expected_count is not None and int(expected_count) != len(prepared):
+    if isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count != len(prepared):
         raise RuntimeError("Job count differs from visual jobs manifest.")
 
     expected_fingerprint = clean(jobs_manifest.get("source_fingerprint"))
     expected_config = clean(jobs_manifest.get("config_signature"))
+    format_name = clean(jobs_manifest.get("format")).lower()
+    expected_size = "720x1280" if format_name == "short" else "1280x720"
+    if clean(jobs_manifest.get("image_size")) != expected_size:
+        raise RuntimeError(
+            f"{format_name.upper()} manifest must declare image_size={expected_size}."
+        )
 
+    part_numbers = sorted({row["part"] for row in prepared})
+    if not part_numbers or part_numbers != list(range(1, len(part_numbers) + 1)):
+        raise RuntimeError("Image jobs must contain continuous Part numbers starting at 1.")
+
+    raw_actual_counts = jobs_manifest.get("actual_scene_counts")
+    if not isinstance(raw_actual_counts, dict):
+        raise RuntimeError("Visual jobs manifest actual_scene_counts must be an object.")
+    actual_counts = {}
+    for part in part_numbers:
+        value = raw_actual_counts.get(str(part), raw_actual_counts.get(part))
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise RuntimeError(f"Part {part}: actual Scene count is missing or invalid.")
+        actual_counts[part] = value
+
+    scenes_min = jobs_manifest.get("scenes_min")
+    scenes_max = jobs_manifest.get("scenes_max")
+    if (
+        isinstance(scenes_min, bool) or not isinstance(scenes_min, int)
+        or isinstance(scenes_max, bool) or not isinstance(scenes_max, int)
+        or scenes_min < 1 or scenes_max < scenes_min
+    ):
+        raise RuntimeError("Visual jobs manifest SCENES range is invalid.")
+    if any(not scenes_min <= count <= scenes_max for count in actual_counts.values()):
+        raise RuntimeError("Per-Part actual Scene count is outside the configured SCENES range.")
+
+    role_totals = {role: 0 for role in ALLOWED_ROLES}
+    part_role_totals = {
+        part: {role: 0 for role in ALLOWED_ROLES}
+        for part in part_numbers
+    }
+    main_seen = set()
     for row in prepared:
         source = row["source_job"]
-        if expected_fingerprint and clean(source.get("source_fingerprint")) != expected_fingerprint:
-            raise RuntimeError("Job source fingerprints do not match manifest.")
-        if expected_config and clean(source.get("config_signature")) != expected_config:
-            raise RuntimeError("Job config signatures do not match manifest.")
+        if clean(source.get("source_fingerprint")) != expected_fingerprint:
+            raise RuntimeError(f"{row['scene_id']}: source fingerprint mismatch.")
+        if clean(source.get("config_signature")) != expected_config:
+            raise RuntimeError(f"{row['scene_id']}: config signature mismatch.")
+        if row["size_text"] != expected_size:
+            raise RuntimeError(f"{row['scene_id']}: image dimensions do not match {format_name.upper()}.")
+
+        role_totals[row["role"]] += 1
+        part_role_totals[row["part"]][row["role"]] += 1
+        if row["role"] == "main":
+            number = row["source_scene_number"]
+            if number > actual_counts[row["part"]]:
+                raise RuntimeError(f"{row['scene_id']}: Main Scene exceeds actual Part Scene count.")
+            pair = (row["part"], number)
+            if pair in main_seen:
+                raise RuntimeError(f"{row['scene_id']}: duplicate Main Scene number.")
+            main_seen.add(pair)
+
+    expected_main = {
+        (part, number)
+        for part in part_numbers
+        for number in range(1, actual_counts[part] + 1)
+    }
+    if main_seen != expected_main:
+        raise RuntimeError("Image jobs do not cover every actual Main Scene exactly once.")
+
+    for position, part in enumerate(part_numbers):
+        counts = part_role_totals[part]
+        if counts["hook"] != 1 or counts["main"] != actual_counts[part]:
+            raise RuntimeError(f"Part {part}: expected one Hook and {actual_counts[part]} Main images.")
+        if position < len(part_numbers) - 1:
+            if counts["suspense"] != 1 or counts["resolution"] != 0:
+                raise RuntimeError(f"Part {part}: expected one Suspense and no Resolution image.")
+        elif counts["resolution"] != 1 or counts["suspense"] != 0:
+            raise RuntimeError("Final Part must have one Resolution and no Suspense image.")
+
+    if jobs_manifest.get("total_main_scenes") != len(expected_main):
+        raise RuntimeError("Manifest total_main_scenes does not match actual per-Part Scene counts.")
+    declared_roles = jobs_manifest.get("scene_role_counts")
+    if not isinstance(declared_roles, dict):
+        raise RuntimeError("Manifest scene_role_counts is missing.")
+    for role, count in role_totals.items():
+        if declared_roles.get(role) != count:
+            raise RuntimeError(f"Manifest {role} image count does not match jobs.")
 
     return prepared, jobs_manifest
 
@@ -490,7 +577,10 @@ def make_prompt(item):
         ("time_period", "Story time period"),
         ("action", "Required visible action"),
         ("objects", "Story-specific objects"),
+        ("animals", "Story-specific animals"),
+        ("vehicles", "Story-specific vehicles"),
         ("clothing", "Story-specific clothing"),
+        ("required_story_entities", "Required story entities — names, places, objects, animals, vehicles and clothing"),
         ("camera_prompt", "Camera composition"),
         ("lighting_prompt", "Lighting"),
         ("mood", "Emotional mood"),
@@ -1174,6 +1264,9 @@ def build_image_manifest(records, metadata, policy):
         "config_signature": metadata.get("config_signature"),
         "format": metadata.get("format"),
         "image_size": metadata.get("image_size"),
+        "actual_scene_counts": metadata.get("actual_scene_counts"),
+        "scenes_min": metadata.get("scenes_min"),
+        "scenes_max": metadata.get("scenes_max"),
         "total_scenes": total,
         "images_ready": ready,
         "images_required": total,
@@ -1213,6 +1306,9 @@ def build_generation_manifest(records, metadata, policy, counters):
         "config_signature": metadata.get("config_signature"),
         "format": metadata.get("format"),
         "image_size": metadata.get("image_size"),
+        "actual_scene_counts": metadata.get("actual_scene_counts"),
+        "scenes_min": metadata.get("scenes_min"),
+        "scenes_max": metadata.get("scenes_max"),
         "total_scenes": total,
         "completed_count": ready,
         "failed_count": failed,
@@ -1550,6 +1646,9 @@ def main():
             )
         else:
             record = make_record(item, "pending")
+            previous_attempts = old.get("attempts", []) if isinstance(old, dict) else []
+            if isinstance(previous_attempts, list) and previous_attempts:
+                record["attempts"] = list(previous_attempts)
 
         records.append(record)
 
@@ -1562,6 +1661,10 @@ def main():
     save_checkpoints(records, metadata, policy, counters)
 
     ready_before = sum(row["status"] == "existing" for row in records)
+    invalid_existing_files = sum(
+        bool(item["destination"].exists()) and row["status"] == "pending"
+        for item, row in zip(items, records)
+    )
     pending_items = [
         (item, record)
         for item, record in zip(items, records)
@@ -1573,6 +1676,7 @@ def main():
     log("IMAGE DIMENSIONS:", expected_size)
     log("TOTAL IMAGE JOBS:", len(items))
     log("VERIFIED REUSABLE IMAGES:", ready_before)
+    log("EXISTING INVALID/MISMATCHED IMAGE FILES TO REPLACE:", invalid_existing_files)
     log("IMAGES REQUIRING GENERATION:", len(pending_items))
     log("CONFIGURED PROVIDER ORDER:", " -> ".join(PROVIDER_ORDER))
     log("BILLABLE PROVIDERS ALLOWED:", ALLOW_BILLABLE)
