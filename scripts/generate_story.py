@@ -616,7 +616,6 @@ def save_selected_model(model: str, reason: str = "") -> None:
     write_json(MODEL_FILE, data)
 
 
-
 def get_api_key() -> str:
     return (
         os.environ.get("GEMINI_API_KEY", "").strip()
@@ -626,6 +625,42 @@ def get_api_key() -> str:
 
 class ModelError(RuntimeError):
     pass
+
+
+def _load_zero_cost_provider_order() -> list[str]:
+    """Load only providers already validated by select_llm_provider.py."""
+    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
+        "1", "true", "yes", "on", "enabled",
+    }:
+        return []
+
+    selection_path = ROOT / "output" / "config" / "selected_llm_provider.json"
+    selection = read_json(selection_path)
+
+    if not isinstance(selection, dict):
+        log("Zero-cost provider fallback unavailable: selector output is missing.")
+        return []
+
+    if (
+        selection.get("enabled") is not True
+        or selection.get("zero_cost_only") is not True
+        or selection.get("status") != "ready"
+    ):
+        log("Zero-cost provider fallback unavailable: selector reports no ready provider.")
+        return []
+
+    allowed = {"groq", "openrouter", "cloudflare", "mistral"}
+    order = selection.get("provider_order")
+    if not isinstance(order, list):
+        return []
+
+    result = []
+    for value in order:
+        provider = clean(value).lower()
+        if provider in allowed and provider not in result:
+            result.append(provider)
+    return result
+
 
 
 def parse_model_response(raw: str) -> dict:
@@ -671,7 +706,6 @@ def parse_model_response(raw: str) -> dict:
         "response_format": "plain_text",
     }
 
-
 def call_model(
     prompt: str,
     model: str,
@@ -679,169 +713,166 @@ def call_model(
     *,
     max_tokens: int = MAX_TOKENS,
 ) -> dict:
+    """Try configured Gemini models first, then validated zero-cost providers."""
     payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt}],
-            }
-        ],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "temperature": 0.25,
             "maxOutputTokens": max_tokens,
         },
     }
-
-    configured_models = get_configured_model_order()
-
-    # The saved selection is authoritative. Do not reinsert an older
-    # primary after a runtime fallback has already succeeded.
-
     failures = []
+    configured_models = get_configured_model_order()
+    retryable_http = {408, 429, 500, 502, 503, 504}
 
-    retryable_http = {
-        408, 429, 500, 502, 503, 504,
-    }
+    if api_key:
+        for model_index, candidate_model in enumerate(configured_models):
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                + urllib.parse.quote(candidate_model, safe="-._")
+                + ":generateContent"
+            )
+            model_errors = []
 
-    for model_index, candidate_model in enumerate(configured_models):
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            + urllib.parse.quote(candidate_model, safe="-._")
-            + ":generateContent"
+            for attempt in range(len(RETRY_DELAYS) + 1):
+                request = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": api_key,
+                    },
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                        response_data = json.loads(
+                            response.read().decode("utf-8", errors="replace")
+                        )
+
+                    candidates = response_data.get("candidates") or []
+                    if not candidates:
+                        raise ModelError(f"{candidate_model}: no response candidate.")
+
+                    content_parts = candidates[0].get("content", {}).get("parts", [])
+                    response_text = "".join(
+                        item.get("text", "")
+                        for item in content_parts
+                        if isinstance(item, dict)
+                    ).strip()
+
+                    if not response_text:
+                        raise ModelError(f"{candidate_model}: empty response.")
+
+                    parsed = parse_model_response(response_text)
+                    if not isinstance(parsed, dict):
+                        raise ModelError(f"{candidate_model}: invalid parsed response.")
+
+                    if candidate_model != clean(model):
+                        log(f"Runtime Gemini fallback succeeded: {candidate_model}")
+
+                    save_selected_model(
+                        candidate_model,
+                        reason=(
+                            "Primary Gemini model succeeded."
+                            if model_index == 0
+                            else "Earlier configured Gemini model failed; "
+                                 "this configured fallback succeeded."
+                        ),
+                    )
+                    parsed["_katha_model_used"] = candidate_model
+                    parsed["_katha_provider_used"] = "gemini"
+                    parsed["_katha_generation_method"] = "configured_gemini"
+                    return parsed
+
+                except urllib.error.HTTPError as exc:
+                    body = exc.read().decode("utf-8", errors="replace")
+                    model_errors.append(f"HTTP {exc.code}: {body[:1000]}")
+                    if exc.code not in retryable_http:
+                        break
+
+                except (
+                    urllib.error.URLError,
+                    TimeoutError,
+                    OSError,
+                    ModelError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    model_errors.append(f"{type(exc).__name__}: {exc}")
+                    if isinstance(exc, (ModelError, json.JSONDecodeError)):
+                        break
+
+                if attempt < len(RETRY_DELAYS):
+                    delay = RETRY_DELAYS[attempt]
+                    log(
+                        f"Transient Gemini failure on {candidate_model}; "
+                        f"retrying in {delay}s ({attempt + 1}/{len(RETRY_DELAYS)})."
+                    )
+                    time.sleep(delay)
+
+            failures.append(
+                f"Gemini {candidate_model}: " + " | ".join(model_errors)
+            )
+            log(
+                f"Gemini model failed: {candidate_model}; "
+                "trying next configured model."
+            )
+    else:
+        failures.append("Gemini API key is absent; no Gemini request was made.")
+
+    provider_order = _load_zero_cost_provider_order()
+    if not provider_order:
+        raise RuntimeError(
+            "Gemini fallback order is exhausted or credentials are absent; "
+            "no validated zero-cost fallback is enabled. No paid provider was attempted. "
+            + " || ".join(failures)
         )
 
-        model_errors = []
+    try:
+        from llm_provider_client import ProviderError, generate_text
+    except Exception as exc:
+        raise RuntimeError(
+            "Zero-cost provider client import failed; no paid provider was attempted: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
-        for attempt in range(len(RETRY_DELAYS) + 1):
-            request = urllib.request.Request(
-                url,
-                data=json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                ).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": api_key,
-                },
-                method="POST",
+    for provider in provider_order:
+        try:
+            generated = generate_text(
+                provider,
+                prompt,
+                max_tokens=max(1, min(int(max_tokens), 32768)),
+                temperature=0.25,
+                timeout=TIMEOUT,
+            )
+            response_text = clean(generated.get("text"))
+            if not response_text:
+                raise ModelError(f"{provider}: provider returned empty text.")
+
+            parsed = parse_model_response(response_text)
+            parsed["_katha_model_used"] = (
+                f"{provider}:{clean(generated.get('model'))}"
+            )
+            parsed["_katha_provider_used"] = provider
+            parsed["_katha_generation_method"] = "zero_cost_external_fallback"
+
+            log(
+                f"Zero-cost fallback succeeded: {provider}/"
+                f"{clean(generated.get('model'))}"
+            )
+            return parsed
+
+        except Exception as exc:
+            failures.append(f"{provider}: {type(exc).__name__}: {exc}")
+            log(
+                f"Zero-cost provider failed: {provider}; "
+                "trying next validated provider."
             )
 
-            try:
-                with urllib.request.urlopen(
-                    request,
-                    timeout=TIMEOUT,
-                ) as response:
-                    response_data = json.loads(
-                        response.read().decode(
-                            "utf-8",
-                            errors="replace",
-                        )
-                    )
-
-                candidates = response_data.get("candidates") or []
-
-                if not candidates:
-                    raise ModelError(
-                        f"{candidate_model}: no response candidate."
-                    )
-
-                content_parts = (
-                    candidates[0]
-                    .get("content", {})
-                    .get("parts", [])
-                )
-
-                response_text = "".join(
-                    item.get("text", "")
-                    for item in content_parts
-                    if isinstance(item, dict)
-                ).strip()
-
-                if not response_text:
-                    raise ModelError(
-                        f"{candidate_model}: empty response."
-                    )
-
-                parsed = parse_model_response(response_text)
-
-                if not isinstance(parsed, dict):
-                    raise ModelError(
-                        f"{candidate_model}: invalid parsed response."
-                    )
-
-                if candidate_model != clean(model):
-                    log(
-                        f"Runtime fallback succeeded: "
-                        f"{candidate_model}"
-                    )
-
-                save_selected_model(
-                    candidate_model,
-                    reason=(
-                        "Primary model succeeded."
-                        if model_index == 0
-                        else "Previous configured model failed; "
-                             "this configured fallback succeeded."
-                    ),
-                )
-
-                parsed["_katha_model_used"] = candidate_model
-                return parsed
-
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode(
-                    "utf-8",
-                    errors="replace",
-                )
-
-                message = (
-                    f"HTTP {exc.code}: {body[:1000]}"
-                )
-                model_errors.append(message)
-
-                if exc.code not in retryable_http:
-                    break
-
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                OSError,
-            ) as exc:
-                model_errors.append(
-                    f"{type(exc).__name__}: {exc}"
-                )
-
-            except (
-                ModelError,
-                json.JSONDecodeError,
-            ) as exc:
-                model_errors.append(
-                    f"{type(exc).__name__}: {exc}"
-                )
-                break
-
-            if attempt < len(RETRY_DELAYS):
-                delay = RETRY_DELAYS[attempt]
-                log(
-                    f"Transient failure on {candidate_model}; "
-                    f"retrying in {delay}s "
-                    f"({attempt + 1}/{len(RETRY_DELAYS)})."
-                )
-                time.sleep(delay)
-
-        failures.append(
-            f"{candidate_model}: " + " | ".join(model_errors)
-        )
-
-        log(
-            f"Model failed: {candidate_model}. "
-            "Trying the next configured model, if available."
-        )
-
     raise RuntimeError(
-        "All configured Gemini models failed. "
-        + " || ".join(failures)
+        "All configured Gemini models and validated zero-cost providers failed. "
+        "No paid provider was attempted. " + " || ".join(failures)
     )
 
 
@@ -901,11 +932,6 @@ def generate_complete_story(
     model: str,
     api_key: str,
 ) -> dict:
-    if not api_key:
-        raise RuntimeError(
-            "Story correction/generation requires the configured Gemini API key."
-        )
-
     result = call_model(
         build_story_prompt(
             mode,
@@ -965,7 +991,10 @@ def generate_complete_story(
     return {
         "story_text": complete,
         "title": clean(result.get("title")),
-        "generation_method": "configured_gemini",
+        "generation_method": (
+            clean(result.get("_katha_generation_method"))
+            or "configured_gemini"
+        ),
         "model": (
             clean(source_verification.get("model"))
             if source_verification
@@ -973,13 +1002,21 @@ def generate_complete_story(
         ),
         "proofreading": {
             "performed": True,
-            "method": "configured_gemini_model",
+            "method": (
+                clean(result.get("_katha_generation_method"))
+                or "configured_gemini_model"
+            ),
+            "generation_method": (
+                clean(result.get("_katha_generation_method"))
+                or "configured_gemini"
+            ),
             "complete_story_reviewed": True,
             "source_story_word_count": word_count(source_text),
             "corrected_story_word_count": word_count(complete),
             "source_preservation_verification": source_verification,
         },
     }
+
 
 def verify_revision_semantics(
     original: str,
@@ -1140,11 +1177,6 @@ RULES:
         }
 
         try:
-            if not api_key:
-                raise RuntimeError(
-                    "Configured Gemini API key is required for SHORT Part revision."
-                )
-
             response = call_model(
                 prompt,
                 model,
@@ -1295,7 +1327,6 @@ def _rebalance_for_merged_count(
         return None
 
     return groups
-
 
 def _partition_and_revise(
     complete_story: str,
@@ -1716,6 +1747,7 @@ def _partition_and_revise(
 
     return revised_groups, policy, selection
 
+
 def select_final_parts(
     complete_story: str,
     mode: str,
@@ -1862,6 +1894,8 @@ def make_story(
             not isinstance(planned_scenes, list)
             or not scenes_min <= len(planned_scenes) <= scenes_max
         ):
+            raise RuntimeError(
+
             raise RuntimeError(
                 f"Plan Scene count is outside {scenes_min}-{scenes_max} "
                 f"for Part {part_number}."
@@ -2057,7 +2091,10 @@ def make_story(
         "topic": topic,
         "format": mode,
         "model": model,
-        "generation_method": "configured_gemini",
+        "generation_method": (
+            clean(proofreading.get("generation_method"))
+            or "configured_gemini"
+        ),
         "proofreading": proofreading,
         "source_text": source_text,
         "source_word_count": word_count(source_text),
@@ -2411,11 +2448,6 @@ def main() -> None:
     model = get_selected_model()
     api_key = get_api_key()
 
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY or GOOGLE_API_KEY is not configured."
-        )
-
     cached = read_json(CACHE_FILE)
 
     if cache_is_valid(
@@ -2452,7 +2484,7 @@ def main() -> None:
                 corrected_story,
             )
 
-        model = get_selected_model()
+        model = clean(cached.get("model")) or model
 
         policy = cached.get("story_length_policy", {})
         selection = cached.get("parts_selection", {})
@@ -2546,7 +2578,7 @@ def main() -> None:
             {},
         )
 
-        model = clean(generated.get("model")) or get_selected_model()
+        model = clean(generated.get("model")) or model
 
         generated_title = clean(
             generated.get("title")
@@ -2574,7 +2606,7 @@ def main() -> None:
         ),
     )
 
-    model = get_selected_model()
+    model = clean(proofreading.get("model")) or model
 
     atomic_write(
         CORRECTED_STORY_FILE,
@@ -2592,6 +2624,7 @@ def main() -> None:
             ),
             "final_title": title,
             "proofreading": proofreading,
+            "model": model,
             "reused_checkpoint": bool(checkpoint),
         },
     )
