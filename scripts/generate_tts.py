@@ -37,7 +37,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 13
+VERSION = 14
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -2289,6 +2289,8 @@ def main() -> int:
             info = None
             provider_used = None
 
+            chunk_reused = False
+
             if reusable_record:
                 info = valid_existing_audio(
                     output_path,
@@ -2299,7 +2301,30 @@ def main() -> int:
                     provider_used = reusable_record.get(
                         "provider"
                     )
+                    chunk_reused = True
                     manifest["summary"]["reused_chunks"] += 1
+                    checkpoint_records.append({
+                        "job_id": job_id,
+                        "part": job["part"],
+                        "scene": job["scene"],
+                        "scene_id": job["scene_id"],
+                        "role": job["role"],
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "text_sha256": hashlib.sha256(
+                            chunk.encode("utf-8")
+                        ).hexdigest(),
+                        "output_path": str(
+                            output_path.relative_to(ROOT)
+                        ),
+                        "provider": provider_used,
+                        "duration": info["duration"],
+                        "duration_source": "ffprobe_measured",
+                        "size_bytes": info["size_bytes"],
+                        "sha256": info["sha256"],
+                        "status": "completed",
+                        "reused": True,
+                    })
 
             if info is None:
                 info, provider_used = (
@@ -2321,12 +2346,6 @@ def main() -> int:
 
             scene_chunk_paths.append(output_path)
             providers_used.append(provider_used)
-
-            chunk_reused = bool(
-                reusable_record is not None
-                and info is not None
-                and provider_used == reusable_record.get("provider")
-            )
 
             chunk_record = {
                 "job_id": job_id,
