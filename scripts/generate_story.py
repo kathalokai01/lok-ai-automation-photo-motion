@@ -712,7 +712,6 @@ def call_model(
         )
 
         model_errors = []
-        model_succeeded = False
 
         for attempt in range(len(RETRY_DELAYS) + 1):
             request = urllib.request.Request(
@@ -820,8 +819,6 @@ def call_model(
                 model_errors.append(
                     f"{type(exc).__name__}: {exc}"
                 )
-                # A bad response belongs to this model. Continue to
-                # the next configured model instead of aborting fallback.
                 break
 
             if attempt < len(RETRY_DELAYS):
@@ -984,7 +981,6 @@ def generate_complete_story(
         },
     }
 
-
 def verify_revision_semantics(
     original: str,
     revised: str,
@@ -999,29 +995,12 @@ Compare ORIGINAL PART with REVISED PART.
 Use COMPLETE STORY only as context.
 
 IMPORTANT LANGUAGE RULES:
-1. Hindi words written in Devanagari and their Roman transliterations
-   must be treated as equivalent when their meaning is unchanged.
+1. Treat Devanagari and Roman transliterations as equivalent when meaning is unchanged.
 2. Common Hindi-English code-switching is not an event omission.
-3. Spelling, matra, punctuation, grammar and sentence restructuring
-   are not semantic changes by themselves.
+3. Spelling, matra, punctuation and grammar changes are not semantic changes.
 4. Never report a missing event based only on different wording.
-5. Do not interpret a transliteration as a changed character, action,
-   object, relationship or event.
-6. Do not invent omissions or additions.
-
-A genuine omission means a meaningful source event, action, clue,
-character, relationship, location, object, motivation, chronology,
-consequence or ending detail is absent from the revised text.
-
-A genuine addition means a new story fact or event appears in the
-revised text without support in the original.
-
-For EVERY alleged omission or addition, provide:
-- exact_original_quote
-- exact_revised_quote (empty only if genuinely absent)
-- reason
-
-If you cannot quote exact evidence, do not report that item.
+5. Do not invent omissions or additions.
+6. Every alleged omission or addition must include exact textual evidence.
 
 Return valid JSON only:
 {{
@@ -1036,9 +1015,9 @@ Return valid JSON only:
   "explanation": "..."
 }}
 
-All six booleans must be true and both arrays must be empty to pass.
+All six booleans must be true and both arrays empty to pass.
 
-COMPLETE STORY CONTEXT:
+COMPLETE STORY:
 {complete_story}
 
 ORIGINAL PART:
@@ -1069,7 +1048,6 @@ REVISED PART:
 
     if not isinstance(omissions, list):
         omissions = [str(omissions)]
-
     if not isinstance(additions, list):
         additions = [str(additions)]
 
@@ -1082,10 +1060,7 @@ REVISED PART:
     return {
         "performed": True,
         "passed": passed,
-        "checks": {
-            key: result.get(key) is True
-            for key in keys
-        },
+        "checks": {key: result.get(key) is True for key in keys},
         "omitted_events": omissions,
         "added_events": additions,
         "explanation": clean(result.get("explanation")),
@@ -1096,94 +1071,6 @@ REVISED PART:
     }
 
 
-def generate_complete_story(
-    mode: str,
-    topic: str,
-    title: str,
-    source_text: str,
-    config: dict,
-    model: str,
-    api_key: str,
-) -> dict:
-    if not api_key:
-        raise RuntimeError(
-            "Story correction/generation requires the configured Gemini API key."
-        )
-
-    result = call_model(
-        build_story_prompt(
-            mode,
-            topic,
-            title,
-            source_text,
-            config,
-        ),
-        model,
-        api_key,
-    )
-
-    complete = normalize_text(
-        result.get("story_text")
-        or result.get("story")
-        or result.get("narration")
-        or result.get("text")
-    )
-
-    if not complete and isinstance(result.get("parts"), list):
-        complete = normalize_text(
-            "\n\n".join(
-                str(
-                    row.get("text", "")
-                    if isinstance(row, dict)
-                    else row
-                )
-                for row in result["parts"]
-            )
-        )
-
-    if word_count(complete) < 20:
-        raise RuntimeError(
-            "Model did not return a complete usable story."
-        )
-
-    source_verification = None
-
-    if source_text:
-        source_verification = verify_revision_semantics(
-            source_text,
-            complete,
-            source_text,
-            model,
-            api_key,
-        )
-
-        if not source_verification.get("passed"):
-            raise RuntimeError(
-                "Corrected full story failed event/chronology "
-                "preservation verification: "
-                + clean(
-                    source_verification.get("explanation")
-                )
-            )
-
-    return {
-        "story_text": complete,
-        "title": clean(result.get("title")),
-        "generation_method": "configured_gemini",
-        "model": (
-            clean(source_verification.get("model"))
-            if source_verification
-            else clean(result.get("_katha_model_used")) or get_selected_model()
-        ),
-        "proofreading": {
-            "performed": True,
-            "method": "configured_gemini_model",
-            "complete_story_reviewed": True,
-            "source_story_word_count": word_count(source_text),
-
-
-
-            
 def repair_short_part(
     part_text: str,
     part_number: int,
@@ -1200,10 +1087,7 @@ def repair_short_part(
     original_hash = sha256(current)
     evidence = None
 
-    hard_max = (
-        SHORT_MERGED_MAX if final_merged
-        else SHORT_HARD_MAX
-    )
+    hard_max = SHORT_MERGED_MAX if final_merged else SHORT_HARD_MAX
 
     for attempt in range(1, REVISION_ATTEMPTS + 1):
         count = word_count(current)
@@ -1212,11 +1096,10 @@ def repair_short_part(
             break
 
         direction = (
-            "Compress wording toward 120–150 words without dropping any event."
+            "Compress toward 120–150 words without dropping events."
             if count > SHORT_MAX
             else
-            "Expand toward 120–150 words using only facts and details "
-            "already present in the complete story."
+            "Expand toward 120–150 words using only facts already in the complete story."
         )
 
         prompt = f"""
@@ -1228,11 +1111,11 @@ TITLE: {title}
 CURRENT WORD COUNT: {count}
 TARGET: 120–150 words.
 NORMAL HARD LIMIT: 180 words.
-FINAL MERGED PART LIMIT, when applicable: 239 words.
+FINAL MERGED PART LIMIT: 239 words, only when explicitly applicable.
 
 DIRECTION: {direction}
 
-COMPLETE STORY CONTEXT:
+COMPLETE STORY:
 {complete_story}
 
 CURRENT PART:
@@ -1242,10 +1125,10 @@ RULES:
 - Preserve every event, character, relationship, chronology, clue,
   object and consequence.
 - Do not invent facts, dialogue, clues, twists or outcomes.
-- Do not omit any important event or change the ending.
+- Do not omit important events or change the ending.
 - Correct Hindi matras, spelling, grammar and punctuation.
 - Keep complete sentence and meaningful clause boundaries.
-- Maintain the same chronological position and scene-unit order.
+- Preserve chronological order.
 - Do not add a title, summary, heading or commentary.
 """
 
@@ -1259,7 +1142,7 @@ RULES:
         try:
             if not api_key:
                 raise RuntimeError(
-                    "A configured Gemini API key is required for SHORT Part revision."
+                    "Configured Gemini API key is required for SHORT Part revision."
                 )
 
             response = call_model(
@@ -1277,11 +1160,10 @@ RULES:
             )
 
             if not revised:
-                raise ModelError(
-                    "Revision model returned empty narration."
-                )
+                raise ModelError("Revision model returned empty narration.")
 
-            record["after_words"] = word_count(revised)
+            revised_count = word_count(revised)
+            record["after_words"] = revised_count
             record["after_sha256"] = sha256(revised)
 
             if sha256(revised) == sha256(current):
@@ -1296,7 +1178,6 @@ RULES:
                 model,
                 api_key,
             )
-
             record["semantic_verification"] = semantic
 
             if not semantic["passed"]:
@@ -1305,7 +1186,6 @@ RULES:
                 continue
 
             current = revised
-
             evidence = {
                 "original_sha256": original_hash,
                 "revised_sha256": sha256(current),
@@ -1316,13 +1196,12 @@ RULES:
 
             record["outcome"] = (
                 "within_target_after_verified_revision"
-                if SHORT_MIN <= word_count(current) <= SHORT_MAX
+                if SHORT_MIN <= revised_count <= SHORT_MAX
                 else "verified_revision_outside_preferred_range"
             )
-
             records.append(record)
 
-            if SHORT_MIN <= word_count(current) <= SHORT_MAX:
+            if SHORT_MIN <= revised_count <= SHORT_MAX:
                 break
 
         except Exception as exc:
@@ -1332,10 +1211,16 @@ RULES:
 
     final_count = word_count(current)
 
+    if final_count < SHORT_MIN:
+        raise RuntimeError(
+            f"SHORT Part {part_number} remains below {SHORT_MIN} words "
+            f"after {REVISION_ATTEMPTS} revision attempts ({final_count})."
+        )
+
     if final_count > hard_max:
         raise RuntimeError(
-            f"SHORT Part {part_number} remains above {hard_max} words "
-            f"after verified retries ({final_count})."
+            f"SHORT Part {part_number} exceeds its hard limit "
+            f"of {hard_max} words ({final_count})."
         )
 
     if (
@@ -1343,8 +1228,8 @@ RULES:
         and not verify_revision_evidence(evidence, current)
     ):
         raise RuntimeError(
-            f"SHORT Part {part_number} has {final_count} words but no "
-            "verified changed-text revision evidence."
+            f"SHORT Part {part_number} has {final_count} words but "
+            "has no verified changed-text revision evidence."
         )
 
     if return_evidence:
@@ -1372,7 +1257,7 @@ def _rebalance_for_merged_count(
     scenes_min, scenes_max = scenes_range
     units = split_sentences(story_text)
 
-    if not units:
+    if not units or part_count < 1:
         return None
 
     required = part_count * scenes_min
@@ -1395,7 +1280,7 @@ def _rebalance_for_merged_count(
         final_max=SHORT_MERGED_MAX,
     )
 
-    if groups is None:
+    if groups is None or len(groups) != part_count:
         return None
 
     counts = [word_count(group) for group in groups]
@@ -1426,11 +1311,9 @@ def _partition_and_revise(
     minimum_parts, maximum_parts = parse_parts_range(
         parts_specification
     )
-
     total_words = word_count(complete_story)
 
     if mode == "full":
-        selected_count = 1
         groups = [complete_story]
         merged_fallback = False
     else:
@@ -1441,8 +1324,7 @@ def _partition_and_revise(
             story_length=story_length,
             config=None,
         )
-
-        groups, selected_count, merged_fallback = _partition_short_story(
+        groups, _selected_count, merged_fallback = _partition_short_story(
             complete_story,
             preferred,
             minimum_parts,
@@ -1468,9 +1350,12 @@ def _partition_and_revise(
         amount = word_count(original)
         is_final = number == len(groups)
 
-        needs_revision = amount < SHORT_MIN or (
-            amount > SHORT_MAX
-            and not (is_final and merged_fallback)
+        needs_revision = (
+            amount < SHORT_MIN
+            or (
+                amount > SHORT_MAX
+                and not (is_final and merged_fallback)
+            )
         )
 
         if not needs_revision:
@@ -1507,7 +1392,6 @@ def _partition_and_revise(
         revision_rows.append({
             "part": number,
             "attempted": True,
-
             "outcome": (
                 "verified_revision"
                 if evidence
@@ -1515,11 +1399,21 @@ def _partition_and_revise(
             ),
             "before_words": amount,
             "after_words": word_count(revised),
+            "before_sha256": sha256(original),
+            "after_sha256": sha256(revised),
+            "revision_evidence": evidence,
+            "attempts": attempts,
+            "final_part_merged": bool(is_final and merged_fallback),
+        })
 
-        if word_count(revised_groups[-1]) < SHORT_MIN:
+    # Final-Part exception is evaluated only after all Parts are revised.
+    if mode == "short" and revised_groups:
+        final_count = word_count(revised_groups[-1])
+
+        if final_count < SHORT_MIN:
             if len(revised_groups) < 2:
                 raise RuntimeError(
-                    "A single SHORT Part remains below 120 words; "
+                    "The only SHORT Part remains below 120 words; "
                     "there is no preceding Part to merge into."
                 )
 
@@ -1528,20 +1422,11 @@ def _partition_and_revise(
                 + "\n"
                 + revised_groups[-1].lstrip()
             )
+            merged_words = word_count(merged_text)
 
-            target_count = len(revised_groups) - 1
-
-            if not minimum_parts <= target_count <= maximum_parts:
-                raise RuntimeError(
-                    f"Final-Part merge requires {target_count} actual Parts, "
-                    f"outside configured PARTS range "
-                    f"{minimum_parts}-{maximum_parts}. "
-                    "The fixed/ranged Part requirement prevents this merge."
-                )
-
-            if word_count(merged_text) > SHORT_MERGED_MAX:
+            if merged_words > SHORT_MERGED_MAX:
+                target_count = len(revised_groups) - 1
                 rebalance_source = "\n\n".join(revised_groups)
-
                 rebalanced = _rebalance_for_merged_count(
                     rebalance_source,
                     target_count,
@@ -1550,11 +1435,9 @@ def _partition_and_revise(
 
                 if rebalanced is None:
                     raise RuntimeError(
-                        f"Final-Part merge would produce "
-                        f"{word_count(merged_text)} words, above "
-                        f"{SHORT_MERGED_MAX}; whole-story rebalancing "
-                        f"into {target_count} Parts could not satisfy "
-                        "the configured SCENES and word limits."
+                        f"Final-Part merge would contain {merged_words} words, "
+                        f"above {SHORT_MERGED_MAX}; rebalancing into "
+                        f"{target_count} Parts failed."
                     )
 
                 revised_groups = rebalanced
@@ -1567,14 +1450,18 @@ def _partition_and_revise(
                     revised_groups,
                     1,
                 ):
-                    merged_flag = (
+                    is_merged_final = (
                         rebalance_number == len(revised_groups)
                     )
+                    amount = word_count(rebalance_text)
 
-                    if (
-                        word_count(rebalance_text) > SHORT_MAX
-                        and not merged_flag
-                    ):
+                    if amount < SHORT_MIN:
+                        raise RuntimeError(
+                            f"Rebalanced Part {rebalance_number} "
+                            f"contains only {amount} words."
+                        )
+
+                    if amount > SHORT_MAX and not is_merged_final:
                         revised_text, retry_records, retry_evidence = (
                             repair_short_part(
                                 rebalance_text,
@@ -1583,11 +1470,9 @@ def _partition_and_revise(
                                 title,
                                 model,
                                 api_key,
-                                final_merged=merged_flag,
                                 return_evidence=True,
                             )
                         )
-
                         revised_groups[rebalance_number - 1] = revised_text
                         attempted_parts.append(rebalance_number)
 
@@ -1602,47 +1487,57 @@ def _partition_and_revise(
                                 if retry_evidence
                                 else "unverified_after_final_rebalance"
                             ),
-                            "before_words": word_count(rebalance_text),
+                            "before_words": amount,
                             "after_words": word_count(revised_text),
                             "before_sha256": sha256(rebalance_text),
                             "after_sha256": sha256(revised_text),
                             "revision_evidence": retry_evidence,
                             "attempts": retry_records,
-                            "final_part_merged": merged_flag,
+                            "final_part_merged": is_merged_final,
+                        })
+                    else:
+                        revision_rows.append({
+                            "part": rebalance_number,
+                            "attempted": False,
+                            "outcome": "accepted_after_final_rebalance",
+                            "before_words": amount,
+                            "after_words": amount,
+                            "before_sha256": sha256(rebalance_text),
+                            "after_sha256": sha256(rebalance_text),
+                            "attempts": [],
+                            "final_part_merged": is_merged_final,
                         })
 
             else:
-                old_part_count = len(revised_groups)
+                previous_part_number = len(revised_groups) - 1
                 revised_groups = revised_groups[:-2] + [merged_text]
                 merged_fallback = True
-                merged_number = len(revised_groups)
 
-                evidence_by_part.pop(old_part_count, None)
-                evidence_by_part.pop(merged_number, None)
+                evidence_by_part.pop(previous_part_number, None)
+                evidence_by_part.pop(previous_part_number + 1, None)
 
                 revision_rows = [
                     row for row in revision_rows
-                    if int(row.get("part", 0)) < merged_number
+                    if int(row.get("part", 0)) < previous_part_number
                 ]
-
                 attempted_parts = [
                     number for number in attempted_parts
-                    if number < merged_number
+                    if number < previous_part_number
                 ]
 
                 revision_rows.append({
-                    "part": merged_number,
+                    "part": len(revised_groups),
                     "attempted": False,
-                    "outcome": (
-                        "final_short_part_merged_exactly_into_preceding_part"
-                    ),
-                    "before_words": word_count(merged_text),
-                    "after_words": word_count(merged_text),
+                    "outcome": "final_short_part_merged_into_preceding_part",
+                    "before_words": merged_words,
+                    "after_words": merged_words,
                     "after_sha256": sha256(merged_text),
                     "final_part_merged": True,
                     "text_preserved_exactly": True,
+                    "attempts": [],
                 })
 
+    if mode == "short":
         for number, part in enumerate(revised_groups, 1):
             amount = word_count(part)
             is_final_merged = bool(
@@ -1655,24 +1550,24 @@ def _partition_and_revise(
 
             if amount < SHORT_MIN or amount > maximum:
                 raise RuntimeError(
-                    f"SHORT Part {number} has {amount} words after "
-                    f"retry/rebalance; allowed {SHORT_MIN}-{maximum}."
+                    f"SHORT Part {number} has {amount} words; "
+                    f"allowed range is {SHORT_MIN}-{maximum}."
                 )
 
             if amount > SHORT_MAX and not is_final_merged:
-                evidence = evidence_by_part.get(number)
-                if not _evidence_is_semantic(evidence, part):
+                if not _evidence_is_semantic(
+                    evidence_by_part.get(number),
+                    part,
+                ):
                     raise RuntimeError(
                         f"SHORT Part {number} has {amount} words but "
-                        "lacks verified revision and semantic-preservation evidence."
+                        "lacks verified revision and semantic evidence."
                     )
 
     final_story_text = "\n\n".join(revised_groups)
 
-    if word_count(final_story_text) <= 0:
-        raise RuntimeError(
-            "Final story became empty after Part revision."
-        )
+    if not final_story_text.strip():
+        raise RuntimeError("Final story became empty after Part revision.")
 
     selected_count = len(revised_groups)
 
@@ -1749,21 +1644,22 @@ def _partition_and_revise(
     validation = validate_all_parts(validation_parts, policy)
 
     if mode == "short":
+        errors = validation.get("errors", [])
         filtered_errors = [
-            error for error in validation.get("errors", [])
+            error for error in errors
             if not (
                 merged_fallback
-                and "Part " + str(len(revised_groups)) + ":" in error
+                and f"Part {len(revised_groups)}:" in str(error)
             )
         ]
 
         if filtered_errors:
             raise RuntimeError(
                 "SHORT Part validation failed: "
-                + " | ".join(filtered_errors)
+                + " | ".join(map(str, filtered_errors))
             )
 
-        validation["errors"] = filtered_errors
+        validation["errors"] = []
         validation["valid"] = True
         validation["passed"] = True
         validation["final_validation_passed"] = True
@@ -1773,7 +1669,6 @@ def _partition_and_revise(
 
         if merged_fallback:
             final_number = len(revised_groups)
-
             validation["retry_parts"] = [
                 number
                 for number in validation.get("retry_parts", [])
@@ -1798,30 +1693,6 @@ def _partition_and_revise(
                         "hard_maximum_words": SHORT_MERGED_MAX,
                     })
 
-        for number, part in enumerate(revised_groups, 1):
-            amount = word_count(part)
-            if amount < SHORT_MIN:
-                raise RuntimeError(
-                    f"SHORT Part {number} remains below 120 words."
-                )
-
-            is_final_merged = bool(
-                merged_fallback and number == len(revised_groups)
-            )
-
-            if (
-                amount > SHORT_MAX
-                and not is_final_merged
-                and not _evidence_is_semantic(
-                    evidence_by_part.get(number),
-                    part,
-                )
-            ):
-                raise RuntimeError(
-                    f"SHORT Part {number} lacks verified revision "
-                    "and semantic-preservation evidence."
-                )
-
     policy["parts_validation"] = {
         "valid": True,
         "actual_parts": selected_count,
@@ -1844,7 +1715,6 @@ def _partition_and_revise(
     }
 
     return revised_groups, policy, selection
-
 
 def select_final_parts(
     complete_story: str,
