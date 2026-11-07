@@ -21,7 +21,7 @@ from input_config import (
     load_and_validate,
     get_format,
     get_parts,
-    get_scenes,
+    get_scenes_range,
 )
 
 OUT = ROOT / "output"
@@ -35,8 +35,8 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v10-grounded"
-PROMPT_VERSION = 10
+VERSION = "photo-motion-visual-jobs-v11-variable-scenes-story-entities"
+PROMPT_VERSION = 11
 
 ROLE_ORDER = {
     "hook": 0,
@@ -258,7 +258,7 @@ def normalize_names(value: Any) -> list[str]:
 def normalize_scene_rows(
     document: dict,
     expected_parts: int,
-    expected_scenes: int,
+    expected_scene_counts: dict[int, int],
 ) -> list[dict]:
     if not isinstance(document, dict):
         raise RuntimeError("scenes.json root must be an object.")
@@ -304,10 +304,10 @@ def normalize_scene_rows(
                 f"Part {part} main scene number",
             )
 
-            if local > expected_scenes:
+            if local > expected_scene_counts[part]:
                 raise RuntimeError(
                     f"Main scene {part}/{local} exceeds "
-                    f"SCENES={expected_scenes}."
+                    f"actual Scene count={expected_scene_counts[part]}."
                 )
 
             pair = (part, local)
@@ -380,7 +380,7 @@ def normalize_scene_rows(
     expected_main = {
         (part, scene)
         for part in range(1, expected_parts + 1)
-        for scene in range(1, expected_scenes + 1)
+        for scene in range(1, expected_scene_counts[part] + 1)
     }
 
     missing = sorted(expected_main - seen_main)
@@ -394,6 +394,11 @@ def normalize_scene_rows(
         )
 
     for part in range(1, expected_parts + 1):
+        if counts["main"].get(part, 0) != expected_scene_counts[part]:
+            raise RuntimeError(
+                f"Part {part} requires {expected_scene_counts[part]} Main Scenes."
+            )
+
         if counts["hook"].get(part, 0) != 1:
             raise RuntimeError(
                 f"Part {part} must have exactly one Hook."
@@ -931,7 +936,9 @@ def build_prompt(
             "people, locations, buildings, vehicles, animals, clothing, "
             "objects, weather, time period and described action. "
             "Do not replace named objects with generic alternatives. "
-            "Do not add unrelated people, props, locations or events."
+            "Do not add unrelated people, props, locations or events. "
+            "Every explicitly named or specified story entity must be "
+            "visibly represented when it belongs in this exact scene."
         ),
         (
             f"Output format: {format_name}. Exact dimensions: "
@@ -979,9 +986,17 @@ def build_prompt(
 
     for key, label in (
         ("action", "Visible action"),
-        ("objects", "Story-specific objects"),
-        ("clothing", "Story-specific clothing"),
+        ("objects", "Story-specific objects and props"),
+        ("animals", "Exact story animals and their actions"),
+        ("vehicles", "Exact story vehicles and their state"),
+        ("buildings", "Story-specific buildings and structures"),
+        ("clothing", "Story-specific clothing and accessories"),
         ("location", "Exact location"),
+        ("environment", "Story-specific environment"),
+        ("weather", "Story weather conditions"),
+        ("time_of_day", "Story time of day"),
+        ("named_entities", "Named people, places and objects"),
+        ("story_entities", "Required story entities"),
         ("world_context", "Story-world context"),
         ("time_period", "Story time period"),
         ("camera_prompt", "Camera direction"),
@@ -1052,7 +1067,7 @@ def build_config_signature(
     config: dict,
     format_name: str,
     parts_count: int,
-    scenes_per_part: int,
+    scene_counts: dict[int, int],
     image_size: str,
 ) -> str:
     keys = (
@@ -1086,7 +1101,7 @@ def build_config_signature(
         "prompt_version": PROMPT_VERSION,
         "format": format_name,
         "parts": parts_count,
-        "scenes_per_part": scenes_per_part,
+        "actual_scene_counts": {str(part): scene_counts[part] for part in sorted(scene_counts)},
         "image_size": image_size,
         "settings": {
             key: config.get(key)
@@ -1863,10 +1878,7 @@ def main() -> int:
         get_parts(config),
         "PARTS",
     )
-    scenes_per_part = positive_int(
-        get_scenes(config),
-        "SCENES",
-    )
+    scenes_min, scenes_max = get_scenes_range(config)
 
     width, height = image_dimensions(format_name)
     image_size = f"{width}x{height}"
@@ -1877,10 +1889,25 @@ def main() -> int:
     )
     bible = load_character_bible(config)
 
+    raw_counts = source_document.get("actual_scene_counts")
+    if not isinstance(raw_counts, list) or len(raw_counts) != parts_count:
+        raise RuntimeError("scenes.json actual_scene_counts must contain one count per selected Part.")
+    scene_counts = {}
+    for part, raw_count in enumerate(raw_counts, 1):
+        count = positive_int(raw_count, f"Part {part} actual Scene count")
+        if not scenes_min <= count <= scenes_max:
+            raise RuntimeError(
+                f"Part {part}: actual Scene count {count} is outside configured range {scenes_min}-{scenes_max}."
+            )
+        scene_counts[part] = count
+
+    if source_document.get("scenes_min") != scenes_min or source_document.get("scenes_max") != scenes_max:
+        raise RuntimeError("scenes.json SCENES range does not match Input/topic.txt.")
+
     scenes = normalize_scene_rows(
         source_document,
         expected_parts=parts_count,
-        expected_scenes=scenes_per_part,
+        expected_scene_counts=scene_counts,
     )
 
     bible_enabled = as_bool(
@@ -1903,7 +1930,7 @@ def main() -> int:
         config,
         format_name,
         parts_count,
-        scenes_per_part,
+        scene_counts,
         image_size,
     )
 
@@ -1920,7 +1947,7 @@ def main() -> int:
         jobs,
         scenes,
         parts_count,
-        parts_count * scenes_per_part,
+        sum(scene_counts.values()),
         format_name,
     )
 
@@ -1948,14 +1975,13 @@ def main() -> int:
         "stage": "visual_jobs_prepared",
         "format": format_name,
         "parts": parts_count,
-        "scenes_per_part": scenes_per_part,
+        "scenes_min": scenes_min,
+        "scenes_max": scenes_max,
+        "scenes_range": [scenes_min, scenes_max],
+        "actual_scene_counts": {str(part): scene_counts[part] for part in sorted(scene_counts)},
         "total_jobs": len(jobs),
-        "total_main_scenes": (
-            parts_count * scenes_per_part
-        ),
-        "total_extra_scenes": (
-            len(jobs) - parts_count * scenes_per_part
-        ),
+        "total_main_scenes": sum(scene_counts.values()),
+        "total_extra_scenes": len(jobs) - sum(scene_counts.values()),
         "scene_role_counts": role_counts,
         "image_size": image_size,
         "source_fingerprint": source_fingerprint,
@@ -2015,7 +2041,9 @@ def main() -> int:
     log("Format:", format_name)
     log("Image dimensions:", image_size)
     log("Parts:", parts_count)
-    log("Main scenes per part:", scenes_per_part)
+    log("SCENES RANGE:", f"{scenes_min}-{scenes_max}")
+    log("ACTUAL SCENE COUNTS:", scene_counts)
+    log("TOTAL MAIN SCENES:", sum(scene_counts.values()))
 
     for role in ROLE_ORDER:
         log(role.upper() + ":", role_counts[role])
