@@ -82,6 +82,8 @@ PROJECT_FILES = (
     OUT / "story" / "story_plan.json",
     OUT / "story" / "character_bible.json",
     OUT / "fonts" / "font_manifest.json",
+    OUT / "fonts" / "selected_hindi_caption_font.ttf",
+    OUT / "fonts" / "OFL-1.1.txt",
     OUT / "scenes" / "scenes.json",
     OUT / "narration" / "narration.json",
     OUT / "visuals" / "visual_jobs.json",
