@@ -290,18 +290,28 @@ def _coerce_scene_range(
 
     if isinstance(scenes_per_part, (tuple, list)):
         if len(scenes_per_part) != 2:
-            raise RuntimeError("SCENES range must contain two values.")
+            raise RuntimeError("SCENES range must contain exactly two values.")
+        if any(
+            isinstance(value, bool) or not str(value).strip().isdigit()
+            for value in scenes_per_part
+        ):
+            raise RuntimeError("SCENES range values must be positive integers.")
         supplied = (int(scenes_per_part[0]), int(scenes_per_part[1]))
+        if supplied[0] < 1 or supplied[1] < supplied[0]:
+            raise RuntimeError("SCENES range is reversed or invalid.")
         if supplied != configured:
             raise RuntimeError(
                 "Passed SCENES range does not match Input/topic.txt."
             )
     elif scenes_per_part is not None:
-        if isinstance(scenes_per_part, bool):
+        if (
+            isinstance(scenes_per_part, bool)
+            or not str(scenes_per_part).strip().isdigit()
+        ):
             raise RuntimeError("Invalid SCENES minimum.")
         if int(scenes_per_part) != configured[0]:
             raise RuntimeError(
-                "Legacy SCENES argument does not match configured minimum."
+                "Legacy SCENES argument does not match Input/topic.txt."
             )
 
     minimum, maximum = configured
@@ -587,7 +597,11 @@ def build_plan(
     if mode not in {"short", "full"}:
         raise RuntimeError("FORMAT must be short or full.")
 
-    if isinstance(parts_count, bool) or not 1 <= int(parts_count) <= MAX_PARTS:
+    if (
+        isinstance(parts_count, bool)
+        or not str(parts_count).strip().isdigit()
+        or not 1 <= int(parts_count) <= MAX_PARTS
+    ):
         raise RuntimeError("Invalid selected PARTS count.")
 
     parts_count = int(parts_count)
@@ -762,6 +776,7 @@ def validate_plan(
     all_extra_ids = set()
     all_anchors = []
     main_count = 0
+    expected_global_scene = 0
 
     for part_number, part in enumerate(parts, 1):
         if not isinstance(part, dict):
@@ -781,6 +796,10 @@ def validate_plan(
             )
         if part.get("main_scene_count") != len(scenes):
             raise RuntimeError(f"Part {part_number} Main Scene count mismatch.")
+        if part.get("actual_scene_count") != len(scenes):
+            raise RuntimeError(f"Part {part_number} actual Scene count mismatch.")
+        if part.get("word_count") != word_count(narration):
+            raise RuntimeError(f"Part {part_number} word count mismatch.")
 
         final_part = part_number == len(parts)
         if part.get("hook_required") is not True:
@@ -795,6 +814,7 @@ def validate_plan(
             if not isinstance(scene, dict):
                 raise RuntimeError("Invalid Main Scene record.")
 
+            expected_global_scene += 1
             expected_id = canonical_main_id(part_number, scene_number)
             if scene.get("scene_id") != expected_id:
                 raise RuntimeError(f"Main Scene ID mismatch: {expected_id}.")
@@ -804,6 +824,10 @@ def validate_plan(
                 raise RuntimeError(f"Main Scene Part mismatch: {expected_id}.")
             if scene.get("scene") != scene_number:
                 raise RuntimeError(f"Main Scene number mismatch: {expected_id}.")
+            if scene.get("global_scene_number") != expected_global_scene:
+                raise RuntimeError(
+                    f"Main Scene global order mismatch: {expected_id}."
+                )
 
             for field in (
                 "beat", "beat_description", "purpose", "continuity_rule",
@@ -921,6 +945,8 @@ def validate_plan(
     if source.get("story_sha256") != sha256_text(rebuilt):
         raise RuntimeError("Story Plan source hash mismatch.")
 
+    if expected_global_scene != main_count:
+        raise RuntimeError("Story Plan global Scene sequence is incomplete.")
     if plan.get("total_main_scenes") != main_count:
         raise RuntimeError("Story Plan Main Scene count mismatch.")
     if plan.get("total_scenes") != main_count:
