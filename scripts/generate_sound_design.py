@@ -992,8 +992,17 @@ def validate_track(record, name, minimum_duration):
         raise RuntimeError(f"{name} track SHA256 mismatch.")
     if duration + 0.5 < minimum_duration:
         raise RuntimeError(f"{name} track is shorter than required.")
+    if name.startswith("sfx_") and abs(duration - SFX_SECONDS) > 0.10:
+        raise RuntimeError(f"{name} duration must be exactly {SFX_SECONDS:.1f} seconds.")
     record["duration_seconds"] = round(duration, 6)
     record["loudness"] = audio_loudness(path)
+    if name.startswith("sfx_"):
+        mean = record["loudness"].get("mean_volume_db")
+        peak = record["loudness"].get("peak_volume_db")
+        if mean is None or peak is None or not math.isfinite(mean) or not math.isfinite(peak):
+            raise RuntimeError(f"{name} loudness metadata is incomplete.")
+        if mean < -25.0 or peak > -0.1:
+            raise RuntimeError(f"{name} loudness is outside safe audible limits.")
     return record
 
 
@@ -1712,7 +1721,9 @@ def main():
         "source_audio_manifest_sha256": sha256_file(AUDIO_MANIFEST),
         "sfx_policy": (
             "Story-event and scene-context keyword selection; "
-            "no forced generic whoosh on every scene."
+            "no forced generic whoosh on every scene. Event assets are "
+            "eight-second normalized WAVs; cues are clipped to measured "
+            "narration boundaries and carry the source narration hash."
         ),
         "external_api_calls": 0,
         "paid_services_used": False,
@@ -1764,6 +1775,13 @@ def main():
         "total_narration_seconds": round(total_duration, 4),
         "background_duration_seconds": round(background_duration, 3),
         "sfx_duration_seconds": SFX_SECONDS,
+        "sfx_normalization_target_lufs": -16.0,
+        "sfx_true_peak_ceiling_dbtp": -1.5,
+        "mix_gain_policy": {
+            "music": 0.38, "ambient": 0.16,
+            "sfx_gain_range": [min(SFX_GAINS.values()), max(SFX_GAINS.values())],
+            "narration_ducking": True,
+        },
         "enabled": enabled_tracks,
         "tracks": tracks,
         "timeline": timeline,
