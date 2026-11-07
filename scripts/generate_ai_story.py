@@ -24,15 +24,15 @@ from input_config import (
 from select_gemini_model import configured_fallbacks
 
 ROOT = Path(__file__).resolve().parent.parent
-STORY_FILE = ROOT / "output" / "story" / "story.json"
-PLAN_FILE = ROOT / "output" / "story" / "story_plan.json"
-OUTPUT_FILE = ROOT / "output" / "story" / "ai_story.json"
-MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
+STORY_FILE = ROOT / "output/story/story.json"
+PLAN_FILE = ROOT / "output/story/story_plan.json"
+OUTPUT_FILE = ROOT / "output/story/ai_story.json"
+MODEL_FILE = ROOT / "output/config/selected_model.json"
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v18-anchor-count-integrity"
+VERSION = "ai-story-v19-fallback-exhaustion-fix"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -46,21 +46,11 @@ ROLE_KEYS = {
 }
 
 REQUIRED_FIELDS = (
-    "narration",
-    "dialogue",
-    "visual_prompt",
-    "negative_prompt",
-    "camera_prompt",
-    "lighting_prompt",
-    "sfx_prompt",
-    "music_prompt",
+    "narration", "dialogue", "visual_prompt", "negative_prompt",
+    "camera_prompt", "lighting_prompt", "sfx_prompt", "music_prompt",
 )
-
 REQUIRED_NONEMPTY = (
-    "narration",
-    "visual_prompt",
-    "camera_prompt",
-    "lighting_prompt",
+    "narration", "visual_prompt", "camera_prompt", "lighting_prompt",
 )
 
 
@@ -80,11 +70,8 @@ def word_count(value: str) -> int:
 
 def stable_hash(value: Any) -> str:
     raw = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
+        value, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), default=str,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -94,22 +81,18 @@ def read_json(path: Path, required: bool = True):
         if required:
             raise FileNotFoundError(f"Required file missing: {path}")
         return None
-
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
-
     if not isinstance(value, dict):
         raise RuntimeError(f"JSON root must be an object: {path}")
-
     return value
 
 
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(value, handle, ensure_ascii=False, indent=2)
@@ -123,25 +106,20 @@ def write_json(path: Path, value: dict) -> None:
 
 def parse_bool(config: dict, key: str, default: bool) -> bool:
     value = config.get(key, default)
-
     if isinstance(value, bool):
         return value
     if value is None:
         return default
-
-    text = str(value).strip().lower()
-
-    if text in {"1", "true", "yes", "y", "on", "enabled"}:
+    value = str(value).strip().lower()
+    if value in {"1", "true", "yes", "y", "on", "enabled"}:
         return True
-    if text in {"0", "false", "no", "n", "off", "disabled"}:
+    if value in {"0", "false", "no", "n", "off", "disabled"}:
         return False
-
     return default
 
 
 def build_config() -> dict:
     config = load_input_config()
-
     return {
         "format": normalize_format(config),
         "audience": clean(config.get("AUDIENCE", "adult")) or "adult",
@@ -171,19 +149,15 @@ def build_config() -> dict:
 
 def normalize_model(value: Any) -> str:
     model = clean(value)
-
     if model.startswith("models/"):
-        model = model[len("models/"):]
-
+        model = model[7:]
     if not re.fullmatch(r"gemini-[A-Za-z0-9._-]+", model, re.IGNORECASE):
         return ""
-
     return model
 
 
 def load_model_order() -> list[str]:
     data = read_json(MODEL_FILE)
-
     if data.get("status") != "selected":
         raise RuntimeError("Selected Gemini model is not marked selected.")
 
@@ -191,23 +165,20 @@ def load_model_order() -> list[str]:
     if not primary:
         raise RuntimeError("Selected Gemini model name is invalid.")
 
-    configured_order = configured_fallbacks(data)
-
     order = []
-    for value in [primary, *configured_order]:
+    for value in [primary, *configured_fallbacks(data)]:
         model = normalize_model(value)
         if model and model not in order:
             order.append(model)
 
-    saved_order = data.get("fallback_order", [])
-    if isinstance(saved_order, list):
-        for value in saved_order:
+    saved = data.get("fallback_order", [])
+    if isinstance(saved, list):
+        for value in saved:
             model = normalize_model(value)
             if model and model not in order:
                 order.append(model)
 
-    raw_env_fallbacks = os.environ.get("GEMINI_MODEL_FALLBACKS", "")
-    for value in re.split(r"[,;]", raw_env_fallbacks):
+    for value in re.split(r"[,;]", os.environ.get("GEMINI_MODEL_FALLBACKS", "")):
         model = normalize_model(value)
         if model and model not in order:
             order.append(model)
@@ -218,189 +189,113 @@ def load_model_order() -> list[str]:
     log("Gemini model order:")
     for index, model in enumerate(order, 1):
         log(f"  {index}. {model}")
-
     return order
 
 
-def validate_source_extra(
-    record: Any,
-    expected_role: str,
-    part_number: int,
-) -> None:
+def validate_source_extra(record: Any, role: str, part_number: int) -> None:
     if not isinstance(record, dict):
-        raise RuntimeError(
-            f"Part {part_number}: invalid {expected_role} source record."
-        )
-
-    if clean(record.get("role")).lower() != expected_role:
-        raise RuntimeError(
-            f"Part {part_number}: {expected_role} source role mismatch."
-        )
-
+        raise RuntimeError(f"Part {part_number}: invalid {role} source record.")
+    if clean(record.get("role")).lower() != role:
+        raise RuntimeError(f"Part {part_number}: {role} source role mismatch.")
     if not clean(record.get("scene_id")):
-        raise RuntimeError(
-            f"Part {part_number}: {expected_role} has no scene_id."
-        )
-
+        raise RuntimeError(f"Part {part_number}: {role} has no scene_id.")
     if not clean(record.get("story_anchor")):
-        raise RuntimeError(
-            f"Part {part_number}: {expected_role} has no story_anchor."
-        )
+        raise RuntimeError(f"Part {part_number}: {role} has no story_anchor.")
 
 
 def validate_source_plan(plan: dict, expected_format: str):
     if plan.get("status") not in {"planned", "completed", "in_progress"}:
-        raise RuntimeError(
-            f"Invalid story-plan status: {plan.get('status')!r}"
-        )
-
+        raise RuntimeError(f"Invalid story-plan status: {plan.get('status')!r}")
     if clean(plan.get("format")).lower() != expected_format:
-        raise RuntimeError(
-            "Story-plan format does not match Input/topic.txt."
-        )
+        raise RuntimeError("Story-plan format does not match Input/topic.txt.")
 
     parts = plan.get("parts")
-
     if not isinstance(parts, list) or not parts:
         raise RuntimeError("Story plan has no parts.")
-
     if plan.get("parts_count") not in (None, len(parts)):
         raise RuntimeError("Story-plan parts_count mismatch.")
 
     all_ids = set()
-    total_main_scenes = 0
+    total_main = 0
 
-    for part_number, part in enumerate(parts, 1):
-        if not isinstance(part, dict) or part.get("part") != part_number:
-            raise RuntimeError(
-                f"Invalid source part numbering: {part_number}"
-            )
-
+    for number, part in enumerate(parts, 1):
+        if not isinstance(part, dict) or part.get("part") != number:
+            raise RuntimeError(f"Invalid source part numbering: {number}")
         scenes = part.get("scenes")
-
         if not isinstance(scenes, list) or not scenes:
-            raise RuntimeError(
-                f"Part {part_number} has no main scenes."
-            )
+            raise RuntimeError(f"Part {number} has no main scenes.")
 
         for scene_number, scene in enumerate(scenes, 1):
-            if not isinstance(scene, dict):
-                raise RuntimeError(
-                    f"Part {part_number}, scene {scene_number}: invalid record."
-                )
-
-            if scene.get("scene") != scene_number:
-                raise RuntimeError(
-                    f"Part {part_number}: main scene order mismatch."
-                )
-
+            if not isinstance(scene, dict) or scene.get("scene") != scene_number:
+                raise RuntimeError(f"Part {number}: main scene order mismatch.")
             scene_id = clean(scene.get("scene_id"))
-
             if not scene_id or scene_id in all_ids:
-                raise RuntimeError(
-                    f"Missing or duplicate source scene_id: {scene_id!r}"
-                )
-
+                raise RuntimeError(f"Missing or duplicate scene_id: {scene_id!r}")
             if clean(scene.get("role")).lower() not in {"", "main"}:
-                raise RuntimeError(
-                    f"Main scene has an invalid role: {scene_id}"
-                )
-
+                raise RuntimeError(f"Main scene has invalid role: {scene_id}")
             if not clean(scene.get("story_anchor")):
-                raise RuntimeError(
-                    f"Main scene has no story_anchor: {scene_id}"
-                )
-
+                raise RuntimeError(f"Main scene has no story_anchor: {scene_id}")
             all_ids.add(scene_id)
 
-        total_main_scenes += len(scenes)
-        final_part = part_number == len(parts)
+        total_main += len(scenes)
+        final = number == len(parts)
 
         for key, role in ROLE_KEYS.items():
             record = part.get(key)
-            should_exist = (
+            required = (
                 key == "hook_scene"
-                or (key == "suspense_scene" and not final_part)
-                or (key == "resolution_scene" and final_part)
+                or (key == "suspense_scene" and not final)
+                or (key == "resolution_scene" and final)
             )
-
-            if should_exist:
-                validate_source_extra(record, role, part_number)
+            if required:
+                validate_source_extra(record, role, number)
                 scene_id = clean(record.get("scene_id"))
-
                 if scene_id in all_ids:
-                    raise RuntimeError(
-                        f"Duplicate source scene_id: {scene_id}"
-                    )
-
+                    raise RuntimeError(f"Duplicate source scene_id: {scene_id}")
                 all_ids.add(scene_id)
             elif record is not None:
-                raise RuntimeError(
-                    f"Unexpected {key} in part {part_number}."
-                )
+                raise RuntimeError(f"Unexpected {key} in part {number}.")
 
-    expected_counts = [len(part["scenes"]) for part in parts]
-    if plan.get("actual_scene_counts") != expected_counts:
+    counts = [len(part["scenes"]) for part in parts]
+    if plan.get("actual_scene_counts") != counts:
         raise RuntimeError("Story-plan actual_scene_counts mismatch.")
-
-    if plan.get("total_main_scenes") not in (None, total_main_scenes):
+    if plan.get("total_main_scenes") not in (None, total_main):
         raise RuntimeError("Story-plan total_main_scenes mismatch.")
-    if plan.get("total_scenes") not in (None, total_main_scenes):
+    if plan.get("total_scenes") not in (None, total_main):
         raise RuntimeError("Story-plan total_scenes mismatch.")
-
-    return len(parts), total_main_scenes
+    return len(parts), total_main
 
 
 def apply_story_part_metadata(source_plan: dict, source_story: dict) -> None:
     story_parts = source_story.get("parts")
-
-    if not isinstance(story_parts, list):
-        raise RuntimeError("Corrected story has no valid parts list.")
-
     plan_parts = source_plan["parts"]
-
-    if len(story_parts) != len(plan_parts):
+    if not isinstance(story_parts, list) or len(story_parts) != len(plan_parts):
         raise RuntimeError("Story and Story Plan have different part counts.")
-
-    for index, (story_part, plan_part) in enumerate(
-        zip(story_parts, plan_parts), 1
-    ):
-        if not isinstance(story_part, dict):
-            raise RuntimeError(f"Invalid corrected story part {index}.")
-
-        if story_part.get("part") != index:
-            raise RuntimeError(f"Invalid corrected story part number {index}.")
-
+    for number, (story_part, plan_part) in enumerate(zip(story_parts, plan_parts), 1):
+        if not isinstance(story_part, dict) or story_part.get("part") != number:
+            raise RuntimeError(f"Invalid corrected story part {number}.")
         merged = story_part.get("final_part_merged") is True
-
-        if merged and index != len(plan_parts):
-            raise RuntimeError(
-                "final_part_merged may only be true for the final part."
-            )
-
+        if merged and number != len(plan_parts):
+            raise RuntimeError("final_part_merged may only be true for final part.")
         plan_part["final_part_merged"] = merged
 
 
 def scene_context(part: dict) -> list:
-    return [
-        {
-            "scene": item["scene"],
-            "scene_id": clean(item.get("scene_id")),
-            "role": "main",
-            "beat": clean(item.get("beat")),
-            "purpose": clean(item.get("purpose")),
-            "story_anchor": clean(item.get("story_anchor")),
-            "visual": clean(item.get("visual") or item.get("visual_prompt")),
-        }
-        for item in part["scenes"]
-    ]
+    return [{
+        "scene": item["scene"],
+        "scene_id": clean(item.get("scene_id")),
+        "role": "main",
+        "beat": clean(item.get("beat")),
+        "purpose": clean(item.get("purpose")),
+        "story_anchor": clean(item.get("story_anchor")),
+        "visual": clean(item.get("visual") or item.get("visual_prompt")),
+    } for item in part["scenes"]]
 
 
 def extra_context(part: dict, key: str):
     record = part.get(key)
     if record is None:
         return None
-
     return {
         "scene_id": clean(record.get("scene_id")),
         "role": clean(record.get("role")),
@@ -410,30 +305,20 @@ def extra_context(part: dict, key: str):
     }
 
 
-def short_word_limits(source_part: dict, config: dict, total_parts: int):
+def short_word_limits(part: dict, config: dict, total_parts: int):
     if config["format"] != "short":
         return None, None
-
-    is_final = source_part["part"] == total_parts
-    is_merged_final = (
-        is_final and source_part.get("final_part_merged") is True
-    )
-
-    if is_merged_final:
+    if part["part"] == total_parts and part.get("final_part_merged") is True:
         return SHORT_MIN_WORDS, SHORT_FINAL_MERGED_MAX
-
-    # 151–180 is the allowed hard range after the model has tried
-    # to revise toward the preferred 120–150 word target.
     return SHORT_MIN_WORDS, SHORT_HARD_MAX
 
 
-def build_response_schema(source_part: dict) -> dict:
+def build_response_schema(part: dict) -> dict:
     scene_properties = {
         "scene": {"type": "integer"},
         "scene_id": {"type": "string"},
         "role": {"type": "string"},
     }
-
     for field in REQUIRED_FIELDS:
         scene_properties[field] = {"type": "string"}
 
@@ -442,12 +327,10 @@ def build_response_schema(source_part: dict) -> dict:
         "properties": scene_properties,
         "required": ["scene", "scene_id", "role", *REQUIRED_FIELDS],
     }
-
     extra_properties = {
         "scene_id": {"type": "string"},
         "role": {"type": "string"},
     }
-
     for field in REQUIRED_FIELDS:
         extra_properties[field] = {"type": "string"}
 
@@ -456,18 +339,15 @@ def build_response_schema(source_part: dict) -> dict:
         "properties": extra_properties,
         "required": ["scene_id", "role", *REQUIRED_FIELDS],
     }
-
     properties = {
         "scenes": {"type": "array", "items": scene_schema},
         "story_title": {"type": "string"},
     }
     required = ["scenes", "story_title"]
-
     for key in ROLE_KEYS:
-        if source_part.get(key) is not None:
+        if part.get(key) is not None:
             properties[key] = extra_schema
             required.append(key)
-
     return {
         "type": "object",
         "properties": properties,
@@ -477,170 +357,100 @@ def build_response_schema(source_part: dict) -> dict:
 
 def extract_response_text(result: dict) -> str:
     candidates = result.get("candidates")
-
     if not isinstance(candidates, list) or not candidates:
-        raise ValueError(
-            "Gemini returned no candidates: "
-            + str(result.get("promptFeedback", {}))
-        )
-
+        raise ValueError("Gemini returned no candidates: " + str(result.get("promptFeedback", {})))
     candidate = candidates[0]
-
     if candidate.get("finishReason") == "SAFETY":
         raise ValueError("Gemini blocked the generated content.")
-
     parts = candidate.get("content", {}).get("parts", [])
-    text = "\n".join(
-        item["text"]
-        for item in parts
-        if isinstance(item, dict)
-        and isinstance(item.get("text"), str)
+    value = "\n".join(
+        item["text"] for item in parts
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
     ).strip()
-
-    if not text:
+    if not value:
         raise ValueError("Gemini returned empty content.")
-
-    if len(text) > MAX_RESPONSE_CHARS:
+    if len(value) > MAX_RESPONSE_CHARS:
         raise ValueError("Gemini response exceeded the size limit.")
-
-    return text
+    return value
 
 
 def parse_json_response(response_text: str) -> dict:
-    value = response_text.strip()
     value = re.sub(
-        r"^\s*```(?:json)?\s*|\s*```\s*$",
-        "",
-        value,
-        flags=re.IGNORECASE,
+        r"^\s*```(?:json)?\s*|\s*```\s*$", "",
+        response_text.strip(), flags=re.IGNORECASE,
     ).strip()
-
     try:
         result = json.loads(value)
     except json.JSONDecodeError:
-        start = value.find("{")
-        end = value.rfind("}")
-
+        start, end = value.find("{"), value.rfind("}")
         if start < 0 or end <= start:
             raise ValueError("Model response contains no JSON object.")
-
         result = json.loads(value[start:end + 1])
-
     if not isinstance(result, dict):
         raise ValueError("Model response JSON root must be an object.")
-
     return result
 
 
-def request_gemini(
-    api_key: str,
-    model: str,
-    prompt: str,
-    schema: dict,
-) -> dict:
+def request_gemini(api_key: str, model: str, prompt: str, schema: dict) -> dict:
     url = f"{API_BASE}/models/{model}:generateContent"
     payload = {
-        "contents": [{
-            "role": "user",
-            "parts": [{"text": prompt}],
-        }],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.65,
+            "temperature": 0.55,
             "topP": 0.90,
             "responseMimeType": "application/json",
             "responseSchema": schema,
         },
     }
-
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key,
-        },
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
-
-    with urllib.request.urlopen(
-        request,
-        timeout=REQUEST_TIMEOUT,
-    ) as response:
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
         raw = response.read().decode("utf-8")
-
-    return parse_json_response(
-        extract_response_text(json.loads(raw))
-    )
+    return parse_json_response(extract_response_text(json.loads(raw)))
 
 
 def build_part_prompt(
-    topic: str,
-    story_text: str,
-    part: dict,
-    config: dict,
-    total_parts: int,
+    topic: str, story_text: str, part: dict, config: dict, total_parts: int,
 ) -> str:
     number = part["part"]
-    final_part = number == total_parts
-    merged_final = (
-        final_part and part.get("final_part_merged") is True
-    )
-
+    final = number == total_parts
+    merged = final and part.get("final_part_merged") is True
     minimum, maximum = short_word_limits(part, config, total_parts)
 
     if config["format"] == "short":
-        if merged_final:
-            format_rules = f"""
-SHORT FINAL MERGED PART:
-- Main narration must contain {minimum}–{maximum} words.
-- The final merged part may contain up to 239 words.
-- Preserve all remaining story events.
-- Hook and Resolution are separate records and are not counted.
-"""
-        elif final_part:
-            format_rules = """
-SHORT FINAL PART:
-- Main narration must contain 120–180 words.
-- Preserve the complete ending.
-- Do not invent words or events to reach a target.
-- Hook and Resolution are separate records and are not counted.
-"""
+        if merged:
+            rules = f"मुख्य narration {minimum}–{maximum} शब्दों में रखें।"
         else:
-            format_rules = """
-SHORT NON-FINAL PART:
-
-- Main narration target is 120–150 words.
-- 151–180 words are allowed only after revision attempts.
-- Below 120 or above 180 words is invalid.
-- Count only main narration, excluding Hook and Suspense.
-"""
+            rules = (
+                "मुख्य narration 120–150 शब्द लक्ष्य रखें। "
+                "सभी revision प्रयासों के बाद 151–180 शब्द स्वीकार्य हैं। "
+                "120 से कम या 180 से अधिक अमान्य है।"
+            )
     else:
-        format_rules = """
-FULL:
-- Preserve all important events and emotional developments.
-- Do not summarize away important story content.
-- Preserve the original ending and event order.
-"""
+        rules = "FULL format: सभी महत्वपूर्ण घटनाएँ और मूल ending सुरक्षित रखें।"
 
     hook = extra_context(part, "hook_scene")
-    suspense = None if final_part else extra_context(part, "suspense_scene")
-    resolution = extra_context(part, "resolution_scene") if final_part else None
+    suspense = None if final else extra_context(part, "suspense_scene")
+    resolution = extra_context(part, "resolution_scene") if final else None
 
     return f"""
 आप हिंदी कहानी-संपादन और सिनेमैटिक नैरेशन इंजन हैं।
 
-कहानी का विषय: {topic}
-
+विषय: {topic}
 पूरी मूल और संशोधित कहानी:
 {story_text}
 
 भाग: {number}/{total_parts}
-फॉर्मेट: {config['format']}
+Format: {config['format']}
 दर्शक: {config['audience']}
 कहानी अवधि: {config['story_length']}
 दृश्य अवधि: {config['scene_duration']}
 
-इस भाग के मुख्य दृश्यों का निश्चित क्रम:
+इस भाग के निश्चित मुख्य दृश्य और क्रम:
 {json.dumps(scene_context(part), ensure_ascii=False, indent=2)}
 
 अलग Hook source:
@@ -652,155 +462,109 @@ FULL:
 अलग Final Resolution source:
 {json.dumps(resolution, ensure_ascii=False, indent=2)}
 
-{format_rules}
+WORD RULE:
+{rules}
 
-कहानी के नियम:
-- पूरी मूल कहानी को पढ़कर घटनाओं का क्रम, पात्र, नाम, संबंध, स्थान,
-  कारण और परिणाम सुरक्षित रखें।
-- कहानी का अर्थ, संदेश और मूल अंत न बदलें।
-- हिंदी मात्रा, वर्तनी, व्याकरण, लिंग, वचन और काल ठीक करें।
-- अधूरे वाक्य, गलत विराम चिह्न, दोहराव और अस्पष्ट सर्वनाम सुधारें।
+कहानी के अनिवार्य नियम:
+- Story Plan में तय Part boundaries, scene_id और scene order न बदलें।
+- इस Part की घटनाएँ उसी क्रम में रखें जिस क्रम में Plan में हैं।
+- पूरी कहानी के संदर्भ से narration लिखें, लेकिन दूसरे Part की घटनाएँ यहाँ न डालें।
+- मूल कहानी का अर्थ, घटनाएँ, पात्र, नाम, संबंध, स्थान और परिणाम सुरक्षित रखें।
 - कोई नई मुख्य घटना, पात्र या असंबंधित मोड़ न जोड़ें।
-- प्रत्येक scene narration उसके story_anchor से मेल खाए।
-- scene number, scene_id और scene order बिल्कुल न बदलें।
-- मुख्य narration में Hook, Suspense या Resolution का पाठ न मिलाएँ।
-- संवाद पात्रों और परिस्थिति के अनुरूप हों।
-- भागों के बीच कथा का प्रवाह बना रहे।
-- कहानी के मूल शब्दों और घटनाओं को अनावश्यक रूप से न हटाएँ।
-- दृश्य में कहानी के वास्तविक नाम, स्थान, वस्तु, पशु, वाहन,
-  कपड़े और अन्य कहानी-विशिष्ट तत्व शामिल करें।
-- visual_prompt उसी narration के वास्तविक क्षण को दिखाए।
-- recurring पात्रों की पहचान और रूप सभी भागों में एक जैसे रखें।
-- असंबंधित पात्र, वस्तु, घटना, text, watermark या logo न जोड़ें।
-- वाक्य को बीच में न काटें; पूर्ण भाव और विराम के बाद ही विभाजन करें।
+- हिंदी मात्रा, वर्तनी, व्याकरण, लिंग, वचन और काल ठीक करें।
+- मुख्य narration में Hook, Suspense या Resolution न मिलाएँ।
+- हर scene narration उसके story_anchor से मेल खाए।
+- वाक्य को बीच में न काटें।
+- कहानी-विशिष्ट वास्तविक नाम, स्थान, वस्तुएँ, पशु, वाहन और कपड़े शामिल करें।
+- सभी Parts में recurring पात्रों का रूप एक जैसा रखें।
 
 HOOK:
-- source में मौजूद हो तो अलग hook_scene record दें।
-- कहानी-विशिष्ट वास्तविक रहस्य या जिज्ञासा से शुरुआत करें।
-- झूठा clickbait या कहानी से बाहर की घटना न गढ़ें।
+- Source मौजूद हो तो अलग hook_scene record दें।
+- कहानी से जुड़ा वास्तविक Hook हो, झूठा clickbait नहीं।
 
 SUSPENSE:
-- केवल non-final part में और source record मौजूद होने पर दें।
-- वास्तविक घटना और अगले भाग के प्रश्न से जुड़ा हो।
-- अंतिम भाग में suspense record नहीं होना चाहिए।
+- केवल non-final Part में source मौजूद हो तो अलग suspense_scene दें।
+- अंतिम Part में suspense_scene न दें।
 
-FINAL RESOLUTION:
-- केवल अंतिम part में और source record मौजूद होने पर दें।
-- मूल संघर्ष और कहानी का वास्तविक समाधान दें।
-- नया अंत या नया अनसुलझा संघर्ष न जोड़ें।
+RESOLUTION:
+- केवल अंतिम Part में source मौजूद हो तो अलग resolution_scene दें।
+- मूल कहानी का वास्तविक समाधान दें।
 
 शीर्षक:
-- पूरी कहानी के सार, संघर्ष और परिणाम के आधार पर एक शीर्षक दें।
-- सभी भागों में story_title बिल्कुल समान रखें।
+- पूरी कहानी के अर्थ और परिणाम पर आधारित एक समान story_title दें।
+- सभी Parts में story_title बिल्कुल समान होना चाहिए।
 
-VISUAL:
-- live-action cinematic realism रखें; cartoon/anime न दें।
-- Style: {config['visual_style']}
-- Realism: {config['realism']}
-- Camera: {config['camera_style']}
-- Lighting: {config['lighting']}
-- Mood: {config['mood']}
-- Quality: {config['quality']}
-- Avoid cartoon: {config['avoid_cartoon']}
-- Avoid neon: {config['avoid_neon']}
-- Avoid glitch: {config['avoid_glitch']}
-- Natural motion: {config['natural_motion']}
-- Realistic lighting: {config['realistic_lighting']}
+Visual style: {config['visual_style']}
+Realism: {config['realism']}
+Camera: {config['camera_style']}
+Lighting: {config['lighting']}
+Mood: {config['mood']}
+Quality: {config['quality']}
+Avoid cartoon: {config['avoid_cartoon']}
+Avoid neon: {config['avoid_neon']}
+Avoid glitch: {config['avoid_glitch']}
+Natural motion: {config['natural_motion']}
+Realistic lighting: {config['realistic_lighting']}
+Music: {config['music']}
+Music style: {config['music_style']}
+SFX: {config['sfx']}
+Ambient: {config['ambient_sound']}
 
-AUDIO:
-- Music enabled: {config['music']}
-- Music style: {config['music_style']}
-- SFX enabled: {config['sfx']}
-- Ambient enabled: {config['ambient_sound']}
-
-हर main scene में ये fields अनिवार्य हैं:
+हर main scene में अनिवार्य fields:
 scene, scene_id, role, narration, dialogue, visual_prompt,
 negative_prompt, camera_prompt, lighting_prompt, sfx_prompt, music_prompt.
 
-हर उपलब्ध extra record में ये fields अनिवार्य हैं:
+हर उपलब्ध extra record में अनिवार्य fields:
 scene_id, role, narration, dialogue, visual_prompt,
 negative_prompt, camera_prompt, lighting_prompt, sfx_prompt, music_prompt.
 
-Extra record का scene_id और role source plan से हूबहू मिलना चाहिए।
-जो extra source record मौजूद नहीं है, उसका output record न दें।
-केवल JSON लौटाएँ।
+केवल JSON लौटाएँ। अतिरिक्त explanation न दें।
 """
 
 
 def validate_text_fields(record: Any, label: str) -> dict:
     if not isinstance(record, dict):
         raise ValueError(f"{label} must be a JSON object.")
-
     result = {}
-
     for field in REQUIRED_FIELDS:
         value = record.get(field)
-
         if not isinstance(value, str):
             raise ValueError(f"{label}.{field} must be text.")
-
         value = value.strip()
-
         if field in REQUIRED_NONEMPTY and not value:
             raise ValueError(f"{label}.{field} cannot be empty.")
-
         result[field] = value
-
-    unexpected = set(record) - set(REQUIRED_FIELDS) - {
-        "scene", "scene_id", "role"
-    }
-
+    unexpected = set(record) - set(REQUIRED_FIELDS) - {"scene", "scene_id", "role"}
     if unexpected:
-        raise ValueError(
-            f"{label} contains unexpected fields: "
-            + ", ".join(sorted(unexpected))
-        )
-
+        raise ValueError(f"{label} contains unexpected fields: {', '.join(sorted(unexpected))}")
     return result
 
 
 def validate_generated_scenes(
-    generated: Any,
-    source_part: dict,
-    config: dict,
-    total_parts: int,
-    allow_soft_overage: bool = False,
+    generated: Any, source_part: dict, config: dict,
+    total_parts: int, allow_soft_overage: bool = False,
 ) -> list:
     if not isinstance(generated, list):
         raise ValueError("Generated main scenes must be a list.")
-
     expected = source_part["scenes"]
-
     if len(generated) != len(expected):
         raise ValueError(
-            f"Part {source_part['part']}: expected {len(expected)} "
-            f"main scenes, received {len(generated)}."
+            f"Part {source_part['part']}: expected {len(expected)} main scenes, "
+            f"received {len(generated)}."
         )
 
     result = []
-
     for source, item in zip(expected, generated):
         if not isinstance(item, dict):
-            raise ValueError("A generated main scene is not an object.")
-
+            raise ValueError("Generated main scene is not an object.")
         if item.get("scene") != source.get("scene"):
             raise ValueError("Generated main scene number/order mismatch.")
-
         if clean(item.get("scene_id")) != clean(source.get("scene_id")):
-            raise ValueError(
-                f"Main scene_id mismatch: {source.get('scene_id')}"
-            )
-
+            raise ValueError(f"Main scene_id mismatch: {source.get('scene_id')}")
         if clean(item.get("role")).lower() != "main":
-            raise ValueError(
-                f"Main scene has wrong role: {source.get('scene_id')}"
-            )
+            raise ValueError(f"Main scene has wrong role: {source.get('scene_id')}")
 
-        fields = validate_text_fields(
-            item,
-            f"Part {source_part['part']} scene {source['scene']}",
-        )
-
+        fields = validate_text_fields(item, f"Part {source_part['part']} scene {source['scene']}")
         row = {
             "scene": source["scene"],
             "scene_id": clean(source["scene_id"]),
@@ -809,24 +573,18 @@ def validate_generated_scenes(
             "story_anchor": clean(source.get("story_anchor")),
             "purpose": clean(source.get("purpose")),
             "beat": clean(source.get("beat")),
-            "scene_duration": clean(
-                source.get("scene_duration", source.get("duration", ""))
-            ),
+            "scene_duration": clean(source.get("scene_duration", source.get("duration", ""))),
         }
         row.update(fields)
         result.append(row)
 
     count = word_count(" ".join(row["narration"] for row in result))
-    minimum, maximum = short_word_limits(
-        source_part, config, total_parts
-    )
-
+    minimum, maximum = short_word_limits(source_part, config, total_parts)
     if minimum is not None and not minimum <= count <= maximum:
         raise ValueError(
             f"SHORT part {source_part['part']} has {count} main words; "
             f"allowed range is {minimum}–{maximum}."
         )
-
     if (
         config["format"] == "short"
         and source_part["part"] < total_parts
@@ -835,227 +593,142 @@ def validate_generated_scenes(
     ):
         raise ValueError(
             f"SHORT non-final part {source_part['part']} has {count} words; "
-            "revise it to 120–150 words. The 151–180 range is allowed "
-            "only after all revision attempts."
+            "revise toward 120–150. 151–180 is allowed after retries."
         )
-
     return result
 
-
 def validate_extra_record(
-    generated: Any,
-    source: Any,
-    role: str,
-    part_number: int,
+    generated: Any, source: Any, role: str, part_number: int,
 ):
     if source is None:
         if generated is not None:
-            raise ValueError(
-                f"Unexpected {role} record in part {part_number}."
-            )
+            raise ValueError(f"Unexpected {role} record in part {part_number}.")
         return None
 
     if not isinstance(generated, dict):
-        raise ValueError(
-            f"Required separate {role} record missing in part {part_number}."
-        )
-
+        raise ValueError(f"Required separate {role} record missing in part {part_number}.")
     if clean(generated.get("scene_id")) != clean(source.get("scene_id")):
-        raise ValueError(
-            f"{role} scene_id does not match the final Story Plan "
-            f"in part {part_number}."
-        )
-
+        raise ValueError(f"{role} scene_id mismatch in part {part_number}.")
     if clean(generated.get("role")).lower() != role:
         raise ValueError(f"{role} role mismatch in part {part_number}.")
 
-    fields = validate_text_fields(
-        generated,
-        f"Part {part_number} {role}",
-    )
-
+    fields = validate_text_fields(generated, f"Part {part_number} {role}")
     result = {
         "scene_id": clean(source["scene_id"]),
         "role": role,
         "status": "completed",
         "purpose": clean(source.get("purpose")),
         "story_anchor": clean(source.get("story_anchor")),
-        "scene_duration": clean(
-            source.get("scene_duration", source.get("duration", ""))
-        ),
+        "scene_duration": clean(source.get("scene_duration", source.get("duration", ""))),
     }
     result.update(fields)
     return result
 
 
 def validate_generated_part(
-    generated: Any,
-    source_part: dict,
-    config: dict,
-    total_parts: int,
-    allow_soft_overage: bool = False,
+    generated: Any, source_part: dict, config: dict,
+    total_parts: int, allow_soft_overage: bool = False,
 ) -> dict:
     if not isinstance(generated, dict):
         raise ValueError("Model response must be a JSON object.")
 
     expected_keys = {"scenes", "story_title"}
-
     for key in ROLE_KEYS:
         if source_part.get(key) is not None:
             expected_keys.add(key)
 
     unexpected = set(generated) - expected_keys
     missing = expected_keys - set(generated)
-
     if unexpected:
-        raise ValueError(
-            "Unexpected generated records/fields: "
-            + ", ".join(sorted(unexpected))
-        )
+        raise ValueError("Unexpected generated fields: " + ", ".join(sorted(unexpected)))
     if missing:
-        raise ValueError(
-            "Missing generated records/fields: "
-            + ", ".join(sorted(missing))
-        )
+        raise ValueError("Missing generated fields: " + ", ".join(sorted(missing)))
 
     title = clean(generated.get("story_title"))
     if not title:
         raise ValueError("Generated story_title cannot be empty.")
 
-    main_scenes = validate_generated_scenes(
-        generated.get("scenes"),
-        source_part,
-        config,
-        total_parts,
+    scenes = validate_generated_scenes(
+        generated.get("scenes"), source_part, config, total_parts,
         allow_soft_overage=allow_soft_overage,
     )
-
-    main_narration = " ".join(
-        item["narration"] for item in main_scenes
-    )
-    part_number = source_part["part"]
-    final_part = part_number == total_parts
+    narration = " ".join(item["narration"] for item in scenes)
+    number = source_part["part"]
+    final = number == total_parts
 
     completed = {
-        "part": part_number,
+        "part": number,
         "status": "completed",
         "title": clean(source_part.get("title")),
         "story_title": title,
-        "narration": main_narration,
-        "word_count": word_count(main_narration),
+        "narration": narration,
+        "word_count": word_count(narration),
         "final_part_merged": bool(source_part.get("final_part_merged")),
-        "scenes": main_scenes,
+        "scenes": scenes,
     }
 
     for key, role in ROLE_KEYS.items():
-        source_record = source_part.get(key)
-
-        if key == "suspense_scene" and final_part:
-            source_record = None
-        if key == "resolution_scene" and not final_part:
-            source_record = None
-
+        source = source_part.get(key)
+        if key == "suspense_scene" and final:
+            source = None
+        if key == "resolution_scene" and not final:
+            source = None
         completed[key] = validate_extra_record(
-            generated.get(key),
-            source_record,
-            role,
-            part_number,
+            generated.get(key), source, role, number,
         )
-
     return completed
 
 
 def build_revision_prompt(
-    original_prompt: str,
-    generated: dict,
-    source_part: dict,
-    config: dict,
-    total_parts: int,
+    original_prompt: str, generated: dict, source_part: dict,
+    config: dict, total_parts: int,
 ) -> str:
     scenes = generated.get("scenes", [])
-    current_text = " ".join(
+    current = " ".join(
         clean(item.get("narration"))
-        for item in scenes
-        if isinstance(item, dict)
+        for item in scenes if isinstance(item, dict)
     )
-    count = word_count(current_text)
-    minimum, maximum = short_word_limits(
-        source_part, config, total_parts
-    )
+    count = word_count(current)
+    minimum, maximum = short_word_limits(source_part, config, total_parts)
 
     if minimum is None:
-        word_rule = "FULL format: preserve the complete story content."
-        correction = (
-            "Keep all important events, but remove only repetition "
-            "and unclear wording."
-        )
+        rule = "FULL: preserve complete story content."
+        correction = "Remove only repetition and unclear wording."
     else:
-        merged_final = (
+        merged = (
             source_part.get("part") == total_parts
             and source_part.get("final_part_merged") is True
         )
-        if merged_final:
-            word_rule = (
-                f"SHORT merged final narration: {minimum}–{maximum} words. "
-                "The 181–239 range is permitted for this final merged Part."
-            )
-        else:
-            word_rule = (
-                f"SHORT main narration: {minimum}–{maximum} words. "
-                "Preferred target: 120–150 words."
-            )
-
+        rule = f"Required main narration: {minimum}–{maximum} words."
         if count > maximum:
             correction = (
-                f"The current narration has {count} words. "
-                f"Reduce it to at most {maximum} words while preserving "
-                "all remaining story events and the complete ending."
+                f"Current count {count}. Reduce to at most {maximum} words. "
+                "Preserve every essential event and the complete ending."
             )
-        elif count > SHORT_TARGET_MAX and not merged_final:
+        elif count > SHORT_TARGET_MAX and not merged:
             correction = (
-                f"The current narration has {count} words. "
-                "Reduce it toward 135–145 words. Remove repeated "
-                "phrases, redundant explanations and unnecessary "
-                "adjectives. Do not remove essential story events."
+                f"Current count {count}. Reduce toward 135–145 words. "
+                "Remove repetition and redundant descriptions only."
             )
-        elif count < SHORT_MIN_WORDS:
+        elif count < minimum:
             correction = (
-                f"The current narration has {count} words. "
-                "Expand only with relevant details already supported "
-                "by the source story. Do not invent events."
+                f"Current count {count}. Expand using relevant details "
+                "already present in the source story. Do not invent events."
             )
         else:
-            correction = (
-                "Keep the narration within the required word range "
-                "without changing its meaning."
-            )
+            correction = "Keep the narration within the required range."
 
     return (
         original_prompt
         + "\n\nपिछला उत्तर validation में असफल हुआ।"
-        + f"\nमुख्य narration के वर्तमान शब्द: {count}"
-        + f"\nसही शब्द सीमा: {word_rule}"
-        + f"\nविशेष सुधार निर्देश: {correction}"
-        + "\nयह नया कहानी-लेखन नहीं है; मौजूदा उत्तर का सुधार है।"
-        + "\nकेवल main narration के शब्द गिनें। Hook/Suspense/"
-        "Resolution को इस गिनती में शामिल न करें।"
-        + (
-            "\nMerged final Part में 120–239 शब्द स्वीकार्य हैं; "
-            "181–239 शब्दों को 180 तक घटाने के लिए कहानी की घटनाएँ न हटाएँ।"
-            if config["format"] == "short"
-            and source_part.get("part") == total_parts
-            and source_part.get("final_part_merged") is True
-            else "\nमुख्य narration को 120–150 शब्द में लाने का प्रयास करें।"
-            "\nयदि 150 से अधिक शब्द हों तो अनावश्यक पुनरावृत्ति हटाएँ।"
-            "\n151–180 शब्द केवल सभी revision attempts के बाद स्वीकार्य हैं।"
-            "\n180 से अधिक या 120 से कम शब्द स्वीकार्य नहीं हैं।"
-        )
-        + "\nयदि 120 से कम हों तो केवल स्रोत-कहानी के प्रासंगिक विवरण जोड़ें।"
+        + f"\nवर्तमान main narration शब्द: {count}"
+        + f"\nनियम: {rule}"
+        + f"\nसुधार: {correction}"
+        + "\nयह नया कहानी-लेखन नहीं, मौजूदा उत्तर का सुधार है।"
+        + "\nHook/Suspense/Resolution की शब्द संख्या main narration में न गिनें।"
         + "\nसभी scene_id, role और scene क्रम source plan के समान रखें।"
-        + "\nHook/Suspense/Resolution अलग records में ही रहें।"
-        + "\nअतिरिक्त या अनुपस्थित role record न जोड़ें।"
-        + "\nवाक्य को बीच में न काटें।"
         + "\nकहानी का अर्थ, घटनाएँ, पात्र और मूल अंत न बदलें।"
+        + "\nवाक्य को बीच में न काटें।"
         + "\nकेवल JSON लौटाएँ।"
     )
 
@@ -1064,37 +737,32 @@ def retryable_http_error(code: int) -> bool:
     return code in {408, 425, 429, 500, 502, 503, 504}
 
 
+def retry_delay(code: int, attempt: int) -> int:
+    base = 12 if code == 429 else 8
+    return min(60, base * (2 ** (attempt - 1)))
+
+
 def generate_part(
-    api_key: str,
-    models: list[str],
-    topic: str,
-    story_text: str,
-    source_part: dict,
-    config: dict,
-    total_parts: int,
+    api_key: str, models: list[str], topic: str, story_text: str,
+    source_part: dict, config: dict, total_parts: int,
 ) -> dict:
     original_prompt = build_part_prompt(
-        topic,
-        story_text,
-        source_part,
-        config,
-        total_parts,
+        topic, story_text, source_part, config, total_parts,
     )
     schema = build_response_schema(source_part)
     errors = []
 
     for model_index, model in enumerate(models, 1):
         prompt = original_prompt
-        model_error = "Unknown generation error."
-        max_attempts = config["max_retries"]
+        model_errors = []
         last_generated = None
+        successful_responses = 0
+        max_attempts = max(1, int(config["max_retries"]))
 
         log(
             f"Part {source_part['part']}/{total_parts}: "
-            f"trying model {model_index}/{len(models)}: {model}"
+            f"model {model_index}/{len(models)}: {model}"
         )
-
-        completed_validation_attempts = 0
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -1102,108 +770,90 @@ def generate_part(
                     f"Part {source_part['part']}; model={model}; "
                     f"attempt {attempt}/{max_attempts}"
                 )
-
-                generated = request_gemini(
-                    api_key,
-                    model,
-                    prompt,
-                    schema,
-                )
+                generated = request_gemini(api_key, model, prompt, schema)
                 last_generated = generated
-                completed_validation_attempts += 1
+                successful_responses += 1
 
                 try:
                     completed = validate_generated_part(
-                        generated,
-                        source_part,
-                        config,
-                        total_parts,
+                        generated, source_part, config, total_parts,
                         allow_soft_overage=False,
                     )
                     completed["_katha_model_used"] = model
+                    log(
+                        f"Part {source_part['part']}: "
+                        f"{completed['word_count']} words accepted on {model}."
+                    )
                     return completed
 
                 except (ValueError, TypeError, KeyError) as exc:
-                    model_error = f"Output validation: {exc}"
+                    message = f"Validation attempt {attempt}: {exc}"
+                    model_errors.append(message)
+                    log(f"Part {source_part['part']} {model}: {message}")
                     prompt = build_revision_prompt(
-                        original_prompt,
-                        generated,
-                        source_part,
-                        config,
-                        total_parts,
+                        original_prompt, generated, source_part,
+                        config, total_parts,
                     )
 
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
-                model_error = f"HTTP {exc.code}: {body[:1000]}"
-
-                log(f"Model {model} returned HTTP {exc.code}.")
+                message = f"HTTP {exc.code}: {body[:700]}"
+                model_errors.append(message)
+                log(f"Model {model}: HTTP {exc.code}.")
 
                 if exc.code == 404:
-                    log(
-                        f"Model {model} is unavailable; "
-                        "skipping it for this run."
-                    )
+                    log(f"Model {model} unavailable; trying next configured model.")
                     break
 
-                if exc.code in {429, 503, 504}:
-                    delay = 8 if exc.code == 429 else 5
-                    log(
-                        f"Temporary model/API failure HTTP {exc.code}; "
-                        f"waiting {delay} seconds before next model."
-                    )
-                    time.sleep(delay)
+                if retryable_http_error(exc.code):
+                    if attempt < max_attempts:
+                        delay = retry_delay(exc.code, attempt)
+                        log(f"Temporary API error; retrying same model in {delay}s.")
+                        time.sleep(delay)
+                        continue
+                    log(f"Model {model}: temporary API retries exhausted.")
                     break
 
-                if not retryable_http_error(exc.code):
-                    break
-
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                ConnectionError,
-            ) as exc:
-                model_error = f"{type(exc).__name__}: {exc}"
-                log(
-                    f"Connection failure on {model}; "
-                    "moving to the next configured model."
-                )
+                log(f"Model {model}: non-retryable HTTP error.")
                 break
 
             except (
-                json.JSONDecodeError,
-                ValueError,
-                KeyError,
-                TypeError,
+                urllib.error.URLError, TimeoutError, ConnectionError,
             ) as exc:
-                model_error = f"{type(exc).__name__}: {exc}"
+                message = f"{type(exc).__name__}: {exc}"
+                model_errors.append(message)
+                log(f"Model {model}: {message}")
+                if attempt < max_attempts:
+                    delay = min(30, 5 * (2 ** (attempt - 1)))
+                    log(f"Retrying same model in {delay}s.")
+                    time.sleep(delay)
+                    continue
+                break
+
+            except (
+                json.JSONDecodeError, ValueError, KeyError, TypeError,
+            ) as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                model_errors.append(message)
+                log(f"Model {model}: {message}")
 
             except Exception as exc:
-                model_error = f"{type(exc).__name__}: {exc}"
+                message = f"{type(exc).__name__}: {exc}"
+                model_errors.append(message)
+                log(f"Unexpected model error: {message}")
                 break
-
-            log(
-                f"Part {source_part['part']} attempt failed "
-                f"on {model}: {model_error}"
-            )
 
             if attempt < max_attempts:
                 delay = min(30, 3 * (2 ** (attempt - 1)))
-                log(f"Retrying same model after {delay} seconds.")
+                log(f"Retrying {model} in {delay}s.")
                 time.sleep(delay)
 
-        # A non-final SHORT part with 151–180 words may be accepted
-        # only after all revision attempts on this model have been used.
-        if (
-            last_generated is not None
-            and completed_validation_attempts >= max_attempts
-        ):
+        # 151–180 words are accepted only after all normal revision
+        # attempts have been used on this model.
+        if last_generated is not None and successful_responses >= max_attempts:
             try:
                 completed = validate_generated_part(
-                    last_generated,
-                    source_part,
-                    config,
-                    total_parts,
+                    last_generated, source_part, config, total_parts,
                     allow_soft_overage=True,
                 )
                 completed["_katha_model_used"] = model
@@ -1213,13 +863,20 @@ def generate_part(
                 )
                 return completed
             except (ValueError, TypeError, KeyError) as exc:
-                model_error = f"{model_error}; final validation: {exc}"
+                model_errors.append(f"Final validation: {exc}")
 
-        errors.append(f"{model}: {model_error}")
-        log(
-            f"Model {model} exhausted; "
-            "moving to the next configured Gemini model."
-        )
+        summary = " | ".join(model_errors) or "No successful response."
+        errors.append(f"{model}: {summary}")
+        log(f"Model {model} exhausted; moving to next configured model.")
+
+    # Critical fix: never return None after exhausting all models.
+    detail = "\n".join(f"  - {item}" for item in errors)
+    raise RuntimeError(
+        f"Part {source_part['part']}/{total_parts} could not be generated. "
+        f"All {len(models)} configured Gemini model(s) failed.\n{detail}\n"
+        "Completed Part checkpoints have been preserved."
+    )
+
 
 def source_part_signature(part: dict) -> str:
     return stable_hash({
@@ -1233,13 +890,8 @@ def source_part_signature(part: dict) -> str:
 
 
 def build_generation_signature(
-    source_data: dict,
-    config: dict,
-    topic: str,
-    story_text: str,
+    source_data: dict, config: dict, topic: str, story_text: str,
 ) -> str:
-    # Model choice is deliberately excluded. A model outage or fallback
-    # change must not invalidate already completed Parts.
     return stable_hash({
         "version": VERSION,
         "source_data": source_data,
@@ -1250,107 +902,71 @@ def build_generation_signature(
 
 
 def is_completed_part_valid(
-    existing: Any,
-    source_part: dict,
-    config: dict,
-    total_parts: int,
+    existing: Any, source_part: dict, config: dict, total_parts: int,
 ) -> bool:
     if not isinstance(existing, dict):
         return False
-
     if existing.get("status") != "completed":
         return False
-
     if existing.get("part") != source_part.get("part"):
         return False
-
-    if existing.get("source_part_signature") != (
-        source_part_signature(source_part)
-    ):
+    if existing.get("source_part_signature") != source_part_signature(source_part):
         return False
-
-    if bool(existing.get("final_part_merged")) != bool(
-        source_part.get("final_part_merged")
-    ):
+    if bool(existing.get("final_part_merged")) != bool(source_part.get("final_part_merged")):
         return False
 
     try:
-        expected_scenes = source_part["scenes"]
-        actual_scenes = existing.get("scenes")
-
-        if not isinstance(actual_scenes, list):
+        expected = source_part["scenes"]
+        actual = existing.get("scenes")
+        if not isinstance(actual, list) or len(actual) != len(expected):
             return False
 
-        if len(actual_scenes) != len(expected_scenes):
-            return False
-
-        for source, actual in zip(expected_scenes, actual_scenes):
-            if not isinstance(actual, dict):
+        for source, row in zip(expected, actual):
+            if not isinstance(row, dict):
                 return False
-
-            if actual.get("scene") != source.get("scene"):
+            if row.get("scene") != source.get("scene"):
                 return False
-            if actual.get("scene_id") != source.get("scene_id"):
+            if row.get("scene_id") != source.get("scene_id"):
                 return False
-            if clean(actual.get("story_anchor")) != clean(source.get("story_anchor")):
+            if clean(row.get("story_anchor")) != clean(source.get("story_anchor")):
                 return False
-            if actual.get("role") != "main":
+            if row.get("role") != "main" or row.get("status") != "completed":
                 return False
-            if actual.get("status") != "completed":
-                return False
-
             for field in REQUIRED_NONEMPTY:
-                if not clean(actual.get(field)):
+                if not clean(row.get(field)):
                     return False
 
-        main_words = word_count(
-            " ".join(
-                clean(item.get("narration"))
-                for item in actual_scenes
-            )
-        )
-
-        minimum, maximum = short_word_limits(
-            source_part, config, total_parts
-        )
-
-        if minimum is not None and not minimum <= main_words <= maximum:
+        count = word_count(" ".join(clean(row.get("narration")) for row in actual))
+        minimum, maximum = short_word_limits(source_part, config, total_parts)
+        if minimum is not None and not minimum <= count <= maximum:
             return False
 
-        final_part = source_part["part"] == total_parts
-
+        final = source_part["part"] == total_parts
         for key, role in ROLE_KEYS.items():
             source = source_part.get(key)
-
-            if key == "suspense_scene" and final_part:
+            if key == "suspense_scene" and final:
                 source = None
-            if key == "resolution_scene" and not final_part:
+            if key == "resolution_scene" and not final:
                 source = None
 
             cached = existing.get(key)
-
             if source is None:
                 if cached is not None:
                     return False
                 continue
-
             if not isinstance(cached, dict):
                 return False
             if cached.get("scene_id") != source.get("scene_id"):
                 return False
             if clean(cached.get("story_anchor")) != clean(source.get("story_anchor")):
                 return False
-            if cached.get("role") != role:
+            if cached.get("role") != role or cached.get("status") != "completed":
                 return False
-            if cached.get("status") != "completed":
-                return False
-
             for field in REQUIRED_NONEMPTY:
                 if not clean(cached.get(field)):
                     return False
 
         return bool(clean(existing.get("story_title")))
-
     except (TypeError, ValueError, KeyError, AttributeError):
         return False
 
@@ -1358,194 +974,109 @@ def is_completed_part_valid(
 def find_existing_part(parts: list, part_number: int):
     matches = [
         item for item in parts
-        if isinstance(item, dict)
-        and item.get("part") == part_number
+        if isinstance(item, dict) and item.get("part") == part_number
     ]
-
     if len(matches) > 1:
-        raise RuntimeError(
-            f"Duplicate cached AI story records for part {part_number}."
-        )
-
+        raise RuntimeError(f"Duplicate cached AI story records for part {part_number}.")
     return matches[0] if matches else None
 
 
-def validate_final_output(
-    ai_story: dict,
-    source_plan: dict,
-    config: dict,
-):
+def validate_final_output(ai_story: dict, source_plan: dict, config: dict):
     source_parts = source_plan["parts"]
     output_parts = ai_story.get("parts")
-
     if not isinstance(output_parts, list):
         raise RuntimeError("AI story output parts must be a list.")
-
     if len(output_parts) != len(source_parts):
         raise RuntimeError(
-            f"Final part count mismatch: "
-            f"{len(output_parts)}/{len(source_parts)}."
+            f"Final part count mismatch: {len(output_parts)}/{len(source_parts)}."
         )
 
-    expected_counts = [len(part.get("scenes", [])) for part in source_parts]
-    if ai_story.get("actual_scene_counts") != expected_counts:
+    counts = [len(part.get("scenes", [])) for part in source_parts]
+    if ai_story.get("actual_scene_counts") != counts:
         raise RuntimeError("AI story actual_scene_counts mismatch.")
 
-    total_main_scenes = 0
-    all_narration = []
+    total_main = 0
+    narrations = []
     titles = set()
 
-    for index, (source, output) in enumerate(
-        zip(source_parts, output_parts), 1
-    ):
+    for index, (source, output) in enumerate(zip(source_parts, output_parts), 1):
         if source.get("part") != index or output.get("part") != index:
             raise RuntimeError(f"Part order mismatch at part {index}.")
-
         if output.get("status") != "completed":
             raise RuntimeError(f"Part {index} is incomplete.")
+        if output.get("source_part_signature") != source_part_signature(source):
+            raise RuntimeError(f"Part {index} does not match final Story Plan.")
+        if bool(output.get("final_part_merged")) != bool(source.get("final_part_merged")):
+            raise RuntimeError(f"Part {index} final_part_merged mismatch.")
 
-        if output.get("source_part_signature") != (
-            source_part_signature(source)
-        ):
-            raise RuntimeError(
-                f"Part {index} does not match the final Story Plan."
-            )
+        expected = source["scenes"]
+        actual = output.get("scenes")
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            raise RuntimeError(f"Part {index} main scene count mismatch.")
 
-        if bool(output.get("final_part_merged")) != bool(
-            source.get("final_part_merged")
-        ):
-            raise RuntimeError(
-                f"Part {index} final_part_merged metadata mismatch."
-            )
-
-        expected_scenes = source["scenes"]
-        actual_scenes = output.get("scenes")
-
-        if not isinstance(actual_scenes, list):
-            raise RuntimeError(f"Part {index} main scenes are invalid.")
-
-        if len(actual_scenes) != len(expected_scenes):
-            raise RuntimeError(
-                f"Part {index} main scene count mismatch."
-            )
-
-        for expected, actual in zip(expected_scenes, actual_scenes):
-            if actual.get("scene") != expected.get("scene"):
-                raise RuntimeError(
-                    f"Part {index} scene order mismatch."
-                )
-            if actual.get("scene_id") != expected.get("scene_id"):
-                raise RuntimeError(
-                    f"Part {index} scene_id mismatch."
-                )
-            if clean(actual.get("story_anchor")) != clean(expected.get("story_anchor")):
-                raise RuntimeError(
-                    f"Part {index} scene story_anchor mismatch."
-                )
-            if actual.get("role") != "main":
-                raise RuntimeError(
-                    f"Part {index} main role mismatch."
-                )
-            if actual.get("status") != "completed":
-                raise RuntimeError(
-                    f"Part {index} has incomplete scene."
-                )
-
+        for source_scene, row in zip(expected, actual):
+            if row.get("scene") != source_scene.get("scene"):
+                raise RuntimeError(f"Part {index} scene order mismatch.")
+            if row.get("scene_id") != source_scene.get("scene_id"):
+                raise RuntimeError(f"Part {index} scene_id mismatch.")
+            if clean(row.get("story_anchor")) != clean(source_scene.get("story_anchor")):
+                raise RuntimeError(f"Part {index} scene story_anchor mismatch.")
+            if row.get("role") != "main" or row.get("status") != "completed":
+                raise RuntimeError(f"Part {index} main scene status/role mismatch.")
             for field in REQUIRED_NONEMPTY:
-                if not clean(actual.get(field)):
-                    raise RuntimeError(
-                        f"Part {index} scene {expected['scene']}: "
-                        f"missing {field}."
-                    )
+                if not clean(row.get(field)):
+                    raise RuntimeError(f"Part {index} scene missing {field}.")
 
-        main_text = " ".join(
-            item["narration"] for item in actual_scenes
-        )
-        main_words = word_count(main_text)
+        main_text = " ".join(row["narration"] for row in actual)
+        count = word_count(main_text)
+        if output.get("word_count") != count:
+            raise RuntimeError(f"Part {index} word_count metadata mismatch.")
 
-        if output.get("word_count") != main_words:
+        minimum, maximum = short_word_limits(source, config, len(source_parts))
+        if minimum is not None and not minimum <= count <= maximum:
             raise RuntimeError(
-                f"Part {index} word_count metadata mismatch."
+                f"SHORT part {index} has {count} words; required {minimum}–{maximum}."
             )
 
-        minimum, maximum = short_word_limits(
-            source, config, len(source_parts)
-        )
-
-        if minimum is not None and not minimum <= main_words <= maximum:
-            raise RuntimeError(
-                f"SHORT part {index} has {main_words} main words; "
-                f"required range is {minimum}–{maximum}."
-            )
-
-        final_part = index == len(source_parts)
-
+        final = index == len(source_parts)
         for key, role in ROLE_KEYS.items():
-            expected = source.get(key)
+            expected_extra = source.get(key)
+            if key == "suspense_scene" and final:
+                expected_extra = None
+            if key == "resolution_scene" and not final:
+                expected_extra = None
 
-            if key == "suspense_scene" and final_part:
-                expected = None
-            if key == "resolution_scene" and not final_part:
-                expected = None
-
-            actual = output.get(key)
-
-            if expected is None:
-                if actual is not None:
-                    raise RuntimeError(
-                        f"Unexpected {role} record in part {index}."
-                    )
+            actual_extra = output.get(key)
+            if expected_extra is None:
+                if actual_extra is not None:
+                    raise RuntimeError(f"Unexpected {role} record in part {index}.")
                 continue
-
-            if not isinstance(actual, dict):
-                raise RuntimeError(
-                    f"Missing separate {role} record in part {index}."
-                )
-
-            if actual.get("scene_id") != expected.get("scene_id"):
-                raise RuntimeError(
-                    f"{role} scene_id mismatch in part {index}."
-                )
-            if actual.get("role") != role:
-                raise RuntimeError(
-                    f"{role} role mismatch in part {index}."
-                )
-            if actual.get("status") != "completed":
-                raise RuntimeError(
-                    f"{role} record incomplete in part {index}."
-                )
-            if clean(actual.get("story_anchor")) != clean(
-                expected.get("story_anchor")
-            ):
-                raise RuntimeError(
-                    f"{role} story_anchor mismatch in part {index}."
-                )
-
+            if not isinstance(actual_extra, dict):
+                raise RuntimeError(f"Missing separate {role} record in part {index}.")
+            if actual_extra.get("scene_id") != expected_extra.get("scene_id"):
+                raise RuntimeError(f"{role} scene_id mismatch in part {index}.")
+            if actual_extra.get("role") != role or actual_extra.get("status") != "completed":
+                raise RuntimeError(f"{role} role/status mismatch in part {index}.")
+            if clean(actual_extra.get("story_anchor")) != clean(expected_extra.get("story_anchor")):
+                raise RuntimeError(f"{role} story_anchor mismatch in part {index}.")
             for field in REQUIRED_NONEMPTY:
-                if not clean(actual.get(field)):
-                    raise RuntimeError(
-                        f"{role} record has empty {field} in part {index}."
-                    )
+                if not clean(actual_extra.get(field)):
+                    raise RuntimeError(f"{role} record missing {field} in part {index}.")
 
         title = clean(output.get("story_title"))
         if not title:
             raise RuntimeError(f"Part {index} has no story_title.")
-
-        titles.add(re.sub(r"\s+", " ", title).strip().casefold())
-        total_main_scenes += len(actual_scenes)
-        all_narration.append(main_text)
+        titles.add(re.sub(r"\s+", " ", title).casefold())
+        total_main += len(actual)
+        narrations.append(main_text)
 
     if len(titles) != 1:
-        raise RuntimeError(
-            "Generated story_title differs between parts."
-        )
-
-    return len(output_parts), total_main_scenes, all_narration
+        raise RuntimeError("Generated story_title differs between parts.")
+    return len(output_parts), total_main, narrations
 
 
 def main() -> None:
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
@@ -1556,16 +1087,8 @@ def main() -> None:
 
     source_story = read_json(STORY_FILE)
     source_plan = read_json(PLAN_FILE)
-
-    total_parts, total_scenes = validate_source_plan(
-        source_plan,
-        config["format"],
-    )
-
+    total_parts, total_scenes = validate_source_plan(source_plan, config["format"])
     apply_story_part_metadata(source_plan, source_story)
-
-    if len(source_plan["parts"]) != total_parts:
-        raise RuntimeError("Story Plan part count changed unexpectedly.")
 
     topic = (
         clean(get_topic(input_config))
@@ -1575,58 +1098,44 @@ def main() -> None:
         or clean(source_plan.get("final_title"))
         or "कहानी"
     )
-
     story_text = (
         clean(source_story.get("corrected_complete_story"))
         or clean(source_story.get("story_text"))
         or clean(get_story_text(input_config))
     )
-
     if not story_text:
-        raise RuntimeError(
-            "Final corrected story text is missing from story.json/Input."
-        )
+        raise RuntimeError("Final corrected story text is missing from story.json/Input.")
 
-    source_story_signature = stable_hash(source_story)
-    source_plan_signature = stable_hash(source_plan)
-
+    story_signature = stable_hash(source_story)
+    plan_signature = stable_hash(source_plan)
     signature = build_generation_signature(
-        {
-            "story_signature": source_story_signature,
-            "plan_signature": source_plan_signature,
-        },
-        config,
-        topic,
-        story_text,
+        {"story_signature": story_signature, "plan_signature": plan_signature},
+        config, topic, story_text,
     )
 
     existing = read_json(OUTPUT_FILE, required=False)
-
     resumable = (
         isinstance(existing, dict)
         and existing.get("version") == VERSION
         and existing.get("generation_signature") == signature
-        and existing.get("source_story_signature") == source_story_signature
-        and existing.get("source_plan_signature") == source_plan_signature
+        and existing.get("source_story_signature") == story_signature
+        and existing.get("source_plan_signature") == plan_signature
         and existing.get("status") in {"in_progress", "completed"}
         and config["resume_enabled"]
     )
 
     if resumable:
         ai_story = existing
-        log("Matching story and plan generation checkpoint found.")
+        log("Matching story and plan checkpoint found.")
     else:
-        # Preserve completed Parts when only the selected Gemini model
-        # or fallback list changes.
-        reusable_parts = []
-
+        reusable = []
         if (
             isinstance(existing, dict)
-            and existing.get("source_story_signature") == source_story_signature
-            and existing.get("source_plan_signature") == source_plan_signature
+            and existing.get("source_story_signature") == story_signature
+            and existing.get("source_plan_signature") == plan_signature
             and isinstance(existing.get("parts"), list)
         ):
-            reusable_parts = existing["parts"]
+            reusable = existing["parts"]
 
         ai_story = {
             "version": VERSION,
@@ -1640,11 +1149,11 @@ def main() -> None:
             "scene_duration": config["scene_duration"],
             "model": primary_model,
             "generation_signature": signature,
-            "source_story_signature": source_story_signature,
-            "source_plan_signature": source_plan_signature,
+            "source_story_signature": story_signature,
+            "source_plan_signature": plan_signature,
             "input_config": config,
             "actual_scene_counts": [len(part["scenes"]) for part in source_plan["parts"]],
-            "parts": reusable_parts,
+            "parts": reusable,
         }
         write_json(OUTPUT_FILE, ai_story)
 
@@ -1660,8 +1169,8 @@ def main() -> None:
         "model": primary_model,
         "model_order": models,
         "generation_signature": signature,
-        "source_story_signature": source_story_signature,
-        "source_plan_signature": source_plan_signature,
+        "source_story_signature": story_signature,
+        "source_plan_signature": plan_signature,
         "input_config": config,
         "actual_scene_counts": [len(part["scenes"]) for part in source_plan["parts"]],
     })
@@ -1673,53 +1182,43 @@ def main() -> None:
     log(f"Format: {config['format']}")
     log(f"Parts: {total_parts}")
     log(f"Main scenes: {total_scenes}")
-    log("Story source: story.json")
-    log("Scene and role source: story_plan.json")
     log("=" * 58)
 
     cached_parts = ai_story.get("parts", [])
-
     if not isinstance(cached_parts, list):
         cached_parts = []
 
     for source_part in source_plan["parts"]:
-        part_number = source_part["part"]
-        cached = find_existing_part(cached_parts, part_number)
+        number = source_part["part"]
+        cached = find_existing_part(cached_parts, number)
 
-        if (
-            config["skip_completed"]
-            and is_completed_part_valid(
-                cached,
-                source_part,
-                config,
-                total_parts,
-            )
+        if config["skip_completed"] and is_completed_part_valid(
+            cached, source_part, config, total_parts,
         ):
-            log(f"Part {part_number}: valid checkpoint reused.")
+            log(f"Part {number}: valid checkpoint reused.")
             continue
 
+        # Defensive guard: generation must return a validated dictionary.
         completed = generate_part(
-            api_key=api_key,
-            models=models,
-            topic=topic,
-            story_text=story_text,
-            source_part=source_part,
-            config=config,
-            total_parts=total_parts,
+            api_key, models, topic, story_text,
+            source_part, config, total_parts,
         )
+        if not isinstance(completed, dict):
+            raise RuntimeError(
+                f"Part {number}: generator returned invalid result; "
+                "refusing to continue."
+            )
 
-        used_model = completed.pop("_katha_model_used", primary_model)
+        used_model = completed.pop("_katha_model_used", None)
+        if not used_model:
+            raise RuntimeError(f"Part {number}: generated model identity is missing.")
+
         completed["generated_by_model"] = used_model
-        completed["source_part_signature"] = (
-            source_part_signature(source_part)
-        )
+        completed["source_part_signature"] = source_part_signature(source_part)
 
         cached_parts = [
             item for item in cached_parts
-            if not (
-                isinstance(item, dict)
-                and item.get("part") == part_number
-            )
+            if not (isinstance(item, dict) and item.get("part") == number)
         ]
         cached_parts.append(completed)
         cached_parts.sort(key=lambda item: item["part"])
@@ -1727,21 +1226,16 @@ def main() -> None:
         ai_story["parts"] = cached_parts
         ai_story["status"] = "in_progress"
         ai_story["last_successful_model"] = used_model
-
         write_json(OUTPUT_FILE, ai_story)
-        log(f"Part {part_number}/{total_parts}: checkpoint saved.")
+        log(f"Part {number}/{total_parts}: checkpoint saved.")
 
     ai_story["parts"] = cached_parts
-
     completed_parts, completed_scenes, narrations = validate_final_output(
-        ai_story,
-        source_plan,
-        config,
+        ai_story, source_plan, config,
     )
 
     if completed_parts != total_parts:
         raise RuntimeError("Final part count does not match Story Plan.")
-
     if completed_scenes != total_scenes:
         raise RuntimeError("Final main scene count does not match Story Plan.")
 
@@ -1749,11 +1243,8 @@ def main() -> None:
         re.sub(r"\s+", " ", clean(item["story_title"])).strip()
         for item in ai_story["parts"]
     }
-
     if len(titles) != 1:
-        raise RuntimeError(
-            "Story titles are inconsistent across parts."
-        )
+        raise RuntimeError("Story titles are inconsistent across parts.")
 
     ai_story["title"] = next(iter(titles))
     ai_story["status"] = "completed"
@@ -1765,32 +1256,22 @@ def main() -> None:
         len(part["scenes"]) for part in source_plan["parts"]
     ]
     ai_story["total_extra_scenes"] = sum(
-        1
-        for part in ai_story["parts"]
-        for key in ROLE_KEYS
-        if isinstance(part.get(key), dict)
+        1 for part in ai_story["parts"]
+        for key in ROLE_KEYS if isinstance(part.get(key), dict)
     )
     ai_story["main_story_text"] = "\n\n".join(narrations)
-    ai_story["total_main_story_words"] = word_count(
-        ai_story["main_story_text"]
-    )
+    ai_story["total_main_story_words"] = word_count(ai_story["main_story_text"])
     ai_story["scene_order"] = "part_then_main_scene"
     ai_story["extra_scene_order"] = [
-        "hook",
-        "main_scenes",
-        "suspense_or_resolution",
+        "hook", "main_scenes", "suspense_or_resolution",
     ]
     ai_story["completed_at"] = int(time.time())
 
     write_json(OUTPUT_FILE, ai_story)
-
     written = read_json(OUTPUT_FILE)
 
     if written.get("generation_signature") != signature:
-        raise RuntimeError(
-            "AI story generation signature read-back mismatch."
-        )
-
+        raise RuntimeError("AI story generation signature read-back mismatch.")
     validate_final_output(written, source_plan, config)
 
     log("=" * 58)
@@ -1811,6 +1292,4 @@ if __name__ == "__main__":
             "ERROR: Interrupted. Completed part checkpoints are preserved."
         )
     except Exception as exc:
-        raise SystemExit(
-            f"ERROR: {type(exc).__name__}: {exc}"
-        )
+        raise SystemExit(f"ERROR: {type(exc).__name__}: {exc}")
