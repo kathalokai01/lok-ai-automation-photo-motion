@@ -1140,8 +1140,6 @@ def source_signature(
     main_sources: list[dict],
     extra_sources: list[dict],
     actual_counts: list[int],
-    ai_story: dict,
-    scene_data: dict,
 ) -> str:
     def relevant(rows: list[dict]) -> list[dict]:
         result = []
@@ -1752,6 +1750,31 @@ def make_output_document(
     now = utc_now()
     all_records = main_records + extra_records
 
+    main_by_key = {
+        (int(row["part"]), int(row["scene"])): row
+        for row in main_records
+    }
+    extra_by_key = {
+        (int(row["part"]), str(row["role"])): row
+        for row in extra_records
+    }
+    narration_order = []
+
+    for part in range(1, settings["parts"] + 1):
+        hook = extra_by_key.get((part, "hook"))
+        if hook is not None:
+            narration_order.append(hook["scene_id"])
+
+        for scene_number in range(1, actual_counts[part - 1] + 1):
+            main = main_by_key.get((part, scene_number))
+            if main is not None:
+                narration_order.append(main["scene_id"])
+
+        ending_role = "suspense" if part < settings["parts"] else "resolution"
+        ending = extra_by_key.get((part, ending_role))
+        if ending is not None:
+            narration_order.append(ending["scene_id"])
+
     document = {
         "status": status,
         "script_version": SCRIPT_VERSION,
@@ -1840,6 +1863,7 @@ def make_output_document(
             row["scene_id"]
             for row in all_records
         ],
+        "narration_order": narration_order,
         "started_at": started_at,
         "updated_at": now,
         "generated_at": now if status == "completed" else None,
@@ -1990,6 +2014,27 @@ def verify_saved_output(
     if saved.get("all_scene_ids") != all_ids:
         raise RuntimeError("Narration output all_scene_ids order mismatch.")
 
+    main_by_key = {
+        (int(row["part"]), int(row["scene"])): row
+        for row in saved["scenes"]
+    }
+    extra_by_key = {
+        (int(row["part"]), str(row["role"])): row
+        for row in saved["extra_scenes"]
+    }
+    expected_order = []
+    for part in range(1, settings["parts"] + 1):
+        expected_order.append(f"part_{part:02d}_hook")
+        for scene_number in range(1, actual_counts[part - 1] + 1):
+            expected_order.append(
+                f"part_{part:02d}_scene_{scene_number:02d}"
+            )
+        ending_role = "suspense" if part < settings["parts"] else "resolution"
+        expected_order.append(f"part_{part:02d}_{ending_role}")
+
+    if saved.get("narration_order") != expected_order:
+        raise RuntimeError("Narration Part/Scene timeline order mismatch.")
+
     for record in all_records:
         if not isinstance(record, dict):
             raise RuntimeError("Narration output contains an invalid record.")
@@ -2062,8 +2107,6 @@ def main() -> int:
         main_sources,
         extra_sources,
         actual_counts,
-        story,
-        source_data,
     )
 
     reusable = load_reusable_records(
@@ -2078,21 +2121,35 @@ def main() -> int:
     extra_map: dict[str, dict] = {}
 
     ordered_sources: list[tuple[dict, str, int | None]] = []
-
+    main_by_key = {
+        (row["part"], row["scene"]): row
+        for row in main_sources
+    }
+    extra_by_key = {
+        (row["part"], row["role"]): row
+        for row in extra_sources
+    }
     global_number = 0
 
-    for row in main_sources:
-        global_number += 1
+    for part in range(1, parts + 1):
         ordered_sources.append((
-            row,
-            "main",
-            global_number,
+            extra_by_key[(part, "hook")],
+            "hook",
+            None,
         ))
 
-    for row in extra_sources:
+        for scene_number in range(1, actual_counts[part - 1] + 1):
+            global_number += 1
+            ordered_sources.append((
+                main_by_key[(part, scene_number)],
+                "main",
+                global_number,
+            ))
+
+        ending_role = "suspense" if part < parts else "resolution"
         ordered_sources.append((
-            row,
-            row["role"],
+            extra_by_key[(part, ending_role)],
+            ending_role,
             None,
         ))
 
