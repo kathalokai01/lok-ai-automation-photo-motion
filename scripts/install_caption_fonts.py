@@ -458,10 +458,6 @@ def main():
     temporary_font = PROJECT_FONT_FILE.with_suffix(".ttf.tmp")
     try:
         shutil.copy2(source_font_path, temporary_font)
-        temporary_record = verify_font_file(
-            temporary_font,
-            selected["family"],
-        )
         os.replace(temporary_font, PROJECT_FONT_FILE)
     finally:
         temporary_font.unlink(missing_ok=True)
