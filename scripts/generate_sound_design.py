@@ -44,9 +44,9 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
 CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v32-ambient-manifest-consistent"
+VERSION = "photo-motion-sound-design-v33-loudness-duration-resume-verified"
 RATE = 22050
-SFX_SECONDS = 5.0
+SFX_SECONDS = 8.0
 MIN_AUDIO_BYTES = 100
 
 ROLE_ORDER = {
@@ -65,19 +65,19 @@ SFX_TYPES = (
 # Cue gain is later multiplied by render_video.py's 1.65 factor.
 # Values are intentionally stronger than the previous v30 values.
 SFX_GAINS = {
-    "whoosh": 0.48,
-    "impact": 0.72,
-    "footsteps": 0.55,
-    "vehicle": 0.58,
-    "door": 0.62,
-    "weather": 0.52,
-    "water": 0.48,
-    "fire": 0.48,
-    "heartbeat": 0.50,
-    "phone": 0.62,
-    "crowd": 0.56,
-    "mystery": 0.52,
-    "chime": 0.62,
+    "whoosh": 0.82,
+    "impact": 0.92,
+    "footsteps": 0.82,
+    "vehicle": 0.84,
+    "door": 0.88,
+    "weather": 0.78,
+    "water": 0.76,
+    "fire": 0.78,
+    "heartbeat": 0.80,
+    "phone": 0.88,
+    "crowd": 0.82,
+    "mystery": 0.82,
+    "chime": 0.90,
 }
 
 EVENT_WORDS = {
@@ -181,10 +181,33 @@ def read_json(path, required=True, default=None):
         if required:
             raise RuntimeError(f"Required JSON missing: {path}")
         return default
+    def reject_constant(value):
+        raise ValueError(f"Non-finite JSON constant: {value}")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception as exc:
-        raise RuntimeError(f"Invalid JSON file {path}: {exc}") from exc
+        value = json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        if required:
+            raise RuntimeError(f"Invalid JSON file {path}: {exc}") from exc
+        log("IGNORING INVALID OPTIONAL SOUND-DESIGN CHECKPOINT:", path, str(exc)[:300])
+        return default
+    if not isinstance(value, (dict, list)):
+        if required:
+            raise RuntimeError(f"Invalid JSON root: {path}")
+        return default
+    return value
 
 
 def write_json(path, data):
@@ -516,14 +539,32 @@ def make_sfx(kind, path, old_record, source_sig):
             pass
     seed = int(track_signature[:8], 16)
     write_wav(path, sfx_samples(kind, SFX_SECONDS, seed), SFX_SECONDS)
+    normalized = path.with_name(path.stem + ".normalized.wav")
+    try:
+        run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(path), "-af",
+            "loudnorm=I=-16:TP=-1.5:LRA=8,alimiter=limit=0.95:level=disabled",
+            "-ac", "1", "-ar", str(RATE), "-c:a", "pcm_s16le",
+            str(normalized),
+        ], timeout=180)
+        validate_wav(normalized, SFX_SECONDS)
+        os.replace(normalized, path)
+    finally:
+        normalized.unlink(missing_ok=True)
     duration = validate_wav(path, SFX_SECONDS)
+    loudness = audio_loudness(path)
+    if loudness.get("mean_volume_db", -999) < -25.0:
+        raise RuntimeError(f"Generated {kind} SFX is too quiet after normalization.")
     return {
         "status": "completed",
         "path": path.relative_to(ROOT).as_posix(),
         "signature": track_signature,
         "sha256": sha256_file(path),
         "duration_seconds": round(duration, 6),
-        "generation": "local_event_sfx",
+        "loudness": loudness,
+        "generation": "local_event_sfx_normalized",
+        "provider": "local_synthesis",
         "reused": False,
     }
 
@@ -999,10 +1040,10 @@ def create_cue(audio, scene_row, tracks):
     # Keep events short and recognizable; avoid stretching a cue over
     # almost the entire narration. Long beds are handled separately.
     cue_limits = {
-        "whoosh": 2.8, "impact": 1.8, "footsteps": 4.5,
-        "vehicle": 4.5, "door": 2.0, "weather": 4.5,
-        "water": 4.0, "fire": 4.0, "heartbeat": 4.0,
-        "phone": 3.0, "crowd": 4.0, "mystery": 4.5, "chime": 2.5,
+        "whoosh": 4.0, "impact": 2.2, "footsteps": 7.5,
+        "vehicle": 7.5, "door": 2.8, "weather": 8.0,
+        "water": 7.5, "fire": 7.0, "heartbeat": 7.0,
+        "phone": 3.5, "crowd": 7.5, "mystery": 8.0, "chime": 2.8,
     }
     fractions = {
         "whoosh": 0.12, "impact": 0.20, "footsteps": 0.36,
@@ -1075,8 +1116,8 @@ def build_part_summary(ordered, cues):
 def build_mix_records(tracks, cues):
     mix = []
     for category, role, gain, target in (
-        ("music", "music", 0.30, 0.16),
-        ("ambient", "ambient", 0.20, 0.13),
+        ("music", "music", 0.38, 0.18),
+        ("ambient", "ambient", 0.16, 0.10),
     ):
         record = tracks.get(category)
         if isinstance(record, dict) and record.get("status") == "completed":
@@ -1419,6 +1460,22 @@ def build_validation_report(fmt, ordered, cues, total_duration, scenes_min, scen
     }
 
 
+def save_track_checkpoint(source_sig, tracks, completed):
+    write_json(CHECKPOINT_PATH, {
+        "status": "in_progress",
+        "version": VERSION,
+        "source_signature": source_sig,
+        "completed_tracks": sorted(completed),
+        "tracks": tracks,
+        "track_hashes": {
+            key: value.get("sha256")
+            for key, value in tracks.items()
+            if isinstance(value, dict) and value.get("sha256")
+        },
+        "updated_at": utc_now(),
+    })
+
+
 def main():
     if not INPUT_FILE.is_file():
         raise RuntimeError("Input/topic.txt is missing.")
@@ -1530,7 +1587,27 @@ def main():
     background_duration = max(30.0, total_duration + 3.0)
 
     tracks = {}
-    if enabled_tracks["music"]:
+    completed_tracks = set()
+    checkpoint = read_json(CHECKPOINT_PATH, required=False, default={})
+    checkpoint_tracks = (
+        checkpoint.get("tracks", {})
+        if isinstance(checkpoint, dict)
+        and checkpoint.get("source_signature") == source_sig
+        and isinstance(checkpoint.get("tracks"), dict)
+        else {}
+    )
+    # A checkpoint track is reused only after the same validators used for
+    # final publication verify its bytes, hash and duration.
+    for key, value in checkpoint_tracks.items():
+        if isinstance(value, dict) and value.get("status") == "completed":
+            try:
+                validate_track(value, key, 0.1)
+                tracks[key] = value
+                completed_tracks.add(key)
+            except Exception:
+                log("CHECKPOINT TRACK INVALID; REGENERATING:", key)
+
+    if enabled_tracks["music"] and "music" not in tracks:
         if FLOW_MANIFEST.is_file():
             flow_result = validate_flow_manifest(ordered)
             if flow_result is None:
@@ -1547,24 +1624,33 @@ def main():
             tracks["music"] = make_fallback_music(
                 background_duration, old_tracks.get("music"), source_sig
             )
-    else:
+    elif not enabled_tracks["music"]:
         tracks["music"] = None
+    if isinstance(tracks.get("music"), dict):
+        completed_tracks.add("music")
+        save_track_checkpoint(source_sig, tracks, completed_tracks)
 
-    if enabled_tracks["ambient"]:
+    if enabled_tracks["ambient"] and "ambient" not in tracks:
         tracks["ambient"] = make_ambient(
             total_duration, scene_records, old_tracks.get("ambient"), source_sig
         )
-    else:
-        # Disabled tracks must be represented as null in the manifest.
+    elif not enabled_tracks["ambient"]:
         tracks["ambient"] = None
+    if isinstance(tracks.get("ambient"), dict):
+        completed_tracks.add("ambient")
+        save_track_checkpoint(source_sig, tracks, completed_tracks)
 
     if enabled_tracks["sfx"]:
         for kind in SFX_TYPES:
             key = f"sfx_{kind}"
+            if key in tracks:
+                continue
             tracks[key] = make_sfx(
                 kind, SFX_DIR / f"{kind}.wav",
                 old_tracks.get(key), source_sig,
             )
+            completed_tracks.add(key)
+            save_track_checkpoint(source_sig, tracks, completed_tracks)
     else:
         for kind in SFX_TYPES:
             tracks[f"sfx_{kind}"] = None
