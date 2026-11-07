@@ -1789,8 +1789,21 @@ def validate_manifest_role_sets(
                 f"part_{part:02d}_scene_{scene:02d}"
             )
 
-    if set(render_by_id) != set(narration_by_id):
-        raise RuntimeError("Role record set validation failed")
+    expected_ids = set()
+    for part in part_numbers:
+        expected_ids.add(f"part_{part:02d}_hook")
+        expected_ids.add(
+            f"part_{part:02d}_" + ("resolution" if part == part_numbers[-1] else "suspense")
+        )
+        for scene in range(1, scene_counts[part] + 1):
+            expected_ids.add(f"part_{part:02d}_scene_{scene:02d}")
+
+    if set(render_by_id) != expected_ids:
+        raise RuntimeError(
+            "Rendered role/scene IDs do not match the selected Part/Scene plan: "
+            f"missing={sorted(expected_ids-set(render_by_id))[:15]}; "
+            f"extra={sorted(set(render_by_id)-expected_ids)[:15]}"
+        )
 
 
 def main():
@@ -1868,6 +1881,16 @@ def main():
         part_numbers,
         scene_counts,
     )
+    if str(caption_data.get("format", "")).lower() != mode:
+        raise RuntimeError("Caption preparation FORMAT differs from Input")
+    if caption_data.get("scenes_range") != [scenes_min, scenes_max]:
+        raise RuntimeError("Caption preparation SCENES range differs from Input")
+    prepared_counts = caption_data.get("actual_scene_counts")
+    if not isinstance(prepared_counts, list) or len(prepared_counts) != len(part_numbers):
+        raise RuntimeError("Caption preparation actual Scene counts are missing")
+    for part, prepared_count in zip(part_numbers, prepared_counts):
+        if int(prepared_count) != scene_counts[part]:
+            raise RuntimeError(f"Part {part}: caption/render actual Scene count mismatch")
 
     family = str(get_caption_font(config)).strip()
 
@@ -2326,7 +2349,8 @@ def main():
         "caption_alignment_scenes": aligned_count,
         "caption_fallback_scenes": fallback_count,
         "caption_font": family,
-        "caption_font_file": relative(font_path),
+        "caption_font_file": str(font_path),
+        "caption_font_requested": requested_family,
         "caption_font_sha256": font_hash,
         "caption_font_size": size,
         "expected_scene_count": expected_main_count,
