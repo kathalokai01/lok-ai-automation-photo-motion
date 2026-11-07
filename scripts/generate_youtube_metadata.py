@@ -38,7 +38,7 @@ OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 CHECKPOINT = ROOT / "output" / "checkpoints" / "youtube_metadata.json"
 
-VERSION = "youtube-metadata-v22-zero-cost-provider-fallback"
+VERSION = "youtube-metadata-v23-strict-story-and-provider-validation"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
@@ -187,10 +187,10 @@ def ordered_parts(story: dict) -> list[dict]:
 
     indexed.sort(key=lambda item: item[0])
     numbers = [number for number, _ in indexed]
-    if numbers and numbers != list(
-        range(numbers[0], numbers[0] + len(numbers))
-    ):
-        raise RuntimeError("Story part numbering is not continuous.")
+    if numbers and numbers != list(range(1, len(numbers) + 1)):
+        raise RuntimeError(
+            "Story part numbering must start at 1 and remain continuous."
+        )
     return [part for _, part in indexed]
 
 
@@ -292,11 +292,12 @@ def validate_story_status(story: dict) -> None:
         for obj in nested_objects(story)
         if obj.get("status")
     ]
-    if statuses and not any(
-        status in {"completed", "complete", "success", "done"}
-        for status in statuses
-    ):
-        raise RuntimeError(f"Story generation is not complete: {statuses}")
+    allowed = {"completed", "complete", "success", "done"}
+    invalid = [status for status in statuses if status not in allowed]
+    if invalid:
+        raise RuntimeError(
+            f"Story generation has incomplete/failed nested status values: {invalid}"
+        )
 
     for obj in nested_objects(story):
         if obj.get("error"):
@@ -355,7 +356,25 @@ def load_gemini_order() -> list[str]:
     if not models:
         raise RuntimeError("Configured Gemini fallback order is empty.")
 
-    return models
+    normalized = []
+    for model in models:
+        value = clean(model)
+        if not re.fullmatch(r"gemini-[A-Za-z0-9._-]+", value, re.IGNORECASE):
+            raise RuntimeError(f"Invalid configured Gemini model: {value!r}.")
+        if value not in normalized:
+            normalized.append(value)
+
+    saved_order = saved.get("fallback_order")
+    if not isinstance(saved_order, list) or not saved_order:
+        raise RuntimeError("Saved Gemini fallback_order is missing.")
+    saved_normalized = [clean(value) for value in saved_order]
+    if saved_normalized != normalized:
+        raise RuntimeError(
+            "Gemini fallback order differs from the saved configured order."
+        )
+    if clean(saved.get("model")) != normalized[0]:
+        raise RuntimeError("Saved Gemini primary model is not first in its order.")
+    return normalized
 
 
 def load_free_provider_order() -> list[dict]:
@@ -383,21 +402,45 @@ def load_free_provider_order() -> list[dict]:
     if not isinstance(records, list) or not isinstance(order, list):
         raise RuntimeError("Selected provider configuration is malformed.")
 
-    by_name = {
-        item.get("provider"): item
-        for item in records
-        if isinstance(item, dict)
-    }
+    supported = {"groq", "openrouter", "cloudflare", "mistral"}
+    by_name = {}
+    for item in records:
+        if not isinstance(item, dict):
+            raise RuntimeError("Provider selector contains a non-object record.")
+        name = clean(item.get("provider")).lower()
+        if name not in supported:
+            raise RuntimeError(f"Unsupported provider in selector: {name!r}.")
+        if name in by_name:
+            raise RuntimeError(f"Duplicate provider selector record: {name}.")
+        by_name[name] = item
 
     result = []
-    for provider in order:
+    seen = set()
+    for raw_provider in order:
+        provider = clean(raw_provider).lower()
+        if provider not in supported:
+            raise RuntimeError(
+                f"Unsupported provider in configured order: {provider!r}."
+            )
+        if provider in seen:
+            raise RuntimeError(
+                f"Duplicate provider in configured order: {provider}."
+            )
+        seen.add(provider)
         item = by_name.get(provider)
         if not isinstance(item, dict) or item.get("ready") is not True:
             continue
         model = clean(item.get("model"))
-        if not model:
-            continue
+        if not model or len(model) > 200 or any(ch.isspace() for ch in model):
+            raise RuntimeError(f"Invalid configured model for {provider}.")
+        if provider == "openrouter" and not model.endswith(":free"):
+            raise RuntimeError("Only OpenRouter :free models are allowed.")
+        if provider == "cloudflare" and not model.startswith("@cf/"):
+            raise RuntimeError("Cloudflare model must use the @cf/ namespace.")
         result.append({"provider": provider, "model": model})
+
+    if data.get("status") == "ready" and not result:
+        log("Selector marked ready but no provider in its configured order is ready.")
     return result
 
 
@@ -415,6 +458,10 @@ def prepare_story(
         raise RuntimeError(
             f"Story format mismatch: input={mode}, story={story_mode}."
         )
+    if mode == "short" and story.get("format") == "full":
+        raise RuntimeError("FULL story cannot produce SHORT metadata.")
+    if mode == "full" and story.get("format") == "short":
+        raise RuntimeError("SHORT story cannot produce FULL metadata.")
 
     story_text, source = extract_complete_story(story)
     parts = ordered_parts(story)
@@ -504,6 +551,8 @@ def normalize_tags(raw: Any) -> list[str]:
         raise RuntimeError(
             f"Only {len(tags)} unique tags; minimum is {MIN_TAGS}."
         )
+    if any(len(tag) > MAX_TAG_LENGTH for tag in tags):
+        raise RuntimeError("A metadata tag exceeds the character limit.")
     return tags
 
 
@@ -517,13 +566,24 @@ def validate_metadata(
 ) -> dict:
     if not isinstance(data, dict):
         raise RuntimeError("Metadata response is not a JSON object.")
+    if mode not in {"short", "full"}:
+        raise RuntimeError(f"Invalid metadata format: {mode!r}.")
+    if not clean(topic):
+        raise RuntimeError("Metadata topic cannot be empty.")
+    if not clean(model):
+        raise RuntimeError("Metadata model cannot be empty.")
+    if not re.fullmatch(r"[a-f0-9]{64}", clean(fingerprint)):
+        raise RuntimeError("Metadata input fingerprint is invalid.")
+    provider = clean(provider).lower()
+    if provider not in {"gemini", "groq", "openrouter", "cloudflare", "mistral"}:
+        raise RuntimeError(f"Unsupported metadata provider: {provider!r}.")
     return {
         "status": "completed",
         "version": VERSION,
         "format": mode,
-        "topic": topic,
+        "topic": clean(topic),
         "provider": provider,
-        "model": model,
+        "model": clean(model),
         "title": normalize_title(data.get("title")),
         "description": normalize_description(data.get("description")),
         "tags": normalize_tags(data.get("tags")),
@@ -637,21 +697,40 @@ JSON:
 
 
 def parse_metadata_json(response: str) -> dict:
+    if not isinstance(response, str) or not response.strip():
+        raise RuntimeError("Model response is empty or not text.")
+    if len(response) > 100_000:
+        raise RuntimeError("Model metadata response exceeds 100 KB.")
     response = response.strip()
     response = re.sub(
         r"^\s*```(?:json)?\s*", "", response, flags=re.IGNORECASE
     )
     response = re.sub(r"\s*```\s*$", "", response)
 
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise RuntimeError(f"Duplicate metadata JSON key: {key!r}.")
+            result[key] = value
+        return result
+
+    def reject_nonfinite(value):
+        raise RuntimeError(f"Invalid non-finite JSON number: {value}.")
+
+    options = {
+        "object_pairs_hook": reject_duplicate_keys,
+        "parse_constant": reject_nonfinite,
+    }
     try:
-        data = json.loads(response)
+        data = json.loads(response, **options)
     except json.JSONDecodeError:
         start = response.find("{")
         end = response.rfind("}")
         if start < 0 or end <= start:
             raise RuntimeError("Model response is not valid JSON.")
         try:
-            data = json.loads(response[start:end + 1])
+            data = json.loads(response[start:end + 1], **options)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
                 f"Metadata JSON parsing failed: {exc}"
@@ -659,6 +738,11 @@ def parse_metadata_json(response: str) -> dict:
 
     if not isinstance(data, dict):
         raise RuntimeError("Metadata response must be a JSON object.")
+    allowed = {"title", "description", "tags"}
+    if set(data) != allowed:
+        raise RuntimeError(
+            "Metadata JSON must contain exactly title, description and tags."
+        )
     return data
 
 
