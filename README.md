@@ -99,7 +99,7 @@ GitHub repository में **Actions → Generate Katha Lok AI Photo Motion Vid
 - Package report: `output/package_manifest.json`
 - ZIP filename: `output/package_archive_name.txt` में दर्ज story-specific नाम
 
-ZIP के अंदर story-slug और mode वाला root folder होता है. इसमें सभी Part MP4, सभी rendered Scene के source images और narration audio, depth maps, sound-design/SFX audio assets, captions, thumbnail, metadata और जरूरी story/visual/audio project manifests शामिल होते हैं. Duplicate, unreferenced media, temporary files और combined/opposite-format videos package में स्वीकार नहीं होते.
+ZIP के अंदर story-slug और mode वाला root folder होता है. इसमें सभी Part MP4, सभी rendered Scene के source images और narration audio, depth maps, sound-design/SFX audio assets, चुना हुआ Hindi caption font और उसका OFL license, captions, thumbnail, metadata और जरूरी story/visual/audio project manifests शामिल होते हैं. Duplicate, unreferenced media, temporary files और combined/opposite-format videos package में स्वीकार नहीं होते.
 
 ## Reuse और provider policy
 
