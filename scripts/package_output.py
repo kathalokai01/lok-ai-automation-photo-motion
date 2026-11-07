@@ -48,6 +48,7 @@ SFX_VALIDATION = OUT / "sound_design" / "sfx_timing_validation.json"
 CAPTIONS_JSON = OUT / "captions" / "captions.json"
 FINAL_SRT = OUT / "captions" / "final_captions.srt"
 SFX_CUES = OUT / "sound_design" / "sfx_cues.json"
+FLOW_MANIFEST = OUT / "music" / "flow_music_manifest.json"
 THUMBNAIL = OUT / "thumbnail.jpg"
 THUMBNAIL_MANIFEST = OUT / "thumbnail" / "thumbnail_manifest.json"
 METADATA_TEXT = OUT / "youtube_metadata.txt"
@@ -81,6 +82,7 @@ PROJECT_FILES = (
     STORY_VERIFICATION,
     OUT / "story" / "story_plan.json",
     OUT / "story" / "character_bible.json",
+    FLOW_MANIFEST,
     OUT / "fonts" / "font_manifest.json",
     OUT / "fonts" / "selected_hindi_caption_font.ttf",
     OUT / "fonts" / "OFL-1.1.txt",
@@ -1086,6 +1088,7 @@ def selected_package_files(render: dict) -> list[Path]:
 
     scene_image_paths = set()
     scene_audio_paths = set()
+    flow_audio_paths = set()
     for sid in sorted(expected_scene_ids):
         photo_row = photo_by_id[sid]
         audio_row = audio_by_id[sid]
@@ -1177,6 +1180,64 @@ def selected_package_files(render: dict) -> list[Path]:
     selected.update(scene_image_paths)
     selected.update(scene_audio_paths)
 
+    flow_data = read_json(FLOW_MANIFEST)
+    flow_status = clean(flow_data.get("status")).lower()
+    if flow_status not in {"completed", "disabled", "unavailable"}:
+        fail(f"Flow Music manifest has invalid status: {flow_status!r}")
+
+    flow_segments = flow_data.get("role_segments") or []
+    if not isinstance(flow_segments, list):
+        fail("Flow Music role-segment inventory is invalid")
+    segment_ids = []
+    for index, row in enumerate(flow_segments, 1):
+        if not isinstance(row, dict):
+            fail(f"Invalid Flow Music segment record {index}")
+        sid = clean(row.get("scene_id"))
+        if sid:
+            segment_ids.append(sid)
+        value = row.get("path") or row.get("audio_path") or row.get("file")
+        if not value:
+            if flow_status == "completed":
+                fail(f"Flow Music segment path is missing: {sid}")
+            continue
+        segment_path = safe_output(value, f"Flow Music segment {sid or index}", 100)
+        declared = clean(row.get("sha256")).lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", declared) or declared != sha256_file(segment_path):
+            fail(f"Flow Music segment SHA-256 mismatch: {sid or index}")
+        if segment_path.suffix.lower() not in AUDIO_SUFFIXES:
+            fail(f"Flow Music segment is not an audio file: {sid or index}")
+        try:
+            duration = float(row.get("duration_seconds"))
+        except (TypeError, ValueError):
+            fail(f"Flow Music segment duration is invalid: {sid or index}")
+        if not math.isfinite(duration) or duration <= 0 or abs(probe_audio_duration(segment_path) - duration) > 0.65:
+            fail(f"Flow Music segment duration mismatch: {sid or index}")
+        flow_audio_paths.add(segment_path.resolve())
+
+    if flow_status == "completed":
+        if len(segment_ids) != len(expected_scene_ids) or set(segment_ids) != expected_scene_ids or len(segment_ids) != len(set(segment_ids)):
+            fail("Completed Flow Music segments do not match every scene exactly once")
+
+    compositions = flow_data.get("role_compositions") or {}
+    if not isinstance(compositions, dict):
+        fail("Flow Music role-composition inventory is invalid")
+    for role, row in compositions.items():
+        if not isinstance(row, dict):
+            fail(f"Invalid Flow Music composition record: {role}")
+        for path_key, hash_key in (("path", "sha256"), ("source_path", "source_sha256")):
+            value = row.get(path_key)
+            if not value:
+                continue
+            composition_path = safe_output(value, f"Flow Music {role} {path_key}", 100)
+            declared = clean(row.get(hash_key)).lower()
+            if not re.fullmatch(r"[a-f0-9]{64}", declared) or declared != sha256_file(composition_path):
+                fail(f"Flow Music composition SHA-256 mismatch: {role} {path_key}")
+            if composition_path.suffix.lower() not in AUDIO_SUFFIXES:
+                fail(f"Flow Music composition is not audio: {role} {path_key}")
+            flow_audio_paths.add(composition_path.resolve())
+
+    selected.update(flow_audio_paths)
+
     depth_data = read_json(OUT / "visuals" / "depth_maps" / "depth_manifest.json")
     depth_rows = depth_data.get("scenes")
     if not isinstance(depth_rows, list) or len(depth_rows) != len(expected_scene_ids):
@@ -1242,7 +1303,7 @@ def selected_package_files(render: dict) -> list[Path]:
             item.resolve() for item in render["part_paths"]
         }:
             fail(f"Non-Part video is forbidden in package: {path}")
-        allowed_audio = set(scene_audio_paths)
+        allowed_audio = set(scene_audio_paths) | set(flow_audio_paths)
         allowed_audio.update(
             safe_output(
                 row.get("path") or row.get("audio_path") or row.get("audio") or row.get("output") or row.get("file"),
