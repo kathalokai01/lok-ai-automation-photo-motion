@@ -99,6 +99,7 @@ PYTHON_MODULES = (
     "requests", "PIL", "cv2", "numpy", "imageio",
     "imageio_ffmpeg", "gradio_client", "huggingface_hub",
     "edge_tts", "transformers", "safetensors", "accelerate",
+    "librosa", "sentencepiece", "soundfile",
 )
 
 RUNTIME_COMMANDS = ("ffmpeg", "ffprobe", "fc-match", "zip", "unzip")
