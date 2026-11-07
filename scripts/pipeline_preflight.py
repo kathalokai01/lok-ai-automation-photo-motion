@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v66-repository-workflow-dependency-delivery-audit"
+VERSION = "photo-motion-preflight-v67-flow-music-and-complete-asset-audit"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -138,18 +138,18 @@ NONFINAL = {
 ROW_KEYS = (
     "jobs", "visual_jobs", "photo_motion_jobs", "scenes", "items",
     "images", "depth_maps", "audio_jobs", "records", "parts",
-    "tracks", "cues", "captions", "thumbnails",
+    "tracks", "cues", "captions", "thumbnails", "role_segments", "role_compositions",
 )
 
 PATH_KEYS = (
     "path", "file", "output", "output_path", "image", "image_path",
     "audio", "audio_path", "video", "video_path", "depth_path",
-    "depth_map", "rendered_video",
+    "depth_map", "rendered_video", "source_path",
 )
 
 HASH_KEYS = (
     "sha256", "image_sha256", "audio_sha256", "video_sha256",
-    "depth_sha256", "file_sha256",
+    "depth_sha256", "file_sha256", "source_sha256",
 )
 
 ARTIFACT_MANIFESTS = (
@@ -158,6 +158,7 @@ ARTIFACT_MANIFESTS = (
     ("story_length", OUT / "story" / "story_length_validation.json"),
     ("narration_jobs", OUT / "narration" / "narration.json"),
     ("narration_audio", OUT / "narration" / "audio_jobs.json"),
+    ("flow_music", OUT / "music" / "flow_music_manifest.json"),
     ("visual_jobs", OUT / "visuals" / "visual_jobs.json"),
     ("photo_motion_jobs", OUT / "visuals" / "photo_motion_jobs.json"),
     ("image_manifest", OUT / "visuals" / "image_manifest.json"),
