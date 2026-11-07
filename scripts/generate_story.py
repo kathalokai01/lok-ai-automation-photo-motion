@@ -50,7 +50,7 @@ TITLE_FILE = STORY_DIR / "final_title.txt"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v32-runtime-interface-fixes"
+VERSION = "story-builder-v33-zero-cost-and-story-integrity"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -584,32 +584,64 @@ def get_selected_model() -> str:
 
 
 def get_configured_model_order() -> list[str]:
-    data = read_json(MODEL_FILE) or {}
-
-    # Resolve the complete priority order from the selector. This also
-    # repairs older selected_model.json files without fallback_order.
-    ordered = configured_fallbacks(data)
-
-    selected = clean(data.get("model"))
-
-    if selected in ordered:
-        ordered = ordered[ordered.index(selected):]
-    elif selected and re.fullmatch(r"[A-Za-z0-9._-]+", selected):
-        ordered.insert(0, selected)
-
-    if not ordered:
+    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
+        "1", "true", "yes", "on", "enabled",
+    }:
         raise RuntimeError(
-            "No configured Gemini model or fallback is available."
+            "LLM_ZERO_COST_ONLY=true is required; paid LLM generation is blocked."
         )
 
-    return ordered
+    if os.environ.get("GEMINI_FREE_TIER_CONFIRMED", "").strip().lower() not in {
+        "1", "true", "yes", "on", "enabled",
+    }:
+        log("Gemini skipped: GEMINI_FREE_TIER_CONFIRMED is not true.")
+        return []
+
+    data = read_json(MODEL_FILE)
+    if not isinstance(data, dict) or data.get("status") != "selected":
+        raise RuntimeError("Configured Gemini selector output is missing or invalid.")
+
+    ordered = configured_fallbacks(data)
+    if not ordered:
+        raise RuntimeError("No configured Gemini model or fallback is available.")
+
+    normalized = []
+    for value in ordered:
+        candidate = clean(value)
+        if not re.fullmatch(r"gemini-[A-Za-z0-9._-]+", candidate, re.IGNORECASE):
+            raise RuntimeError(f"Invalid configured Gemini model: {candidate!r}.")
+        if candidate in normalized:
+            raise RuntimeError(f"Duplicate Gemini model in fallback order: {candidate}.")
+        normalized.append(candidate)
+
+    saved_order = data.get("fallback_order")
+    if not isinstance(saved_order, list) or [
+        clean(item) for item in saved_order
+    ] != normalized:
+        raise RuntimeError("Saved Gemini fallback order does not match selector priority.")
+
+    if clean(data.get("model")) != normalized[0]:
+        raise RuntimeError("Saved Gemini primary model is not first in configured order.")
+
+    return normalized
 
 
 def save_selected_model(model: str, reason: str = "") -> None:
-    data = read_json(MODEL_FILE) or {}
-    data["model"] = model
+    data = read_json(MODEL_FILE)
+    if not isinstance(data, dict) or data.get("status") != "selected":
+        raise RuntimeError("Cannot save runtime Gemini result without selector state.")
+
+    configured_order = data.get("fallback_order")
+    if not isinstance(configured_order, list) or model not in configured_order:
+        raise RuntimeError(
+            "Runtime Gemini model is not present in the configured fallback order."
+        )
+
+    # Preserve the selector's configured primary and fallback sequence.
+    # Runtime success is recorded separately and never changes model priority.
     data["runtime_fallback"] = {
-        "status": "selected",
+        "status": "succeeded",
+        "model": model,
         "reason": reason,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -723,10 +755,21 @@ def call_model(
         },
     }
     failures = []
-    configured_models = get_configured_model_order()
+    zero_cost_only = os.environ.get(
+        "LLM_ZERO_COST_ONLY", ""
+    ).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    if not zero_cost_only:
+        raise RuntimeError(
+            "LLM_ZERO_COST_ONLY=true is required; refusing any paid LLM request."
+        )
+
+    gemini_confirmed = os.environ.get(
+        "GEMINI_FREE_TIER_CONFIRMED", ""
+    ).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    configured_models = get_configured_model_order() if gemini_confirmed else []
     retryable_http = {408, 429, 500, 502, 503, 504}
 
-    if api_key:
+    if api_key and gemini_confirmed and configured_models:
         for model_index, candidate_model in enumerate(configured_models):
             url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -818,6 +861,10 @@ def call_model(
                 f"Gemini model failed: {candidate_model}; "
                 "trying next configured model."
             )
+    elif not gemini_confirmed:
+        failures.append(
+            "Gemini skipped because GEMINI_FREE_TIER_CONFIRMED is not true."
+        )
     else:
         failures.append("Gemini API key is absent; no Gemini request was made.")
 
@@ -967,6 +1014,10 @@ def generate_complete_story(
         raise RuntimeError(
             "Model did not return a complete usable story."
         )
+    if source_text and clean(complete) == clean(source_text):
+        log("Full story proofreading returned unchanged text; source is retained.")
+    if not isinstance(result.get("title", ""), str):
+        raise RuntimeError("Generated story title must be text.")
 
     source_verification = None
 
@@ -1070,6 +1121,9 @@ REVISED PART:
         api_key,
         max_tokens=3500,
     )
+
+    if not isinstance(result, dict):
+        raise RuntimeError("Story-preservation verifier returned a non-object response.")
 
     keys = (
         "all_events_preserved",
