@@ -53,7 +53,7 @@ METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v100-dynamic-scenes-role-aware"
+VERSION = "output-packager-v101-story-project-scene-assets-complete"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
@@ -74,10 +74,25 @@ REQUIRED_CHECKS = (
     "render", "captions", "thumbnail", "metadata",
     "unique_output_files", "mode_separation",
 )
+STORY_VERIFICATION = OUT / "story" / "story_verification.json"
+PROJECT_FILES = (
+    OUT / "story" / "story.json",
+    STORY_VERIFICATION,
+    OUT / "story" / "story_plan.json",
+    OUT / "story" / "character_bible.json",
+    OUT / "scenes" / "scenes.json",
+    OUT / "narration" / "narration.json",
+    OUT / "visuals" / "visual_jobs.json",
+    OUT / "visuals" / "visual_jobs_manifest.json",
+    OUT / "visuals" / "image_manifest.json",
+    OUT / "visuals" / "image_generation_manifest.json",
+    OUT / "visuals" / "photo_motion_jobs.json",
+    OUT / "visuals" / "depth_maps" / "depth_manifest.json",
+)
 REQUIRED_FILES = (
     VALIDATION, RENDER, PHOTO, AUDIO, SOUND, SFX_VALIDATION,
     CAPTIONS_JSON, FINAL_SRT, THUMBNAIL, THUMBNAIL_MANIFEST,
-    METADATA_TEXT, METADATA_JSON, TAGS,
+    METADATA_TEXT, METADATA_JSON, TAGS, *PROJECT_FILES,
 )
 SUCCESS = {"completed", "complete", "success", "done", "reused", "valid"}
 ROLE_ALIASES = {
@@ -990,6 +1005,99 @@ def selected_package_files(render: dict) -> list[Path]:
     selected = {path.resolve() for path in REQUIRED_FILES}
     selected.update(path.resolve() for path in render["part_paths"])
 
+    photo_data = read_json(PHOTO)
+    photo_rows = photo_data.get("scenes")
+    if not isinstance(photo_rows, list) or not photo_rows:
+        fail("Photo Motion manifest has no scene asset references")
+
+    audio_data = read_json(AUDIO)
+    audio_rows = (
+        audio_data.get("jobs")
+        or audio_data.get("audio_jobs")
+        or audio_data.get("scenes")
+    )
+    if not isinstance(audio_rows, list) or not audio_rows:
+        fail("Narration manifest has no scene audio references")
+
+    expected_scene_ids = {
+        clean(row.get("scene_id"))
+        for row in render["scene_rows"]
+        if isinstance(row, dict)
+    }
+    photo_by_id = {}
+    for row in photo_rows:
+        if not isinstance(row, dict):
+            fail("Invalid Photo Motion asset record")
+        sid = clean(row.get("scene_id"))
+        if not sid or sid in photo_by_id:
+            fail(f"Missing or duplicate Photo Motion scene ID: {sid}")
+        photo_by_id[sid] = row
+    audio_by_id = {}
+    for row in audio_rows:
+        if not isinstance(row, dict):
+            fail("Invalid narration audio asset record")
+        sid = clean(row.get("scene_id"))
+        if not sid or sid in audio_by_id:
+            fail(f"Missing or duplicate narration audio scene ID: {sid}")
+        audio_by_id[sid] = row
+    if set(photo_by_id) != expected_scene_ids or set(audio_by_id) != expected_scene_ids:
+        fail("Scene image/audio manifests do not match the complete rendered scene-role set")
+
+    scene_image_paths = set()
+    scene_audio_paths = set()
+    for sid in sorted(expected_scene_ids):
+        photo_row = photo_by_id[sid]
+        audio_row = audio_by_id[sid]
+        image_value = (
+            photo_row.get("image_path")
+            or photo_row.get("image")
+            or photo_row.get("output_path")
+        )
+        audio_value = (
+            audio_row.get("audio_path")
+            or audio_row.get("audio_file")
+            or audio_row.get("audio")
+            or audio_row.get("output")
+        )
+        image_path = safe_output(image_value, f"Scene image {sid}", MIN_IMAGE_BYTES)
+        audio_path = safe_output(audio_value, f"Scene narration audio {sid}", 100)
+        if image_path.suffix.lower() not in IMAGE_SUFFIXES:
+            fail(f"Scene image is not a supported image file: {sid}")
+        if audio_path.suffix.lower() not in AUDIO_SUFFIXES:
+            fail(f"Scene narration is not a supported audio file: {sid}")
+        scene_image_paths.add(image_path.resolve())
+        scene_audio_paths.add(audio_path.resolve())
+
+    selected.update(scene_image_paths)
+    selected.update(scene_audio_paths)
+
+    sound_data = read_json(SOUND)
+    tracks = sound_data.get("tracks", {})
+    track_rows = list(tracks.values()) if isinstance(tracks, dict) else tracks if isinstance(tracks, list) else []
+    for index, row in enumerate(track_rows, 1):
+        if not isinstance(row, dict):
+            fail(f"Invalid sound track record {index}")
+        value = row.get("path") or row.get("audio_path") or row.get("audio") or row.get("output") or row.get("file")
+        if value:
+            track_path = safe_output(value, f"Sound-design track {index}", 100)
+            if track_path.suffix.lower() not in AUDIO_SUFFIXES:
+                fail(f"Unsupported sound-design track type: {track_path}")
+            selected.add(track_path.resolve())
+
+    sfx_data = read_json(OUT / "sound_design" / "sfx_cues.json")
+    cue_rows = sfx_data.get("cues") or sfx_data.get("sfx_cues") or sfx_data.get("jobs") or []
+    if not isinstance(cue_rows, list):
+        fail("SFX cue manifest rows are invalid")
+    for index, row in enumerate(cue_rows, 1):
+        if not isinstance(row, dict):
+            fail(f"Invalid SFX cue record {index}")
+        value = row.get("path") or row.get("audio_path") or row.get("audio") or row.get("file") or row.get("output")
+        if value:
+            cue_path = safe_output(value, f"SFX cue audio {index}", 100)
+            if cue_path.suffix.lower() not in AUDIO_SUFFIXES:
+                fail(f"Unsupported SFX cue audio type: {cue_path}")
+            selected.add(cue_path.resolve())
+
     for path in selected:
         if not path.is_file():
             fail(f"Required package file is missing: {path}")
@@ -1005,10 +1113,34 @@ def selected_package_files(render: dict) -> list[Path]:
             item.resolve() for item in render["part_paths"]
         }:
             fail(f"Non-Part video is forbidden in package: {path}")
-        if suffix in IMAGE_SUFFIXES and path != THUMBNAIL.resolve():
-            fail(f"Unrequested image is forbidden in package: {path}")
-        if suffix in AUDIO_SUFFIXES:
-            fail(f"Unrequested audio file is forbidden in package: {path}")
+        if suffix in IMAGE_SUFFIXES and path not in scene_image_paths and path != THUMBNAIL.resolve():
+            fail(f"Unreferenced image is forbidden in package: {path}")
+        if suffix in AUDIO_SUFFIXES and path not in scene_audio_paths and path not in {
+            item.resolve()
+            for item in (
+                safe_output(
+                    row.get("path") or row.get("audio_path") or row.get("audio") or row.get("output") or row.get("file"),
+                    "Sound-design track",
+                    100,
+                )
+                for row in track_rows
+                if isinstance(row, dict)
+                and (row.get("path") or row.get("audio_path") or row.get("audio") or row.get("output") or row.get("file"))
+            )
+        } and path not in {
+            item.resolve()
+            for item in (
+                safe_output(
+                    row.get("path") or row.get("audio_path") or row.get("audio") or row.get("file") or row.get("output"),
+                    "SFX cue audio",
+                    100,
+                )
+                for row in cue_rows
+                if isinstance(row, dict)
+                and (row.get("path") or row.get("audio_path") or row.get("audio") or row.get("file") or row.get("output"))
+            )
+        }:
+            fail(f"Unreferenced audio file is forbidden in package: {path}")
         if suffix == ".zip":
             fail(f"Nested ZIP is forbidden: {path}")
         if path.name.endswith(".tmp") or suffix in TEMP_SUFFIXES:
