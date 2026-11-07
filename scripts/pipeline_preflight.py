@@ -2332,7 +2332,7 @@ def check_workflow_structure(source: str) -> list[dict]:
         ),
         "checkout_action": r"(?m)^\s{8}uses:\s*actions/checkout@v4\s*$",
         "python_setup_action": r"(?m)^\s{8}uses:\s*actions/setup-python@v5\s*$",
-        "cpu_torch_install": r"(?s)python -m pip install torch\s+--index-url https://download\.pytorch\.org/whl/cpu",
+        "cpu_torch_install": r"(?s)python -m pip install torch\s*\\\s*--index-url https://download\.pytorch\.org/whl/cpu",
         "pip_dependency_check": r"(?m)^\s*python -m pip check\s*$",
         "caption_font_manifest": r"(?m)^\s*test -s output/fonts/font_manifest\.json\s*$",
         "artifact_upload_action": r"(?m)^\s{8}uses:\s*actions/upload-artifact@v4\s*$",
