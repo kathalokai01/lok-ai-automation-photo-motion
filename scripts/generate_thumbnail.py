@@ -33,8 +33,8 @@ from input_config import (
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 
 STORY_FILES = (
-    ROOT / "output" / "story" / "ai_story.json",
     ROOT / "output" / "story" / "story.json",
+    ROOT / "output" / "story" / "ai_story.json",
 )
 
 VISUAL_MANIFESTS = (
@@ -674,6 +674,17 @@ def load_visual_candidates(
             log("Skipping image with SHA256 mismatch:", path)
             continue
 
+        manifest_relative = clean(row.get("_manifest"))
+        source_manifest_path = (ROOT / manifest_relative).resolve()
+        try:
+            source_manifest_path.relative_to(ROOT.resolve())
+        except ValueError:
+            log("Skipping visual row with unsafe manifest path:", manifest_relative)
+            continue
+        if not source_manifest_path.is_file():
+            log("Skipping visual row with missing source manifest:", manifest_relative)
+            continue
+
         candidates.append({
             "path": path,
             "part": part,
@@ -681,9 +692,9 @@ def load_visual_candidates(
             "scene": row_scene(row, len(candidates) + 1),
             "role": role_name(row),
             "row": row,
-            "manifest": row.get("_manifest", ""),
+            "manifest": manifest_relative,
             "sha256": actual_hash,
-            "source_manifest_sha256": sha256_file(manifest_path),
+            "source_manifest_sha256": sha256_file(source_manifest_path),
         })
 
     if not candidates:
