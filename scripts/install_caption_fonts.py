@@ -450,11 +450,52 @@ def main():
             + json.dumps(failures, ensure_ascii=False)
         )
 
+    source_font_path = Path(selected["path"]).resolve()
+    if not source_font_path.is_file():
+        raise RuntimeError("Selected Hindi font source file disappeared.")
+
+    PROJECT_FONT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary_font = PROJECT_FONT_FILE.with_suffix(".ttf.tmp")
+    try:
+        shutil.copy2(source_font_path, temporary_font)
+        temporary_record = verify_font_file(
+            temporary_font,
+            selected["family"],
+        )
+        os.replace(temporary_font, PROJECT_FONT_FILE)
+    finally:
+        temporary_font.unlink(missing_ok=True)
+
+    copied_record = verify_font_file(
+        PROJECT_FONT_FILE,
+        selected["family"],
+    )
+    if copied_record["sha256"] != selected["sha256"]:
+        raise RuntimeError("Packaged caption font differs from selected source.")
+
+    copyright_notice = FONT_COPYRIGHTS.get(selected["family"])
+    if not copyright_notice:
+        raise RuntimeError("No font copyright notice is registered for selected family.")
+
+    atomic_text(
+        PROJECT_LICENSE_FILE,
+        copyright_notice + "\n\n" + OFL_LICENSE_BODY,
+    )
+
+    selected["source_path"] = str(source_font_path)
+    selected["path"] = PROJECT_FONT_FILE.relative_to(ROOT).as_posix()
+    selected["sha256"] = copied_record["sha256"]
+    selected["bytes"] = copied_record["bytes"]
+    selected["project_license"] = PROJECT_LICENSE_FILE.relative_to(ROOT).as_posix()
+    selected["verification"] = "project-copy-family-and-sha256-verified"
+
     manifest_data = {
         "status": "completed",
         "version": VERSION,
         "font_directory": str(FONT_DIR),
         "project_manifest": PROJECT_MANIFEST.relative_to(ROOT).as_posix(),
+        "project_font_file": PROJECT_FONT_FILE.relative_to(ROOT).as_posix(),
+        "project_license_file": PROJECT_LICENSE_FILE.relative_to(ROOT).as_posix(),
         "fallback_order": list(fallback_order),
         "fonts": records,
         "selected_hindi_font": selected,
@@ -462,21 +503,29 @@ def main():
         "external_api_calls": 0,
         "paid_services_used": False,
         "note": (
-            "Font files are accepted only after file-signature, family, "
-            "SHA-256 and fontconfig verification. The selected fallback "
-            "family and its absolute file path are recorded."
+            "Selected font is copied into output/fonts with its OFL 1.1 "
+            "copyright and license. Source and packaged font hashes are "
+            "verified; the selected fallback family is recorded."
         ),
     }
     atomic_json(MANIFEST, manifest_data)
     atomic_json(PROJECT_MANIFEST, manifest_data)
 
-    if not PROJECT_MANIFEST.is_file() or PROJECT_MANIFEST.stat().st_size <= 0:
-        raise RuntimeError("Project caption-font manifest was not written.")
+    if (
+        not PROJECT_MANIFEST.is_file()
+        or PROJECT_MANIFEST.stat().st_size <= 0
+        or not PROJECT_FONT_FILE.is_file()
+        or PROJECT_FONT_FILE.stat().st_size <= MIN_BYTES
+        or not PROJECT_LICENSE_FILE.is_file()
+    ):
+        raise RuntimeError("Project caption-font files or manifest were not written.")
 
     log("CAPTION FONT INSTALLATION COMPLETE")
     log("Verified project font records:", len(records))
     log("Selected Hindi font:", selected["family"])
     log("Selected font path:", selected["path"])
+    log("Font SHA256:", selected["sha256"])
+    log("Font license:", PROJECT_LICENSE_FILE)
     log("Cache manifest:", MANIFEST)
     log("Project manifest:", PROJECT_MANIFEST)
     log("External API calls: 0")
