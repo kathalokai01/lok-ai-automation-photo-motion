@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v64-retryable-narration-audio"
+VERSION = "photo-motion-preflight-v65-caption-font-fallback-manifest-and-requirements"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -270,31 +270,79 @@ def check_runtime_command(command: str) -> tuple[bool, str]:
     return bool(executable), executable or f"{command} missing from PATH."
 
 
-def check_font(family: str) -> tuple[bool, str]:
-    executable = shutil.which("fc-match")
-    if not executable:
-        return False, "fc-match is not installed."
+def check_font() -> tuple[bool, str]:
+    manifest_paths = (
+        OUT / "fonts" / "font_manifest.json",
+        Path.home() / ".local" / "share" / "fonts" / "katha-caption" / "font_install_manifest.json",
+    )
+    manifest = None
+    for manifest_path in manifest_paths:
+        try:
+            candidate = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict) and candidate.get("status") == "completed":
+                manifest = candidate
+                break
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
 
-    try:
-        result = subprocess.run(
-            [executable, "-f", "%{file}\n", family],
+    if isinstance(manifest, dict):
+        selected = manifest.get("selected_hindi_font")
+        if not isinstance(selected, dict):
+            return False, "Font manifest has no selected_hindi_font record."
+        family = str(selected.get("family") or "").strip()
+        path_value = str(selected.get("path") or "").strip()
+        declared_hash = str(selected.get("sha256") or "").strip().lower()
+        if family not in FONT_FAMILIES:
+            return False, f"Selected font family is outside the verified fallback list: {family!r}."
+        if not path_value:
+            return False, "Selected font manifest path is missing."
+        path = Path(path_value)
+        if not path.is_file() or path.is_symlink():
+            return False, f"Selected font file is missing or unsafe: {path}."
+        if not re.fullmatch(r"[a-f0-9]{64}", declared_hash):
+            return False, "Selected font SHA-256 is missing or invalid."
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != declared_hash:
+            return False, "Selected font file SHA-256 differs from its manifest."
+        scanner = shutil.which("fc-scan")
+        if not scanner:
+            return False, "fc-scan is not installed."
+        scanned = subprocess.run(
+            [scanner, "--format", "%{family}", str(path)],
             capture_output=True,
             text=True,
             timeout=15,
             check=False,
         )
+        if scanned.returncode:
+            return False, "fc-scan could not verify the selected font family."
+        actual = [item.strip().casefold() for item in scanned.stdout.split(",") if item.strip()]
+        if not any(item == family.casefold() or item.startswith(family.casefold() + " ") for item in actual):
+            return False, f"Font family mismatch: expected {family}, got {scanned.stdout!r}."
+        fallback_note = "primary font" if family == FONT_FAMILIES[0] else f"verified fallback for {FONT_FAMILIES[0]}"
+        return True, f"{family} verified at {path} ({fallback_note}; SHA-256 matched)."
 
-        if result.returncode:
-            return False, result.stderr.strip() or "Font lookup failed."
-
-        resolved = result.stdout.strip().splitlines()
-        if not resolved or not Path(resolved[0]).is_file():
-            return False, f"No installed font file found for {family}."
-
-        return True, resolved[0]
-
-    except Exception as exc:
-        return False, f"{type(exc).__name__}: {exc}"
+    executable = shutil.which("fc-match")
+    scanner = shutil.which("fc-scan")
+    if not executable or not scanner:
+        return False, "Font manifest is missing and fontconfig tools are unavailable."
+    for family in FONT_FAMILIES:
+        result = subprocess.run(
+            [executable, "-f", "%{family}|%{file}", family],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode or "|" not in result.stdout:
+            continue
+        actual_family, raw_path = result.stdout.strip().split("|", 1)
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        if actual_family.strip().casefold() == family.casefold():
+            return True, f"{family} verified by fontconfig at {path}; installer manifest is absent."
+    return False, "No exact Devanagari font family is installed and no verified fallback manifest exists."
 
 
 
@@ -2181,9 +2229,8 @@ def check_local_dependencies(config: dict) -> list[dict]:
         passed, detail = check_runtime_command(command)
         add("runtime_command:" + command, passed, detail)
 
-    for family in FONT_FAMILIES:
-        passed, detail = check_font(family)
-        add("caption_font_installed:" + family, passed, detail)
+    passed, detail = check_font()
+    add("caption_font_installed_and_fallback_verified", passed, detail)
 
     mandatory_modules = ("cv2", "numpy", "PIL")
     mandatory_available = all(
