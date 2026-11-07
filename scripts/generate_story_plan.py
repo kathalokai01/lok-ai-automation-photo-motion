@@ -764,9 +764,19 @@ def validate_plan(
         raise RuntimeError("Story Plan Main Scene order is invalid.")
 
     if isinstance(scenes_range, (tuple, list)):
+        if len(scenes_range) != 2 or any(
+            isinstance(value, bool) or not str(value).strip().isdigit()
+            for value in scenes_range
+        ):
+            raise RuntimeError("SCENES range must contain two positive integers.")
         minimum, maximum = int(scenes_range[0]), int(scenes_range[1])
     else:
+        if isinstance(scenes_range, bool) or not str(scenes_range).strip().isdigit():
+            raise RuntimeError("SCENES count must be a positive integer.")
         minimum = maximum = int(scenes_range)
+
+    if not 1 <= minimum <= maximum <= MAX_SCENES_PER_PART:
+        raise RuntimeError("Story Plan SCENES range is reversed or unsupported.")
 
     parts = plan.get("parts")
     if not isinstance(parts, list) or len(parts) != int(parts_count):
@@ -951,6 +961,11 @@ def validate_plan(
         raise RuntimeError("Story Plan Main Scene count mismatch.")
     if plan.get("total_scenes") != main_count:
         raise RuntimeError("Story Plan total Scene count mismatch.")
+    flattened_main = [
+        scene for part in parts for scene in part["scenes"]
+    ]
+    if plan.get("scenes") != flattened_main:
+        raise RuntimeError("Story Plan flattened Main Scene list mismatch.")
 
     expected_counts = [len(part["scenes"]) for part in parts]
     if plan.get("actual_scene_counts") != expected_counts:
@@ -975,6 +990,22 @@ def validate_plan(
         raise RuntimeError("Story Plan source payload is missing.")
     if payload.get("mapping_version") != MAPPING_VERSION:
         raise RuntimeError("Story Plan source mapping version mismatch.")
+    if payload.get("format") != clean_text(format_type).lower():
+        raise RuntimeError("Story Plan source FORMAT mismatch.")
+    if clean_text(payload.get("topic")) != clean_text(topic):
+        raise RuntimeError("Story Plan source topic mismatch.")
+    if payload.get("parts_count") != parts_count:
+        raise RuntimeError("Story Plan source PARTS mismatch.")
+    if payload.get("scenes_min") != minimum or payload.get("scenes_max") != maximum:
+        raise RuntimeError("Story Plan source SCENES range mismatch.")
+    if payload.get("actual_scene_counts") != expected_counts:
+        raise RuntimeError("Story Plan source actual Scene counts mismatch.")
+    payload_parts = payload.get("part_texts")
+    if not isinstance(payload_parts, list) or len(payload_parts) != parts_count:
+        raise RuntimeError("Story Plan source Part texts are invalid.")
+    for index, part in enumerate(parts):
+        if clean_text(payload_parts[index]) != clean_text(part["narration"]):
+            raise RuntimeError(f"Story Plan source Part {index + 1} mismatch.")
     if plan.get("source_fingerprint") != fingerprint(payload):
         raise RuntimeError("Story Plan source fingerprint mismatch.")
 
