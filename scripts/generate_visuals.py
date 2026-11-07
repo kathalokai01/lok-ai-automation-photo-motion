@@ -1227,6 +1227,21 @@ def build_jobs(
             "title": clean(source.get("title")),
             "narration": clean(source.get("narration")),
             "dialogue": clean(source.get("dialogue")),
+            "objects": source.get("objects", []),
+            "animals": source.get("animals", []),
+            "vehicles": source.get("vehicles", []),
+            "clothing": source.get("clothing", ""),
+            "location": source.get("location", ""),
+            "time_period": source.get("time_period", ""),
+            "required_story_entities": {
+                key: source.get(key)
+                for key in (
+                    "objects", "animals", "vehicles", "clothing",
+                    "location", "time_period", "named_entities",
+                    "story_entities",
+                )
+                if source.get(key) not in (None, "", [], {})
+            },
             "prompt": prompt,
             "image_prompt": prompt,
             "visual_prompt": prompt,
@@ -1276,7 +1291,7 @@ def build_jobs(
                 "required": True,
                 "file_integrity": "pending_image_generation",
                 "semantic_source": (
-                    "scene_visual_prompt_and_narration"
+                    "scene_visual_prompt_narration_and_required_story_entities"
                 ),
                 "semantic_validation": (
                     "pending_external_vision_verification"
