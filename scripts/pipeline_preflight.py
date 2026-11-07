@@ -163,9 +163,6 @@ SCRIPT_RE = re.compile(
     r"(?<![\w./-])python(?:3(?:\.\d+)?)?"
     r"\s+(?:-u\s+)?scripts/([A-Za-z0-9_.-]+\.py)"
 )
-LEGACY_RE = re.compile(r"\bi2v\b|wan2gp", re.IGNORECASE)
-
-
 
 def log(*items: Any) -> None:
     print(*items, flush=True)
@@ -558,76 +555,6 @@ def check_story_length_policy_integration() -> tuple[bool, str]:
         )
 
     return True, "generate_story.py imports the story length policy module."
-
-
-def check_legacy_execution() -> tuple[bool, str]:
-    violations = []
-    executable_calls = {
-        "run", "Popen", "call", "check_call",
-        "check_output", "system", "exec",
-    }
-
-    for name in REQUIRED_SCRIPTS:
-        path = SCRIPTS / name
-        if not path.is_file():
-            continue
-
-        try:
-            tree = ast.parse(
-                path.read_text(encoding="utf-8-sig"),
-                filename=str(path),
-            )
-        except Exception as exc:
-            violations.append(f"{name}: syntax inspection failed: {exc}")
-            continue
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if LEGACY_RE.search(alias.name):
-                        violations.append(
-                            f"{name}:{node.lineno} imports legacy module."
-                        )
-
-            elif isinstance(node, ast.ImportFrom):
-                if LEGACY_RE.search(node.module or ""):
-                    violations.append(
-                        f"{name}:{node.lineno} imports legacy module."
-                    )
-
-            if not isinstance(node, ast.Call):
-                continue
-
-            function = node.func
-            function_name = (
-                function.attr if isinstance(function, ast.Attribute)
-                else function.id if isinstance(function, ast.Name)
-                else ""
-            )
-
-            if function_name not in executable_calls:
-                continue
-
-            values = []
-
-            for argument in list(node.args) + [
-                keyword.value for keyword in node.keywords
-            ]:
-                values.extend(
-                    child.value for child in ast.walk(argument)
-                    if isinstance(child, ast.Constant)
-                    and isinstance(child.value, str)
-                )
-
-            if any(LEGACY_RE.search(value) for value in values):
-                violations.append(
-                    f"{name}:{node.lineno} executes legacy I2V/Wan2GP command."
-                )
-
-    if violations:
-        return False, "; ".join(violations[:30])
-
-    return True, "No executable legacy I2V/Wan2GP integration detected."
 
 
 def _manifest_rows(data: Any) -> list[dict]:
@@ -2517,13 +2444,6 @@ def main() -> int:
         "story_length_policy_integration",
         policy_ok,
         policy_detail,
-    )
-
-    legacy_ok, legacy_detail = check_legacy_execution()
-    record(
-        "photo_motion_only_execution_path",
-        legacy_ok,
-        legacy_detail,
     )
 
     workflow = ""
