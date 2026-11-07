@@ -374,7 +374,14 @@ def load_narration(configured_parts, scenes_min, scenes_max, mode):
             "text": str(row.get("text") or row.get("narration") or ""),
             "tts_fingerprint": fingerprint,
         }
-        expected_id = (f"part_{identity["part"]:02d}_scene_{identity["scene"]:02d}" if identity["role"] == "main" else f"part_{identity["part"]:02d}_{identity["role"]}")
+        part_number = identity["part"]
+        role_name = identity["role"]
+        scene_number = identity["scene"]
+        expected_id = (
+            f"part_{part_number:02d}_scene_{scene_number:02d}"
+            if role_name == "main"
+            else f"part_{part_number:02d}_{role_name}"
+        )
         if scene_id != expected_id:
             raise RuntimeError(f"Non-canonical narration Scene ID: {scene_id}; expected {expected_id}.")
         mapping[scene_id] = item
