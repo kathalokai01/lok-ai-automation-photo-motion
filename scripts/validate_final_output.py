@@ -1240,14 +1240,28 @@ def validate_render(
     for field, manifest_path in (
         ("source_photo_manifest_sha256", PHOTO),
         ("source_audio_manifest_sha256", AUDIO),
-        ("source_sound_manifest_sha256", SOUND),
-        ("source_sfx_validation_sha256", SFX_VALIDATION),
     ):
         declared_source_hash = clean(data.get(field)).lower()
         if not re.fullmatch(r"[a-f0-9]{64}", declared_source_hash):
             fail(f"Render manifest source provenance is missing: {field}")
         if declared_source_hash != digest_file(manifest_path):
             fail(f"Render manifest source provenance mismatch: {field}")
+
+    for field, expected_path in (
+        ("source_photo_manifest", PHOTO),
+        ("source_audio_manifest", AUDIO),
+        ("source_sound_manifest", SOUND),
+        ("source_sfx_validation", SFX_VALIDATION),
+    ):
+        if clean(data.get(field)) != relative(expected_path):
+            fail(f"Render manifest source path mismatch: {field}")
+
+    sound_data = read_json(SOUND)
+    sound_fingerprint = clean(data.get("source_sound_fingerprint")).lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", sound_fingerprint):
+        fail("Render manifest sound-design fingerprint is missing")
+    if clean(sound_data.get("source_audio_manifest_sha256")).lower() != digest_file(AUDIO):
+        fail("Sound-design manifest was generated from a different narration manifest")
 
     verified_scenes = []
     seen_render_paths = set()
@@ -1358,7 +1372,7 @@ def validate_render(
         if declared.strip().lower() != checksum:
             fail(f"Rendered Part {part_number} SHA-256 mismatch")
 
-        part_duration_total += info["duration")
+        part_duration_total += info["duration"]
         verified_parts.append({
             "part": part_number,
             "path": relative(path),
