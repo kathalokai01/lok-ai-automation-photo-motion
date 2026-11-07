@@ -32,7 +32,7 @@ MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v16-selector-fallback-runtime"
+VERSION = "ai-story-v17-controlled-word-revision"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -191,8 +191,6 @@ def load_model_order() -> list[str]:
     if not primary:
         raise RuntimeError("Selected Gemini model name is invalid.")
 
-    # Selector is the source of truth for configured priority and defaults.
-    # It also preserves saved custom fallback order when env vars are empty.
     configured_order = configured_fallbacks(data)
 
     order = []
@@ -201,7 +199,6 @@ def load_model_order() -> list[str]:
         if model and model not in order:
             order.append(model)
 
-    # Retain any explicitly saved order entries without changing their order.
     saved_order = data.get("fallback_order", [])
     if isinstance(saved_order, list):
         for value in saved_order:
@@ -209,7 +206,6 @@ def load_model_order() -> list[str]:
             if model and model not in order:
                 order.append(model)
 
-    # Explicit workflow fallbacks are appended only if not already present.
     raw_env_fallbacks = os.environ.get("GEMINI_MODEL_FALLBACKS", "")
     for value in re.split(r"[,;]", raw_env_fallbacks):
         model = normalize_model(value)
@@ -419,9 +415,10 @@ def short_word_limits(source_part: dict, config: dict, total_parts: int):
 
     if is_merged_final:
         return SHORT_MIN_WORDS, SHORT_FINAL_MERGED_MAX
-    if is_final:
-        return SHORT_MIN_WORDS, SHORT_HARD_MAX
-    return SHORT_MIN_WORDS, SHORT_TARGET_MAX
+
+    # 151–180 is the allowed hard range after the model has tried
+    # to revise toward the preferred 120–150 word target.
+    return SHORT_MIN_WORDS, SHORT_HARD_MAX
 
 
 def build_response_schema(source_part: dict) -> dict:
@@ -606,7 +603,7 @@ SHORT FINAL PART:
             format_rules = """
 SHORT NON-FINAL PART:
 - Main narration target is 120–150 words.
-- 151–180 words require revision toward 120–150.
+- 151–180 words are allowed only after revision attempts.
 - Below 120 or above 180 words is invalid.
 - Count only main narration, excluding Hook and Suspense.
 """
@@ -760,6 +757,7 @@ def validate_generated_scenes(
     source_part: dict,
     config: dict,
     total_parts: int,
+    allow_soft_overage: bool = False,
 ) -> list:
     if not isinstance(generated, list):
         raise ValueError("Generated main scenes must be a list.")
@@ -826,14 +824,15 @@ def validate_generated_scenes(
         config["format"] == "short"
         and source_part["part"] < total_parts
         and count > SHORT_TARGET_MAX
+        and not allow_soft_overage
     ):
         raise ValueError(
             f"SHORT non-final part {source_part['part']} has {count} words; "
-            "revise it to 120–150 words."
+            "revise it to 120–150 words. The 151–180 range is allowed "
+            "only after all revision attempts."
         )
 
     return result
-
 
 def validate_extra_record(
     generated: Any,
@@ -880,11 +879,13 @@ def validate_extra_record(
     result.update(fields)
     return result
 
+
 def validate_generated_part(
     generated: Any,
     source_part: dict,
     config: dict,
     total_parts: int,
+    allow_soft_overage: bool = False,
 ) -> dict:
     if not isinstance(generated, dict):
         raise ValueError("Model response must be a JSON object.")
@@ -918,6 +919,7 @@ def validate_generated_part(
         source_part,
         config,
         total_parts,
+        allow_soft_overage=allow_soft_overage,
     )
 
     main_narration = " ".join(
@@ -975,20 +977,50 @@ def build_revision_prompt(
 
     if minimum is None:
         word_rule = "FULL format: preserve the complete story content."
+        correction = (
+            "Keep all important events, but remove only repetition "
+            "and unclear wording."
+        )
     else:
         word_rule = (
             f"SHORT main narration: {minimum}–{maximum} words. "
-            "Count only main narration."
+            "Preferred target: 120–150 words."
         )
-        if source_part["part"] < total_parts:
-            word_rule += " Preferred target is 120–150 words."
+
+        if count > SHORT_TARGET_MAX:
+            correction = (
+                f"The current narration has {count} words. "
+                f"Reduce it toward 135–145 words. Remove repeated "
+                "phrases, redundant explanations and unnecessary "
+                "adjectives. Do not remove essential story events."
+            )
+        elif count < SHORT_MIN_WORDS:
+            correction = (
+                f"The current narration has {count} words. "
+                "Expand only with relevant details already supported "
+                "by the source story. Do not invent events."
+            )
+        else:
+            correction = (
+                "Keep the narration within the required word range "
+                "without changing its meaning."
+            )
 
     return (
         original_prompt
         + "\n\nपिछला उत्तर validation में असफल हुआ।"
         + f"\nमुख्य narration के वर्तमान शब्द: {count}"
         + f"\nसही शब्द सीमा: {word_rule}"
-        + "\nइसी भाग का पूरा JSON दोबारा बनाएं।"
+        + f"\nविशेष सुधार निर्देश: {correction}"
+        + "\nयह नया कहानी-लेखन नहीं है; मौजूदा उत्तर का सुधार है।"
+        + "\nकेवल main narration के शब्द गिनें। Hook/Suspense/"
+        "Resolution को इस गिनती में शामिल न करें।"
+        + "\nमुख्य narration को 120–150 शब्द में लाने का प्रयास करें।"
+        + "\nयदि 150 से अधिक शब्द हों तो अनावश्यक पुनरावृत्ति हटाएँ।"
+        + "\nयदि 120 से कम हों तो केवल स्रोत-कहानी के प्रासंगिक "
+        "विवरण जोड़ें।"
+        + "\n151–180 शब्द अंतिम revision के बाद ही स्वीकार्य हैं।"
+        + "\n180 से अधिक या 120 से कम शब्द स्वीकार्य नहीं हैं।"
         + "\nसभी scene_id, role और scene क्रम source plan के समान रखें।"
         + "\nHook/Suspense/Resolution अलग records में ही रहें।"
         + "\nअतिरिक्त या अनुपस्थित role record न जोड़ें।"
@@ -1025,6 +1057,7 @@ def generate_part(
         prompt = original_prompt
         model_error = "Unknown generation error."
         max_attempts = config["max_retries"]
+        last_generated = None
 
         log(
             f"Part {source_part['part']}/{total_parts}: "
@@ -1044,6 +1077,7 @@ def generate_part(
                     prompt,
                     schema,
                 )
+                last_generated = generated
 
                 try:
                     completed = validate_generated_part(
@@ -1051,6 +1085,7 @@ def generate_part(
                         source_part,
                         config,
                         total_parts,
+                        allow_soft_overage=False,
                     )
                     completed["_katha_model_used"] = model
                     return completed
@@ -1071,12 +1106,23 @@ def generate_part(
 
                 log(f"Model {model} returned HTTP {exc.code}.")
 
-                if not retryable_http_error(exc.code):
+                if exc.code == 404:
+                    log(
+                        f"Model {model} is unavailable; "
+                        "skipping it for this run."
+                    )
                     break
 
-                # Rate limits and temporary overloads move to the
-                # next configured model instead of exhausting retries.
                 if exc.code in {429, 503, 504}:
+                    delay = 8 if exc.code == 429 else 5
+                    log(
+                        f"Temporary model/API failure HTTP {exc.code}; "
+                        f"waiting {delay} seconds before next model."
+                    )
+                    time.sleep(delay)
+                    break
+
+                if not retryable_http_error(exc.code):
                     break
 
             except (
@@ -1085,6 +1131,10 @@ def generate_part(
                 ConnectionError,
             ) as exc:
                 model_error = f"{type(exc).__name__}: {exc}"
+                log(
+                    f"Connection failure on {model}; "
+                    "moving to the next configured model."
+                )
                 break
 
             except (
@@ -1108,6 +1158,26 @@ def generate_part(
                 delay = min(30, 3 * (2 ** (attempt - 1)))
                 log(f"Retrying same model after {delay} seconds.")
                 time.sleep(delay)
+
+        # A non-final SHORT part with 151–180 words may be accepted
+        # only after all revision attempts on this model have been used.
+        if last_generated is not None:
+            try:
+                completed = validate_generated_part(
+                    last_generated,
+                    source_part,
+                    config,
+                    total_parts,
+                    allow_soft_overage=True,
+                )
+                completed["_katha_model_used"] = model
+                log(
+                    f"Part {source_part['part']}: accepted "
+                    f"{completed['word_count']} words after revision attempts."
+                )
+                return completed
+            except (ValueError, TypeError, KeyError) as exc:
+                model_error = f"{model_error}; final validation: {exc}"
 
         errors.append(f"{model}: {model_error}")
         log(
@@ -1364,15 +1434,6 @@ def validate_final_output(
             raise RuntimeError(
                 f"SHORT part {index} has {main_words} main words; "
                 f"required range is {minimum}–{maximum}."
-            )
-
-        if (
-            config["format"] == "short"
-            and index < len(source_parts)
-            and main_words > SHORT_TARGET_MAX
-        ):
-            raise RuntimeError(
-                f"SHORT non-final part {index} exceeds the 150-word target."
             )
 
         final_part = index == len(source_parts)
