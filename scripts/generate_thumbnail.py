@@ -47,7 +47,7 @@ OUTPUT_FILE = ROOT / "output" / "thumbnail.jpg"
 OUTPUT_DIR = ROOT / "output" / "thumbnail"
 MANIFEST_FILE = OUTPUT_DIR / "thumbnail_manifest.json"
 
-VERSION = "thumbnail-v51-story-mode-resumable"
+VERSION = "thumbnail-v52-story-context-ranked-format-bound-source-verified"
 MIN_IMAGE_BYTES = 1000
 SHORT_SIZE = (720, 1280)
 FULL_SIZE = (1280, 720)
@@ -148,7 +148,7 @@ def atomic_write(path: Path, content: str) -> None:
 def write_json(path: Path, data: dict) -> None:
     atomic_write(
         path,
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
     )
 
 
@@ -158,9 +158,24 @@ def read_json(path: Path, required: bool = False) -> Any:
             raise RuntimeError(f"Required file missing: {path}")
         return None
 
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"Non-finite JSON constant: {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
         if required:
             raise RuntimeError(f"Invalid JSON {path}: {exc}") from exc
         log("Ignoring invalid optional JSON:", path, exc)
@@ -464,12 +479,20 @@ def extract_image_path(row: dict) -> Path | None:
     return None
 
 
-def rows_from_manifest(path: Path) -> list[dict]:
+def rows_from_manifest(path: Path, expected_format: str) -> list[dict]:
     data = read_json(path)
 
     if isinstance(data, list):
         rows = data
     elif isinstance(data, dict):
+        declared_format = clean(data.get("format")).lower()
+        status = clean(data.get("status")).lower()
+        if declared_format and declared_format != expected_format:
+            log("Skipping visual manifest with wrong FORMAT:", path)
+            return []
+        if status and status not in {"completed", "complete", "success", "done", "generated"}:
+            log("Skipping incomplete visual manifest:", path, status)
+            return []
         rows = (
             data.get("scenes")
             or data.get("jobs")
@@ -584,12 +607,13 @@ def description_text(row: dict) -> str:
 
 def load_visual_candidates(
     selected_parts: int,
+    expected_format: str,
 ) -> list[dict]:
     merged: dict[tuple[int, str], dict] = {}
 
     for manifest_path in VISUAL_MANIFESTS:
         for index, row in enumerate(
-            rows_from_manifest(manifest_path),
+            rows_from_manifest(manifest_path, expected_format),
             1,
         ):
             part = row_part(row)
@@ -636,14 +660,17 @@ def load_visual_candidates(
             continue
 
         declared_hash = clean(
-            row.get("sha256")
-            or row.get("image_sha256")
+            row.get("image_sha256")
+            or row.get("sha256")
             or row.get("output_sha256")
-        )
+        ).lower()
 
         actual_hash = sha256_file(path)
 
-        if declared_hash and declared_hash.lower() != actual_hash:
+        if not re.fullmatch(r"[a-f0-9]{64}", declared_hash):
+            log("Skipping image without a valid manifest SHA256:", path)
+            continue
+        if declared_hash != actual_hash:
             log("Skipping image with SHA256 mismatch:", path)
             continue
 
@@ -656,6 +683,7 @@ def load_visual_candidates(
             "row": row,
             "manifest": row.get("_manifest", ""),
             "sha256": actual_hash,
+            "source_manifest_sha256": sha256_file(manifest_path),
         })
 
     if not candidates:
@@ -666,7 +694,7 @@ def load_visual_candidates(
     return candidates
 
 
-def score_candidate(candidate: dict) -> int:
+def score_candidate(candidate: dict, story_context: str) -> int:
     row = candidate["row"]
     description = description_text(row)
     role = candidate["role"]
@@ -693,6 +721,22 @@ def score_candidate(candidate: dict) -> int:
         if any(term in description for term in group):
             score += 3
 
+    story_tokens = {
+        token.casefold()
+        for token in re.findall(r"[^\W_]{3,}", story_context, flags=re.UNICODE)
+        if token.casefold() not in {
+            "the", "and", "was", "were", "with", "from", "that", "this",
+            "then", "they", "their", "there", "into", "when", "where",
+            "उसके", "उसकी", "उसका", "और", "लेकिन", "फिर", "तभी", "एक",
+            "था", "थी", "थे", "है", "हैं", "को", "से", "पर", "का", "की",
+        }
+    }
+    prompt_tokens = {
+        token.casefold()
+        for token in re.findall(r"[^\W_]{3,}", description, flags=re.UNICODE)
+    }
+    score += min(36, len(story_tokens & prompt_tokens) * 4)
+
     negative_terms = (
         "empty room",
         "plain background",
@@ -716,11 +760,29 @@ def score_candidate(candidate: dict) -> int:
     return score
 
 
-def choose_hero(selected_parts: int) -> dict:
-    candidates = load_visual_candidates(selected_parts)
+def choose_hero(
+    selected_parts: int,
+    expected_format: str,
+    story_context: str,
+) -> dict:
+    candidates = load_visual_candidates(selected_parts, expected_format)
 
     for candidate in candidates:
-        candidate["score"] = score_candidate(candidate)
+        candidate["score"] = score_candidate(candidate, story_context)
+        candidate["story_context_matches"] = sorted(
+            {
+                token.casefold()
+                for token in re.findall(r"[^\W_]{3,}", story_context, flags=re.UNICODE)
+            }
+            & {
+                token.casefold()
+                for token in re.findall(
+                    r"[^\W_]{3,}",
+                    description_text(candidate["row"]),
+                    flags=re.UNICODE,
+                )
+            }
+        )
 
     candidates.sort(
         key=lambda item: (
@@ -1228,6 +1290,8 @@ def create_thumbnail(
         "height": dimensions[1],
         "bytes": OUTPUT_FILE.stat().st_size,
         "sha256": sha256_file(OUTPUT_FILE),
+        "source_image_sha256": sha256_file(source),
+        "format": "JPEG",
         "success": True,
         "design": design,
     }
@@ -1238,7 +1302,7 @@ def build_fingerprint(
     selected_parts: int,
     title: str,
     story_text: str,
-    source_hash: str,
+    hero: dict,
 ) -> str:
     payload = {
         "version": VERSION,
@@ -1246,7 +1310,12 @@ def build_fingerprint(
         "selected_parts": selected_parts,
         "title": title,
         "story_sha256": sha256_text(story_text),
-        "source_image_sha256": source_hash,
+        "source_image_sha256": hero["sha256"],
+        "source_manifest": hero["manifest"],
+        "source_manifest_sha256": hero["source_manifest_sha256"],
+        "selected_scene_id": hero["scene_id"],
+        "selected_part": hero["part"],
+        "selected_role": hero["role"],
         "dimensions": (
             SHORT_SIZE if mode == "short" else FULL_SIZE
         ),
@@ -1276,6 +1345,14 @@ def verify_saved_manifest(
 
     if manifest.get("fingerprint") != fingerprint:
         raise RuntimeError("Thumbnail manifest fingerprint mismatch.")
+    if manifest.get("title_sha256") != sha256_text(clean(manifest.get("title"))):
+        raise RuntimeError("Thumbnail title fingerprint mismatch.")
+    if manifest.get("format_dimensions") != list(expected_size):
+        raise RuntimeError("Thumbnail format dimensions metadata mismatch.")
+    if manifest.get("source_image_sha256") != manifest.get("selected_image_sha256"):
+        raise RuntimeError("Thumbnail source image hash metadata mismatch.")
+    if not re.fullmatch(r"[a-f0-9]{64}", clean(manifest.get("source_manifest_sha256")).lower()):
+        raise RuntimeError("Thumbnail source manifest SHA256 is missing.")
 
     declared = (
         manifest.get("thumbnail")
@@ -1304,6 +1381,12 @@ def verify_saved_manifest(
 
     if item.get("file") != declared:
         raise RuntimeError("Thumbnail manifest output path mismatch.")
+    if item.get("format") != "JPEG":
+        raise RuntimeError("Thumbnail output record format mismatch.")
+    if item.get("bytes") != OUTPUT_FILE.stat().st_size:
+        raise RuntimeError("Thumbnail output record byte-size mismatch.")
+    if manifest.get("title") != clean(manifest.get("title")):
+        raise RuntimeError("Thumbnail title contains invalid whitespace.")
 
     if item.get("success") is not True:
         raise RuntimeError("Thumbnail is not marked successful.")
@@ -1320,6 +1403,8 @@ def verify_saved_manifest(
 
     if item.get("sha256") != actual_hash:
         raise RuntimeError("Thumbnail SHA256 verification failed.")
+    if item.get("source_image_sha256") != manifest.get("source_image_sha256"):
+        raise RuntimeError("Thumbnail output/source image binding mismatch.")
 
     if manifest.get("source_image_sha256") != manifest.get(
         "selected_image_sha256"
@@ -1391,7 +1476,10 @@ def main() -> None:
     if not title:
         raise RuntimeError("Story-derived thumbnail title is empty.")
 
-    hero = choose_hero(selected_parts)
+    story_context = " ".join(
+        value for value in (title, summary, story_text[:12000]) if value
+    )
+    hero = choose_hero(selected_parts, mode, story_context)
     source = hero["path"]
 
     if not source.is_file():
@@ -1405,7 +1493,7 @@ def main() -> None:
         selected_parts,
         title,
         story_text,
-        source_hash,
+        hero,
     )
 
     existing = reusable_thumbnail(
@@ -1437,7 +1525,12 @@ def main() -> None:
         "format": mode,
         "fingerprint": fingerprint,
         "title": title,
+        "title_sha256": sha256_text(title),
         "title_source": title_source,
+        "format_dimensions": list(dimensions),
+        "story_sha256": sha256_text(story_text),
+        "source_manifest_sha256": hero["source_manifest_sha256"],
+        "hero_story_context_matches": hero["story_context_matches"],
         "story_source": story_path.relative_to(ROOT).as_posix(),
         "story_word_count": len(re.findall(r"\S+", story_text)),
         "selected_parts": selected_parts,
@@ -1470,6 +1563,9 @@ def main() -> None:
             "fixed_red_gold_template": False,
             "duplicate_thumbnail_copies": False,
             "format_specific_dimensions": True,
+            "story_context_ranked_scene": True,
+            "source_manifest_and_image_hash_verified": True,
+            "title_and_format_fingerprints_verified": True,
             "ai_character_generation": False,
         },
         "thumbnails": [thumbnail_record],
