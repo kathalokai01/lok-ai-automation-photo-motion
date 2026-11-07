@@ -1629,7 +1629,7 @@ def main():
                     f"part={part} role={item['role']} scene_id={sid}"
                 )
 
-            part_output = PART_DIR / f"{output_slug}_part_{part:02d}_{mode}.mp4"
+            part_output = PART_DIR / f"part_{part:02d}.mp4"
             part_info = concat_videos(
                 scene_paths,
                 part_output,
@@ -1770,6 +1770,8 @@ def main():
         final_manifest.update({
             "story_title": output_slug,
             "output_basename": output_slug,
+            "story_named_scene_files": True,
+            "part_filename_contract": "part_{part:02d}.mp4",
             "format_dimensions": f"{width}x{height}",
             "timeline_duration_basis": "sum_of_ffprobe_measured_narration_audio_durations",
             "captions_burned": False,
