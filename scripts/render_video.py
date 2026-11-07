@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,8 @@ PHOTO_MANIFEST = OUT / "photo_motion" / "photo_motion_manifest.json"
 AUDIO_MANIFEST = OUT / "narration" / "audio_jobs.json"
 SOUND_MANIFEST = OUT / "sound_design" / "sound_design_manifest.json"
 SFX_VALIDATION = OUT / "sound_design" / "sfx_timing_validation.json"
+STORY_FILE = OUT / "story" / "story.json"
+TITLE_FILE = OUT / "story" / "final_title.txt"
 
 RENDER_DIR = OUT / "scene_renders"
 PART_DIR = OUT / "parts"
@@ -38,7 +41,7 @@ RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 PRE_CAPTION_VIDEO = VIDEO_DIR / "pre_caption_render.mp4"
 
-VERSION = "render-video-v62-variable-scenes-role-audio-verified"
+VERSION = "render-video-v63-story-named-verified-audio-checkpoints"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -99,8 +102,19 @@ def read_json(path, label, required=True, default=None):
         if required:
             raise RuntimeError(f"{label} missing: {path}")
         return default
+    def reject_constant(value):
+        raise ValueError(f"Non-finite JSON constant: {value}")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"), parse_constant=reject_constant, object_pairs_hook=unique_object)
     except Exception as exc:
         raise RuntimeError(f"Invalid {label}: {exc}") from exc
     if not isinstance(data, dict):
@@ -230,8 +244,8 @@ def positive_int(value, label):
         number = int(value)
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"Invalid {label}: {value!r}") from exc
-    if number < 1:
-        raise RuntimeError(f"{label} must be positive")
+    if number < 1 or str(value).strip() != str(number):
+        raise RuntimeError(f"{label} must be a canonical positive integer")
     return number
 
 
@@ -326,6 +340,19 @@ def selected_part_numbers(config, manifest, count):
     start = manifest.get("first_part", manifest.get("start_part", 1))
     start = positive_int(start, "first selected part")
     return list(range(start, start + count))
+
+
+def story_output_slug():
+    title = TITLE_FILE.read_text(encoding="utf-8-sig").strip() if TITLE_FILE.is_file() else ""
+    if not title and STORY_FILE.is_file():
+        story = read_json(STORY_FILE, "Story manifest")
+        title = str(story.get("final_title") or story.get("title") or story.get("topic") or "").strip()
+    title = title or "photo-motion-story"
+    slug = re.sub(r"[^\\w-]+", "-", title, flags=re.UNICODE).strip("-_")
+    slug = re.sub(r"-{2,}", "-", slug)[:72].strip("-_")
+    if not slug:
+        raise RuntimeError("Could not derive a safe story-based output filename")
+    return slug.lower()
 
 
 def expected_role_sequence(parts):
@@ -717,6 +744,18 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
         raise RuntimeError("Sound design FORMAT does not match Input")
     if str(validation.get("format", "")).lower() != mode:
         raise RuntimeError("SFX validation FORMAT does not match Input")
+    if validation.get("duration_source") != "ffprobe_measured_tts_audio_files":
+        raise RuntimeError("SFX validation lacks measured TTS duration provenance")
+    if validation.get("narration_manifest_sha256") != audio_manifest_hash:
+        raise RuntimeError("SFX validation belongs to a different narration manifest")
+    if validation.get("sound_design_manifest_sha256") != sha256_file(SOUND_MANIFEST):
+        raise RuntimeError("SFX validation belongs to a different sound-design manifest")
+    cue_manifest_hash = validation.get("sfx_cue_manifest_sha256")
+    if not isinstance(cue_manifest_hash, str) or len(cue_manifest_hash) != 64:
+        raise RuntimeError("SFX validation cue-manifest fingerprint is missing")
+    expected_signature = hashlib.sha256((audio_manifest_hash + sha256_file(SOUND_MANIFEST) + cue_manifest_hash + "sfx-validator-v12-measured-duration-overlap-truncation-hash-verified").encode("utf-8")).hexdigest()
+    if validation.get("validator_source_signature") != expected_signature:
+        raise RuntimeError("SFX validation source signature mismatch")
 
     manifest_parts = manifest.get("part_numbers")
     if isinstance(manifest_parts, list):
@@ -762,8 +801,8 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
 
         checksum = sha256_file(path)
         declared = record.get("sha256") or record.get("audio_sha256")
-        if declared and declared != checksum:
-            raise RuntimeError(f"{category} track SHA-256 mismatch")
+        if not isinstance(declared, str) or declared != checksum:
+            raise RuntimeError(f"{category} track SHA-256 missing or mismatched")
 
         assets[category] = {
             "path": path,
@@ -841,33 +880,31 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
 
         checksum = sha256_file(path)
         declared = cue.get("sha256") or cue.get("audio_sha256")
-        if declared and declared != checksum:
-            raise RuntimeError(f"SFX cue SHA-256 mismatch: {index}")
+        if not isinstance(declared, str) or declared != checksum:
+            raise RuntimeError(f"SFX cue SHA-256 missing or mismatched: {index}")
+        if cue.get("timing_basis") != "measured_tts_audio_duration":
+            raise RuntimeError(f"SFX cue timing basis is not measured: {sid}")
+        if cue.get("narration_sha256") != narration_row["audio_sha256"]:
+            raise RuntimeError(f"SFX cue narration hash mismatch: {sid}")
+        if cue.get("narration_file") != relative(narration_row["audio"]):
+            raise RuntimeError(f"SFX cue narration path mismatch: {sid}")
+        declared_narration_duration = finite_number(cue.get("narration_duration_seconds"), f"SFX cue narration duration {sid}", minimum=0.01)
+        if abs(declared_narration_duration - narration_row["duration"]) > 0.15:
+            raise RuntimeError(f"SFX cue measured narration duration mismatch: {sid}")
 
         duration = narration_row["duration"]
         if start >= duration:
             raise RuntimeError(f"SFX cue starts outside narration: {sid}")
 
-        latest_start = max(
-            0.0, duration - info["duration"] - SFX_END_MARGIN
-        )
-        actual_start = min(start, latest_start)
-        usable_duration = min(info["duration"], duration - actual_start)
-
-        if usable_duration <= 0:
-            assets["warnings"].append({
-                "scene_id": sid,
-                "warning": "SFX duration does not fit narration",
-            })
-            continue
-
-        if actual_start != start:
-            assets["warnings"].append({
-                "scene_id": sid,
-                "declared_start": start,
-                "actual_start": actual_start,
-                "warning": "SFX shifted earlier to preserve its tail",
-            })
+        declared_duration = finite_number(cue.get("duration_seconds"), f"SFX cue {index} declared duration", minimum=0.01)
+        if abs(declared_duration - info["duration"]) > 0.15:
+            raise RuntimeError(f"SFX cue declared/file duration mismatch: {sid}")
+        actual_start = start
+        usable_duration = info["duration"]
+        if actual_start + usable_duration > duration + 0.02:
+            raise RuntimeError(f"SFX cue would be truncated by narration boundary: {sid}")
+        if actual_start + usable_duration > duration - SFX_END_MARGIN + 0.02:
+            assets["warnings"].append({"scene_id": sid, "warning": "SFX tail reaches narration end margin"})
 
         assets["sfx"].setdefault(sid, []).append({
             "path": path,
@@ -880,7 +917,11 @@ def load_sound_assets(parts, narration, mode, audio_manifest_hash):
         track_hashes[f"sfx_{index}"] = checksum
 
     for sid in assets["sfx"]:
-        assets["sfx"][sid].sort(key=lambda item: item["start"])
+        assets["sfx"][sid].sort(key=lambda item: (item["start"], item["kind"]))
+        for previous_cue, current_cue in zip(assets["sfx"][sid], assets["sfx"][sid][1:]):
+            overlap = previous_cue["start"] + previous_cue["duration"] - current_cue["start"]
+            if overlap > 2.5 + 0.001:
+                raise RuntimeError(f"Excessive SFX overlap in {sid}: {overlap:.3f}s")
 
     assets["fingerprint"] = digest_data({
         "sound_manifest_sha256": sha256_file(SOUND_MANIFEST),
@@ -1388,6 +1429,7 @@ def main():
 
     config = load_and_validate(ROOT / "Input" / "topic.txt")
     mode = str(get_format(config)).strip().lower()
+    output_slug = story_output_slug()
     if mode not in {"short", "full"}:
         raise RuntimeError(f"Unsupported FORMAT: {mode}")
 
@@ -1526,7 +1568,7 @@ def main():
                 output = (
                     RENDER_DIR
                     / f"part_{part:02d}"
-                    / f"scene_{global_number:03d}.mp4"
+                    / f"{output_slug}_part_{part:02d}_scene_{global_number:03d}.mp4"
                 )
 
                 info, checksum, reused = render_scene(
@@ -1569,7 +1611,7 @@ def main():
                     f"part={part} role={item['role']} scene_id={sid}"
                 )
 
-            part_output = PART_DIR / f"part_{part:02d}.mp4"
+            part_output = PART_DIR / f"{output_slug}_part_{part:02d}_{mode}.mp4"
             part_info = concat_videos(
                 scene_paths,
                 part_output,
@@ -1708,6 +1750,10 @@ def main():
             "completed",
         )
         final_manifest.update({
+            "story_title": output_slug,
+            "output_basename": output_slug,
+            "format_dimensions": f"{width}x{height}",
+            "timeline_duration_basis": "sum_of_ffprobe_measured_narration_audio_durations",
             "captions_burned": False,
             "rendered_new": new_renders,
             "rendered_reused": reused_renders,
@@ -1750,6 +1796,12 @@ def main():
             raise RuntimeError("Final render manifest Part output count mismatch")
         if saved.get("pre_caption_video_sha256") != sha256_file(PRE_CAPTION_VIDEO):
             raise RuntimeError("Pre-caption video read-back checksum mismatch")
+        if saved.get("story_title") != output_slug or saved.get("format_dimensions") != f"{width}x{height}":
+            raise RuntimeError("Final render manifest story/format metadata mismatch")
+        if saved.get("source_photo_manifest_sha256") != photo_hash or saved.get("source_audio_manifest_sha256") != audio_manifest_hash:
+            raise RuntimeError("Final render manifest source hash mismatch")
+        if saved.get("source_sound_fingerprint") != sound_assets["fingerprint"]:
+            raise RuntimeError("Final render manifest sound fingerprint mismatch")
 
         write_json(
             CHECKPOINT_FILE,
