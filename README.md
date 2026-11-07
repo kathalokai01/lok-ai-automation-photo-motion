@@ -93,6 +93,7 @@ GitHub repository में **Actions → Generate Katha Lok AI Photo Motion Vid
 - Scene Photo Motion clips: `output/photo_motion/`
 - Scene images and depth maps: `output/visuals/images/` और `output/visuals/depth_maps/`
 - Scene narration audio: `output/narration/audio/`
+- Flow Music manifest and role-aligned source/segment audio: `output/music/flow_music_manifest.json`, `output/music/role_sources/`, `output/music/role_segments/`
 - Captions: `output/captions/`
 - Thumbnail: `output/thumbnail.jpg`
 - Validation report: `output/validation_report.json`
