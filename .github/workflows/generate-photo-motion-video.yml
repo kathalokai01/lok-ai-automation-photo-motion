@@ -379,6 +379,7 @@ jobs:
               load_and_validate,
               get_format,
               get_parts_range,
+              get_scenes_range,
           )
 
           context_path = Path(sys.argv[1])
@@ -391,6 +392,7 @@ jobs:
 
           mode = str(get_format(config)).strip().lower()
           minimum, maximum = get_parts_range(config)
+          scenes_min, scenes_max = get_scenes_range(config)
 
           if context.get("format") != mode:
               raise SystemExit("Checkpoint FORMAT mismatch.")
@@ -400,6 +402,12 @@ jobs:
 
           if context.get("parts_max") != maximum:
               raise SystemExit("Checkpoint PARTS maximum mismatch.")
+
+          if context.get("scenes_min") != scenes_min:
+              raise SystemExit("Checkpoint SCENES minimum mismatch.")
+
+          if context.get("scenes_max") != scenes_max:
+              raise SystemExit("Checkpoint SCENES maximum mismatch.")
 
           selected = context.get("actual_parts")
           if (
@@ -439,6 +447,36 @@ jobs:
 
           if story.get("configured_parts_max") != maximum:
               raise SystemExit("Checkpoint Story PARTS maximum mismatch.")
+
+          if plan.get("scenes_min") != scenes_min:
+              raise SystemExit("Checkpoint Story Plan SCENES minimum mismatch.")
+
+          if plan.get("scenes_max") != scenes_max:
+              raise SystemExit("Checkpoint Story Plan SCENES maximum mismatch.")
+
+          plan_counts = plan.get("actual_scene_counts")
+          if (
+              not isinstance(plan_counts, list)
+              or len(plan_counts) != selected
+              or any(
+                  not isinstance(count, int)
+                  or isinstance(count, bool)
+                  or not scenes_min <= count <= scenes_max
+                  for count in plan_counts
+              )
+          ):
+              raise SystemExit("Checkpoint Story Plan Scene counts are invalid.")
+
+          for index, part in enumerate(plan_parts):
+              scenes = part.get("scenes") if isinstance(part, dict) else None
+              if (
+                  not isinstance(scenes, list)
+                  or len(scenes) != plan_counts[index]
+                  or not scenes_min <= len(scenes) <= scenes_max
+              ):
+                  raise SystemExit(
+                      f"Checkpoint Part {index + 1} Scene range mismatch."
+                  )
           PY
             then
               continue
@@ -773,6 +811,72 @@ jobs:
 
       - name: Generate complete story plan
         run: python scripts/generate_story_plan.py
+
+      - name: Verify configured SCENES range for every Part
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from scripts.input_config import (
+              load_and_validate,
+              get_scenes_range,
+          )
+
+          config = load_and_validate("Input/topic.txt")
+          minimum, maximum = get_scenes_range(config)
+
+          path = Path("output/story/story_plan.json")
+          if not path.is_file():
+              raise SystemExit("Story Plan is missing.")
+
+          plan = json.loads(path.read_text(encoding="utf-8-sig"))
+          parts = plan.get("parts")
+          counts = plan.get("actual_scene_counts")
+
+          if plan.get("scenes_min") != minimum:
+              raise SystemExit("Story Plan SCENES minimum differs from input.")
+
+          if plan.get("scenes_max") != maximum:
+              raise SystemExit("Story Plan SCENES maximum differs from input.")
+
+          if plan.get("scenes_range") != [minimum, maximum]:
+              raise SystemExit("Story Plan SCENES range metadata is invalid.")
+
+          if not isinstance(parts, list) or not parts:
+              raise SystemExit("Story Plan has no Parts.")
+
+          actual = []
+          for index, part in enumerate(parts, start=1):
+              scenes = part.get("scenes") if isinstance(part, dict) else None
+              if not isinstance(scenes, list):
+                  raise SystemExit(f"Part {index} has no valid Scene list.")
+
+              count = len(scenes)
+              if not minimum <= count <= maximum:
+                  raise SystemExit(
+                      f"Part {index} has {count} Scenes; "
+                      f"configured range is {minimum}-{maximum}."
+                  )
+
+              if part.get("main_scene_count") != count:
+                  raise SystemExit(
+                      f"Part {index} main_scene_count does not match its Scenes."
+                  )
+
+              actual.append(count)
+
+          if counts != actual:
+              raise SystemExit(
+                  "Story Plan actual_scene_counts does not match Part Scene lists."
+              )
+
+          print("SCENES RANGE VERIFIED:", f"{minimum}-{maximum}")
+          print("PART SCENE COUNTS:", ", ".join(map(str, actual)))
+          PY
 
       - name: Verify actual PARTS selection
         shell: bash
@@ -1216,12 +1320,14 @@ jobs:
               load_and_validate,
               get_format,
               get_parts_range,
+              get_scenes_range,
               get_selected_parts,
           )
 
           config = load_and_validate("Input/topic.txt")
           mode = str(get_format(config)).strip().lower()
           minimum, maximum = get_parts_range(config)
+          scenes_min, scenes_max = get_scenes_range(config)
 
           try:
               selected = get_selected_parts(config, required=False)
@@ -1272,6 +1378,8 @@ jobs:
               "format": mode,
               "parts_min": minimum,
               "parts_max": maximum,
+              "scenes_min": scenes_min,
+              "scenes_max": scenes_max,
               "actual_parts": actual,
               "naming_key": slug,
           }
