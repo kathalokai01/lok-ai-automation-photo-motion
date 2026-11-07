@@ -31,7 +31,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 11
+SCRIPT_VERSION = 12
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -96,6 +96,19 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key: {key!r}.")
+        result[key] = value
+    return result
+
+
+def reject_nonfinite_json(value: str):
+    raise ValueError(f"Non-finite JSON value is not permitted: {value!r}.")
+
+
 def load_json(path: Path, required: bool = True) -> Any:
     if not path.is_file():
         if required:
@@ -107,8 +120,8 @@ def load_json(path: Path, required: bool = True) -> Any:
         return None
 
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=reject_duplicate_json_keys, parse_constant=reject_nonfinite_json)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise RuntimeError(f"Invalid JSON file {path}: {exc}") from exc
 
 
@@ -172,12 +185,12 @@ def positive_int(value: Any, label: str) -> int:
     if isinstance(value, bool):
         raise RuntimeError(f"{label} must be a positive integer.")
 
-    try:
-        number = int(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise RuntimeError(
-            f"{label} must be a positive integer."
-        ) from exc
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value.strip()):
+        number = int(value.strip())
+    else:
+        raise RuntimeError(f"{label} must be a positive integer.")
 
     if number < 1:
         raise RuntimeError(f"{label} must be at least 1.")
@@ -631,11 +644,8 @@ def canonical_extra_id(
 def load_story_metadata() -> dict:
     value = load_json(
         AI_STORY_FILE,
-        required=False,
+        required=True,
     )
-
-    if value is None:
-        return {}
 
     if not isinstance(value, dict):
         raise RuntimeError(
@@ -681,7 +691,7 @@ def validate_ai_story(
                 f"ai_story.json Part {part_number} is invalid."
             )
 
-        if int(part.get("part", -1)) != part_number:
+        if positive_int(part.get("part"), f"ai_story.json Part {part_number}") != part_number:
             raise RuntimeError(
                 f"ai_story.json Part {part_number} numbering mismatch."
             )
@@ -720,7 +730,7 @@ def validate_ai_story(
             )
 
             if (
-                scene.get("scene") != scene_number
+                positive_int(scene.get("scene"), f"{expected_id} scene number") != scene_number
                 or scene.get("scene_id") != expected_id
             ):
                 raise RuntimeError(
@@ -790,11 +800,38 @@ def validate_ai_story(
                 source_texts[expected_id] = narration
 
     declared = story.get("actual_scene_counts")
+    if declared is not None and (
+        not isinstance(declared, list)
+        or len(declared) != len(counts)
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in declared)
+        or declared != counts
+    ):
+        raise RuntimeError("ai_story.json actual_scene_counts mismatch.")
 
-    if declared is not None and declared != counts:
-        raise RuntimeError(
-            "ai_story.json actual_scene_counts mismatch."
-        )
+    expected_main_total = sum(counts)
+    for field, expected in (
+        ("total_parts", settings["parts"]),
+        ("parts_count", settings["parts"]),
+        ("total_scenes", expected_main_total),
+        ("total_main_scenes", expected_main_total),
+        ("total_extra_scenes", settings["parts"] * 2),
+    ):
+        value = story.get(field)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value != expected
+        ):
+            raise RuntimeError(f"ai_story.json {field} mismatch.")
+
+    if story.get("scene_order") not in (None, "part_then_main_scene"):
+        raise RuntimeError("ai_story.json scene_order is unsupported.")
+
+    if story.get("extra_scene_order") not in (
+        None,
+        ["hook", "main_scenes", "suspense_or_resolution"],
+    ):
+        raise RuntimeError("ai_story.json extra_scene_order is inconsistent.")
 
     return counts, source_texts
 
@@ -845,6 +882,18 @@ def validate_scene_collection(
         if not 1 <= part <= settings["parts"]:
             raise RuntimeError(
                 f"Scene record {index} refers to an unselected Part."
+            )
+
+        if source.get("status") != "completed":
+            raise RuntimeError(f"Scene record {index} is not completed.")
+
+        source_signature = source.get("source_scene_signature")
+        if (
+            not isinstance(source_signature, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_signature)
+        ):
+            raise RuntimeError(
+                f"Scene record {index} has an invalid source scene signature."
             )
 
         item = dict(source)
@@ -1030,14 +1079,34 @@ def validate_scene_collection(
                 )
 
     declared_counts = data.get("actual_scene_counts")
-
-    if (
-        declared_counts is not None
-        and declared_counts != actual_counts
+    if declared_counts is not None and (
+        not isinstance(declared_counts, list)
+        or len(declared_counts) != len(actual_counts)
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in declared_counts)
+        or declared_counts != actual_counts
     ):
-        raise RuntimeError(
-            "scenes.json actual_scene_counts mismatch."
-        )
+        raise RuntimeError("scenes.json actual_scene_counts mismatch.")
+
+    for field, expected in (
+        ("total_parts", settings["parts"]),
+        ("total_main_scenes", sum(actual_counts)),
+        ("total_scenes", sum(actual_counts)),
+        ("total_extra_scenes", len(ordered_extras)),
+    ):
+        value = data.get(field)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value != expected
+        ):
+            raise RuntimeError(f"scenes.json {field} mismatch.")
+
+    generation_signature = data.get("generation_signature")
+    if (
+        not isinstance(generation_signature, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", generation_signature)
+    ):
+        raise RuntimeError("scenes.json generation_signature is invalid.")
 
     total_records = (
         sum(actual_counts)
@@ -1058,6 +1127,8 @@ def source_signature(
     main_sources: list[dict],
     extra_sources: list[dict],
     actual_counts: list[int],
+    ai_story: dict,
+    scene_data: dict,
 ) -> str:
     def relevant(rows: list[dict]) -> list[dict]:
         result = []
@@ -1085,6 +1156,9 @@ def source_signature(
         "title": title,
         "settings": settings,
         "actual_scene_counts": actual_counts,
+        "ai_story_generation_signature": ai_story.get("generation_signature"),
+        "ai_story_source_plan_signature": ai_story.get("source_plan_signature"),
+        "scenes_generation_signature": scene_data.get("generation_signature"),
         "main": relevant(main_sources),
         "extras": relevant(extra_sources),
     })
@@ -1266,7 +1340,23 @@ def validate_cached_audio(record: dict) -> bool:
         ):
             return False
 
-        if not record.get("tts_fingerprint"):
+        fingerprint = record.get("tts_fingerprint")
+        if not isinstance(fingerprint, str) or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            fingerprint,
+        ):
+            return False
+
+        provider = record.get("tts_provider") or record.get("provider")
+        if not isinstance(provider, str) or not provider.strip():
+            return False
+
+        declared_size = record.get("audio_size_bytes")
+        if (
+            isinstance(declared_size, bool)
+            or not isinstance(declared_size, int)
+            or declared_size != path.stat().st_size
+        ):
             return False
 
         return True
@@ -1823,6 +1913,8 @@ def verify_saved_output(
     actual_counts: list[int],
     expected_main: int,
     expected_extras: int,
+    expected_texts: dict[str, str],
+    settings: dict,
 ) -> None:
     saved = load_json(OUTPUT_FILE)
 
@@ -1835,6 +1927,12 @@ def verify_saved_output(
         raise RuntimeError(
             "Narration output is not marked completed."
         )
+
+    if saved.get("script_version") != SCRIPT_VERSION:
+        raise RuntimeError("Narration output script version mismatch.")
+
+    if saved.get("input_config") != settings:
+        raise RuntimeError("Narration output settings mismatch.")
 
     if saved.get("source_signature") != current_signature:
         raise RuntimeError(
@@ -1863,11 +1961,13 @@ def verify_saved_output(
             "Narration output scene ID count mismatch."
         )
 
-    all_records = (
-        saved["scenes"]
-        + saved["extra_scenes"]
-    )
+    if (
+        not isinstance(saved.get("scenes"), list)
+        or not isinstance(saved.get("extra_scenes"), list)
+    ):
+        raise RuntimeError("Narration output record groups are invalid.")
 
+    all_records = saved["scenes"] + saved["extra_scenes"]
     all_ids = [
         row.get("scene_id")
         for row in all_records
@@ -1875,9 +1975,25 @@ def verify_saved_output(
     ]
 
     if len(all_ids) != len(set(all_ids)):
-        raise RuntimeError(
-            "Narration output contains duplicate scene IDs."
-        )
+        raise RuntimeError("Narration output contains duplicate scene IDs.")
+
+    if saved.get("all_scene_ids") != all_ids:
+        raise RuntimeError("Narration output all_scene_ids order mismatch.")
+
+    for record in all_records:
+        if not isinstance(record, dict):
+            raise RuntimeError("Narration output contains an invalid record.")
+        scene_id = record.get("scene_id")
+        expected_text = expected_texts.get(scene_id)
+        if expected_text is None or record.get("text") != expected_text:
+            raise RuntimeError(f"Narration read-back text mismatch: {scene_id}.")
+
+    validate_final_records(
+        saved["scenes"],
+        saved["extra_scenes"],
+        actual_counts,
+        settings["parts"],
+    )
 
 
 def main() -> int:
@@ -1936,6 +2052,8 @@ def main() -> int:
         main_sources,
         extra_sources,
         actual_counts,
+        story,
+        source_data,
     )
 
     reusable = load_reusable_records(
@@ -2144,11 +2262,18 @@ def main() -> int:
             },
         )
 
+        expected_texts = {
+            row["scene_id"]: row["narration"]
+            for row in main_sources + extra_sources
+        }
+
         verify_saved_output(
             current_signature,
             actual_counts,
             expected_main_total,
             expected_extras_total,
+            expected_texts,
+            settings,
         )
 
     except Exception as exc:
