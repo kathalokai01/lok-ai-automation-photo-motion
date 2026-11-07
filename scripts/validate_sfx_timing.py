@@ -28,12 +28,14 @@ SOUND_MANIFEST = ROOT / "output" / "sound_design" / "sound_design_manifest.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-validator-v11-role-aware-measured-audio-manifest-compatible"
+VERSION = "sfx-validator-v12-measured-duration-overlap-truncation-hash-verified"
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 0.20
 SFX_END_MARGIN = 0.08
 MAX_GAIN = 1.0
 MAX_CUES_PER_SCENE = 12
+MAX_CUE_DURATION_SECONDS = 12.0
+MAX_OVERLAP_SECONDS = 2.5
 EPSILON = 0.001
 
 ROLE_ORDER = {
@@ -69,10 +71,25 @@ def log(*values):
 
 def read_json(path):
     path = Path(path)
+    def reject_constant(value):
+        raise ValueError(f"Non-finite JSON constant: {value}")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(f"Cannot read JSON {path}: {exc}") from exc
+        value = json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"Cannot read strict JSON {path}: {exc}") from exc
 
     if not isinstance(value, (dict, list)):
         raise RuntimeError(f"Invalid JSON root: {path}")
@@ -123,8 +140,8 @@ def positive_int(value, label):
         number = int(value)
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"{label} must be a positive integer.") from exc
-    if number < 1:
-        raise RuntimeError(f"{label} must be at least 1.")
+    if number < 1 or str(value).strip() != str(number):
+        raise RuntimeError(f"{label} must be a canonical positive integer.")
     return number
 
 
@@ -215,7 +232,7 @@ def media_info(path):
         )
 
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(result.stdout, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
         duration = float(data["format"]["duration"])
     except (ValueError, KeyError, TypeError) as exc:
         raise RuntimeError(f"Invalid media metadata: {path.name}") from exc
@@ -278,6 +295,8 @@ def load_narration(configured_parts, scenes_min, scenes_max, mode):
         raise RuntimeError("Narration manifest must be a JSON object.")
     if data.get("status") != "completed":
         raise RuntimeError("Narration manifest is not completed.")
+    if data.get("duration_source") not in (None, "ffprobe_measured_tts_audio_files"):
+        raise RuntimeError("Narration manifest duration provenance is invalid.")
 
     manifest_format = str(data.get("format", "")).strip().lower()
     if manifest_format and manifest_format != mode:
@@ -355,6 +374,9 @@ def load_narration(configured_parts, scenes_min, scenes_max, mode):
             "text": str(row.get("text") or row.get("narration") or ""),
             "tts_fingerprint": fingerprint,
         }
+        expected_id = (f"part_{identity["part"]:02d}_scene_{identity["scene"]:02d}" if identity["role"] == "main" else f"part_{identity["part"]:02d}_{identity["role"]}")
+        if scene_id != expected_id:
+            raise RuntimeError(f"Non-canonical narration Scene ID: {scene_id}; expected {expected_id}.")
         mapping[scene_id] = item
 
         role_counts.setdefault(identity["part"], {
@@ -535,6 +557,9 @@ def validate_sound_manifest(mode, parts, actual_counts, narration, audio_hash):
         raise RuntimeError(
             "Sound design was generated from a different narration manifest."
         )
+
+    if manifest.get("version") != "photo-motion-sound-design-v33-loudness-duration-resume-verified":
+        raise RuntimeError("Sound-design manifest version is unsupported or stale.")
 
     enabled_tracks = manifest.get("enabled")
     if not isinstance(enabled_tracks, dict):
@@ -735,6 +760,8 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
             raise RuntimeError(
                 f"SFX cue starts outside narration: {scene_id}."
             )
+        if declared_duration > MAX_CUE_DURATION_SECONDS:
+            raise RuntimeError(f"SFX cue duration exceeds {MAX_CUE_DURATION_SECONDS}s: {scene_id}.")
         if start + declared_duration > narration_duration + 0.05:
             raise RuntimeError(
                 f"SFX cue declared duration exceeds narration: {scene_id}."
@@ -783,6 +810,17 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
             raise RuntimeError(
                 f"SFX cue file does not match sound-design track {kind}."
             )
+
+        if abs(declared_duration - info["duration"]) > DURATION_TOLERANCE:
+            raise RuntimeError(
+                f"SFX cue declared duration does not match measured file duration: {scene_id}."
+            )
+        if cue.get("source_track_sha256") not in (None, track_hash):
+            raise RuntimeError(f"SFX cue source-track hash mismatch: {scene_id}.")
+        if cue.get("size_bytes") is not None and positive_int(
+            cue.get("size_bytes"), f"SFX cue {index} byte size"
+        ) != path.stat().st_size:
+            raise RuntimeError(f"SFX cue byte-size mismatch: {scene_id}.")
 
         latest_start = max(
             0.0,
@@ -849,6 +887,8 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
             "gain": gain,
             "timing_basis": "measured_tts_audio_duration",
             "timing_status": "fits_narration" if truncated <= 0.02 else "may_be_trimmed",
+            "source_track_sha256": track_hash,
+            "file_size_bytes": path.stat().st_size,
         }
 
         reports.append(report)
@@ -897,6 +937,10 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
                 previous["renderer_end_seconds"]
                 - current["renderer_start_seconds"]
             )
+            if overlap > MAX_OVERLAP_SECONDS:
+                raise RuntimeError(
+                    f"Excessive overlapping SFX cues in {scene_id}: {overlap:.3f}s."
+                )
             if overlap > EPSILON:
                 warning = {
                     "scene_id": scene_id,
@@ -906,7 +950,7 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
                     "previous_kind": previous["kind"],
                     "next_kind": current["kind"],
                     "overlap_seconds": round(overlap, 4),
-                    "note": "Overlapping effects are permitted.",
+                    "note": "Intentional layered effects; overlap is bounded by policy.",
                 }
                 overlaps.append(warning)
                 overlap_warnings.append(warning)
@@ -936,6 +980,9 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
         "scene_audit": scene_audit,
         "truncation_warnings": warnings,
         "overlap_warnings": overlap_warnings,
+        "max_allowed_overlap_seconds": MAX_OVERLAP_SECONDS,
+        "max_cue_duration_seconds": MAX_CUE_DURATION_SECONDS,
+        "duration_source": "ffprobe_measured_tts_audio_files_and_sfx_files",
     }
 
 
@@ -1029,6 +1076,7 @@ def main():
         "sound_design_manifest_sha256": sha256_file(SOUND_MANIFEST),
         "sfx_cue_manifest": relative(CUES_FILE),
         "sfx_cue_manifest_sha256": sha256_file(CUES_FILE),
+        "validator_source_signature": __import__("hashlib").sha256((audio_hash + sha256_file(SOUND_MANIFEST) + sha256_file(CUES_FILE) + VERSION).encode("utf-8")).hexdigest(),
         "sound_tracks": {
             "music_enabled": sound_manifest["enabled"]["music"],
             "ambient_enabled": sound_manifest["enabled"]["ambient"],
@@ -1070,7 +1118,11 @@ def main():
         or saved.get("status") != "completed"
         or saved.get("format") != mode
         or saved.get("narration_manifest_sha256") != audio_hash
+        or saved.get("sound_design_manifest_sha256") != sha256_file(SOUND_MANIFEST)
+        or saved.get("sfx_cue_manifest_sha256") != sha256_file(CUES_FILE)
+        or saved.get("validator_source_signature") != report["validator_source_signature"]
         or saved.get("sfx", {}).get("cue_count") != len(sfx_report["cues"])
+        or saved.get("sfx", {}).get("duration_source") != "ffprobe_measured_tts_audio_files_and_sfx_files"
     ):
         raise RuntimeError("SFX timing validation report read-back failed.")
 
