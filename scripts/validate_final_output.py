@@ -53,7 +53,7 @@ REPORT = OUT / "validation_report.json"
 PACKAGE_REPORT = OUT / "package_manifest.json"
 PACKAGE_NAME = OUT / "package_archive_name.txt"
 
-VERSION = "final-validator-v100-dynamic-scenes-role-aware"
+VERSION = "final-validator-v101-strict-manifest-audio-caption-path-integrity"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -118,7 +118,7 @@ def write_json(path: Path, value: dict) -> None:
     temporary = path.with_name(path.name + ".tmp")
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2)
+            json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -134,8 +134,23 @@ def read_json(path: Path, optional: bool = False) -> Any:
         fail(f"Required file is missing: {relative(path)}")
     if path.stat().st_size <= 0:
         fail(f"Required file is empty: {relative(path)}")
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"Non-finite JSON constant: {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        return json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
     except Exception as exc:
         fail(f"Invalid JSON {relative(path)}: {exc}")
 
@@ -145,6 +160,10 @@ def positive_int(value: Any, label: str, allow_zero: bool = False) -> int:
         fail(f"{label}: invalid integer")
     try:
         result = int(value)
+        if isinstance(value, float) and (not math.isfinite(value) or value != result):
+            fail(f"{label}: fractional integer is not permitted")
+        if isinstance(value, str) and str(result) != value.strip():
+            fail(f"{label}: non-canonical integer is not permitted")
     except (TypeError, ValueError, OverflowError):
         fail(f"{label}: invalid integer")
     if result < (0 if allow_zero else 1):
@@ -257,6 +276,8 @@ def media_info(path: Path) -> dict:
         fail(f"Invalid media duration: {path.name}")
     if not isinstance(streams, list):
         fail(f"Invalid media streams: {path.name}")
+    if any(not isinstance(item, dict) for item in streams):
+        fail(f"Invalid media stream record: {path.name}")
 
     video = next(
         (item for item in streams if item.get("codec_type") == "video"),
@@ -269,6 +290,8 @@ def media_info(path: Path) -> dict:
 
     rate = None
     if video:
+        if int(video.get("width") or 0) < 1 or int(video.get("height") or 0) < 1:
+            fail(f"Invalid video dimensions: {path.name}")
         rate = video.get("avg_frame_rate")
         if not rate or rate in {"0/0", "N/A"}:
             rate = video.get("r_frame_rate")
@@ -740,6 +763,7 @@ def validate_media_rows(
     )
 
     verified = []
+    seen_media_paths = set()
     for key in sorted(
         mapping,
         key=lambda item: (
@@ -782,22 +806,24 @@ def validate_media_rows(
                 "actual_audio_duration_seconds",
                 row.get("audio_duration", row.get("duration")),
             )
-            if declared_duration is not None:
-                try:
-                    expected_duration = float(declared_duration)
-                except (TypeError, ValueError):
-                    fail(f"{label} {sid}: invalid audio duration")
-                if (
-                    not math.isfinite(expected_duration)
-                    or abs(expected_duration - info["duration"]) > 0.2
-                ):
-                    fail(f"{label} {sid}: measured audio duration mismatch")
+            if declared_duration is None:
+                fail(f"{label} {sid}: ffprobe-measured audio duration is missing")
+            try:
+                expected_duration = float(declared_duration)
+            except (TypeError, ValueError):
+                fail(f"{label} {sid}: invalid audio duration")
+            if (
+                not math.isfinite(expected_duration)
+                or expected_duration <= 0
+                or abs(expected_duration - info["duration"]) > 0.2
+            ):
+                fail(f"{label} {sid}: measured audio duration mismatch")
 
             source = (
                 row.get("duration_source")
                 or row.get("audio_duration_source")
             )
-            if source and source != "ffprobe_measured":
+            if source != "ffprobe_measured":
                 fail(f"{label} {sid}: duration is not ffprobe-measured")
             declared_hash = (
                 row.get("audio_sha256")
@@ -805,8 +831,16 @@ def validate_media_rows(
             )
 
         checksum = digest_file(path)
-        if declared_hash and clean(declared_hash).lower() != checksum:
+        if not isinstance(declared_hash, str) or not re.fullmatch(
+            r"[a-f0-9]{64}", declared_hash.strip().lower()
+        ):
+            fail(f"{label} {sid}: manifest SHA-256 is missing or invalid")
+        if declared_hash.strip().lower() != checksum:
             fail(f"{label} {sid}: SHA-256 mismatch")
+        resolved_media = path.resolve()
+        if resolved_media in seen_media_paths:
+            fail(f"{label}: duplicate media file is referenced by multiple scenes: {relative(path)}")
+        seen_media_paths.add(resolved_media)
 
         verified.append({
             "scene_id": sid,
@@ -818,6 +852,8 @@ def validate_media_rows(
             "sha256": checksum,
         })
 
+    if not verified:
+        fail(f"{label}: no verified media records")
     return {
         "status": "valid",
         "record_count": len(verified),
@@ -1105,7 +1141,11 @@ def parse_srt(path: Path) -> list[dict]:
     return rows
 
 
-def validate_captions(part_numbers: list[int], total_duration: float) -> dict:
+def validate_captions(
+    part_numbers: list[int],
+    total_duration: float,
+    render_data: dict,
+) -> dict:
     captions = read_json(CAPTIONS)
     srt_path = safe_output(SRT, "Final captions SRT", 10)
     srt_rows = parse_srt(srt_path)
@@ -1131,6 +1171,20 @@ def validate_captions(part_numbers: list[int], total_duration: float) -> dict:
 
     if srt_rows[-1]["end"] > total_duration + DURATION_TOLERANCE:
         fail("SRT contains captions beyond the final video duration")
+    declared_srt_hash = clean(render_data.get("final_srt_sha256")).lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", declared_srt_hash):
+        fail("Render manifest is missing the final SRT SHA-256")
+    if declared_srt_hash != digest_file(srt_path):
+        fail("Final SRT SHA-256 differs from the burned-caption render manifest")
+    declared_caption_manifest = clean(render_data.get("caption_manifest"))
+    if declared_caption_manifest and declared_caption_manifest != relative(CAPTIONS):
+        fail("Render manifest caption-manifest path mismatch")
+    timeline = render_data.get("caption_timeline")
+    if not isinstance(timeline, dict) or any(
+        timeline.get(key) is not True
+        for key in ("includes_hook", "includes_main", "includes_suspense", "includes_resolution", "global_srt")
+    ):
+        fail("Burned-caption timeline does not cover every required scene role")
 
     return {
         "status": "valid",
@@ -1183,7 +1237,20 @@ def validate_render(
         rows, part_numbers, scene_counts, "Rendered scene"
     )
 
+    for field, manifest_path in (
+        ("source_photo_manifest_sha256", PHOTO),
+        ("source_audio_manifest_sha256", AUDIO),
+        ("source_sound_manifest_sha256", SOUND),
+        ("source_sfx_validation_sha256", SFX_VALIDATION),
+    ):
+        declared_source_hash = clean(data.get(field)).lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", declared_source_hash):
+            fail(f"Render manifest source provenance is missing: {field}")
+        if declared_source_hash != digest_file(manifest_path):
+            fail(f"Render manifest source provenance mismatch: {field}")
+
     verified_scenes = []
+    seen_render_paths = set()
     scene_duration_total = 0.0
 
     for key in sorted(
@@ -1208,20 +1275,29 @@ def validate_render(
         checksum = digest_file(path)
 
         declared = row.get("sha256") or row.get("video_sha256")
-        if declared and clean(declared).lower() != checksum:
+        if not isinstance(declared, str) or not re.fullmatch(r"[a-f0-9]{64}", declared.strip().lower()):
+            fail(f"Rendered scene manifest SHA-256 is missing or invalid: {sid}")
+        if declared.strip().lower() != checksum:
             fail(f"Rendered scene SHA-256 mismatch: {sid}")
+        if path.suffix.lower() != ".mp4":
+            fail(f"Rendered scene must be MP4: {sid}")
+        if path.resolve() in seen_render_paths:
+            fail(f"Multiple rendered scene records reference the same MP4: {sid}")
+        seen_render_paths.add(path.resolve())
 
         declared_duration = row.get("duration")
-        if declared_duration is not None:
-            try:
-                expected_duration = float(declared_duration)
-            except (TypeError, ValueError):
-                fail(f"Invalid rendered duration: {sid}")
-            if (
-                not math.isfinite(expected_duration)
-                or abs(expected_duration - info["duration"]) > DURATION_TOLERANCE
-            ):
-                fail(f"Rendered scene duration mismatch: {sid}")
+        if declared_duration is None:
+            fail(f"Rendered scene duration is missing: {sid}")
+        try:
+            expected_duration = float(declared_duration)
+        except (TypeError, ValueError):
+            fail(f"Invalid rendered duration: {sid}")
+        if (
+            not math.isfinite(expected_duration)
+            or expected_duration <= 0
+            or abs(expected_duration - info["duration"]) > DURATION_TOLERANCE
+        ):
+            fail(f"Rendered scene duration mismatch: {sid}")
 
         scene_duration_total += info["duration"]
         verified_scenes.append({
@@ -1277,10 +1353,12 @@ def validate_render(
         )
         checksum = digest_file(path)
         declared = row.get("sha256") or row.get("video_sha256")
-        if declared and clean(declared).lower() != checksum:
+        if not isinstance(declared, str) or not re.fullmatch(r"[a-f0-9]{64}", declared.strip().lower()):
+            fail(f"Rendered Part {part_number} manifest SHA-256 is missing or invalid")
+        if declared.strip().lower() != checksum:
             fail(f"Rendered Part {part_number} SHA-256 mismatch")
 
-        part_duration_total += info["duration"]
+        part_duration_total += info["duration")
         verified_parts.append({
             "part": part_number,
             "path": relative(path),
@@ -1363,6 +1441,20 @@ def validate_thumbnail(
         )
         if declared_path.resolve() != path.resolve():
             fail("Thumbnail manifest points to a different image")
+    thumbnail_rows = manifest.get("thumbnails")
+    if not isinstance(thumbnail_rows, list) or len(thumbnail_rows) != 1:
+        fail("Thumbnail manifest must contain exactly one output record")
+    thumbnail_row = thumbnail_rows[0]
+    if not isinstance(thumbnail_row, dict):
+        fail("Thumbnail output record is invalid")
+    if thumbnail_row.get("sha256") != digest_file(path):
+        fail("Thumbnail output SHA-256 differs from its manifest")
+    if thumbnail_row.get("bytes") != path.stat().st_size:
+        fail("Thumbnail output byte count differs from its manifest")
+    if thumbnail_row.get("format") != "JPEG":
+        fail("Thumbnail manifest does not identify JPEG output")
+    if thumbnail_row.get("width") != width or thumbnail_row.get("height") != height:
+        fail("Thumbnail manifest dimensions differ from the image")
 
     return {
         "status": "valid",
@@ -1800,7 +1892,11 @@ def main() -> int:
     total_duration = sum(
         row["duration"] for row in render_check["parts"]
     )
-    caption_check = validate_captions(part_numbers, total_duration)
+    caption_check = validate_captions(
+        part_numbers,
+        total_duration,
+        read_json(RENDER),
+    )
     thumbnail_check = validate_thumbnail(mode, dimensions)
     metadata_check = validate_metadata(mode, story_check["title"])
     mode_check = validate_mode_separation(mode, dimensions, fps)
@@ -1857,6 +1953,16 @@ def main() -> int:
     }
 
     write_json(REPORT, report)
+    saved_report = read_json(REPORT)
+    if not isinstance(saved_report, dict):
+        fail("Final validation report read-back failed")
+    if (
+        saved_report.get("status") != "completed"
+        or saved_report.get("format") != mode
+        or saved_report.get("story_title") != story_check["title"]
+        or saved_report.get("checks") != checks
+    ):
+        fail("Final validation report read-back integrity mismatch")
 
     log("=" * 64)
     log("FINAL OUTPUT VALIDATION PASSED")
