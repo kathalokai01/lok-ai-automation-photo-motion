@@ -31,7 +31,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 12
+SCRIPT_VERSION = 11
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -1169,9 +1169,6 @@ def source_signature(
         "title": title,
         "settings": settings,
         "actual_scene_counts": actual_counts,
-        "ai_story_generation_signature": ai_story.get("generation_signature"),
-        "ai_story_source_plan_signature": ai_story.get("source_plan_signature"),
-        "scenes_generation_signature": scene_data.get("generation_signature"),
         "main": relevant(main_sources),
         "extras": relevant(extra_sources),
     })
