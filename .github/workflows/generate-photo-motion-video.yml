@@ -594,6 +594,7 @@ jobs:
               "cv2", "edge_tts", "gradio_client",
               "huggingface_hub", "numpy", "PIL",
               "requests", "torch", "transformers",
+              "librosa", "sentencepiece", "soundfile",
           )
 
           for module in modules:
@@ -626,6 +627,9 @@ jobs:
           import requests
           import torch
           import transformers
+          import librosa
+          import sentencepiece
+          import soundfile
 
           print("Python dependencies imported successfully.")
           print("OpenCV:", cv2.__version__)
