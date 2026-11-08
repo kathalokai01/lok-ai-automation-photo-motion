@@ -117,7 +117,7 @@ class ProviderConfigurationTests(unittest.TestCase):
 
     def test_openai_is_first_default_provider(self):
         self.assertEqual(
-            client.DEFAULT_PROVIDER_ORDER,
+            list(client.DEFAULT_PROVIDER_ORDER),
             ["openai", "groq", "openrouter", "cloudflare"],
         )
         self.assertEqual(client.PROVIDER_ENV["openai"]["key"], "OPENAI_API_KEY")
