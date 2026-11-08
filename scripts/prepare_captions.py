@@ -842,7 +842,11 @@ def main() -> int:
 
     ordered_rows = sorted(
         all_rows,
-        key=lambda row: (int(row["part"]), int(row["scene"])),
+        key=lambda row: (
+            int(row["part"]),
+            ROLE_ORDER[scene_identity(row)[2]],
+            int(scene_identity(row)[3] or 0),
+        ),
     )
 
     main_ids = {scene_identity(row)[0] for row in ordered_main}
