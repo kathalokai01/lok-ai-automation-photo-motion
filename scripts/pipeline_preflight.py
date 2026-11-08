@@ -380,7 +380,7 @@ def check_font() -> tuple[bool, str]:
         )
         if scanned.returncode:
             return False, "fc-scan could not verify the selected font family."
-        normalized = scanned.stdout.replace("\\r", "\\n").replace(",", "\\n")
+        normalized = scanned.stdout.replace("\r", "\n").replace(",", "\n")
         actual = [item.strip().casefold() for item in normalized.splitlines() if item.strip()]
         expected = family.casefold()
         if not any(item == expected or item.startswith(expected + " ") for item in actual):
