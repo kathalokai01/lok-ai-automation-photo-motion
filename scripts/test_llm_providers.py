@@ -34,8 +34,11 @@ class ProviderConfigurationTests(unittest.TestCase):
     def test_default_order_includes_every_supported_provider(self):
         self.assertEqual(client.get_provider_order(), list(client.SUPPORTED_PROVIDERS))
 
-    def test_openai_is_supported_as_last_default_fallback(self):
-        self.assertEqual(client.DEFAULT_PROVIDER_ORDER[-1], "openai")
+    def test_openai_is_first_default_provider(self):
+        self.assertEqual(
+            client.DEFAULT_PROVIDER_ORDER,
+            ["openai", "groq", "openrouter", "cloudflare"],
+        )
         self.assertEqual(client.PROVIDER_ENV["openai"]["key"], "OPENAI_API_KEY")
         self.assertEqual(client.PROVIDER_ENV["openai"]["model"], "OPENAI_MODEL")
         self.assertEqual(client.PROVIDER_ENV["openai"]["url"], "https://api.openai.com/v1/chat/completions")
@@ -59,8 +62,11 @@ class ProviderConfigurationTests(unittest.TestCase):
         self.assertEqual(result["text"], "OpenAI mocked response")
 
     def test_configured_priority_is_preserved_and_deduplicated(self):
-        os.environ["LLM_PROVIDER_ORDER"] = "mistral,openrouter,groq,mistral"
-        self.assertEqual(client.get_provider_order(), ["mistral", "openrouter", "groq"])
+        os.environ["LLM_PROVIDER_ORDER"] = "openai,groq,openrouter,cloudflare,openai"
+        self.assertEqual(
+            client.get_provider_order(),
+            ["openai", "groq", "openrouter", "cloudflare"],
+        )
 
     def test_gemini_in_provider_order_is_reserved_for_gemini_selector(self):
         os.environ["LLM_PROVIDER_ORDER"] = "gemini,groq,openrouter"
@@ -119,28 +125,27 @@ class ProviderConfigurationTests(unittest.TestCase):
         self.assertEqual(model, "test-model")
         self.assertIn("present", detail)
 
-    def test_configured_cloudflare_and_mistral_are_supported(self):
+    def test_configured_cloudflare_is_supported_and_mistral_rejected(self):
         os.environ.update({
             "CLOUDFLARE_API_TOKEN": "cf-token",
             "CLOUDFLARE_ACCOUNT_ID": "account-id",
             "CLOUDFLARE_MODEL": "@cf/meta/test-model",
-            "MISTRAL_API_KEY": "mistral-key",
-            "MISTRAL_MODEL": "mistral-large-latest",
         })
         self.assertTrue(selector.validate_provider("cloudflare")[0])
-        self.assertTrue(selector.validate_provider("mistral")[0])
+        with self.assertRaises(client.ProviderError):
+            client.get_provider_model("mistral")
 
     def test_selector_uses_all_configured_providers_without_cost_gate(self):
         os.environ.update({
-            "LLM_PROVIDER_ORDER": "mistral,groq",
-            "MISTRAL_API_KEY": "mistral-key",
-            "MISTRAL_MODEL": "mistral-large-latest",
+            "LLM_PROVIDER_ORDER": "openai,groq",
+            "OPENAI_API_KEY": "openai-key",
+            "OPENAI_MODEL": "test-openai-model",
             "GROQ_API_KEY": "groq-key",
             "GROQ_MODEL": "llama-model",
         })
         selection = selector.build_selection()
         self.assertEqual(selection["status"], "ready")
-        self.assertEqual(selection["provider_order"], ["mistral", "groq"])
+        self.assertEqual(selection["provider_order"], ["openai", "groq"])
         self.assertTrue(selection["all_providers_enabled"])
 
     def test_selector_reports_no_provider_when_credentials_are_missing(self):
