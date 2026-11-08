@@ -1736,6 +1736,16 @@ def main():
     mix_records = build_mix_records(tracks, cues)
 
     music = tracks.get("music")
+    flow_music_data = read_json(FLOW_MANIFEST, required=False, default={})
+    role_compositions = (
+        flow_music_data.get("role_compositions", {})
+        if isinstance(flow_music_data, dict) else {}
+    )
+    music_providers = sorted({
+        str(item.get("provider") or "lyria")
+        for item in role_compositions.values()
+        if isinstance(item, dict)
+    })
     using_flow = (
         isinstance(music, dict)
         and str(music.get("generation", "")).startswith("google_flow")
@@ -1811,6 +1821,8 @@ def main():
         ),
         "external_api_calls": external_api_calls,
         "paid_services_used": paid_services_used,
+        "music_providers": music_providers,
+        "music_role_compositions": sorted(role_compositions),
         "sample_rate": RATE,
         "format": fmt,
         "dynamic_parts": True,
