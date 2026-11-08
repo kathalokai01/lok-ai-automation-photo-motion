@@ -36,6 +36,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       ALLOW_GEMINI_GENERATION: "I_ACCEPT_POTENTIAL_GEMINI_CHARGES"
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      FLOW_MUSIC_MODEL: ${{ vars.FLOW_MUSIC_MODEL }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
       GEMINI_MODEL_FALLBACKS: ${{ vars.GEMINI_MODEL_FALLBACKS }}
 
@@ -128,6 +129,7 @@ jobs:
             scripts/select_gemini_model.py
             scripts/check_gemini_guard.py
             scripts/gemini_api_guard.py
+            scripts/gemini_http.py
             scripts/select_visual_model.py
             scripts/test_gemini.py
             scripts/llm_provider_client.py
