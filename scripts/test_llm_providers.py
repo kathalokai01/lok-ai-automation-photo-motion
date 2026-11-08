@@ -34,6 +34,30 @@ class ProviderConfigurationTests(unittest.TestCase):
     def test_default_order_includes_every_supported_provider(self):
         self.assertEqual(client.get_provider_order(), list(client.SUPPORTED_PROVIDERS))
 
+    def test_openai_is_supported_as_last_default_fallback(self):
+        self.assertEqual(client.DEFAULT_PROVIDER_ORDER[-1], "openai")
+        self.assertEqual(client.PROVIDER_ENV["openai"]["key"], "OPENAI_API_KEY")
+        self.assertEqual(client.PROVIDER_ENV["openai"]["model"], "OPENAI_MODEL")
+        self.assertEqual(client.PROVIDER_ENV["openai"]["url"], "https://api.openai.com/v1/chat/completions")
+
+    def test_configured_openai_provider_is_ready(self):
+        os.environ.update({"OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "gpt-6-luna"})
+        ready, model, detail = selector.validate_provider("openai")
+        self.assertTrue(ready)
+        self.assertEqual(model, "gpt-6-luna")
+        self.assertIn("present", detail)
+
+    def test_openai_generation_uses_mocked_request(self):
+        os.environ.update({"OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "gpt-6-luna"})
+        mocked_response = {"choices": [{"message": {"content": "OpenAI mocked response"}}], "usage": {"total_tokens": 9}}
+        with patch.object(client, "_make_request", return_value=mocked_response) as mocked:
+            result = client.generate_text("openai", "Write a short test.")
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.args[1], "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(result["provider"], "openai")
+        self.assertEqual(result["model"], "gpt-6-luna")
+        self.assertEqual(result["text"], "OpenAI mocked response")
+
     def test_configured_priority_is_preserved_and_deduplicated(self):
         os.environ["LLM_PROVIDER_ORDER"] = "mistral,openrouter,groq,mistral"
         self.assertEqual(client.get_provider_order(), ["mistral", "openrouter", "groq"])
