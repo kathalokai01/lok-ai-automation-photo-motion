@@ -1303,6 +1303,13 @@ def build_narration_record(
         ),
         "role": role,
         "scene_type": role,
+        "voiceover_enabled": True,
+        "narration_source": (
+            "locked_part_text" if role == "main"
+            else "ai_generated_role_narration"
+        ),
+        "source_text_sha256": digest,
+        "source_word_count": count_words(narration),
         "title": str(
             scene.get("title", "")
         ).strip(),
