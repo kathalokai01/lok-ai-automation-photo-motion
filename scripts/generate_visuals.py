@@ -35,7 +35,7 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v11-variable-scenes-story-entities-locked-narration-visual-only-extras"
+VERSION = "photo-motion-visual-jobs-v12-narrated-extra-roles"
 PROMPT_VERSION = 12
 
 ROLE_ORDER = {
@@ -374,14 +374,16 @@ def normalize_scene_rows(
             if original.get("source_word_count") != len(narration.split()):
                 raise RuntimeError(f"{scene_id}: locked narration word count mismatch.")
         else:
-            if narration:
-                raise RuntimeError(f"{scene_id}: visual-only extra narration must be empty.")
-            if original.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{scene_id}: extra voiceover must be disabled.")
-            if original.get("narration_source") != "visual_only":
-                raise RuntimeError(f"{scene_id}: extra role must be marked visual_only.")
+            if len(narration.split()) < 8:
+                raise RuntimeError(f"{scene_id}: extra-role narration is missing or too short.")
+            if original.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{scene_id}: extra-role voiceover must be enabled.")
+            if original.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{scene_id}: extra narration source is invalid.")
+            if original.get("source_text_sha256") != text_sha256(narration):
+                raise RuntimeError(f"{scene_id}: extra narration hash mismatch.")
             if not story_anchor:
-                raise RuntimeError(f"{scene_id}: visual-only story anchor is missing.")
+                raise RuntimeError(f"{scene_id}: extra-role story anchor is missing.")
 
         if len(visual) < MIN_PROMPT_LENGTH:
             raise RuntimeError(
@@ -401,10 +403,10 @@ def normalize_scene_rows(
             "is_extra_scene": role != "main",
             "narration": narration,
             "story_anchor": story_anchor,
-            "voiceover_enabled": role == "main",
-            "narration_source": "locked_part_text" if role == "main" else "visual_only",
-            "source_text_sha256": text_sha256(narration) if role == "main" else "",
-            "source_word_count": len(narration.split()) if role == "main" else 0,
+            "voiceover_enabled": True,
+            "narration_source": "locked_part_text" if role == "main" else "ai_generated_role_narration",
+            "source_text_sha256": text_sha256(narration),
+            "source_word_count": len(narration.split()),
             "visual_prompt": visual,
         })
 
@@ -942,9 +944,9 @@ def build_prompt(
         raise RuntimeError(
             f"{source['scene_id']}: Main narration is too short."
         )
-    if role != "main" and (narration or not story_anchor):
+    if role != "main" and (len(narration.split()) < 8 or not story_anchor):
         raise RuntimeError(
-            f"{source['scene_id']}: extra role must be visual-only with a source anchor."
+            f"{source['scene_id']}: extra role needs spoken narration and a source anchor."
         )
 
     style = clean(config.get("VISUAL_STYLE")) or "cinematic_realistic"
@@ -958,11 +960,9 @@ def build_prompt(
         "EXACT STORY EVENT — PRIMARY VISUAL INSTRUCTION:",
         visual,
         (
-            "LOCKED NARRATION CONTEXT — DO NOT PRINT THESE WORDS IN THE IMAGE:"
-            if role == "main"
-            else "VISUAL-ONLY STORY ANCHOR — NOT VOICEOVER:"
+            "LOCKED SPOKEN NARRATION CONTEXT — DO NOT PRINT THESE WORDS IN THE IMAGE:"
         ),
-        narration if role == "main" else story_anchor,
+        narration,
         (
             "Create one photorealistic live-action cinematic film still. "
             "Depict the exact event in the primary visual instruction. "
@@ -1266,16 +1266,10 @@ def build_jobs(
             "title": clean(source.get("title")),
             "narration": clean(source.get("narration")),
             "story_anchor": clean(source.get("story_anchor")),
-            "voiceover_enabled": role == "main",
-            "narration_source": "locked_part_text" if role == "main" else "visual_only",
-            "source_text_sha256": (
-                text_sha256(clean(source.get("narration")))
-                if role == "main" else ""
-            ),
-            "source_word_count": (
-                len(clean(source.get("narration")).split())
-                if role == "main" else 0
-            ),
+            "voiceover_enabled": True,
+            "narration_source": "locked_part_text" if role == "main" else "ai_generated_role_narration",
+            "source_text_sha256": text_sha256(clean(source.get("narration"))),
+            "source_word_count": len(clean(source.get("narration")).split()),
             "dialogue": clean(source.get("dialogue")),
             "objects": source.get("objects", []),
             "animals": source.get("animals", []),
@@ -1466,10 +1460,13 @@ def validate_jobs(
             if job.get("source_word_count") != len(narration.split()):
                 raise RuntimeError(f"{scene_id}: Main narration word count mismatch.")
         else:
-            if clean(job.get("narration")):
-                raise RuntimeError(f"{scene_id}: extra role narration must be empty.")
-            if job.get("voiceover_enabled") is not False or job.get("narration_source") != "visual_only":
-                raise RuntimeError(f"{scene_id}: extra role must be visual-only.")
+            narration = clean(job.get("narration"))
+            if len(narration.split()) < 8:
+                raise RuntimeError(f"{scene_id}: extra-role narration is missing.")
+            if job.get("voiceover_enabled") is not True or job.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{scene_id}: extra-role narration metadata is invalid.")
+            if job.get("source_text_sha256") != text_sha256(narration):
+                raise RuntimeError(f"{scene_id}: extra-role narration hash mismatch.")
 
         parsed = Path(clean(job["image_path"]))
 
