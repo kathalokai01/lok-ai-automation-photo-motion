@@ -47,6 +47,7 @@ CHECKPOINT_FILE = STORY_DIR / "story_checkpoint.json"
 CORRECTED_STORY_FILE = STORY_DIR / "corrected_complete_story.txt"
 PLAN_FILE = STORY_DIR / "story_plan.json"
 TITLE_FILE = STORY_DIR / "final_title.txt"
+TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
@@ -2527,6 +2528,35 @@ Story:
     return title[:180]
 
 
+def load_persisted_title(complete_story: str) -> str:
+    """Reuse a title only when its saved story fingerprint matches exactly."""
+    data = read_json(TITLE_CACHE_FILE)
+    if not isinstance(data, dict):
+        return ""
+
+    expected_fingerprint = sha256(normalize_text(complete_story))
+    if data.get("story_fingerprint") != expected_fingerprint:
+        return ""
+
+    return clean(data.get("title"))[:180]
+
+
+def save_persisted_title(title: str, complete_story: str) -> None:
+    """Persist the final title against the complete corrected story."""
+    title = clean(title)[:180]
+    if not title:
+        raise RuntimeError("Refusing to persist an empty story title.")
+
+    write_json(
+        TITLE_CACHE_FILE,
+        {
+            "version": 1,
+            "story_fingerprint": sha256(normalize_text(complete_story)),
+            "title": title,
+        },
+    )
+
+
 def main() -> None:
     STORY_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -2640,6 +2670,7 @@ def main() -> None:
             cached.get("final_title")
             or cached.get("title")
             or title_source
+            or load_persisted_title(corrected_story)
         )
 
         if not title:
@@ -2649,6 +2680,8 @@ def main() -> None:
                 topic,
                 corrected_story,
             )
+
+        save_persisted_title(title, corrected_story)
 
         model = clean(cached.get("model")) or model
 
@@ -2769,8 +2802,11 @@ def main() -> None:
             checkpoint_data.get("final_title")
             or checkpoint_data.get("title")
             or title_source
+            or load_persisted_title(complete_story)
         ),
     )
+
+    save_persisted_title(title, complete_story)
 
     model = clean(proofreading.get("model")) or model
 
