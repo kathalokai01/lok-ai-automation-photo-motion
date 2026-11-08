@@ -50,7 +50,9 @@ DURATION_TOLERANCE = 1.25
 SFX_END_MARGIN = 0.08
 
 NARRATION_GAIN = 1.0
-MUSIC_GAIN = 0.50
+MUSIC_GAIN = 0.35
+MUSIC_DUCKING_ENABLED = True
+MUSIC_DUCKING_DB = -10.0
 AMBIENT_GAIN = 0.24
 SFX_GAIN_MULTIPLIER = 1.90
 MASTER_LIMIT = 0.95
@@ -1057,10 +1059,11 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
             + f"amix=inputs={len(bed_labels)}:duration=longest:normalize=0,"
             "volume=1.0[bed]"
         )
-        if audio:
+        if audio and MUSIC_DUCKING_ENABLED:
+            threshold = max(0.005, min(0.5, 10 ** (MUSIC_DUCKING_DB / 20)))
             filters.append(
                 "[bed][narr]sidechaincompress="
-                "threshold=0.025:ratio=5:attack=180:release=700:"
+                f"threshold={threshold:.5f}:ratio=5:attack=120:release=750:"
                 "makeup=1[ducked]"
             )
             mix_labels.append("[ducked]")
@@ -1436,7 +1439,14 @@ def main():
         if not shutil.which(command):
             raise RuntimeError(f"Required command not installed: {command}")
 
+    global MUSIC_GAIN, MUSIC_DUCKING_ENABLED, MUSIC_DUCKING_DB
     config = load_and_validate(ROOT / "Input" / "topic.txt")
+    try:
+        MUSIC_GAIN = max(0.0, min(1.0, float(config.get("MUSIC_GAIN", MUSIC_GAIN))))
+        MUSIC_DUCKING_DB = max(-30.0, min(0.0, float(config.get("MUSIC_DUCKING_DB", -10.0))))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("MUSIC_GAIN and MUSIC_DUCKING_DB must be numeric.") from exc
+    MUSIC_DUCKING_ENABLED = str(config.get("MUSIC_DUCKING", True)).strip().lower() in {"1", "true", "yes", "on"}
     mode = str(get_format(config)).strip().lower()
     output_slug = story_output_slug()
     if mode not in {"short", "full"}:
