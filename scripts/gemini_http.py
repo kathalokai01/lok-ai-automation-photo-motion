@@ -29,13 +29,23 @@ def http_error_body(error: BaseException, limit: int = 3000) -> str:
     if isinstance(cached, str):
         return cached[:limit]
     reader = getattr(error, "read", None)
-    if not callable(reader):
-        return ""
-    try:
-        body = reader(limit + 1)
-        if isinstance(body, bytes):
-            body = body.decode("utf-8", errors="replace")
-        body = str(body)
+    if callable(reader):
+        try:
+            body = reader(limit + 1)
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", errors="replace")
+            body = str(body)
+        except Exception:
+            body = ""
+    else:
+        response = getattr(error, "response", None)
+        body = getattr(response, "text", "") if response is not None else ""
+        if not body and response is not None:
+            raw = getattr(response, "content", b"")
+            if isinstance(raw, bytes):
+                body = raw.decode("utf-8", errors="replace")
+            else:
+                body = str(raw or "")
     except Exception:
         body = ""
     try:
@@ -76,6 +86,9 @@ def retry_after_seconds(
 ) -> int:
     """Honor Retry-After / Google RetryInfo, then use bounded backoff."""
     headers = getattr(error, "headers", None)
+    if headers is None:
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None)
     retry_after = None
     if headers is not None:
         try:
