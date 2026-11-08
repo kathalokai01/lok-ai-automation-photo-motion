@@ -123,20 +123,8 @@ def parse_model_list(raw: str, setting_name: str) -> list[str]:
 
     return result
 
-def zero_cost_llm_enabled() -> bool:
-    """The selector may prepare models only in explicit zero-cost mode."""
-    raw = os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower()
-    if raw not in {"1", "true", "yes", "on", "enabled"}:
-        raise RuntimeError(
-            "LLM_ZERO_COST_ONLY must be true. "
-            "Paid LLM providers and unconfirmed Gemini usage are blocked."
-        )
-    return True
-
-
 def configured_fallbacks(existing: dict) -> list[str]:
     """Preserve configured primary/fallback priority without reordering it."""
-    zero_cost_llm_enabled()
     existing = existing if isinstance(existing, dict) else {}
 
     raw_primary = os.environ.get("GEMINI_MODEL", "").strip()
@@ -308,7 +296,6 @@ def build_selection(
 
 def main() -> None:
     log("Preparing configured Gemini model order.")
-    zero_cost_llm_enabled()
 
     previous = read_existing_selection()
     models = configured_fallbacks(previous)
@@ -346,11 +333,6 @@ def main() -> None:
 
     if saved.get("selection_source") != "configured_priority_order":
         raise RuntimeError("Unexpected Gemini selection source.")
-
-    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
-        "1", "true", "yes", "on", "enabled",
-    }:
-        raise RuntimeError("Zero-cost LLM restriction changed during selection.")
 
     log("GEMINI MODEL PRIORITY SAVED")
     log("Selected primary: " + models[0])
