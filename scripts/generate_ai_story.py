@@ -218,7 +218,7 @@ def load_configured_provider_order() -> list[str]:
             result.append(f"{name}|{model}")
 
     if data.get("status") == "ready" and not result:
-        log("Zero-cost provider selector has no ready providers.")
+        log("LLM provider selector has no ready providers.")
     return result
 
 
