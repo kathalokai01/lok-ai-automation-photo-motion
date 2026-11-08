@@ -78,6 +78,10 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def text_sha256(value: Any) -> str:
+    return hashlib.sha256(clean(value).encode("utf-8")).hexdigest()
+
+
 def read_json(path: Path, required: bool = True):
     if not path.is_file():
         if required:
@@ -932,7 +936,7 @@ def validate_generated_part(
         "word_count": word_count(narration),
         "text_locked": True,
         "locked_word_count": word_count(narration),
-        "locked_text_sha256": stable_hash(narration),
+        "locked_text_sha256": text_sha256(narration),
         "final_part_merged": bool(source_part.get("final_part_merged")),
         "scenes": scenes,
     }
@@ -1457,7 +1461,7 @@ def validate_final_output(
             raise RuntimeError(f"Part {index} narration is not marked as locked.")
         if output.get("locked_word_count") != count:
             raise RuntimeError(f"Part {index} locked word count mismatch.")
-        if output.get("locked_text_sha256") != stable_hash(main_text):
+        if output.get("locked_text_sha256") != text_sha256(main_text):
             raise RuntimeError(f"Part {index} locked text hash mismatch.")
 
         if output.get("word_count") != count:
