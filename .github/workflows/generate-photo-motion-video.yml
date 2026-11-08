@@ -431,7 +431,7 @@ jobs:
                 or not str(checkpoint.get("final_title") or "").strip()
             ):
                 raise SystemExit(1)
-            PY
+          PY
               then
                 mkdir -p output/story
                 cp -f "$STORY_CHECKPOINT" output/story/story_checkpoint.json
