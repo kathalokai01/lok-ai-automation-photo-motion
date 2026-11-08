@@ -171,6 +171,18 @@ def get_provider_model(provider: str) -> str:
             "Only OpenRouter model IDs ending in :free are allowed.",
         )
 
+    if provider == "cloudflare":
+        if not model.startswith("@cf/") or len(model) <= 4:
+            raise ProviderError(
+                provider,
+                "CLOUDFLARE_MODEL must use a valid @cf/ model namespace.",
+            )
+        if any(char.isspace() for char in model) or ".." in model:
+            raise ProviderError(
+                provider,
+                "CLOUDFLARE_MODEL contains an invalid model path.",
+            )
+
     return model
 
 
