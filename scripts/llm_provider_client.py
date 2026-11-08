@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Zero-cost-only LLM provider client for the Katha Lok AI pipeline."""
+"""Multi-provider LLM client with ordered fallback for the Katha Lok AI pipeline."""
 
 from __future__ import annotations
 
@@ -99,16 +99,9 @@ def _env_bool(name: str, default: bool = False) -> bool:
     }
 
 
-def _require_zero_cost_mode() -> None:
-    if not _env_bool("LLM_ZERO_COST_ONLY", False):
-        raise ProviderError(
-            "configuration",
-            "LLM_ZERO_COST_ONLY must be true. Paid API calls are disabled.",
-        )
-
 
 def get_provider_order() -> list[str]:
-    """Return only explicitly supported non-Gemini free-tier providers."""
+    """Return all configured supported non-Gemini providers in priority order."""
 
     raw = os.environ.get("LLM_PROVIDER_ORDER", "").strip()
 
@@ -163,12 +156,6 @@ def get_provider_model(provider: str) -> str:
         raise ProviderError(
             provider,
             "Configured model ID is invalid.",
-        )
-
-    if provider == "openrouter" and not model.endswith(":free"):
-        raise ProviderError(
-            provider,
-            "Only OpenRouter model IDs ending in :free are allowed.",
         )
 
     if provider == "cloudflare":
@@ -304,25 +291,6 @@ def _decode_json_response(
     return data
 
 
-def _require_provider_free_mode(provider: str) -> None:
-    confirmation_variables = {
-        "groq": "GROQ_FREE_TIER_CONFIRMED",
-        "cloudflare": "CLOUDFLARE_FREE_TIER_CONFIRMED",
-        "mistral": "MISTRAL_FREE_MODE_CONFIRMED",
-    }
-
-    variable = confirmation_variables.get(provider)
-
-    if variable and not _env_bool(variable, False):
-        raise ProviderError(
-            provider,
-            (
-                f"Free-tier confirmation is required. "
-                f"Set {variable}=true only after confirming "
-                "the account is configured for free usage without paid billing."
-            ),
-        )
-
 
 def _make_request(
     provider: str,
@@ -416,7 +384,7 @@ def generate_text(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> dict:
     """
-    Generate text using one explicitly selected free-tier provider.
+    Generate text using one explicitly selected configured provider.
 
     Returns:
         {
@@ -430,8 +398,6 @@ def generate_text(
     fallback order and decides whether to try the next provider.
     """
 
-    _require_zero_cost_mode()
-
     provider = _clean(provider).lower()
 
     if provider not in SUPPORTED_PROVIDERS:
@@ -439,8 +405,6 @@ def generate_text(
             provider or "unknown",
             "Provider is not supported by the free-tier client.",
         )
-
-    _require_provider_free_mode(provider)
 
     prompt = str(prompt or "").strip()
 
@@ -478,14 +442,6 @@ def generate_text(
 
     api_key = get_provider_api_key(provider)
     selected_model = _clean(model) or get_provider_model(provider)
-
-    # Apply the OpenRouter free-only rule even when the model is passed
-    # directly by the calling script.
-    if provider == "openrouter" and not selected_model.endswith(":free"):
-        raise ProviderError(
-            provider,
-            "Paid OpenRouter model IDs are blocked. Use a :free model only.",
-        )
 
     messages = [
         {
