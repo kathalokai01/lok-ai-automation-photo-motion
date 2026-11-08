@@ -407,6 +407,7 @@ def load_caption_map(part_numbers, scene_counts):
         raise RuntimeError("Caption preparation manifest is incomplete")
 
     mapping = {}
+    extras = {}
 
     caption_rows = rows_from(data, "captions", "scenes")
     extra_caption_rows = rows_from(data, "extra_captions")
