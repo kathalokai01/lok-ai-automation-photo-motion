@@ -87,9 +87,13 @@ def resolve_voice_profile(config: dict[str, Any], record: dict[str, Any] | None 
     profile["delivery"] = profile["delivery"] + "; " + profile["emotion_instruction"]
     profile["voice_id"] = _clean(config.get("TTS_VOICE_ID", ""))
     profile["provider_voice_id"] = _clean(config.get("TTS_VOICE_ID_" + preset.upper(), ""))
+    try:
+        profile["emotion_strength"] = max(0.0, min(1.0, float(config.get("TTS_EMOTION_STRENGTH", 0.65))))
+    except (TypeError, ValueError):
+        profile["emotion_strength"] = 0.65
     profile["fingerprint"] = hashlib.sha256(json.dumps(profile, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     return profile
 
 def profile_summary(config: dict[str, Any], record: dict[str, Any] | None = None) -> dict[str, Any]:
     profile = resolve_voice_profile(config, record)
-    return {key: profile[key] for key in ("profile_id", "speaker_id", "speaker_name", "emotion", "pitch", "speed", "fingerprint")}
+    return {key: profile[key] for key in ("profile_id", "speaker_id", "speaker_name", "emotion", "emotion_instruction", "delivery", "emotion_strength", "pitch", "speed", "fingerprint")}
