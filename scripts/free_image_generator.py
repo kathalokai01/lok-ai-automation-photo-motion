@@ -13,7 +13,6 @@ import time
 from io import BytesIO
 from pathlib import Path
 
-from gemini_http import http_status
 from urllib.parse import quote, urlparse
 
 import requests
