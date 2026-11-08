@@ -70,7 +70,7 @@ def resolve_voice_profile(config: dict[str, Any], record: dict[str, Any] | None 
     character_mode = str(config.get("CHARACTER_VOICES", "true")).lower() in {"1", "true", "yes", "on"}
     if configured in PRESETS:
         preset = configured
-    elif audience == "kids":
+    elif audience == "kids" and str(config.get("TTS_CHILD_FRIENDLY", True)).lower() in {"1", "true", "yes", "on"}:
         preset = "child_friendly"
     elif role == "character" or (speaker and speaker.casefold() != "narrator" and character_mode):
         preset = "character"
