@@ -2340,8 +2340,8 @@ def main():
         "caption_font_requested": requested_family,
         "caption_font_sha256": font_hash,
         "caption_font_size": size,
-        "expected_scene_count": expected_main_count,
-        "completed_count": expected_main_count,
+        "expected_scene_count": len(ordered),
+        "completed_count": len(completed),
         "all_completed_scene_count": len(completed),
         "extra_scene_count": len(extra_rows),
         "completed_scenes": main_rows,
@@ -2378,6 +2378,7 @@ def main():
             for row in extra_rows
         ),
         "captions_burned_main_scenes": True,
+        "captions_burned_all_roles": True,
         "visual_only_role_scenes_captioned": False,
         "narrated_extra_roles_captioned": True,
         "caption_timeline": {
