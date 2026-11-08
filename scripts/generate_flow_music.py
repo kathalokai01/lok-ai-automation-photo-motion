@@ -17,6 +17,7 @@ from pathlib import Path
 import requests
 
 from gemini_http import retry_after_seconds
+from music_provider_client import generate_music, MusicProviderError
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_FILE = ROOT / "Input" / "topic.txt"
@@ -852,7 +853,7 @@ def save_composition_checkpoint(signature, compositions, status="in_progress", r
     if reason:
         record["last_error"] = str(reason)[:2000]
     write_json(CHECKPOINT, record)
-def build_role_compositions(api_key, model, prompts, role_durations, role_rows, signature):
+def build_role_compositions(api_key, model, prompts, role_durations, role_rows, signature, config):
     checkpoint = read_json(CHECKPOINT)
     manifest = read_json(MANIFEST)
     previous = checkpoint if checkpoint.get("source_fingerprint") == signature else manifest
@@ -889,10 +890,51 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
         source = SOURCE_DIR / f"{role}_source.audio"
         prepared = SOURCE_DIR / f"{role}_composition.mp3"
 
-        source_duration = request_music(api_key, model, prompts[role], source)
+        selected_provider = "lyria"
+        try:
+            source_duration = request_music(api_key, model, prompts[role], source)
+        except Exception as lyria_error:
+            if not truthy(config.get("MUSIC_FALLBACK_ENABLED", True), True):
+                raise
+            provider_order = config.get(
+                "MUSIC_PROVIDER_ORDER",
+                "lyria,eleven_music,stable_audio,local",
+            )
+            if isinstance(provider_order, str):
+                provider_order = [item.strip().lower() for item in provider_order.split(",") if item.strip()]
+            fallback_errors = []
+            recovered = False
+            for provider in provider_order:
+                if provider in {"lyria", "local"}:
+                    continue
+                if not truthy(config.get("MUSIC_ALLOW_PAID", False), False):
+                    fallback_errors.append(f"{provider}: paid music permission disabled")
+                    continue
+                try:
+                    generate_music(
+                        provider,
+                        prompts[role],
+                        max(MIN_AUDIO_DURATION, duration),
+                        source,
+                    )
+                    source_duration = probe_audio(source, MIN_AUDIO_DURATION)
+                    selected_provider = provider
+                    API_CALLS += 1
+                    recovered = True
+                    log("MUSIC FALLBACK SUCCESS:", provider, role)
+                    break
+                except Exception as provider_error:
+                    fallback_errors.append(f"{provider}: {str(provider_error)[:300]}")
+            if not recovered:
+                raise RuntimeError(
+                    "Lyria failed and no configured music fallback succeeded. "
+                    f"Lyria: {str(lyria_error)[:500]}; "
+                    + " | ".join(fallback_errors)
+                ) from lyria_error
         info = prepare_composition(source, prepared, max(MIN_AUDIO_DURATION, duration))
         compositions[role] = {
             "role": role,
+            "provider": selected_provider,
             "role_fingerprint": role_signature,
             "source_path": source.relative_to(ROOT).as_posix(),
             "source_sha256": sha256_file(source),
@@ -1470,7 +1512,7 @@ def main():
 
         compositions = build_role_compositions(
             api_key, model, prompts, role_durations,
-            role_rows, source_sig,
+            role_rows, source_sig, config,
         )
 
         expected_roles = {
