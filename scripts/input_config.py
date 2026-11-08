@@ -150,7 +150,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     "PHOTO_MOTION_STYLE": "dynamic",
     "PHOTO_MOTION_PARALLAX": True,
-    "PHOTO_MOTION_PARALLAX_STRENGTH": 0.026,
+    "PHOTO_MOTION_PARALLAX_STRENGTH": 0.045,
     "PHOTO_MOTION_SPEED": "fast",
     "PHOTO_MOTION_VARIATION": "high",
     "PHOTO_MOTION_PRESERVE_SUBJECT": True,
@@ -1427,16 +1427,16 @@ def _validate_photo_motion_settings(
 
     try:
         strength = float(
-            config.get("PHOTO_MOTION_PARALLAX_STRENGTH", 0.026)
+            config.get("PHOTO_MOTION_PARALLAX_STRENGTH", 0.045)
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(
             "PHOTO_MOTION_PARALLAX_STRENGTH must be a number."
         ) from exc
 
-    if not 0.0 <= strength <= 0.10:
+    if not 0.0 <= strength <= 0.055:
         raise ValueError(
-            "PHOTO_MOTION_PARALLAX_STRENGTH must be between 0 and 0.10."
+            "PHOTO_MOTION_PARALLAX_STRENGTH must be between 0 and 0.055."
         )
     config["PHOTO_MOTION_PARALLAX_STRENGTH"] = strength
 
