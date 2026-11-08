@@ -42,7 +42,7 @@ PLAN_FILE = STORY_DIR / "story_plan.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 REPORT_FILE = STORY_DIR / "story_length_validation.json"
 
-REPORT_VERSION = "story-length-validation-v14-natural-boundary-reporting"
+REPORT_VERSION = "story-length-validation-v15-locked-text-fingerprints"
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -324,6 +324,10 @@ def verify_story_header(
 
     if normalize_text(story.get("story_text")) != normalize_text(corrected):
         fail("story_text differs from corrected_complete_story.")
+    if story.get("story_text_locked") is not True:
+        fail("Corrected story is not marked as locked.")
+    if clean_text(story.get("corrected_complete_story_sha256")) != sha256_text(normalize_text(corrected)):
+        fail("Corrected complete story hash mismatch.")
 
     if as_int(story.get("total_story_words")) != corrected_words:
         fail("Story total_story_words mismatch.")
@@ -573,6 +577,12 @@ def verify_plan_part(
 
     if clean_text(plan_part.get("part_id")) != f"part_{part_number:02d}":
         fail(f"Story Plan Part {part_number} ID mismatch.")
+    if plan_part.get("text_locked") is not True:
+        fail(f"Story Plan Part {part_number} text is not locked.")
+    if as_int(plan_part.get("locked_word_count")) != word_count(plan_part.get("narration")):
+        fail(f"Story Plan Part {part_number} locked word count mismatch.")
+    if clean_text(plan_part.get("locked_text_sha256")) != sha256_text(normalize_text(plan_part.get("narration"))):
+        fail(f"Story Plan Part {part_number} locked text hash mismatch.")
 
     scenes = plan_part.get("scenes")
 
@@ -606,6 +616,10 @@ def verify_plan_part(
 
         if not anchor or normalize_text(scene.get("narration")) != anchor:
             fail(f"Story Plan Scene narration mismatch: {expected_id}.")
+        if clean_text(scene.get("source_text_sha256")) != sha256_text(anchor):
+            fail(f"Story Plan Scene source hash mismatch: {expected_id}.")
+        if as_int(scene.get("source_word_count")) != word_count(anchor):
+            fail(f"Story Plan Scene source word count mismatch: {expected_id}.")
 
         for field in (
             "beat",
@@ -707,6 +721,12 @@ def verify_story_parts(
             fail(f"Story Part {part_number} narration is empty.")
 
         amount = word_count(narration)
+        if part.get("text_locked") is not True:
+            fail(f"Story Part {part_number} text is not locked.")
+        if as_int(part.get("locked_word_count")) != amount:
+            fail(f"Story Part {part_number} locked word count mismatch.")
+        if clean_text(part.get("locked_text_sha256")) != sha256_text(narration):
+            fail(f"Story Part {part_number} locked text hash mismatch.")
 
         if as_int(part.get("word_count")) != amount:
             fail(f"Story Part {part_number} word_count mismatch.")
@@ -784,6 +804,10 @@ def verify_story_parts(
 
             if normalize_text(planned.get("story_anchor")) != narration_text:
                 fail(f"Story/Plan anchor mismatch for {scene_id}.")
+            if clean_text(planned.get("source_text_sha256")) != sha256_text(narration_text):
+                fail(f"Story/Plan source hash mismatch for {scene_id}.")
+            if as_int(planned.get("source_word_count")) != word_count(narration_text):
+                fail(f"Story/Plan source word count mismatch for {scene_id}.")
 
             visual = clean_text(scene.get("visual"))
             visual_prompt = clean_text(scene.get("visual_prompt"))
