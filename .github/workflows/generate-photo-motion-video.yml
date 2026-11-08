@@ -54,6 +54,9 @@ jobs:
       MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
       MISTRAL_MODEL: ${{ vars.MISTRAL_MODEL }}
 
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+
       FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
       FISH_AUDIO_API_KEY: ${{ secrets.FISH_AUDIO_API_KEY }}
       FISH_REFERENCE_ID: ${{ secrets.FISH_REFERENCE_ID }}
