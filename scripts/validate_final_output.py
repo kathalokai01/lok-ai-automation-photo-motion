@@ -54,7 +54,7 @@ REPORT = OUT / "validation_report.json"
 PACKAGE_REPORT = OUT / "package_manifest.json"
 PACKAGE_NAME = OUT / "package_archive_name.txt"
 
-VERSION = "final-validator-v102-locked-text-visual-only-roles"
+VERSION = "final-validator-v103-all-role-narration-captions"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -731,12 +731,17 @@ def validate_extra_role_records(
                 fail(f"Story {role} affects Main scene numbering: {expected_id}")
             if row.get("scene") is not None:
                 fail(f"Story {role} must not have a Main scene number: {expected_id}")
-            if clean(row.get("narration")):
-                fail(f"Story {role} must be visual-only with empty narration: {expected_id}")
-            if row.get("voiceover_enabled") is not False:
-                fail(f"Story {role} voiceover must be disabled: {expected_id}")
-            if row.get("narration_source") != "visual_only":
-                fail(f"Story {role} must be marked visual_only: {expected_id}")
+            role_text = clean(row.get("narration"))
+            if len(role_text.split()) < 8:
+                fail(f"Story {role} narration is missing or too short: {expected_id}")
+            if row.get("voiceover_enabled") is not True:
+                fail(f"Story {role} voiceover must be enabled: {expected_id}")
+            if row.get("narration_source") != "ai_generated_role_narration":
+                fail(f"Story {role} narration source is invalid: {expected_id}")
+            if row.get("source_text_sha256") != story_text_sha256(role_text):
+                fail(f"Story {role} narration hash mismatch: {expected_id}")
+            if row.get("source_word_count") != len(role_text.split()):
+                fail(f"Story {role} narration word count mismatch: {expected_id}")
 
             for key in (
                 "story_anchor", "purpose", "instruction",
@@ -979,12 +984,12 @@ def validate_narration(
         scene_counts,
         "Narration",
         media_type="audio",
-        roles=("main",),
+        roles=("hook", "main", "suspense", "resolution"),
     )
 
-    expected = sum(scene_counts.values())
+    expected = sum(scene_counts.values()) + len(part_numbers) * 2
     if result["record_count"] != expected:
-        fail(f"Main TTS record count mismatch: {result['record_count']} != {expected}")
+        fail(f"All-role TTS record count mismatch: {result['record_count']} != {expected}")
 
     audio_data = read_json(AUDIO)
     audio_rows = rows_from(audio_data, "jobs", "audio_jobs", "scenes")
@@ -992,14 +997,17 @@ def validate_narration(
     source_by_id = {
         clean(scene.get("scene_id")): scene
         for part in story.get("parts", [])
-        for scene in part.get("scenes", [])
+        for scene in (
+            list(part.get("scenes", []))
+            + list(part.get("extra_scenes", []))
+        )
         if isinstance(scene, dict)
     }
     seen = set()
     for row in audio_rows:
         sid = clean(row.get("scene_id") or row.get("job_id"))
         if sid in seen or sid not in source_by_id:
-            fail(f"Main TTS scene mapping is duplicate or unknown: {sid}")
+            fail(f"TTS scene mapping is duplicate or unknown: {sid}")
         seen.add(sid)
         text_value = clean(row.get("text") or row.get("narration"))
         source_text = clean(source_by_id[sid].get("narration"))
@@ -1138,8 +1146,11 @@ def validate_sound_design(
                 if cue.get("narration_sha256") != (audio_row.get("sha256") or audio_row.get("audio_sha256")):
                     fail(f"SFX Main cue narration hash mismatch: {sid}")
             else:
-                if cue.get("timing_basis") != "visual_scene_duration" or clean(cue.get("narration_sha256")):
-                    fail(f"SFX visual-only cue must not reference TTS: {sid}")
+                audio_row = audio_by_id.get(sid)
+                if audio_row is None or cue.get("timing_basis") != "measured_tts_audio_duration":
+                    fail(f"SFX narrated-role cue timing source mismatch: {sid}")
+                if cue.get("narration_sha256") != (audio_row.get("sha256") or audio_row.get("audio_sha256")):
+                    fail(f"SFX narrated-role cue audio hash mismatch: {sid}")
 
         value = first_path(
             cue, "path", "audio_path", "audio", "file", "output"
@@ -1276,12 +1287,13 @@ def validate_captions(
     declared_caption_manifest = clean(render_data.get("caption_manifest"))
     if declared_caption_manifest and declared_caption_manifest != relative(CAPTIONS):
         fail("Render manifest caption-manifest path mismatch")
-    if captions.get("total_extra_scenes") != 0:
-        fail("Visual-only extra scenes must not receive captions")
-    if captions.get("total_caption_records") != sum(
+    expected_caption_count = sum(
         int(value) for value in render_data.get("actual_scene_counts", {}).values()
-    ):
-        fail("Caption manifest Main Scene record count mismatch")
+    ) + len(part_numbers) * 2
+    if captions.get("total_extra_scenes") != len(part_numbers) * 2:
+        fail("Caption manifest extra-role coverage mismatch")
+    if captions.get("total_caption_records") != expected_caption_count:
+        fail("Caption manifest all-role record count mismatch")
 
     timeline = render_data.get("caption_timeline")
     if not isinstance(timeline, dict):
@@ -1289,12 +1301,12 @@ def validate_captions(
     if (
         timeline.get("includes_main") is not True
         or timeline.get("global_srt") is not True
-        or timeline.get("includes_hook") is not False
-        or timeline.get("includes_suspense") is not False
-        or timeline.get("includes_resolution") is not False
-        or render_data.get("visual_only_role_scenes_captioned") is not False
+        or timeline.get("includes_hook") is not True
+        or timeline.get("includes_suspense") is not True
+        or timeline.get("includes_resolution") is not True
+        or render_data.get("narrated_extra_roles_captioned") is not True
     ):
-        fail("Caption timeline must cover Main narration only; extra roles are visual-only")
+        fail("Caption timeline does not cover all narrated roles")
 
     return {
         "status": "valid",
@@ -1388,25 +1400,26 @@ def validate_render(
 
         if clean(row.get("status")).lower() not in SUCCESS:
             fail(f"Rendered scene is incomplete: {sid}")
-        if key[1] == "main":
-            if row.get("captions_burned") is not True:
-                fail(f"Main scene does not confirm burned captions: {sid}")
-            if row.get("source_text_sha256") != text_sha256(
-                next(
-                    item.get("narration")
-                    for part in read_json(STORY).get("parts", [])
-                    for item in part.get("scenes", [])
-                    if item.get("scene_id") == sid
+        if row.get("captions_burned") is not True:
+            fail(f"Rendered role does not confirm burned captions: {sid}")
+        if row.get("voiceover_enabled") is not True:
+            fail(f"Rendered role voiceover is disabled: {sid}")
+        if not clean(row.get("source_audio_sha256")):
+            fail(f"Rendered role TTS audio fingerprint is missing: {sid}")
+        source_text = next(
+            (
+                item.get("narration")
+                for part in read_json(STORY).get("parts", [])
+                for item in (
+                    list(part.get("scenes", []))
+                    + list(part.get("extra_scenes", []))
                 )
-            ):
-                fail(f"Rendered Main scene source text hash mismatch: {sid}")
-        else:
-            if row.get("captions_burned") is not False:
-                fail(f"Visual-only role must not contain captions: {sid}")
-            if row.get("voiceover_enabled") is not False:
-                fail(f"Visual-only role voiceover must be disabled: {sid}")
-            if clean(row.get("source_audio_sha256")):
-                fail(f"Visual-only role has a TTS audio fingerprint: {sid}")
+                if isinstance(item, dict) and item.get("scene_id") == sid
+            ),
+            None,
+        )
+        if not source_text or row.get("source_text_sha256") != text_sha256(source_text):
+            fail(f"Rendered role source text hash mismatch: {sid}")
 
         value = first_path(row, "video", "output", "path")
         path = safe_output(value, f"Rendered scene {sid}", MIN_VIDEO_BYTES)
