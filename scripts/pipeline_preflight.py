@@ -2194,7 +2194,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             "scenes_range": [scenes_min, scenes_max],
             "fps": fps,
             "tts_provider_order": tts_order,
-        "music_provider_order": music_order,
+            "music_provider_order": music_order,
             "tts_primary_providers": primary,
             "image_provider_order": image_order,
             "billable_providers_allowed": billable,
