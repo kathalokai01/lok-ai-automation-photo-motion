@@ -686,6 +686,13 @@ jobs:
           print("VERIFIED HINDI FONT:", selected["family"])
           PY
 
+      - name: Compile Python pipeline and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m compileall -q scripts
+
       - name: Test configured paid and free LLM provider fallback
         shell: bash
         run: |
