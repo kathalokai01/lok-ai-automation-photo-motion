@@ -1060,10 +1060,10 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
             "volume=1.0[bed]"
         )
         if audio and MUSIC_DUCKING_ENABLED:
-            threshold = max(0.005, min(0.5, 10 ** (MUSIC_DUCKING_DB / 20)))
+            ratio = max(2.0, min(12.0, abs(MUSIC_DUCKING_DB) / 2.0))
             filters.append(
                 "[bed][narr]sidechaincompress="
-                f"threshold={threshold:.5f}:ratio=5:attack=120:release=750:"
+                f"threshold=0.025:ratio={ratio:.2f}:attack=120:release=750:"
                 "makeup=1[ducked]"
             )
             mix_labels.append("[ducked]")
