@@ -72,7 +72,7 @@ def resolve_voice_profile(config: dict[str, Any], record: dict[str, Any] | None 
         preset = configured
     elif audience == "kids":
         preset = "child_friendly"
-    elif role == "character" or (speaker and character_mode):
+    elif role == "character" or (speaker and speaker.casefold() != "narrator" and character_mode):
         preset = "character"
     else:
         voice = _clean(config.get("VOICE", "male")).lower()
