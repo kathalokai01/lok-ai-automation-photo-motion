@@ -30,7 +30,7 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v15-audio-role-font-verified"
+VERSION = "prepare-captions-v16-locked-main-only-captions"
 MIN_AUDIO_BYTES = 1000
 DURATION_TOLERANCE = 0.15
 
@@ -334,30 +334,9 @@ def validate_narration_records(
             f"extra={sorted(set(main_map)-expected_main)}."
         )
 
-    for row in extra_rows:
-        sid, part, role, _ = scene_identity(row)
-        if not 1 <= part <= parts:
-            raise RuntimeError(f"{sid}: part is outside selected range.")
-        if sid in all_ids or sid in extra_map:
-            raise RuntimeError(f"Duplicate narration scene ID: {sid}.")
-        if row.get("status") != "completed" or not narration_text(row):
-            raise RuntimeError(f"Extra narration is incomplete: {sid}.")
-        extra_map[sid] = row
-        all_ids.add(sid)
-
-    expected_extra = []
-    for part in range(1, parts + 1):
-        expected_extra.append(f"part_{part:02d}_hook")
-        if part < parts:
-            expected_extra.append(f"part_{part:02d}_suspense")
-        else:
-            expected_extra.append(f"part_{part:02d}_resolution")
-
-    if set(extra_map) != set(expected_extra) or len(extra_map) != len(expected_extra):
+    if extra_rows:
         raise RuntimeError(
-            "Hook/Suspense/Resolution mapping mismatch: "
-            f"missing={sorted(set(expected_extra)-set(extra_map))}, "
-            f"unexpected={sorted(set(extra_map)-set(expected_extra))}."
+            "Hook/Suspense/Resolution are visual-only and cannot create captions."
         )
 
     ordered_main = [
@@ -365,10 +344,7 @@ def validate_narration_records(
         for part, count in enumerate(actual_counts, 1)
         for scene in range(1, count + 1)
     ]
-    ordered_extra = [
-        extra_map[sid] for sid in expected_extra
-    ]
-    return ordered_main, ordered_extra
+    return ordered_main, []
 
 
 def validate_audio_manifest(
@@ -465,9 +441,16 @@ def validate_audio_manifest(
         if not fingerprint:
             raise RuntimeError(f"{sid}: TTS fingerprint is missing.")
 
+        text_hash = sha256(source_text)
+        if job.get("text_sha256") != text_hash:
+            raise RuntimeError(f"{sid}: TTS locked source-text hash mismatch.")
+        if clean_text(job.get("text")) != source_text:
+            raise RuntimeError(f"{sid}: TTS text differs from locked narration.")
+
         audio_map[sid] = {
             "path": audio_path.relative_to(ROOT).as_posix(),
             "sha256": actual_hash,
+            "text_sha256": text_hash,
             "duration": round(duration, 5),
             "provider": job.get("provider"),
             "model": job.get("model"),
@@ -580,6 +563,9 @@ def prepare_one(
     source = clean_text(narration_text(row))
     if not source:
         raise RuntimeError(f"{sid}: source narration is empty.")
+    source_hash = sha256(source)
+    if audio.get("text_sha256") != source_hash:
+        raise RuntimeError(f"{sid}: caption source text differs from locked TTS text.")
 
     caption, source_field, method = choose_caption(row, mode)
     if not caption:
@@ -599,7 +585,7 @@ def prepare_one(
         "part": part,
         "scene": scene,
         "role": role,
-        "source_sha256": sha256(source),
+        "source_sha256": source_hash,
         "caption_sha256": sha256(caption),
         "source_field": source_field,
         "selection_method": method,
@@ -630,7 +616,7 @@ def prepare_one(
             "role": role,
             "text": selected_text,
             "caption_sha256": caption_hash,
-            "source_text_sha256": sha256(source),
+            "source_text_sha256": source_hash,
             "audio_sha256": audio["sha256"],
             "audio_fingerprint": audio["fingerprint"],
             "caption_language": mode,
@@ -653,7 +639,7 @@ def prepare_one(
         "caption_language": mode,
         "caption_source_field": source_field,
         "selection_method": method,
-        "source_text_sha256": sha256(source),
+        "source_text_sha256": source_hash,
         "caption_sha256": caption_hash,
         "audio_path": audio["path"],
         "audio_sha256": audio["sha256"],
@@ -726,44 +712,8 @@ def validate_prepared_records(
             f"extra={sorted(actual_main-expected_main)}."
         )
 
-    expected_extras = []
-    for part in range(1, parts + 1):
-        expected_extras.append((part, "hook"))
-        if part < parts:
-            expected_extras.append((part, "suspense"))
-        else:
-            expected_extras.append((part, "resolution"))
-
-    actual_extras = []
-
-    for row in extra_records:
-        sid = clean_text(row.get("scene_id"))
-        if not sid or sid in all_ids:
-            raise RuntimeError(f"Missing or duplicate extra caption ID: {sid!r}.")
-
-        role = clean_text(row.get("role")).lower()
-        if role not in EXTRA_ROLES:
-            raise RuntimeError(f"{sid}: invalid extra caption role.")
-        if row.get("scene") is not None:
-            raise RuntimeError(f"{sid}: extra caption cannot have Main scene number.")
-        if not clean_text(row.get("text")):
-            raise RuntimeError(f"{sid}: extra caption text is empty.")
-        if row.get("caption_sha256") != sha256(row["text"]):
-            raise RuntimeError(f"{sid}: extra caption SHA-256 mismatch.")
-        if sid not in audio_map:
-            raise RuntimeError(f"{sid}: verified TTS audio mapping is missing.")
-        if row.get("audio_sha256") != audio_map[sid]["sha256"]:
-            raise RuntimeError(f"{sid}: extra caption/audio hash mismatch.")
-
-        actual_extras.append((int(row["part"]), role))
-        all_ids.add(sid)
-
-    if sorted(actual_extras) != sorted(expected_extras):
-        raise RuntimeError(
-            "Extra caption role mapping mismatch: "
-            f"expected={sorted(expected_extras)}, "
-            f"found={sorted(actual_extras)}."
-        )
+    if extra_records:
+        raise RuntimeError("Visual-only Hook/Suspense/Resolution cannot have captions.")
 
     if all_ids != set(audio_map):
         raise RuntimeError(
@@ -844,7 +794,7 @@ def main() -> int:
         actual_counts,
     )
 
-    all_rows = ordered_main + ordered_extras
+    all_rows = ordered_main
     audio_map, audio_manifest_hash = validate_audio_manifest(
         narration_data,
         all_rows,
@@ -871,11 +821,7 @@ def main() -> int:
 
     ordered_rows = sorted(
         all_rows,
-        key=lambda row: (
-            int(row["part"]),
-            ROLE_ORDER[scene_identity(row)[2]],
-            int(row["scene"]) if scene_identity(row)[2] == "main" else 0,
-        ),
+        key=lambda row: (int(row["part"]), int(row["scene"])),
     )
 
     main_ids = {scene_identity(row)[0] for row in ordered_main}
@@ -956,8 +902,9 @@ def main() -> int:
         "scenes_range": [scenes_min, scenes_max],
         "actual_scene_counts": actual_counts,
         "total_scenes": len(prepared_main),
-        "total_extra_scenes": len(prepared_extras),
-        "total_caption_records": len(prepared_main) + len(prepared_extras),
+        "total_extra_scenes": 0,
+        "visual_only_extra_scenes": parts + max(0, parts - 1) + 1,
+        "total_caption_records": len(prepared_main),
         "role_counts": role_counts,
         "caption_font": font,
         "caption_font_size": font_size,
@@ -996,12 +943,12 @@ def main() -> int:
     log("SCENES range:", f"{scenes_min}-{scenes_max}")
     log("Actual Scene counts:", actual_counts)
     log("Main captions:", len(prepared_main))
-    log("Extra-role captions:", len(prepared_extras))
+    log("Extra-role captions:", 0)
     log("Role counts:", role_counts)
     log("Language:", mode)
     log("Font:", font)
     log("Font size:", font_size)
-    log("Verified TTS audio records:", len(audio_map))
+    log("Verified Main TTS audio records:", len(audio_map))
     log("Reused checkpoints:", reused_count)
     log("New checkpoints:", created_count)
     log("Translation API calls: 0")
