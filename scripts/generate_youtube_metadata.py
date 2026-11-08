@@ -401,7 +401,7 @@ def load_configured_provider_order() -> list[dict]:
     if not isinstance(records, list) or not isinstance(order, list):
         raise RuntimeError("Selected provider configuration is malformed.")
 
-    supported = {"groq", "openrouter", "cloudflare", "mistral"}
+    supported = {"openai", "groq", "openrouter", "cloudflare"}
     by_name = {}
     for item in records:
         if not isinstance(item, dict):
@@ -570,7 +570,7 @@ def validate_metadata(
     if not re.fullmatch(r"[a-f0-9]{64}", clean(fingerprint)):
         raise RuntimeError("Metadata input fingerprint is invalid.")
     provider = clean(provider).lower()
-    if provider not in {"gemini", "groq", "openrouter", "cloudflare", "mistral"}:
+    if provider not in {"gemini", "openai", "groq", "openrouter", "cloudflare"}:
         raise RuntimeError(f"Unsupported metadata provider: {provider!r}.")
     return {
         "status": "completed",
