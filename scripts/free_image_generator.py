@@ -455,6 +455,7 @@ def get_jobs():
             "story_anchor": story_anchor,
             "voiceover_enabled": role == "main",
             "narration_source": "locked_part_text" if role == "main" else "visual_only",
+            "visual_only": role != "main",
             "source_text_sha256": sha256_text(narration) if role == "main" else "",
             "source_word_count": len(narration.split()) if role == "main" else 0,
             "negative_prompt": clean(job.get("negative_prompt")),
