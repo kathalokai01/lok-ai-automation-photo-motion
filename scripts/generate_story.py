@@ -51,7 +51,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v36-locked-part-text-integrity"
+VERSION = "story-builder-v36-locked-part-text-integrity-language-first-exact-partition-lock"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -519,16 +519,17 @@ def _partition_short_story(
                 scenes_min,
                 scenes_max,
                 allow_final_short=False,
-                final_max=SHORT_HARD_MAX,
+                final_max=SHORT_MAX,
             )
 
             if groups is not None:
                 return groups, part_count, False
 
     merged_candidates = [
-        number for number in range(minimum_parts, maximum_parts + 1)
+        number for number in range(max(1, minimum_parts - 1), preferred_count)
         if number >= 1
         and number < preferred_count
+        and number <= maximum_parts
         and number * scenes_max <= MAX_TOTAL_SCENES
     ]
     merged_candidates.sort(
@@ -1081,7 +1082,7 @@ def generate_complete_story(
                 or "configured_gemini"
             ),
             "complete_story_reviewed": True,
-            "source_story_word_count": word_count(source_text),
+            "source_story_character_count": len(source_text),
             "corrected_story_word_count": word_count(complete),
             "source_preservation_verification": source_verification,
         },
@@ -1412,13 +1413,12 @@ def _partition_and_revise(
     title: str,
     scenes_range: tuple[int, int],
 ) -> tuple[list[str], dict, dict]:
-    minimum_parts, maximum_parts = parse_parts_range(
-        parts_specification
-    )
-    total_words = word_count(complete_story)
+    minimum_parts, maximum_parts = parse_parts_range(parts_specification)
+    corrected_story = normalize_text(complete_story)
+    total_words = word_count(corrected_story)
 
     if mode == "full":
-        groups = [complete_story]
+        groups = [corrected_story]
         merged_fallback = False
     else:
         preferred = select_final_part_count(
@@ -1429,320 +1429,84 @@ def _partition_and_revise(
             config=None,
         )
         groups, _selected_count, merged_fallback = _partition_short_story(
-            complete_story,
+            corrected_story,
             preferred,
             minimum_parts,
             maximum_parts,
             scenes_range,
         )
 
-    revised_groups: list[str] = []
-    revision_rows: list[dict] = []
-    evidence_by_part: dict[int, dict] = {}
-    attempted_parts: list[int] = []
-
-    for number, original in enumerate(groups, 1):
-        if mode == "full":
-            revised_groups.append(original)
-            revision_rows.append({
-                "part": number,
-                "attempted": False,
-                "outcome": "full_unrestricted",
-            })
-            continue
-
-        amount = word_count(original)
-        is_final = number == len(groups)
-
-        needs_revision = (
-            amount < SHORT_MIN
-            or (
-                amount > SHORT_MAX
-                and not (is_final and merged_fallback)
-            )
+    if not groups or clean("\n\n".join(groups)) != clean(corrected_story):
+        raise RuntimeError(
+            "Part partition changed, omitted, duplicated or reordered corrected Story text."
         )
 
-        if not needs_revision:
-            revised_groups.append(original)
-            revision_rows.append({
-                "part": number,
-                "attempted": False,
-                "outcome": "already_within_target",
-                "before_words": amount,
-                "after_words": amount,
-                "before_sha256": sha256(original),
-                "after_sha256": sha256(original),
-                "attempts": [],
-            })
-            continue
-
-        try:
-            revised, attempts, evidence = repair_short_part(
-                original,
-                number,
-                complete_story,
-                title,
-                model,
-                api_key,
-                final_merged=bool(is_final and merged_fallback),
-                return_evidence=True,
-            )
-        except RuntimeError as exc:
-            # A final Part below 120 words must reach the explicit
-            # retry-then-merge recovery below. repair_short_part raises
-            # after exhausting retries, so preserve the untouched final
-            # text here instead of aborting before that recovery can run.
-            if not (is_final and amount < SHORT_MIN):
-                raise
-            revised = original
-            attempts = [{
-                "attempt": REVISION_ATTEMPTS,
-                "attempted": True,
-                "outcome": "final_part_retry_exhausted_merge_required",
-                "error": str(exc),
-                "before_words": amount,
-                "after_words": amount,
-                "before_sha256": sha256(original),
-                "after_sha256": sha256(original),
-            }]
-            evidence = None
-
-        revised_groups.append(revised)
-        attempted_parts.append(number)
-
-        if evidence:
-            evidence_by_part[number] = evidence
-
-        revision_rows.append({
-            "part": number,
-            "attempted": True,
-            "outcome": (
-                "verified_revision"
-                if evidence
-                else (
-                    "final_part_retry_exhausted_merge_required"
-                    if is_final and word_count(revised) < SHORT_MIN
-                    else "retried_no_verified_change"
-                )
-            ),
-            "before_words": amount,
-            "after_words": word_count(revised),
-            "before_sha256": sha256(original),
-            "after_sha256": sha256(revised),
-            "revision_evidence": evidence,
-            "attempts": attempts,
-            "final_part_merged": bool(is_final and merged_fallback),
-        })
-
-    # Final-Part exception is evaluated only after all Parts are revised.
-    if mode == "short" and revised_groups:
-        final_count = word_count(revised_groups[-1])
-
-        if final_count < SHORT_MIN:
-            if len(revised_groups) < 2:
-                raise RuntimeError(
-                    "The only SHORT Part remains below 120 words; "
-                    "there is no preceding Part to merge into."
-                )
-
-            merged_text = (
-                revised_groups[-2].rstrip()
-                + "\n"
-                + revised_groups[-1].lstrip()
-            )
-            merged_words = word_count(merged_text)
-
-            if merged_words > SHORT_MERGED_MAX:
-                target_count = len(revised_groups) - 1
-                rebalance_source = "\n\n".join(revised_groups)
-                rebalanced = _rebalance_for_merged_count(
-                    rebalance_source,
-                    target_count,
-                    scenes_range,
-                )
-
-                if rebalanced is None:
-                    raise RuntimeError(
-                        f"Final-Part merge would contain {merged_words} words, "
-                        f"above {SHORT_MERGED_MAX}; rebalancing into "
-                        f"{target_count} Parts failed."
-                    )
-
-                revised_groups = rebalanced
-                evidence_by_part = {}
-                revision_rows = []
-                attempted_parts = []
-                merged_fallback = True
-
-                for rebalance_number, rebalance_text in enumerate(
-                    revised_groups,
-                    1,
-                ):
-                    is_merged_final = (
-                        rebalance_number == len(revised_groups)
-                    )
-                    amount = word_count(rebalance_text)
-
-                    if amount < SHORT_MIN:
-                        raise RuntimeError(
-                            f"Rebalanced Part {rebalance_number} "
-                            f"contains only {amount} words."
-                        )
-
-                    if amount > SHORT_MAX and not is_merged_final:
-                        revised_text, retry_records, retry_evidence = (
-                            repair_short_part(
-                                rebalance_text,
-                                rebalance_number,
-                                rebalance_source,
-                                title,
-                                model,
-                                api_key,
-                                return_evidence=True,
-                            )
-                        )
-                        revised_groups[rebalance_number - 1] = revised_text
-                        attempted_parts.append(rebalance_number)
-
-                        if retry_evidence:
-                            evidence_by_part[rebalance_number] = retry_evidence
-
-                        revision_rows.append({
-                            "part": rebalance_number,
-                            "attempted": True,
-                            "outcome": (
-                                "verified_after_final_rebalance"
-                                if retry_evidence
-                                else "unverified_after_final_rebalance"
-                            ),
-                            "before_words": amount,
-                            "after_words": word_count(revised_text),
-                            "before_sha256": sha256(rebalance_text),
-                            "after_sha256": sha256(revised_text),
-                            "revision_evidence": retry_evidence,
-                            "attempts": retry_records,
-                            "final_part_merged": is_merged_final,
-                        })
-                    else:
-                        revision_rows.append({
-                            "part": rebalance_number,
-                            "attempted": False,
-                            "outcome": "accepted_after_final_rebalance",
-                            "before_words": amount,
-                            "after_words": amount,
-                            "before_sha256": sha256(rebalance_text),
-                            "after_sha256": sha256(rebalance_text),
-                            "attempts": [],
-                            "final_part_merged": is_merged_final,
-                        })
-
-            else:
-                previous_part_number = len(revised_groups) - 1
-                revised_groups = revised_groups[:-2] + [merged_text]
-                merged_fallback = True
-
-                evidence_by_part.pop(previous_part_number, None)
-                evidence_by_part.pop(previous_part_number + 1, None)
-
-                revision_rows = [
-                    row for row in revision_rows
-                    if int(row.get("part", 0)) < previous_part_number
-                ]
-                attempted_parts = [
-                    number for number in attempted_parts
-                    if number < previous_part_number
-                ]
-
-                revision_rows.append({
-                    "part": len(revised_groups),
-                    "attempted": False,
-                    "outcome": "final_short_part_merged_into_preceding_part",
-                    "before_words": merged_words,
-                    "after_words": merged_words,
-                    "after_sha256": sha256(merged_text),
-                    "final_part_merged": True,
-                    "text_preserved_exactly": True,
-                    "attempts": [],
-                })
-
+    selected_count = len(groups)
     if mode == "short":
-        for number, part in enumerate(revised_groups, 1):
+        for number, part in enumerate(groups, 1):
             amount = word_count(part)
-            is_final_merged = bool(
-                merged_fallback and number == len(revised_groups)
-            )
-            maximum = (
-                SHORT_MERGED_MAX if is_final_merged
-                else SHORT_HARD_MAX
-            )
-
+            is_final_merged = bool(merged_fallback and number == selected_count)
+            maximum = SHORT_MERGED_MAX if is_final_merged else SHORT_MAX
             if amount < SHORT_MIN or amount > maximum:
                 raise RuntimeError(
                     f"SHORT Part {number} has {amount} words; "
-                    f"allowed range is {SHORT_MIN}-{maximum}."
+                    f"exact partition range is {SHORT_MIN}-{maximum}."
                 )
-
-            if amount > SHORT_MAX and not is_final_merged:
-                if not _evidence_is_semantic(
-                    evidence_by_part.get(number),
-                    part,
-                ):
-                    raise RuntimeError(
-                        f"SHORT Part {number} has {amount} words but "
-                        "lacks verified revision and semantic evidence."
-                    )
-
-    final_story_text = "\n\n".join(revised_groups)
-
-    if not final_story_text.strip():
-        raise RuntimeError("Final story became empty after Part revision.")
-
-    selected_count = len(revised_groups)
 
     set_selected_parts(
         config,
         selected_count,
-        source="corrected_story_scene_aware_partition",
-        story_word_count=word_count(final_story_text),
+        source="corrected_story_exact_sentence_partition",
+        story_word_count=total_words,
     )
 
-    scenes_min, _scenes_max = scenes_range
-
+    policy_minimum_parts = (
+        min(minimum_parts, selected_count)
+        if merged_fallback else minimum_parts
+    )
     policy = build_length_policy(
         format_type=mode,
         story_length=story_length,
-        parts=f"{minimum_parts}-{maximum_parts}",
-        scenes_per_part=scenes_min,
+        parts=f"{policy_minimum_parts}-{maximum_parts}",
+        scenes_per_part=scenes_range[0],
         scene_duration=config.get("SCENE_DURATION", "auto"),
-        source_word_count=word_count(final_story_text),
+        source_word_count=total_words,
         selected_parts=selected_count,
     )
-
     policy.update({
-        "corrected_story_word_count": word_count(final_story_text),
-        "corrected_story_sha256": sha256(final_story_text),
+        "requested_parts_minimum": minimum_parts,
+        "requested_parts_maximum": maximum_parts,
+        "final_merge_reduced_part_count": bool(
+            merged_fallback and selected_count < minimum_parts
+        ),
+        "corrected_story_word_count": total_words,
+        "corrected_story_sha256": sha256(corrected_story),
         "story_was_corrected_before_counting": True,
+        "story_parts_reconstructed_exactly": True,
         "selection_persisted": True,
-        "selection_source": "corrected_story_scene_aware_partition",
-        "revision_attempted": bool(attempted_parts),
-        "revision_outcome": (
-            "verified" if evidence_by_part
-            else (
-                "attempted_without_verified_change"
-                if attempted_parts else "not_required"
-            )
-        ),
-        "revision_parts": sorted(set(attempted_parts)),
-        "revision_evidence_parts": sorted(evidence_by_part),
-        "revision_results": revision_rows,
-        "revision_attempt_count": sum(
-            len(row.get("attempts", []))
-            for row in revision_rows
-        ),
+        "selection_source": "corrected_story_exact_sentence_partition",
+        "revision_attempted": False,
+        "revision_outcome": "not_required_exact_partition",
+        "revision_parts": [],
+        "revision_evidence_parts": [],
+        "revision_results": [
+            {
+                "part": number,
+                "attempted": False,
+                "outcome": "exact_source_partition_no_rewrite",
+                "before_words": word_count(part),
+                "after_words": word_count(part),
+                "before_sha256": sha256(part),
+                "after_sha256": sha256(part),
+                "text_changed": False,
+                "text_preserved_exactly": True,
+                "attempts": [],
+            }
+            for number, part in enumerate(groups, 1)
+        ],
+        "revision_attempt_count": 0,
         "final_part_merged": bool(merged_fallback),
-        "final_merged_maximum_words": (
-            SHORT_MERGED_MAX if merged_fallback else None
-        ),
+        "final_merged_maximum_words": SHORT_MERGED_MAX if merged_fallback else None,
         "actual_parts": selected_count,
         "parts_count": selected_count,
         "selected_parts": selected_count,
@@ -1751,9 +1515,10 @@ def _partition_and_revise(
                 "part": number,
                 "words": word_count(part),
                 "sha256": sha256(part),
-                "revision_evidence": evidence_by_part.get(number),
+                "revision_evidence": None,
+                "final_part_merged": bool(merged_fallback and number == selected_count),
             }
-            for number, part in enumerate(revised_groups, 1)
+            for number, part in enumerate(groups, 1)
         ],
     })
 
@@ -1761,90 +1526,25 @@ def _partition_and_revise(
         {
             "part": number,
             "narration": part,
-            "revision_evidence": evidence_by_part.get(number),
-            "final_part_merged": bool(
-                merged_fallback and number == len(revised_groups)
-            ),
+            "revision_evidence": None,
+            "final_part_merged": bool(merged_fallback and number == selected_count),
         }
-        for number, part in enumerate(revised_groups, 1)
+        for number, part in enumerate(groups, 1)
     ]
-
     validation = validate_all_parts(validation_parts, policy)
-
-    if mode == "short":
-        errors = validation.get("errors", [])
-        filtered_errors = [
-            error for error in errors
-            if not (
-                merged_fallback
-                and f"Part {len(revised_groups)}:" in str(error)
-            )
-        ]
-
-        if filtered_errors:
-            raise RuntimeError(
-                "SHORT Part validation failed: "
-                + " | ".join(map(str, filtered_errors))
-            )
-
-        validation["errors"] = []
-        validation["valid"] = True
-        validation["passed"] = True
-        validation["final_validation_passed"] = True
-        validation["final_merged_exception_applied"] = bool(
-            merged_fallback
-        )
-
-        if merged_fallback:
-            final_number = len(revised_groups)
-            validation["retry_parts"] = [
-                number
-                for number in validation.get("retry_parts", [])
-                if number != final_number
-            ]
-            validation["retry_required"] = bool(
-                validation["retry_parts"]
-            )
-            validation["final_part_exception"] = None
-            validation["final_part_merge_proposal"] = None
-
-            for row in validation.get("parts", []):
-                if row.get("part_number") == final_number:
-                    row.update({
-                        "status": "valid_final_merge_exception",
-                        "needs_revision": False,
-                        "retry_required": False,
-                        "passed": True,
-                        "final_validation_passed": True,
-                        "merge_exception_applied": True,
-                        "maximum_words": SHORT_MERGED_MAX,
-                        "hard_maximum_words": SHORT_MERGED_MAX,
-                    })
-
-    # The initial policy is deliberately marked not-yet-validated.
-    # Publish the result of the final validator only after all SHORT/FULL
-    # checks (including the final-Part merge exception) have completed.
-    final_validation_passed = bool(
-        validation.get(
-            "final_validation_passed",
-            validation.get("passed", validation.get("valid", False)),
-        )
-    )
-    if not final_validation_passed:
+    if not validation.get("final_validation_passed", validation.get("passed", False)):
         raise RuntimeError(
-            "Final story length validation did not pass; "
-            "refusing to publish a completed story."
+            "Exact Part partition failed word-count validation: "
+            + " | ".join(map(str, validation.get("errors", [])))
         )
 
     policy["final_part_validation_passed"] = True
     policy["parts_validation"] = {
         "valid": True,
         "actual_parts": selected_count,
-        "word_counts": [word_count(part) for part in revised_groups],
+        "word_counts": [word_count(part) for part in groups],
         "final_part_merged": bool(merged_fallback),
-        "final_merged_limit": (
-            SHORT_MERGED_MAX if merged_fallback else None
-        ),
+        "final_merged_limit": SHORT_MERGED_MAX if merged_fallback else None,
         "policy_validator_report": validation,
     }
 
@@ -1853,12 +1553,12 @@ def _partition_and_revise(
         "minimum_parts": minimum_parts,
         "maximum_parts": maximum_parts,
         "corrected_story_words": total_words,
-        "final_story_words": word_count(final_story_text),
-        "revision_attempted_parts": sorted(set(attempted_parts)),
+        "final_story_words": word_count("\n\n".join(groups)),
+        "revision_attempted_parts": [],
         "final_part_merged": bool(merged_fallback),
+        "exact_source_text_preserved": True,
     }
-
-    return revised_groups, policy, selection
+    return groups, policy, selection
 
 
 def select_final_parts(
