@@ -1429,10 +1429,10 @@ def prepare_jobs(
         "main_scene_numbering": "source_scene_number_preserved",
         "extra_scene_numbering": "separate_local_photo_motion_slot",
         "duration_policy": (
-            "Main jobs use ffprobe-measured TTS; visual-only role jobs use source Scene duration."
+            "Every role uses ffprobe-measured TTS audio duration."
         ),
-        "measured_audio_count": role_counts["main"],
-        "visual_only_scene_count": len(jobs) - role_counts["main"],
+        "measured_audio_count": len(jobs),
+        "visual_only_scene_count": 0,
         "pending_audio_measurement_count": 0,
         "config_signature": config_signature,
         "character_bible_status": bible.get("status", "unknown"),
@@ -1868,8 +1868,8 @@ def main() -> int:
     for role in ("hook", "main", "suspense", "resolution"):
         log(role.upper() + ":", document["scene_role_counts"][role])
 
-    log("Measured Main TTS audio:", document["measured_audio_count"])
-    log("Visual-only Scenes without TTS:", document["visual_only_scene_count"])
+    log("Measured TTS audio for all roles:", document["measured_audio_count"])
+    log("Visual-only Scenes without TTS:", 0)
     log("Pending TTS measurements: 0")
     log("Photo Motion jobs:", PHOTO_JOBS_FILE.relative_to(ROOT))
     log("Photo Motion manifest:", PHOTO_MANIFEST_FILE.relative_to(ROOT))
