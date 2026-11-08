@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate story-grounded Hindi YouTube metadata with zero-cost-only fallback."""
+"""Generate story-grounded Hindi YouTube metadata with configured LLM fallback."""
 
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from input_config import load_and_validate, get_format, get_topic, get_parts
 from select_gemini_model import configured_fallbacks
-from llm_provider_client import generate_text as generate_free_provider_text
+from llm_provider_client import generate_text as generate_provider_text
+from gemini_api_guard import require_gemini_generation
 
 INPUT_TOPIC = ROOT / "Input" / "topic.txt"
 STORY_FILES = (
@@ -28,7 +29,7 @@ STORY_FILES = (
     ROOT / "output" / "story" / "story.json",
 )
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
-FREE_PROVIDER_FILE = ROOT / "output" / "config" / "selected_llm_provider.json"
+LLM_PROVIDER_FILE = ROOT / "output" / "config" / "selected_llm_provider.json"
 
 OUTPUT_DIR = ROOT / "output" / "publish"
 OUTPUT_JSON = OUTPUT_DIR / "youtube_metadata.json"
@@ -38,7 +39,7 @@ OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 CHECKPOINT = ROOT / "output" / "checkpoints" / "youtube_metadata.json"
 
-VERSION = "youtube-metadata-v23-strict-story-and-provider-validation"
+VERSION = "youtube-metadata-v24-configured-llm-fallback"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
@@ -334,16 +335,20 @@ def load_config() -> tuple[dict, str, str, int]:
 
 
 def load_gemini_order() -> list[str]:
-    """Use the saved/configured Gemini priority only when free use is confirmed."""
-    if not env_bool("LLM_ZERO_COST_ONLY", False):
-        raise RuntimeError(
-            "LLM_ZERO_COST_ONLY must be true. Paid generation is disabled."
-        )
-
-    if not env_bool("GEMINI_FREE_TIER_CONFIRMED", False):
-        log(
-            "Gemini skipped: GEMINI_FREE_TIER_CONFIRMED is not true."
-        )
+    """Use the saved Gemini model order when billing opt-in and key exist."""
+    api_key = (
+        os.environ.get("GEMINI_API_KEY", "").strip()
+        or os.environ.get("GOOGLE_API_KEY", "").strip()
+    )
+    authorized = (
+        os.environ.get("ALLOW_GEMINI_GENERATION", "").strip()
+        == "I_ACCEPT_POTENTIAL_GEMINI_CHARGES"
+    )
+    if not api_key:
+        log("Gemini skipped: API key is not configured.")
+        return []
+    if not authorized:
+        log("Gemini skipped: explicit billable-generation opt-in is absent.")
         return []
 
     saved = read_json(MODEL_FILE, required=False) or {}
@@ -377,21 +382,15 @@ def load_gemini_order() -> list[str]:
     return normalized
 
 
-def load_free_provider_order() -> list[dict]:
+def load_configured_provider_order() -> list[dict]:
     """Read only provider records explicitly marked ready by the selector."""
-    if not env_bool("LLM_ZERO_COST_ONLY", False):
-        raise RuntimeError(
-            "LLM_ZERO_COST_ONLY must be true. Paid generation is disabled."
-        )
-
-    data = read_json(FREE_PROVIDER_FILE, required=False)
+    data = read_json(LLM_PROVIDER_FILE, required=False)
     if not isinstance(data, dict):
         log("No selected non-Gemini provider configuration found.")
         return []
 
     if (
         data.get("enabled") is not True
-        or data.get("zero_cost_only") is not True
         or data.get("status") != "ready"
     ):
         log("No non-Gemini provider is marked ready.")
@@ -433,8 +432,6 @@ def load_free_provider_order() -> list[dict]:
         model = clean(item.get("model"))
         if not model or len(model) > 200 or any(ch.isspace() for ch in model):
             raise RuntimeError(f"Invalid configured model for {provider}.")
-        if provider == "openrouter" and not model.endswith(":free"):
-            raise RuntimeError("Only OpenRouter :free models are allowed.")
         if provider == "cloudflare" and not model.startswith("@cf/"):
             raise RuntimeError("Cloudflare model must use the @cf/ namespace.")
         result.append({"provider": provider, "model": model})
@@ -891,10 +888,10 @@ def generate_external_metadata(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             log(
-                f"Zero-cost fallback {provider}/{model}; "
+                f"Configured LLM fallback {provider}/{model}; "
                 f"attempt {attempt}/{MAX_RETRIES}"
             )
-            result = generate_free_provider_text(
+            result = generate_provider_text(
                 provider=provider,
                 model=model,
                 prompt=prompt,
@@ -948,7 +945,7 @@ def generate_external_metadata(
                 time.sleep(min(2 ** attempt, 12))
 
     raise RuntimeError(
-        f"Zero-cost provider {provider}/{model} failed: {last_error}"
+        f"LLM provider {provider}/{model} failed: {last_error}"
     )
 
 
@@ -960,16 +957,11 @@ def generate_metadata_with_fallback(
     mode: str,
     fingerprint: str,
 ) -> dict:
-    if not env_bool("LLM_ZERO_COST_ONLY", False):
-        raise RuntimeError(
-            "LLM_ZERO_COST_ONLY must be true. Paid generation is blocked."
-        )
-
     prompt = build_prompt(topic, story, mode)
     failures = []
 
     # Preserve the configured Gemini priority and fallback order.
-    # Gemini is attempted only after explicit free-tier confirmation.
+    # Potentially billable Gemini calls require the exact explicit opt-in.
     api_key = (
         os.environ.get("GEMINI_API_KEY", "").strip()
         or os.environ.get("GOOGLE_API_KEY", "").strip()
@@ -978,8 +970,11 @@ def generate_metadata_with_fallback(
     if gemini_models and api_key:
         for model in gemini_models:
             try:
+                authorized_key = require_gemini_generation(
+                    "YouTube metadata generation", api_key=api_key
+                )
                 return generate_gemini_metadata(
-                    api_key=api_key,
+                    api_key=authorized_key,
                     model=model,
                     prompt=prompt,
                     topic=topic,
@@ -1013,8 +1008,8 @@ def generate_metadata_with_fallback(
 
     details = "\n".join(f"- {item}" for item in failures)
     raise RuntimeError(
-        "All permitted zero-cost metadata providers were exhausted. "
-        "No paid provider was called and no placeholder metadata was created."
+        "All configured LLM metadata providers were exhausted. "
+        "No placeholder metadata was created."
         + (f"\nFailures:\n{details}" if details else "")
     )
 
@@ -1175,13 +1170,12 @@ def main() -> None:
     )
 
     gemini_models = load_gemini_order()
-    external_providers = load_free_provider_order()
+    external_providers = load_configured_provider_order()
 
     if not gemini_models and not external_providers:
         raise RuntimeError(
-            "No permitted zero-cost metadata provider is ready. "
-            "Confirm Gemini free-tier status or configure a verified "
-            "zero-cost fallback provider."
+            "No configured LLM metadata provider is ready. Check API keys, "
+            "model settings, provider order, and Gemini billing opt-in."
         )
 
     fingerprint = make_fingerprint(
@@ -1210,7 +1204,7 @@ def main() -> None:
             ", ".join(gemini_models) if gemini_models else "skipped",
         )
         log(
-            "Configured free fallbacks:",
+            "Configured LLM fallbacks:",
             ", ".join(
                 f"{item['provider']}/{item['model']}"
                 for item in external_providers
