@@ -372,7 +372,7 @@ def check_font() -> tuple[bool, str]:
         if not scanner:
             return False, "fc-scan is not installed."
         scanned = subprocess.run(
-            [scanner, "--format", "%{family}", str(path)],
+            [scanner, "--format", "%{family}\n", str(path)],
             capture_output=True,
             text=True,
             timeout=15,
