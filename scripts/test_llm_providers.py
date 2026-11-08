@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import os
 import sys
+import io
+import urllib.error
+from email.message import Message
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +20,48 @@ if str(SCRIPTS) not in sys.path:
 import llm_provider_client as client
 import select_llm_provider as selector
 import gemini_api_guard
+import gemini_http
+
+
+class GeminiHttpFallbackTests(unittest.TestCase):
+    def _http_error(self, status, headers=None, body=b""):
+        return urllib.error.HTTPError(
+            "https://generativelanguage.googleapis.com/test",
+            status,
+            "test",
+            headers or Message(),
+            io.BytesIO(body),
+        )
+
+    def test_gemini_404_is_permanent_and_moves_to_next_model(self):
+        error = self._http_error(404)
+        self.assertEqual(gemini_http.http_status(error), 404)
+        self.assertFalse(gemini_http.is_retryable_http_status(404))
+        self.assertTrue(gemini_http.is_permanent_model_status(404))
+
+    def test_gemini_429_is_retryable_not_model_permanent(self):
+        self.assertTrue(gemini_http.is_retryable_http_status(429))
+        self.assertFalse(gemini_http.is_permanent_model_status(429))
+
+    def test_gemini_retry_after_header_is_honored(self):
+        headers = Message()
+        headers.add_header("Retry-After", "23")
+        error = self._http_error(429, headers=headers)
+        self.assertEqual(gemini_http.retry_after_seconds(error, 1), 23)
+
+    def test_google_retry_info_is_honored(self):
+        body = (
+            b'{"error":{"details":[{"@type":"type.googleapis.com/'
+            b'google.rpc.RetryInfo","retryDelay":"19s"}]}}'
+        )
+        error = self._http_error(429, body=body)
+        self.assertEqual(gemini_http.retry_after_seconds(error, 1), 19)
+
+    def test_retry_delay_is_bounded(self):
+        headers = Message()
+        headers.add_header("Retry-After", "900")
+        error = self._http_error(429, headers=headers)
+        self.assertEqual(gemini_http.retry_after_seconds(error, 1), 120)
 
 
 class ProviderConfigurationTests(unittest.TestCase):
