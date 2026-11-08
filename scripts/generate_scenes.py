@@ -222,7 +222,7 @@ def validate_ai_story_record(
         validate_sentence_boundary(record["narration"], scene_id)
         if record.get("source_text_sha256") != digest(clean(record["narration"])):
             raise RuntimeError(f"{scene_id}: locked narration hash mismatch.")
-        if record.get("source_word_count") != len(re.findall(r"\\S+", clean(record["narration"]))):
+        if record.get("source_word_count") != len(re.findall(r"\S+", clean(record["narration"]))):
             raise RuntimeError(f"{scene_id}: locked narration word count mismatch.")
     else:
         if clean(record.get("narration")):
