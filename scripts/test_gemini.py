@@ -23,6 +23,8 @@ import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
+from gemini_http import http_error_body, retry_after_seconds
+
 
 BASE_URL = (
     "https://generativelanguage.googleapis.com/v1beta"
@@ -35,9 +37,10 @@ MODEL_FILE = Path(
 TIMEOUT = 60
 MAX_OUTPUT_TOKENS = 12
 
-API_KEY = os.environ.get(
-    "GEMINI_API_KEY", ""
-).strip()
+API_KEY = (
+    os.environ.get("GEMINI_API_KEY", "").strip()
+    or os.environ.get("GOOGLE_API_KEY", "").strip()
+)
 
 
 def log(message):
@@ -232,16 +235,18 @@ def test_model(model):
         method="POST"
     )
 
-    with urllib.request.urlopen(
-        request,
-        timeout=TIMEOUT
-    ) as response:
-
-        raw = response.read().decode(
-            "utf-8"
-        )
-
-        result = json.loads(raw)
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                raw = response.read().decode("utf-8")
+            result = json.loads(raw)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt >= 3:
+                raise
+            delay = retry_after_seconds(exc, attempt, default_base=12, maximum=120)
+            log(f"HTTP 429 rate limit for {model}; retrying in {delay}s.")
+            time.sleep(delay)
 
     if not isinstance(result, dict):
         raise ValueError(
@@ -301,7 +306,7 @@ def main():
 
     if not API_KEY:
         raise SystemExit(
-            "ERROR: GEMINI_API_KEY is not set."
+            "ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is not set."
         )
 
     config = load_config()
@@ -386,10 +391,7 @@ def main():
         except urllib.error.HTTPError as exc:
 
             try:
-                body = exc.read().decode(
-                    "utf-8",
-                    errors="replace"
-                )
+                body = http_error_body(exc, 700)
             except Exception:
                 body = ""
 
