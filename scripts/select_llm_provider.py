@@ -45,6 +45,10 @@ def get_provider_allowlist() -> list[str]:
         if not provider:
             continue
 
+        if provider == "gemini":
+            # Gemini has its own model selector and is always tried first.
+            continue
+
         if provider not in SUPPORTED_PROVIDERS:
             raise ProviderError(
                 "configuration",
@@ -64,7 +68,12 @@ def validate_provider(provider: str) -> tuple[bool, str, str]:
         model = get_provider_model(provider)
         get_provider_api_key(provider)
 
-        return True, model, "API key and model configuration are present."
+        if provider == "cloudflare":
+            # Validate the account ID and model endpoint before marking ready.
+            from llm_provider_client import _cloudflare_url
+            _cloudflare_url(model)
+
+        return True, model, "API key, model, and provider-specific configuration are present."
 
     except ProviderError as exc:
         return False, "", str(exc)
