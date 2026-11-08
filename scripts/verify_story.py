@@ -41,7 +41,7 @@ PLAN_FILE = ROOT / "output" / "story" / "story_plan.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 REPORT_FILE = ROOT / "output" / "story" / "story_verification.json"
 
-VERSION = "story-verifier-v18-source-payload-and-completeness"
+VERSION = "story-verifier-v19-locked-text-fingerprints"
 
 SHORT_MIN_WORDS = SHORT_MIN_WORDS_PER_PART
 SHORT_PREFERRED_MAX_WORDS = SHORT_PREFERRED_MAX_WORDS_PER_PART
@@ -541,6 +541,12 @@ def verify_plan_parts(
 
         if not clean(part.get("narration")):
             fail(f"Plan Part {part_number} narration is empty.")
+        if part.get("text_locked") is not True:
+            fail(f"Plan Part {part_number} text is not locked.")
+        if part.get("locked_word_count") != word_count(part.get("narration")):
+            fail(f"Plan Part {part_number} locked word count mismatch.")
+        if part.get("locked_text_sha256") != sha256_text(clean(part.get("narration"))):
+            fail(f"Plan Part {part_number} locked text hash mismatch.")
 
         if not clean(part.get("story_anchor")):
             fail(f"Plan Part {part_number} story anchor is empty.")
@@ -583,6 +589,10 @@ def verify_plan_parts(
 
             if not narration or narration != anchor:
                 fail(f"Plan Scene narration/anchor mismatch: {scene_id}.")
+            if scene.get("source_text_sha256") != sha256_text(narration):
+                fail(f"Plan Scene source text hash mismatch: {scene_id}.")
+            if scene.get("source_word_count") != word_count(narration):
+                fail(f"Plan Scene source word count mismatch: {scene_id}.")
 
             part_anchors.append(anchor)
 
@@ -920,6 +930,15 @@ def verify_story_parts(
             fail(f"Part {part_number} narration is empty.")
 
         amount = word_count(narration)
+        if part.get("text_locked") is not True:
+            fail(f"Part {part_number} narration is not marked as locked.")
+        if positive_int(
+            part.get("locked_word_count"),
+            f"Part {part_number} locked_word_count",
+        ) != amount:
+            fail(f"Part {part_number} locked word count mismatch.")
+        if clean(part.get("locked_text_sha256")) != sha256_text(narration):
+            fail(f"Part {part_number} locked text hash mismatch.")
 
         if positive_int(
             part.get("word_count"),
@@ -1040,6 +1059,10 @@ def verify_story_parts(
 
             if scene_text != clean(scene.get("story_anchor")):
                 fail(f"Scene narration/anchor mismatch: {scene_id}.")
+            if clean(planned.get("source_text_sha256")) != sha256_text(scene_text):
+                fail(f"Scene source text hash mismatch: {scene_id}.")
+            if planned.get("source_word_count") != word_count(scene_text):
+                fail(f"Scene source word count mismatch: {scene_id}.")
 
             scene_narrations.append(scene_text)
             flattened.append(scene)
@@ -1105,6 +1128,10 @@ def verify_story_text(
 
     if clean(story.get("corrected_complete_story")) != combined:
         fail("corrected_complete_story does not match ordered Part narrations.")
+    if story.get("story_text_locked") is not True:
+        fail("Corrected complete story is not marked as locked.")
+    if clean(story.get("corrected_complete_story_sha256")) != sha256_text(combined):
+        fail("Corrected complete story fingerprint mismatch.")
 
     if positive_int(
         story.get("total_story_words"),
