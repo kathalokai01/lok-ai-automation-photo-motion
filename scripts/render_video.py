@@ -718,7 +718,7 @@ def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash
         raise RuntimeError("Sound design FORMAT does not match Input")
     if str(validation.get("format", "")).lower() != mode:
         raise RuntimeError("SFX validation FORMAT does not match Input")
-    if validation.get("duration_source") != "main_tts_audio_and_visual_scene_durations":
+    if validation.get("duration_source") != "all_role_tts_audio_durations":
         raise RuntimeError("SFX validation lacks Main TTS/visual Scene duration provenance")
     if validation.get("narration_manifest_sha256") != audio_manifest_hash:
         raise RuntimeError("SFX validation belongs to a different narration manifest")
