@@ -854,6 +854,7 @@ def save_composition_checkpoint(signature, compositions, status="in_progress", r
         record["last_error"] = str(reason)[:2000]
     write_json(CHECKPOINT, record)
 def build_role_compositions(api_key, model, prompts, role_durations, role_rows, signature, config):
+    global API_CALLS
     checkpoint = read_json(CHECKPOINT)
     manifest = read_json(MANIFEST)
     previous = checkpoint if checkpoint.get("source_fingerprint") == signature else manifest
