@@ -1490,7 +1490,7 @@ def main():
             "role_segment_summary": role_segment_summary,
             "role_segment_directory": SEGMENT_DIR.relative_to(ROOT).as_posix(),
             "role_segment_policy": (
-                "Every visual Scene, including visual-only Hook/Suspense/Resolution, "
+                "Every narrated visual Scene, including Hook/Suspense/Resolution, "
                 "receives a verified segment from its matching role composition."
             ),
             "role_segment_timing_verified": True,
