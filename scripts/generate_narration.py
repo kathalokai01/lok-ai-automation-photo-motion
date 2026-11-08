@@ -704,6 +704,22 @@ def validate_ai_story(
             )
 
         count = len(scenes)
+        locked_part_text = clean_narration(
+            part.get("narration"),
+            f"ai_story.json Part {part_number}",
+        )
+        if part.get("text_locked") is not True:
+            raise RuntimeError(
+                f"ai_story.json Part {part_number} narration is not locked."
+            )
+        if part.get("locked_word_count") != count_words(locked_part_text):
+            raise RuntimeError(
+                f"ai_story.json Part {part_number} locked word count mismatch."
+            )
+        if part.get("locked_text_sha256") != text_sha256(locked_part_text):
+            raise RuntimeError(
+                f"ai_story.json Part {part_number} locked text hash mismatch."
+            )
 
         if not (
             settings["scenes_min"]
@@ -751,8 +767,27 @@ def validate_ai_story(
                 narration,
                 expected_id,
             )
+            if scene.get("source_text_sha256") != text_sha256(narration):
+                raise RuntimeError(
+                    f"{expected_id}: locked narration hash mismatch."
+                )
+            if scene.get("source_word_count") != count_words(narration):
+                raise RuntimeError(
+                    f"{expected_id}: locked narration word count mismatch."
+                )
 
             source_texts[expected_id] = narration
+
+        reconstructed_part = normalize_text(
+            " ".join(
+                source_texts[canonical_main_id(part_number, n)]
+                for n in range(1, count + 1)
+            )
+        )
+        if reconstructed_part != normalize_text(locked_part_text):
+            raise RuntimeError(
+                f"Part {part_number}: Main Scene narration does not reconstruct locked Part."
+            )
 
         final = part_number == settings["parts"]
 
