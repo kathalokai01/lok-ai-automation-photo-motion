@@ -625,19 +625,11 @@ def build_part_prompt(
         part, config, total_parts, target_total=135
     )
 
-    if config["format"] == "short":
-        if merged:
-            rules = f"मुख्य narration {minimum}–{maximum} शब्दों में रखें।"
-        else:
-            rules = (
-                "मुख्य narration 120–150 शब्द लक्ष्य रखें। "
-                "सभी revision प्रयासों के बाद 151–180 शब्द स्वीकार्य हैं। "
-                "120 से कम या 180 से अधिक अमान्य है।"
-            )
-    else:
-        rules = (
-            "FULL format: सभी महत्वपूर्ण घटनाएँ और मूल ending सुरक्षित रखें।"
-        )
+    rules = (
+        "Main narration is locked source text. Do not write, edit, "
+        "expand, shorten, paraphrase, or correct it. Generate visual "
+        "and production prompts only."
+    )
 
     hook = extra_context(part, "hook_scene")
     suspense = None if final else extra_context(part, "suspense_scene")
@@ -836,17 +828,8 @@ def validate_generated_scenes(
             f"allowed range is {minimum}–{maximum}."
         )
 
-    if (
-        config["format"] == "short"
-        and source_part["part"] < total_parts
-        and count > SHORT_TARGET_MAX
-        and not allow_soft_overage
-    ):
-        raise ValueError(
-            f"SHORT non-final part {source_part['part']} has {count} words; "
-            "revise toward 120–150. 151–180 is allowed after retries."
-        )
-
+    # The source Part has already passed story-length validation.
+    # Do not ask a later model stage to rewrite locked narration.
     return result
 
 
@@ -999,25 +982,11 @@ def build_revision_prompt(
             source_part.get("part") == total_parts
             and source_part.get("final_part_merged") is True
         )
-        rule = f"Required main narration: {minimum}–{maximum} words."
-
-        if count > maximum:
-            correction = (
-                f"Current count {count}. Reduce to at most {maximum} words. "
-                "Preserve every essential event and the complete ending."
-            )
-        elif count > SHORT_TARGET_MAX and not merged:
-            correction = (
-                f"Current count {count}. Reduce toward 135–145 words. "
-                "Remove repetition and redundant descriptions only."
-            )
-        elif count < minimum:
-            correction = (
-                f"Current count {count}. Expand using relevant details "
-                "already present in the source story. Do not invent events."
-            )
-        else:
-            correction = "Keep the narration within the required range."
+        rule = f"Locked source narration: {minimum}–{maximum} words."
+        correction = (
+            "Do not change narration or its word count. Correct only missing "
+            "or invalid visual/production fields in the response."
+        )
 
     return (
         original_prompt
