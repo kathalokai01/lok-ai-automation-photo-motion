@@ -30,6 +30,7 @@ from input_config import (
     get_fps,
 )
 from story_length_policy import verify_revision_evidence
+from story_text_integrity import require_exact_reconstruction, story_text_sha256
 
 OUT = ROOT / "output"
 INPUT_FILE = ROOT / "Input" / "topic.txt"
@@ -594,11 +595,14 @@ def validate_story(
             scene_narrations.append(clean(scene["narration"]))
             flattened.append(scene)
 
-        if clean(" ".join(scene_narrations)) != narration:
-            fail(
-                f"Part {part_number}: ordered Main scene narration "
-                "does not reconstruct the Part narration"
+        try:
+            require_exact_reconstruction(
+                narration,
+                scene_narrations,
+                label=f"Part {part_number} Main Scene narration",
             )
+        except Exception as exc:
+            fail(str(exc))
 
         if part.get("main_scene_count") != actual_count:
             fail(f"Part {part_number} main_scene_count mismatch")
@@ -980,10 +984,33 @@ def validate_narration(
 
     expected = sum(scene_counts.values())
     if result["record_count"] != expected:
-        fail(
-            f"Main TTS record count mismatch: "
-            f"{result['record_count']} != {expected}"
-        )
+        fail(f"Main TTS record count mismatch: {result['record_count']} != {expected}")
+
+    audio_data = read_json(AUDIO)
+    audio_rows = rows_from(audio_data, "jobs", "audio_jobs", "scenes")
+    story = read_json(STORY)
+    source_by_id = {
+        clean(scene.get("scene_id")): scene
+        for part in story.get("parts", [])
+        for scene in part.get("scenes", [])
+        if isinstance(scene, dict)
+    }
+    seen = set()
+    for row in audio_rows:
+        sid = clean(row.get("scene_id") or row.get("job_id"))
+        if sid in seen or sid not in source_by_id:
+            fail(f"Main TTS scene mapping is duplicate or unknown: {sid}")
+        seen.add(sid)
+        text_value = clean(row.get("text") or row.get("narration"))
+        source_text = clean(source_by_id[sid].get("narration"))
+        if text_value != source_text:
+            fail(f"{sid}: TTS text differs from Locked Main Scene narration")
+        if row.get("text_sha256") != story_text_sha256(text_value):
+            fail(f"{sid}: TTS source text fingerprint mismatch")
+        if source_by_id[sid].get("source_text_sha256") != story_text_sha256(text_value):
+            fail(f"{sid}: Story Scene source fingerprint mismatch")
+    if seen != set(source_by_id):
+        fail("TTS jobs do not cover every Main Scene exactly once")
 
     return result
 
@@ -1062,6 +1089,17 @@ def validate_sound_design(
             "sha256": checksum,
         })
 
+    expected_visual_ids = {
+        canonical_id(*key)
+        for key in expected_scene_keys(part_numbers, scene_counts)
+    }
+    if sound.get("total_visual_scene_records") != len(expected_visual_ids):
+        fail("Sound-design visual Scene count mismatch")
+    if validation.get("total_visual_scene_records") != len(expected_visual_ids):
+        fail("SFX validation visual Scene count mismatch")
+    if validation.get("duration_source") != "main_tts_audio_and_visual_scene_durations":
+        fail("SFX timing validation does not use Main TTS and visual Scene durations")
+
     cue_rows = rows_from(
         validation, "cues", "validated_cues", "sfx_cues", "records"
     )
@@ -1076,6 +1114,12 @@ def validate_sound_design(
         for key in expected_scene_keys(part_numbers, scene_counts)
     }
     verified_cues = []
+    cue_scene_ids = set()
+    audio_rows = rows_from(read_json(AUDIO), "jobs", "audio_jobs", "scenes")
+    audio_by_id = {
+        clean(row.get("scene_id") or row.get("job_id")): row
+        for row in audio_rows
+    }
 
     for index, cue in enumerate(cue_rows, 1):
         if not isinstance(cue, dict):
@@ -1084,6 +1128,18 @@ def validate_sound_design(
         sid = clean(cue.get("scene_id"))
         if sid and sid not in valid_ids:
             fail(f"SFX cue {index} references unknown scene {sid}")
+        if sid:
+            cue_scene_ids.add(sid)
+            role = scene_key({"scene_id": sid, "part": cue.get("part"), "role": cue.get("role"), "scene": cue.get("scene")}, f"SFX cue {index}")[1]
+            if role == "main":
+                audio_row = audio_by_id.get(sid)
+                if audio_row is None or cue.get("timing_basis") != "measured_tts_audio_duration":
+                    fail(f"SFX Main cue timing source mismatch: {sid}")
+                if cue.get("narration_sha256") != (audio_row.get("sha256") or audio_row.get("audio_sha256")):
+                    fail(f"SFX Main cue narration hash mismatch: {sid}")
+            else:
+                if cue.get("timing_basis") != "visual_scene_duration" or clean(cue.get("narration_sha256")):
+                    fail(f"SFX visual-only cue must not reference TTS: {sid}")
 
         value = first_path(
             cue, "path", "audio_path", "audio", "file", "output"
@@ -1108,6 +1164,12 @@ def validate_sound_design(
                 "scene_id": sid or None,
                 "cue": clean(cue.get("kind") or cue.get("type")),
             })
+
+    if cue_scene_ids != valid_ids:
+        fail(
+            "SFX cues do not cover every visual Scene exactly once or more: "
+            f"missing={sorted(valid_ids-cue_scene_ids)[:15]}"
+        )
 
     return {
         "status": "valid",
@@ -1214,6 +1276,13 @@ def validate_captions(
     declared_caption_manifest = clean(render_data.get("caption_manifest"))
     if declared_caption_manifest and declared_caption_manifest != relative(CAPTIONS):
         fail("Render manifest caption-manifest path mismatch")
+    if captions.get("total_extra_scenes") != 0:
+        fail("Visual-only extra scenes must not receive captions")
+    if captions.get("total_caption_records") != sum(
+        int(value) for value in render_data.get("actual_scene_counts", {}).values()
+    ):
+        fail("Caption manifest Main Scene record count mismatch")
+
     timeline = render_data.get("caption_timeline")
     if not isinstance(timeline, dict):
         fail("Burned-caption timeline metadata is missing")
@@ -1322,6 +1391,15 @@ def validate_render(
         if key[1] == "main":
             if row.get("captions_burned") is not True:
                 fail(f"Main scene does not confirm burned captions: {sid}")
+            if row.get("source_text_sha256") != text_sha256(
+                next(
+                    item.get("narration")
+                    for part in read_json(STORY).get("parts", [])
+                    for item in part.get("scenes", [])
+                    if item.get("scene_id") == sid
+                )
+            ):
+                fail(f"Rendered Main scene source text hash mismatch: {sid}")
         else:
             if row.get("captions_burned") is not False:
                 fail(f"Visual-only role must not contain captions: {sid}")
