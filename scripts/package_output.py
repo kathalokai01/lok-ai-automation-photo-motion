@@ -1146,55 +1146,55 @@ def selected_package_files(render: dict) -> list[Path]:
 
         if audio_row is None:
             fail(f"Role TTS audio is missing: {sid}")
-            audio_value = (
-                audio_row.get("audio_path") or audio_row.get("audio_file")
-                or audio_row.get("audio") or audio_row.get("output")
-            )
-            audio_path = safe_output(audio_value, f"Scene narration audio {sid}", 100)
-            if audio_path.suffix.lower() not in AUDIO_SUFFIXES:
-                fail(f"Scene narration is not a supported audio file: {sid}")
-            declared_audio_hash = clean(
-                audio_row.get("audio_sha256") or audio_row.get("sha256")
-            ).lower()
-            photo_audio_hash = clean(photo_row.get("audio_sha256")).lower()
-            if not re.fullmatch(r"[a-f0-9]{64}", declared_audio_hash) or declared_audio_hash != sha256_file(audio_path):
-                fail(f"Scene narration SHA-256 mismatch: {sid}")
-            if photo_audio_hash != declared_audio_hash:
-                fail(f"Photo Motion/narration audio hashes differ: {sid}")
-            photo_audio_path = photo_row.get("audio_path") or photo_row.get("narration_audio")
-            if not isinstance(photo_audio_path, str) or safe_output(
-                photo_audio_path, f"Photo Motion narration path {sid}", 100
-            ).resolve() != audio_path.resolve():
-                fail(f"Photo Motion/narration audio paths differ: {sid}")
-            declared_duration = audio_row.get(
-                "actual_audio_duration_seconds",
-                audio_row.get("audio_duration", audio_row.get("duration")),
-            )
-            try:
-                declared_duration = float(declared_duration)
-            except (TypeError, ValueError):
-                fail(f"Measured narration duration is missing: {sid}")
-            if not math.isfinite(declared_duration) or declared_duration <= 0:
-                fail(f"Measured narration duration is invalid: {sid}")
-            if (
-                audio_row.get("duration_source") != "ffprobe_measured"
-                and audio_row.get("audio_duration_source") != "ffprobe_measured"
-            ):
-                fail(f"Narration duration is not ffprobe-measured: {sid}")
-            if abs(probe_audio_duration(audio_path) - declared_duration) > 0.2:
-                fail(f"Scene narration file duration differs from TTS manifest: {sid}")
-            if abs(float(photo_row.get("duration", 0)) - declared_duration) > 0.2:
-                fail(f"Photo Motion/narration duration mismatch: {sid}")
-            if photo_row.get("source_text_sha256") != audio_row.get("text_sha256"):
-                fail(f"Photo Motion/TTS source text hash mismatch: {sid}")
-            scene_audio_paths.add(audio_path.resolve())
-        else:
-            if normalize_role(audio_row) != role:
-                fail(f"Photo Motion/TTS role mismatch: {sid}")
+        if normalize_role(audio_row) != role:
+            fail(f"Photo Motion/TTS role mismatch: {sid}")
+        if role != "main":
             if photo_row.get("voiceover_enabled") is not True or not clean(photo_row.get("narration")):
                 fail(f"Narrated extra role has no narration/voiceover: {sid}")
             if photo_row.get("narration_source") != "ai_generated_role_narration":
                 fail(f"Extra-role narration source mismatch: {sid}")
+        audio_value = (
+            audio_row.get("audio_path") or audio_row.get("audio_file")
+            or audio_row.get("audio") or audio_row.get("output")
+        )
+        audio_path = safe_output(audio_value, f"Scene narration audio {sid}", 100)
+        if audio_path.suffix.lower() not in AUDIO_SUFFIXES:
+            fail(f"Scene narration is not a supported audio file: {sid}")
+        declared_audio_hash = clean(
+            audio_row.get("audio_sha256") or audio_row.get("sha256")
+        ).lower()
+        photo_audio_hash = clean(photo_row.get("audio_sha256")).lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", declared_audio_hash) or declared_audio_hash != sha256_file(audio_path):
+            fail(f"Scene narration SHA-256 mismatch: {sid}")
+        if photo_audio_hash != declared_audio_hash:
+            fail(f"Photo Motion/narration audio hashes differ: {sid}")
+        photo_audio_path = photo_row.get("audio_path") or photo_row.get("narration_audio")
+        if not isinstance(photo_audio_path, str) or safe_output(
+            photo_audio_path, f"Photo Motion narration path {sid}", 100
+        ).resolve() != audio_path.resolve():
+            fail(f"Photo Motion/narration audio paths differ: {sid}")
+        declared_duration = audio_row.get(
+            "actual_audio_duration_seconds",
+            audio_row.get("audio_duration", audio_row.get("duration")),
+        )
+        try:
+            declared_duration = float(declared_duration)
+        except (TypeError, ValueError):
+            fail(f"Measured narration duration is missing: {sid}")
+        if not math.isfinite(declared_duration) or declared_duration <= 0:
+            fail(f"Measured narration duration is invalid: {sid}")
+        if (
+            audio_row.get("duration_source") != "ffprobe_measured"
+            and audio_row.get("audio_duration_source") != "ffprobe_measured"
+        ):
+            fail(f"Narration duration is not ffprobe-measured: {sid}")
+        if abs(probe_audio_duration(audio_path) - declared_duration) > 0.2:
+            fail(f"Scene narration file duration differs from TTS manifest: {sid}")
+        if abs(float(photo_row.get("duration", 0)) - declared_duration) > 0.2:
+            fail(f"Photo Motion/narration duration mismatch: {sid}")
+        if photo_row.get("source_text_sha256") != audio_row.get("text_sha256"):
+            fail(f"Photo Motion/TTS source text hash mismatch: {sid}")
+        scene_audio_paths.add(audio_path.resolve())
 
         try:
             from PIL import Image
