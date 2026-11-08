@@ -22,11 +22,7 @@ from llm_provider_client import (
 
 
 OUTPUT_FILE = Path("output/config/selected_llm_provider.json")
-VERSION = "llm-provider-selector-v1"
-
-# Only these providers are eligible by default.
-# Cloudflare and Mistral require explicit addition to this allowlist.
-DEFAULT_PROVIDER_ALLOWLIST = SUPPORTED_PROVIDERS
+VERSION = "llm-provider-selector-v2"
 
 
 def log(message: str) -> None:
@@ -52,7 +48,7 @@ def get_provider_allowlist() -> list[str]:
         if provider not in SUPPORTED_PROVIDERS:
             raise ProviderError(
                 "configuration",
-                f"Unsupported provider in LLM_ZERO_COST_PROVIDERS: {provider}",
+                f"Unsupported provider in LLM_PROVIDER_ORDER: {provider}",
             )
 
         if provider not in allowed:
@@ -68,7 +64,7 @@ def validate_provider(provider: str) -> tuple[bool, str, str]:
         model = get_provider_model(provider)
         get_provider_api_key(provider)
 
-        return True, model, "Credentials and local free-mode settings are present."
+        return True, model, "API key and model configuration are present."
 
     except ProviderError as exc:
         return False, "", str(exc)
@@ -165,9 +161,6 @@ def verify_saved_selection(expected: dict) -> dict:
 
     if saved.get("enabled") is not expected.get("enabled"):
         raise RuntimeError("Saved provider enabled flag is inconsistent.")
-
-    if saved.get("zero_cost_only") != expected.get("zero_cost_only"):
-        raise RuntimeError("Saved zero-cost mode flag is inconsistent.")
 
     return saved
 
