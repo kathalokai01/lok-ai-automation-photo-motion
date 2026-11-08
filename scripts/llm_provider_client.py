@@ -403,7 +403,7 @@ def generate_text(
     if provider not in SUPPORTED_PROVIDERS:
         raise ProviderError(
             provider or "unknown",
-            "Provider is not supported by the free-tier client.",
+            "Provider is not supported by the LLM client.",
         )
 
     prompt = str(prompt or "").strip()
@@ -533,24 +533,11 @@ def provider_configuration_status() -> list[dict]:
         key_present = bool(_clean(os.environ.get(key_name)))
         model_present = bool(_clean(os.environ.get(model_name)))
 
-        free_confirmed = (
-            provider == "openrouter"
-            or _env_bool(
-                {
-                    "groq": "GROQ_FREE_TIER_CONFIRMED",
-                    "cloudflare": "CLOUDFLARE_FREE_TIER_CONFIRMED",
-                    "mistral": "MISTRAL_FREE_MODE_CONFIRMED",
-                }[provider],
-                False,
-            )
-        )
-
         status.append({
             "provider": provider,
             "api_key_configured": key_present,
             "model_configured": model_present,
-            "free_mode_confirmed": free_confirmed,
-            "ready": key_present and model_present and free_confirmed,
+            "ready": key_present and model_present,
         })
 
     return status
