@@ -2571,7 +2571,8 @@ def main() -> None:
         )
 
     topic = clean(get_topic(config))
-    title_source = clean(get_title_source(config))
+    explicit_title = clean(config.get("TITLE", ""))
+    title_source = explicit_title or clean(get_title_source(config))
     source_text = normalize_text(
         get_complete_source(config)
     )
@@ -2667,9 +2668,9 @@ def main() -> None:
             )
 
         title = clean(
-            cached.get("final_title")
+            explicit_title
+            or cached.get("final_title")
             or cached.get("title")
-            or title_source
             or load_persisted_title(corrected_story)
         )
 
@@ -2783,7 +2784,7 @@ def main() -> None:
             generated.get("title")
         )
 
-        if generated_title and not title_source:
+        if generated_title and not explicit_title:
             title_source = generated_title
 
     complete_story = normalize_text(complete_story)
@@ -2799,9 +2800,10 @@ def main() -> None:
         topic=topic,
         complete_story=complete_story,
         existing_title=(
-            checkpoint_data.get("final_title")
+            explicit_title
+            or generated_title
+            or checkpoint_data.get("final_title")
             or checkpoint_data.get("title")
-            or title_source
             or load_persisted_title(complete_story)
         ),
     )
