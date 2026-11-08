@@ -1248,6 +1248,10 @@ def prepare_jobs(
             ),
             "narration": narration,
             "text": narration,
+            "story_anchor": clean(source.get("story_anchor")),
+            "voiceover_enabled": role == "main",
+            "narration_source": "locked_part_text" if role == "main" else "visual_only",
+            "visual_only": role != "main",
             "dialogue": clean(
                 source.get("dialogue")
                 or visual_job.get("dialogue")
@@ -1806,7 +1810,7 @@ def main() -> int:
         "measured_audio_count": len(jobs),
         "pending_audio_measurement_count": 0,
         "scene_role_counts": document["scene_role_counts"],
-        "status_detail": "all_images_and_tts_audio_verified",
+        "status_detail": "all_images_verified_main_tts_verified_visual_only_roles_without_tts",
     }
 
     if len(jobs) != len(source_scenes):
