@@ -54,6 +54,19 @@ BOUNDARY_ENDINGS = (
     "।", "॥", ".", "!", "?", "…", "...",
     ",", "，", ";", "؛", ":", "—", "–",
 )
+BOUNDARY_CLOSERS = frozenset(
+    "\"'”’»›」』】〕）)]}>"
+)
+
+
+def ends_at_natural_boundary(value: Any) -> bool:
+    """Accept punctuation followed by closing quotes/brackets, not dangling text."""
+    text = clean_text(value).rstrip()
+    while text and text[-1] in BOUNDARY_CLOSERS:
+        text = text[:-1].rstrip()
+    return bool(text) and any(
+        text.endswith(ending) for ending in BOUNDARY_ENDINGS
+    )
 
 
 def log(*values: Any) -> None:
@@ -833,7 +846,7 @@ def verify_story_parts(
         if part.get("extra_scenes") != expected_extras:
             fail(f"Story Part {part_number} extra_scenes mismatch.")
 
-        boundary_valid = narration.rstrip()[-1] in BOUNDARY_ENDINGS
+        boundary_valid = ends_at_natural_boundary(narration)
 
         if not boundary_valid:
             boundary_errors.append(
@@ -849,7 +862,7 @@ def verify_story_parts(
             "scene_ids": scene_ids,
             "narration_sha256": sha256_text(narration),
             "natural_boundary_valid": boundary_valid,
-            "passed": True,
+            "passed": boundary_valid,
             **length_result,
         })
 
@@ -975,7 +988,9 @@ def main() -> int:
         fail("Story length policy Scene counts mismatch.")
 
     boundary_valid = not boundary_errors
-    valid = boundary_valid
+    valid = boundary_valid and all(
+        row.get("passed") is True for row in part_results
+    )
 
     report = {
         "report_version": REPORT_VERSION,
