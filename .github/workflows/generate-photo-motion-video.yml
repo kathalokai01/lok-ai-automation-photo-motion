@@ -151,6 +151,9 @@ jobs:
             scripts/generate_character_bible.py
             scripts/generate_scenes.py
             scripts/generate_narration.py
+            scripts/voice_profiles.py
+            scripts/preview_voice.py
+            scripts/music_provider_client.py
             scripts/prepare_captions.py
             scripts/generate_tts.py
             scripts/generate_flow_music.py
