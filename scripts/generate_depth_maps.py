@@ -340,10 +340,13 @@ def load_jobs():
             if job.get("source_word_count") != len(narration.split()):
                 raise RuntimeError(f"{scene_id}: Main source word count mismatch.")
         else:
-            if narration or voiceover_enabled is not False or narration_source != "visual_only":
-                raise RuntimeError(f"{scene_id}: extra role must be visual-only.")
-            if source_text_hash:
-                raise RuntimeError(f"{scene_id}: visual-only role cannot have a narration hash.")
+            expected_text_hash = hashlib.sha256(narration.encode("utf-8")).hexdigest()
+            if not narration or voiceover_enabled is not True or narration_source != "ai_generated_role_narration":
+                raise RuntimeError(f"{scene_id}: extra-role narration metadata is invalid.")
+            if source_text_hash != expected_text_hash:
+                raise RuntimeError(f"{scene_id}: extra-role narration hash mismatch.")
+            if job.get("source_word_count") != len(narration.split()):
+                raise RuntimeError(f"{scene_id}: extra-role narration word count mismatch.")
         local_raw = job.get("local_scene", job.get("scene", job.get("source_scene_number")))
         try:
             local_scene = int(local_raw)
@@ -423,8 +426,8 @@ def load_jobs():
             "voiceover_enabled": voiceover_enabled,
             "narration_source": narration_source,
             "source_text_sha256": source_text_hash,
-            "source_word_count": len(narration.split()) if role == "main" else 0,
-            "visual_only": role != "main",
+            "source_word_count": len(narration.split()),
+            "visual_only": False,
             "job": job,
             "image_path": image_path,
             "image_sha256": image_hash,
