@@ -1362,6 +1362,12 @@ def build_narration_record(
             "hook": "curiosity", "suspense": "suspense",
             "resolution": "warm", "main": "neutral",
         }.get(role, "neutral")),
+        "music_mood": str(scene.get("music_mood") or {
+            "hook": "intriguing cinematic",
+            "suspense": "tense suspense",
+            "resolution": "warm emotional resolution",
+            "main": "story-matched cinematic",
+        }.get(role, "story-matched cinematic")),
         "voice_profile": profile_summary({
             "AUDIENCE": settings["audience"],
             "VOICE": settings["voice"],
