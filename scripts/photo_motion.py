@@ -36,7 +36,7 @@ RENDER_DIR = OUTPUT / "photo_motion"
 MANIFEST_FILE = RENDER_DIR / "photo_motion_manifest.json"
 CHECKPOINT_FILE = OUTPUT / "checkpoints" / "photo_motion_progress.json"
 
-VERSION = "photo-motion-v22-variable-scenes-faster-motion-strict-depth"
+VERSION = "photo-motion-v22-variable-scenes-faster-motion-strict-depth-visual-only-role-scenes"
 
 MIN_IMAGE_BYTES = 1000
 MIN_DEPTH_BYTES = 100
@@ -44,6 +44,7 @@ MIN_AUDIO_BYTES = 100
 MIN_VIDEO_BYTES = 1000
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
+DEFAULT_VISUAL_SCENE_SECONDS = 6.0
 MAX_FRAMES = 216000
 MAX_PARALLAX_SECONDS = 600
 
@@ -586,7 +587,25 @@ def prepare_jobs(
         if not declared_image_hash or declared_image_hash != image_hash:
             raise RuntimeError(f"{scene_id}: image SHA256 missing or mismatched.")
 
-        audio_path, audio_hash, duration = resolve_audio(row, scene_id, ffprobe)
+        if role == "main":
+            if row.get("voiceover_enabled") is not True or row.get("narration_source") != "locked_part_text":
+                raise RuntimeError(f"{scene_id}: Main narration source is not locked.")
+            audio_path, audio_hash, duration = resolve_audio(row, scene_id, ffprobe)
+            duration_source = "ffprobe_measured"
+        else:
+            if row.get("voiceover_enabled") is not False or text(row.get("narration")):
+                raise RuntimeError(f"{scene_id}: visual-only role cannot contain narration.")
+            if text(row.get("narration_source")) != "visual_only":
+                raise RuntimeError(f"{scene_id}: extra role is not marked visual_only.")
+            if text(row.get("audio_sha256")) or row.get("audio_path") not in (None, ""):
+                raise RuntimeError(f"{scene_id}: visual-only role has unexpected TTS audio.")
+            duration = (
+                valid_duration(row.get("scene_duration"))
+                or valid_duration(row.get("duration"))
+                or DEFAULT_VISUAL_SCENE_SECONDS
+            )
+            audio_path, audio_hash = None, ""
+            duration_source = "visual_scene_duration"
         prompt = text(row.get("prompt") or row.get("image_prompt"))
         if len(prompt) < 24:
             raise RuntimeError(f"{scene_id}: story visual prompt is missing or too short.")
@@ -607,7 +626,10 @@ def prepare_jobs(
             "audio_path": audio_path,
             "audio_sha256": audio_hash,
             "duration": duration,
-            "duration_source": "ffprobe_measured",
+            "duration_source": duration_source,
+            "voiceover_enabled": role == "main",
+            "narration_source": "locked_part_text" if role == "main" else "visual_only",
+            "source_text_sha256": text(row.get("source_text_sha256")) if role == "main" else "",
             "target": resolve_output_target(part, scene_id),
             "source_job": dict(row),
         })
@@ -693,8 +715,12 @@ def validate_job_metadata(
     actual_ids = [item["scene_id"] for item in prepared]
     if declared_ids != actual_ids:
         raise RuntimeError("Prepared manifest Scene ID order does not match jobs.")
-    if metadata.get("pending_audio_measurement_count") != 0 or metadata.get("measured_audio_count") != len(prepared):
-        raise RuntimeError("Photo Motion preparation metadata does not confirm measured TTS for every job.")
+    main_count = sum(item["role"] == "main" for item in prepared)
+    visual_only_count = len(prepared) - main_count
+    if metadata.get("pending_audio_measurement_count") != 0 or metadata.get("measured_audio_count") != main_count:
+        raise RuntimeError("Photo Motion preparation metadata does not confirm measured Main TTS.")
+    if metadata.get("visual_only_scene_count") != visual_only_count:
+        raise RuntimeError("Photo Motion visual-only Scene count mismatch.")
 def validate_output_dimensions(mode: str) -> tuple[int, int]:
     if mode == "short":
         return 720, 1280
@@ -1333,10 +1359,13 @@ def try_reuse(
             "source_scene_number": item["source_scene_number"],
             "image": item["image"].relative_to(ROOT).as_posix(),
             "image_sha256": item["image_sha256"],
-            "audio_path": item["audio_path"].relative_to(ROOT).as_posix(),
+            "audio_path": (
+                item["audio_path"].relative_to(ROOT).as_posix()
+                if item["audio_path"] is not None else None
+            ),
             "audio_sha256": item["audio_sha256"],
-            "audio_duration": item["duration"],
-            "duration_source": "ffprobe_measured",
+            "audio_duration": item["duration"] if item["role"] == "main" else None,
+            "duration_source": item["duration_source"],
             "video": path.relative_to(ROOT).as_posix(),
             "video_sha256": checksum,
             "duration": round(actual_duration, 5),
@@ -1438,6 +1467,7 @@ def build_manifest(
     error: str | None = None,
 ) -> dict:
     rows = [entries[item["scene_id"]] for item in prepared if item["scene_id"] in entries]
+    main_count = sum(item["role"] == "main" for item in prepared)
     result = {
         "version": VERSION,
         "status": status,
@@ -1452,6 +1482,8 @@ def build_manifest(
         "scenes_max": settings["scenes_max"],
         "actual_scene_counts": settings["actual_scene_counts"],
         "expected_scene_count": len(prepared),
+        "measured_audio_count": main_count,
+        "visual_only_scene_count": len(prepared) - main_count,
         "completed_count": sum(row.get("status") == "completed" for row in rows),
         "total_scenes": len(prepared),
         "scene_role_counts": {
@@ -1838,10 +1870,14 @@ def main() -> int:
                 "image_sha256": item["image_sha256"],
                 "audio_path": (
                     item["audio_path"].relative_to(ROOT).as_posix()
+                    if item["audio_path"] is not None else None
                 ),
                 "audio_sha256": item["audio_sha256"],
-                "audio_duration": item["duration"],
-                "duration_source": "ffprobe_measured",
+                "audio_duration": item["duration"] if item["role"] == "main" else None,
+                "duration_source": item["duration_source"],
+                "voiceover_enabled": item["voiceover_enabled"],
+                "narration_source": item["narration_source"],
+                "source_text_sha256": item["source_text_sha256"],
                 "video": target.relative_to(ROOT).as_posix(),
                 "video_sha256": video_hash,
                 "size_bytes": target.stat().st_size,
