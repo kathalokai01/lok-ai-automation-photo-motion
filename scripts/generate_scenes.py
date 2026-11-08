@@ -32,7 +32,7 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v9-variable-range-story-anchor-continuity"
+VERSION = "photo-motion-scenes-v10-narrated-extra-role-scenes"
 PROMPT_VERSION = 11
 
 ROLE_ORDER = {
