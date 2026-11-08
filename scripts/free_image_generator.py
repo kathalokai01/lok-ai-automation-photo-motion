@@ -12,6 +12,8 @@ import sys
 import time
 from io import BytesIO
 from pathlib import Path
+
+from gemini_http import retry_after_seconds
 from urllib.parse import quote, urlparse
 
 import requests
@@ -1419,13 +1421,19 @@ def classify_provider_error(exc):
     if response is not None:
         status = getattr(response, "status_code", None)
 
-    message = clean(exc).lower()
+    response_body = ""
+    if response is not None:
+        response_body = clean(
+            getattr(response, "text", "")
+            or getattr(response, "content", "")
+        )
+    message = f"{clean(exc)} {response_body}".lower()
 
     quota_terms = (
-        "quota", "billing", "payment required", "insufficient credit",
+        "quota exceeded", "quota limit", "daily quota", "monthly quota",
+        "billing", "payment required", "insufficient credit",
         "insufficient funds", "resource_exhausted", "resource exhausted",
-        "rate limit", "too many requests", "exceeded your",
-        "credit balance", "account suspended",
+        "exceeded your", "credit balance", "account suspended",
     )
 
     auth_terms = (
@@ -1433,18 +1441,29 @@ def classify_provider_error(exc):
         "authentication", "permission denied", "forbidden",
     )
 
-    quota_or_billing = status in {402, 429} or any(
-        term in message for term in quota_terms
+    explicit_quota = any(term in message for term in quota_terms)
+    rate_limited = status == 429 and (
+        any(term in message for term in (
+            "rate limit", "too many requests", "requests per minute",
+            "requests per second", "per minute", "per second",
+        ))
+        or not explicit_quota
     )
+    quota_or_billing = status == 402 or (
+        explicit_quota and not rate_limited
+    ) or (status == 429 and not rate_limited)
+    model_unavailable = status == 404
     authentication = status in {401, 403} or any(
         term in message for term in auth_terms
     )
 
     return {
-        "stop_retry": bool(quota_or_billing or authentication),
+        "stop_retry": bool(quota_or_billing or authentication or rate_limited or model_unavailable),
         "stop_billable": bool(quota_or_billing or authentication),
         "category": (
             "quota_or_billing" if quota_or_billing
+            else "rate_limit" if rate_limited
+            else "model_unavailable" if model_unavailable
             else "authentication" if authentication
             else "provider_error"
         ),
@@ -1593,6 +1612,17 @@ def run_provider_attempts(
                     )
 
                 save_checkpoints(records, metadata, build_policy(), counters)
+
+                if classification["category"] == "rate_limit" and retry_number < retry_limit:
+                    delay = retry_after_seconds(
+                        exc, retry_number, default_base=12, maximum=120
+                    )
+                    log(
+                        "Gemini/image provider rate-limited; retrying after",
+                        delay, "seconds."
+                    )
+                    time.sleep(delay)
+                    continue
 
                 if classification["stop_retry"]:
                     break

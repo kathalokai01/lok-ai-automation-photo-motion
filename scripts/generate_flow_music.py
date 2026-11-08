@@ -16,6 +16,8 @@ from pathlib import Path
 
 import requests
 
+from gemini_http import retry_after_seconds
+
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
@@ -608,7 +610,11 @@ def extract_audio(data):
 def request_music(api_key, model, prompt, destination):
     global API_CALLS
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-    payload = {"model": model, "input": prompt}
+    payload = {
+        "model": model,
+        "input": prompt,
+        "response_format": {"type": "audio"},
+    }
     last_error = "Unknown Google Lyria API error."
     for attempt in range(len(RETRY_DELAYS) + 1):
         try:
@@ -617,16 +623,65 @@ def request_music(api_key, model, prompt, destination):
                 API_URL, headers=headers, json=payload,
                 timeout=REQUEST_TIMEOUT,
             )
-            if response.status_code in {408, 429, 500, 502, 503, 504}:
-                last_error = f"Temporary Google API error {response.status_code}: {response.text[:800]}"
+            status = int(response.status_code)
+            response_text = str(response.text or "")
+            response_lower = response_text.lower()
+
+            if status == 404:
+                raise RuntimeError(
+                    "Google Lyria model/API endpoint was not found (HTTP 404). "
+                    "Check FLOW_MUSIC_MODEL and Gemini API access. "
+                    + response_text[:1000]
+                )
+
+            if status == 429:
+                quota_error = any(term in response_lower for term in (
+                    "quota", "resource_exhausted", "resource exhausted",
+                    "billing", "payment required", "insufficient credit",
+                    "daily limit", "monthly limit",
+                ))
+                rate_error = any(term in response_lower for term in (
+                    "rate limit", "too many requests", "per minute",
+                    "per second", "requests per",
+                ))
+                if quota_error and not rate_error:
+                    raise RuntimeError(
+                        "Google Lyria quota/billing limit reached (HTTP 429): "
+                        + response_text[:1000]
+                    )
+                last_error = (
+                    f"Google Lyria rate limit (HTTP 429): "
+                    f"{response_text[:800]}"
+                )
                 if attempt < len(RETRY_DELAYS):
-                    time.sleep(RETRY_DELAYS[attempt])
+                    delay = retry_after_seconds(
+                        response, attempt + 1,
+                        default_base=12, maximum=120,
+                    )
+                    log("LYRIA RATE LIMITED; retrying in", delay, "seconds.")
+                    time.sleep(delay)
                     continue
                 break
-            if response.status_code >= 400:
+
+            if status in {408, 500, 502, 503, 504}:
+                last_error = (
+                    f"Temporary Google API error {status}: "
+                    f"{response_text[:800]}"
+                )
+                if attempt < len(RETRY_DELAYS):
+                    delay = retry_after_seconds(
+                        response, attempt + 1,
+                        default_base=8, maximum=120,
+                    )
+                    log("LYRIA TEMPORARY API ERROR; retrying in", delay, "seconds.")
+                    time.sleep(delay)
+                    continue
+                break
+
+            if status >= 400:
                 raise RuntimeError(
-                    f"Google API rejected request ({response.status_code}): "
-                    f"{response.text[:1200]}"
+                    f"Google API rejected request ({status}): "
+                    f"{response_text[:1200]}"
                 )
             try:
                 data = response.json()

@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import os
 import sys
+import io
+import urllib.error
+from email.message import Message
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +21,83 @@ if str(SCRIPTS) not in sys.path:
 import llm_provider_client as client
 import select_llm_provider as selector
 import gemini_api_guard
+import gemini_http
+import generate_tts
+
+
+class GeminiHttpFallbackTests(unittest.TestCase):
+    def _http_error(self, status, headers=None, body=b""):
+        return urllib.error.HTTPError(
+            "https://generativelanguage.googleapis.com/test",
+            status,
+            "test",
+            headers or Message(),
+            io.BytesIO(body),
+        )
+
+    def test_gemini_404_is_permanent_and_moves_to_next_model(self):
+        error = self._http_error(404)
+        self.assertEqual(gemini_http.http_status(error), 404)
+        self.assertFalse(gemini_http.is_retryable_http_status(404))
+        self.assertTrue(gemini_http.is_permanent_model_status(404))
+
+    def test_gemini_429_is_retryable_not_model_permanent(self):
+        self.assertTrue(gemini_http.is_retryable_http_status(429))
+        self.assertFalse(gemini_http.is_permanent_model_status(429))
+
+    def test_gemini_retry_after_header_is_honored(self):
+        headers = Message()
+        headers.add_header("Retry-After", "23")
+        error = self._http_error(429, headers=headers)
+        self.assertEqual(gemini_http.retry_after_seconds(error, 1), 23)
+
+    def test_google_retry_info_is_honored(self):
+        body = (
+            b'{"error":{"details":[{"@type":"type.googleapis.com/'
+            b'google.rpc.RetryInfo","retryDelay":"19s"}]}}'
+        )
+        error = self._http_error(429, body=body)
+        self.assertEqual(gemini_http.retry_after_seconds(error, 1), 19)
+
+    def test_retry_delay_is_bounded(self):
+        headers = Message()
+        headers.add_header("Retry-After", "900")
+        error = self._http_error(429, headers=headers)
+        self.assertEqual(gemini_http.retry_after_seconds(error, 1), 120)
+
+    def test_retry_after_works_with_direct_requests_response(self):
+        headers = Message()
+        headers.add_header("Retry-After", "31")
+        response = SimpleNamespace(
+            status_code=429,
+            headers=headers,
+            text="Too many requests",
+        )
+        self.assertEqual(gemini_http.http_status(response), 429)
+        self.assertEqual(gemini_http.retry_after_seconds(response, 1), 31)
+
+
+class TTSFallbackHttpTests(unittest.TestCase):
+    def _error(self, status, body="", retry_after=None):
+        headers = Message()
+        if retry_after is not None:
+            headers.add_header("Retry-After", str(retry_after))
+        return generate_tts.TTSProviderHTTPError(
+            status, "test", body, headers
+        )
+
+    def test_tts_404_skips_unavailable_provider_without_blocking_paid_chain(self):
+        error = self._error(404, "model not found")
+        self.assertEqual(generate_tts.classify_provider_error(error), "model_unavailable")
+
+    def test_tts_429_rate_limit_retries_same_provider(self):
+        error = self._error(429, "Too many requests per minute", 17)
+        self.assertEqual(generate_tts.classify_provider_error(error), "rate_limit")
+        self.assertEqual(gemini_http.retry_after_seconds(error, 1), 17)
+
+    def test_tts_429_daily_quota_blocks_only_that_paid_provider(self):
+        error = self._error(429, "RESOURCE_EXHAUSTED: daily quota exceeded")
+        self.assertEqual(generate_tts.classify_provider_error(error), "quota_or_billing")
 
 
 class ProviderConfigurationTests(unittest.TestCase):

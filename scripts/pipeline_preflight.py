@@ -32,6 +32,7 @@ REQUIRED_SCRIPTS = (
     "pipeline_preflight.py",
     "check_gemini_guard.py",
     "gemini_api_guard.py",
+    "gemini_http.py",
     "select_visual_model.py",
     "test_gemini.py",
     "story_length_policy.py",
