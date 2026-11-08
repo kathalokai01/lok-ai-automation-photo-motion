@@ -117,12 +117,14 @@ def require_hindi_shaping():
 
 
 def family_matches(actual, expected):
+    # fontconfig may list variable-font instances on separate lines.
+    normalized = str(actual).replace("\\r", "\\n").replace(",", "\\n")
     families = [
         item.strip().casefold()
-        for item in actual.split(",")
+        for item in normalized.splitlines()
         if item.strip()
     ]
-    expected = expected.casefold()
+    expected = expected.strip().casefold()
 
     return any(
         family == expected or family.startswith(expected + " ")
