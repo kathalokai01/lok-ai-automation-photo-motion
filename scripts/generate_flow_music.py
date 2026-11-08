@@ -758,8 +758,9 @@ def source_fingerprint(
                 "SCENES_SPEC", "SCENES_MIN", "SCENES_MAX",
                 "MUSIC", "MUSIC_ENABLED", "MUSIC_STYLE",
                 "MUSIC_GENRE", "MUSIC_INTENSITY", "MOOD",
-                "FLOW_MUSIC_MODEL", "MUSIC_ALLOW_BILLABLE",
-                "ALLOW_BILLABLE_PROVIDERS",
+                "MUSIC_PROVIDER_ORDER", "MUSIC_FALLBACK_ENABLED",
+                "MUSIC_ALLOW_PAID", "FLOW_MUSIC_MODEL",
+                "MUSIC_ALLOW_BILLABLE", "ALLOW_BILLABLE_PROVIDERS",
             )
         },
         "role_durations": role_durations,
