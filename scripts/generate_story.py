@@ -50,7 +50,7 @@ TITLE_FILE = STORY_DIR / "final_title.txt"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v34-final-part-recovery-and-strict-story-cache"
+VERSION = "story-builder-v35-pasted-story-authority-and-title-topic-metadata"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -936,22 +936,31 @@ def build_story_prompt(
     source_text: str,
     config: dict,
 ) -> str:
+    has_pasted_story = bool(normalize_text(source_text))
     task = (
-        "Correct and proofread the complete supplied story."
-        if source_text
-        else "Write a complete original Hindi story from the topic/title."
+        "Proofread and correct ONLY the supplied complete story; do not write a new story."
+        if has_pasted_story
+        else "Write a complete original Hindi story from the topic/title because no STORY_TEXT was supplied."
     )
 
     return f"""
-You are a professional Hindi story editor.
+You are a professional Hindi story proofreader and editor.
 
 TASK: {task}
 FORMAT: {mode}
-TOPIC: {topic or '(not supplied)'}
-EXPLICIT TITLE: {title or '(not supplied)'}
+TOPIC (metadata/subject label only): {topic or '(not supplied)'}
+EXPLICIT TITLE (story name only): {title or '(not supplied)'}
 AUDIENCE: {config.get('AUDIENCE', 'adult')}
 
-Read the COMPLETE story from beginning to ending before editing.
+SOURCE PRIORITY — ABSOLUTE:
+- If SOURCE STORY below contains text, it is the authoritative story.
+- TITLE and TOPIC are labels/metadata only. They are NOT permission or instructions
+  to invent, replace, restart, expand, or write a different story.
+- When SOURCE STORY is present, edit that exact story only. Never create a new
+  story from TITLE or TOPIC, even if either field is filled.
+- Generate an original story from TITLE/TOPIC only when SOURCE STORY is empty.
+
+Read the COMPLETE source from beginning to ending before editing.
 
 SOURCE STORY:
 <source_story>
@@ -959,20 +968,23 @@ SOURCE STORY:
 </source_story>
 
 MANDATORY RULES:
-1. Correct Hindi matras, spelling, grammar and punctuation.
-2. Improve sentence construction without changing meaning.
-3. Preserve every character, relationship, location, object, clue, event,
-   motivation, chronology and consequence.
-4. Preserve the original ending and every meaningful event.
-5. Do not invent events, dialogue, clues, characters or outcomes.
-6. Use natural Hindi Devanagari unless the source requires otherwise.
-7. Return the entire corrected story, not a summary.
-8. If TITLE is blank, derive it only after reading the complete story,
-   including its middle and ending.
-9. Return JSON with title and story_text. Plain text is accepted.
+1. When a source story is present, retain its complete storyline and edit only
+   spelling, Hindi matras, grammar, punctuation, and clarity.
+2. Preserve every character, relationship, location, object, clue, event,
+   motivation, chronology, dialogue meaning, consequence, and ending.
+3. Do not invent, remove, replace, reorder, or add events, characters, dialogue,
+   clues, locations, or outcomes.
+4. Do not turn the source into a different story, summary, outline, or adaptation.
+5. Do not let TITLE or TOPIC override, reinterpret, or replace SOURCE STORY.
+6. If a correction could change meaning, retain the original wording instead.
+7. Use natural Hindi Devanagari unless the source requires otherwise.
+8. Return the entire corrected source story, not a summary.
+9. If TITLE is blank and a source story exists, derive a title only after reading
+   the entire story, including its middle and ending.
+10. Return JSON with title and story_text. Plain text is accepted.
 
 Return:
-{{"title":"full-story-based title","story_text":"complete corrected story"}}
+{{"title":"story title","story_text":"complete corrected source story"}}
 """
 
 
