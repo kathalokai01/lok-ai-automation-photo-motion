@@ -51,8 +51,6 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_MODEL: ${{ vars.CLOUDFLARE_MODEL }}
 
-      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-      MISTRAL_MODEL: ${{ vars.MISTRAL_MODEL }}
 
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
