@@ -939,8 +939,27 @@ def synthesize_provider(
                 "Gemini TTS returned no valid audio."
             ) from exc
 
-        if "wav" in mime_type or "mpeg" in mime_type or "mp3" in mime_type:
+        if "mpeg" in mime_type or "mp3" in mime_type:
             return write_audio_bytes(output_path, audio_data)
+
+        if "wav" in mime_type:
+            wav_path = output_path.with_name(
+                output_path.stem + ".gemini.wav"
+            )
+            try:
+                wav_path.write_bytes(audio_data)
+                validate_audio(wav_path)
+                run_command([
+                    shutil.which("ffmpeg") or "ffmpeg",
+                    "-y", "-v", "error",
+                    "-i", wav_path,
+                    "-codec:a", "libmp3lame",
+                    "-q:a", "3",
+                    output_path,
+                ])
+                return validate_audio(output_path)
+            finally:
+                wav_path.unlink(missing_ok=True)
 
         return pcm_to_mp3(audio_data, output_path, 24000)
 
