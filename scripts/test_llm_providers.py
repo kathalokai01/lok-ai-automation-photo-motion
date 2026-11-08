@@ -16,6 +16,7 @@ if str(SCRIPTS) not in sys.path:
 
 import llm_provider_client as client
 import select_llm_provider as selector
+import gemini_api_guard
 
 
 class ProviderConfigurationTests(unittest.TestCase):
@@ -36,6 +37,39 @@ class ProviderConfigurationTests(unittest.TestCase):
     def test_configured_priority_is_preserved_and_deduplicated(self):
         os.environ["LLM_PROVIDER_ORDER"] = "mistral,openrouter,groq,mistral"
         self.assertEqual(client.get_provider_order(), ["mistral", "openrouter", "groq"])
+
+    def test_gemini_in_provider_order_is_reserved_for_gemini_selector(self):
+        os.environ["LLM_PROVIDER_ORDER"] = "gemini,groq,openrouter"
+        self.assertEqual(selector.get_provider_allowlist(), ["groq", "openrouter"])
+        self.assertEqual(client.get_provider_order(), ["groq", "openrouter"])
+
+    def test_cloudflare_is_not_ready_without_account_id(self):
+        os.environ.update({
+            "CLOUDFLARE_API_TOKEN": "cf-token",
+            "CLOUDFLARE_MODEL": "@cf/meta/test-model",
+        })
+        ready, model, detail = selector.validate_provider("cloudflare")
+        self.assertFalse(ready)
+        self.assertEqual(model, "")
+        self.assertIn("CLOUDFLARE_ACCOUNT_ID", detail)
+
+    def test_gemini_billing_guard_requires_exact_opt_in_and_key(self):
+        with patch.dict(os.environ, {
+            "ALLOW_GEMINI_GENERATION": "true",
+            "GEMINI_API_KEY": "test-key",
+        }, clear=True):
+            self.assertFalse(gemini_api_guard.gemini_generation_allowed())
+            with self.assertRaises(gemini_api_guard.GeminiBillingBlocked):
+                gemini_api_guard.require_gemini_generation("unit test")
+
+        with patch.dict(os.environ, {
+            "ALLOW_GEMINI_GENERATION": "I_ACCEPT_POTENTIAL_GEMINI_CHARGES",
+            "GEMINI_API_KEY": "test-key",
+        }, clear=True):
+            self.assertEqual(
+                gemini_api_guard.require_gemini_generation("unit test"),
+                "test-key",
+            )
 
     def test_unsupported_provider_is_rejected(self):
         os.environ["LLM_PROVIDER_ORDER"] = "unknown-provider"
