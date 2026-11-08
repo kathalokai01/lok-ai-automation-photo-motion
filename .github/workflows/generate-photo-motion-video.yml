@@ -738,6 +738,9 @@ jobs:
           print("API CALLS: 0")
           PY
 
+      - name: Compile-check all pipeline scripts
+        run: python -m compileall -q scripts
+
       - name: Select configured Gemini model priority
         shell: bash
         run: |
@@ -934,11 +937,23 @@ jobs:
       - name: Generate AI story artifacts
         run: python scripts/generate_ai_story.py
 
+      - name: Re-validate locked story text after AI Story generation
+        run: |
+          set -euo pipefail
+          python scripts/validate_story_length.py
+          python scripts/verify_story.py
+
       - name: Generate character bible
         run: python scripts/generate_character_bible.py
 
       - name: Generate scenes with story roles
         run: python scripts/generate_scenes.py
+
+      - name: Verify exact Main Scene narration coverage before TTS
+        run: |
+          set -euo pipefail
+          python scripts/validate_story_length.py
+          python scripts/verify_story.py
 
       - name: Prepare narration jobs
         run: python scripts/generate_narration.py
