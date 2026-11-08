@@ -36,7 +36,7 @@ PHOTO_JOBS_FILE = VISUALS / "photo_motion_jobs.json"
 PHOTO_MANIFEST_FILE = VISUALS / "photo_motion_manifest.json"
 CHECKPOINT_FILE = CHECKPOINTS / "prepare_visuals_progress.json"
 
-VERSION = "prepare-visuals-v14-variable-scene-range-image-integrity"
+VERSION = "prepare-visuals-v14-variable-scene-range-image-integrity-main-tts-visual-only-extra-timing"
 
 ROLE_ORDER = {
     "hook": 0,
@@ -56,6 +56,7 @@ MIN_IMAGE_DIMENSION = 256
 MAX_IMAGE_DIMENSION = 4096
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
+DEFAULT_VISUAL_SCENE_SECONDS = 6.0
 
 
 def log(*values: Any) -> None:
@@ -331,6 +332,21 @@ def normalize_source_scenes(
         if scene_id in seen_ids:
             raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
         seen_ids.add(scene_id)
+        narration = clean(original.get("narration"))
+        if role == "main":
+            if not narration or original.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{scene_id}: Main narration/voiceover is invalid.")
+            if original.get("narration_source") != "locked_part_text":
+                raise RuntimeError(f"{scene_id}: Main narration source is not locked.")
+            if original.get("source_text_sha256") != hashlib.sha256(narration.encode("utf-8")).hexdigest():
+                raise RuntimeError(f"{scene_id}: Main narration hash mismatch.")
+            if original.get("source_word_count") != len(narration.split()):
+                raise RuntimeError(f"{scene_id}: Main narration word count mismatch.")
+        else:
+            if narration or original.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"{scene_id}: extra role must be visual-only.")
+            if original.get("narration_source") != "visual_only" or not clean(original.get("story_anchor")):
+                raise RuntimeError(f"{scene_id}: visual-only story anchor is missing.")
         counts.setdefault(part, {name: 0 for name in ROLE_ORDER})
         counts[part][role] += 1
         prepared.append({**dict(original), "part": part, "role": role,
@@ -449,6 +465,14 @@ def verify_visual_jobs(
 
         if not clean(job.get("prompt") or job.get("image_prompt")):
             raise RuntimeError(f"{scene_id}: visual prompt is missing.")
+        if source["role"] == "main":
+            if clean(job.get("narration")) != clean(source.get("narration")):
+                raise RuntimeError(f"{scene_id}: visual job narration differs from locked source.")
+            if job.get("source_text_sha256") != hashlib.sha256(clean(source.get("narration")).encode("utf-8")).hexdigest():
+                raise RuntimeError(f"{scene_id}: visual job narration hash mismatch.")
+        else:
+            if clean(job.get("narration")) or job.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"{scene_id}: visual-only job contains narration.")
 
         if not clean(job.get("source_scene_signature")):
             raise RuntimeError(
@@ -956,58 +980,54 @@ def validate_narration_mapping(
     source_scenes: list[dict],
     narration_records: dict[str, dict],
 ) -> dict[str, dict]:
-    expected_ids = {row["scene_id"] for row in source_scenes}
+    main_sources = [row for row in source_scenes if row["role"] == "main"]
+    expected_ids = {row["scene_id"] for row in main_sources}
     actual_ids = set(narration_records)
-
     if expected_ids != actual_ids:
         raise RuntimeError(
-            "TTS narration records do not match scene IDs. "
+            "TTS narration records must match Main Scene IDs only. "
             f"Missing={sorted(expected_ids - actual_ids)[:20]}, "
             f"extra={sorted(actual_ids - expected_ids)[:20]}."
         )
 
-    for source in source_scenes:
+    by_part = {}
+    for source in main_sources:
         scene_id = source["scene_id"]
         record = narration_records[scene_id]
+        if positive_int(record.get("part"), scene_id + " narration part") != source["part"]:
+            raise RuntimeError(f"{scene_id}: narration part mismatch.")
+        if normalize_role(record) != "main":
+            raise RuntimeError(f"{scene_id}: TTS record is not a Main Scene.")
+        narration_text = clean(record.get("narration") or record.get("text") or record.get("content"))
+        source_text = clean(source.get("narration"))
+        if not narration_text or narration_text != source_text:
+            raise RuntimeError(f"{scene_id}: TTS text differs from locked scenes.json narration.")
+        declared_hash = clean(record.get("text_sha256") or record.get("narration_sha256"))
+        expected_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        if declared_hash and declared_hash != expected_hash:
+            raise RuntimeError(f"{scene_id}: TTS source text hash mismatch.")
+        if source.get("source_text_sha256") != expected_hash:
+            raise RuntimeError(f"{scene_id}: source scene text hash mismatch.")
+        by_part.setdefault(source["part"], []).append((source["source_scene_number"], narration_text))
 
-        if positive_int(record.get("part"), scene_id + " narration part") != (
-            source["part"]
-        ):
-            raise RuntimeError(
-                f"{scene_id}: narration part mismatch."
-            )
+    for part, values in by_part.items():
+        values.sort(key=lambda item: item[0])
+        source_part = next(
+            row.get("part_narration") or row.get("locked_part_narration")
+            for row in source_scenes
+            if row["part"] == part and row["role"] == "main"
+            if row.get("part_narration") or row.get("locked_part_narration")
+        ) if any(
+            row["part"] == part and (row.get("part_narration") or row.get("locked_part_narration"))
+            for row in source_scenes
+        ) else None
+        if source_part and clean(" ".join(item[1] for item in values)) != clean(source_part):
+            raise RuntimeError(f"Part {part}: TTS Main Scene text does not reconstruct its locked Part.")
 
-        if normalize_role(record) != source["role"]:
-            raise RuntimeError(
-                f"{scene_id}: narration role mismatch."
-            )
-
-        narration_text = clean(
-            record.get("narration")
-            or record.get("text")
-            or record.get("content")
-        )
-
-        source_text = clean(
-            source.get("narration")
-            or source.get("text")
-        )
-
-        if not narration_text:
-            raise RuntimeError(
-                f"{scene_id}: narration text is missing."
-            )
-
-        if not source_text:
-            raise RuntimeError(
-                f"{scene_id}: source scene narration is missing."
-            )
-
-        if narration_text != source_text:
-            raise RuntimeError(
-                f"{scene_id}: TTS narration text differs from scenes.json."
-            )
-
+    for source in source_scenes:
+        if source["role"] != "main":
+            if clean(source.get("narration")) or source.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"{source['scene_id']}: extra role must be visual-only.")
     return narration_records
 
 
@@ -1121,7 +1141,7 @@ def prepare_jobs(
         visual_job = jobs_by_id[scene_id]
         image_record = image_by_id[scene_id]
         generation_record = generation_by_id[scene_id]
-        narration_row = narration_by_id[scene_id]
+        narration_row = narration_by_id.get(scene_id)
 
         image_path, image_info = verify_image_record(
             source,
@@ -1131,18 +1151,45 @@ def prepare_jobs(
             format_name,
         )
 
-        measured_audio = measured_audio_record(
-            scene_id,
-            narration_row,
-            source,
-        )
-
-        narration = clean(
-            narration_row.get("narration")
-            or narration_row.get("text")
-            or source.get("narration")
-            or source.get("text")
-        )
+        if role == "main":
+            if narration_row is None:
+                raise RuntimeError(f"{scene_id}: Main TTS record is missing.")
+            measured_audio = measured_audio_record(scene_id, narration_row, source)
+            narration = clean(
+                narration_row.get("narration")
+                or narration_row.get("text")
+                or source.get("narration")
+            )
+            duration = measured_audio["duration"]
+            audio_fields = {
+                "duration_source": "ffprobe_measured",
+                "audio_path": measured_audio["audio_path"],
+                "audio_sha256": measured_audio["audio_sha256"],
+                "audio_duration": duration,
+                "actual_audio_duration_seconds": duration,
+                "audio_duration_source": "ffprobe_measured",
+                "audio_provider": measured_audio["audio_provider"],
+                "audio_model": measured_audio["audio_model"],
+            }
+        else:
+            if narration_row is not None or clean(source.get("narration")):
+                raise RuntimeError(f"{scene_id}: visual-only extra role cannot have TTS.")
+            narration = ""
+            duration = (
+                valid_duration(source.get("duration"))
+                or valid_duration(source.get("scene_duration"))
+                or DEFAULT_VISUAL_SCENE_SECONDS
+            )
+            audio_fields = {
+                "duration_source": "visual_scene_duration",
+                "audio_path": None,
+                "audio_sha256": "",
+                "audio_duration": None,
+                "actual_audio_duration_seconds": None,
+                "audio_duration_source": "visual_scene_duration",
+                "audio_provider": None,
+                "audio_model": None,
+            }
 
         prompt = clean(
             visual_job.get("prompt")
@@ -1230,16 +1277,16 @@ def prepare_jobs(
                 visual_job.get("source_scene_signature")
             ),
 
-            "duration": measured_audio["duration"],
-            "scene_duration": measured_audio["duration"],
-            "duration_source": "ffprobe_measured",
-            "audio_path": measured_audio["audio_path"],
-            "audio_sha256": measured_audio["audio_sha256"],
-            "audio_duration": measured_audio["duration"],
-            "actual_audio_duration_seconds": measured_audio["duration"],
-            "audio_duration_source": "ffprobe_measured",
-            "audio_provider": measured_audio["audio_provider"],
-            "audio_model": measured_audio["audio_model"],
+            "duration": duration,
+            "scene_duration": duration,
+            **audio_fields,
+            "voiceover_enabled": role == "main",
+            "narration_source": "locked_part_text" if role == "main" else "visual_only",
+            "source_text_sha256": (
+                hashlib.sha256(narration.encode("utf-8")).hexdigest()
+                if role == "main" else ""
+            ),
+            "source_word_count": len(narration.split()) if role == "main" else 0,
 
             "character_ids": character_data["character_ids"],
             "characters": character_data["characters"],
@@ -1368,9 +1415,10 @@ def prepare_jobs(
         "main_scene_numbering": "source_scene_number_preserved",
         "extra_scene_numbering": "separate_local_photo_motion_slot",
         "duration_policy": (
-            "every_job_requires_ffprobe_measured_tts_audio_duration"
+            "Main jobs use ffprobe-measured TTS; visual-only role jobs use source Scene duration."
         ),
-        "measured_audio_count": len(jobs),
+        "measured_audio_count": role_counts["main"],
+        "visual_only_scene_count": len(jobs) - role_counts["main"],
         "pending_audio_measurement_count": 0,
         "config_signature": config_signature,
         "character_bible_status": bible.get("status", "unknown"),
@@ -1499,15 +1547,14 @@ def verify_written_outputs(
                 "Photo Motion job has no scene ID after writing."
             )
 
-        if valid_duration(row.get("actual_audio_duration_seconds")) is None:
-            raise RuntimeError(
-                f"{row.get('scene_id')}: written job has no measured duration."
-            )
-
-        if not clean(row.get("audio_sha256")):
-            raise RuntimeError(
-                f"{row.get('scene_id')}: written job has no audio SHA256."
-            )
+        if row.get("role") == "main":
+            if valid_duration(row.get("actual_audio_duration_seconds")) is None:
+                raise RuntimeError(f"{row.get('scene_id')}: Main TTS duration is missing.")
+            if not clean(row.get("audio_sha256")):
+                raise RuntimeError(f"{row.get('scene_id')}: Main TTS SHA256 is missing.")
+        else:
+            if row.get("actual_audio_duration_seconds") is not None or clean(row.get("audio_sha256")):
+                raise RuntimeError(f"{row.get('scene_id')}: visual-only role has TTS audio.")
 
         if not clean(row.get("image_sha256")):
             raise RuntimeError(
@@ -1768,15 +1815,16 @@ def main() -> int:
         )
 
     for row in jobs:
-        if not row["image_sha256"] or not row["audio_sha256"]:
-            raise RuntimeError(
-                f"{row['scene_id']}: image/audio integrity data is missing."
-            )
-
-        if valid_duration(row["actual_audio_duration_seconds"]) is None:
-            raise RuntimeError(
-                f"{row['scene_id']}: measured audio duration is invalid."
-            )
+        if not row["image_sha256"]:
+            raise RuntimeError(f"{row['scene_id']}: image integrity data is missing.")
+        if row["role"] == "main":
+            if not row["audio_sha256"] or valid_duration(row["actual_audio_duration_seconds"]) is None:
+                raise RuntimeError(f"{row['scene_id']}: measured Main TTS audio is invalid.")
+        else:
+            if row["audio_sha256"] or row["audio_path"] is not None:
+                raise RuntimeError(f"{row['scene_id']}: visual-only role has unexpected TTS audio.")
+            if row["voiceover_enabled"] is not False or row["narration"]:
+                raise RuntimeError(f"{row['scene_id']}: visual-only role contains narration.")
 
     atomic_json(PHOTO_JOBS_FILE, document)
     atomic_json(PHOTO_MANIFEST_FILE, manifest)
@@ -1806,7 +1854,8 @@ def main() -> int:
     for role in ("hook", "main", "suspense", "resolution"):
         log(role.upper() + ":", document["scene_role_counts"][role])
 
-    log("Measured TTS audio:", len(jobs))
+    log("Measured Main TTS audio:", document["measured_audio_count"])
+    log("Visual-only Scenes without TTS:", document["visual_only_scene_count"])
     log("Pending TTS measurements: 0")
     log("Photo Motion jobs:", PHOTO_JOBS_FILE.relative_to(ROOT))
     log("Photo Motion manifest:", PHOTO_MANIFEST_FILE.relative_to(ROOT))
