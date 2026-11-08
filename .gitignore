@@ -1,0 +1,13 @@
+# Generated pipeline artifacts must stay out of the source repository.
+/output/
+
+# Python runtime artifacts.
+__pycache__/
+*.py[cod]
+.venv/
+
+# Temporary and editor files.
+*.tmp
+*.download
+*.part
+.DS_Store
