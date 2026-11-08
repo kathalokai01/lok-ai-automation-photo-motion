@@ -956,7 +956,7 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
         "overlap_warnings": overlap_warnings,
         "max_allowed_overlap_seconds": MAX_OVERLAP_SECONDS,
         "max_cue_duration_seconds": MAX_CUE_DURATION_SECONDS,
-        "duration_source": "ffprobe_measured_main_tts_and_visual_scene_durations_plus_sfx_files",
+        "duration_source": "ffprobe_measured_all_role_tts_audio_plus_sfx_files",
     }
 
 
@@ -1043,7 +1043,7 @@ def main():
         "total_visual_scene_records": len(narration),
         "visual_scenes_checked": len(narration),
         "scene_timeline_seconds": round(narration_duration, 4),
-        "duration_source": "main_tts_audio_and_visual_scene_durations",
+        "duration_source": "all_role_tts_audio_durations",
         "narration_manifest": relative(AUDIO_FILE),
         "narration_manifest_sha256": audio_hash,
         "sound_design_manifest": relative(SOUND_MANIFEST),
