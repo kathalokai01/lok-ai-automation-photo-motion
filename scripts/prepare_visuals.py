@@ -36,7 +36,7 @@ PHOTO_JOBS_FILE = VISUALS / "photo_motion_jobs.json"
 PHOTO_MANIFEST_FILE = VISUALS / "photo_motion_manifest.json"
 CHECKPOINT_FILE = CHECKPOINTS / "prepare_visuals_progress.json"
 
-VERSION = "prepare-visuals-v14-variable-scene-range-image-integrity-main-tts-visual-only-extra-timing"
+VERSION = "prepare-visuals-v15-all-role-tts-audio"
 
 ROLE_ORDER = {
     "hook": 0,
@@ -343,10 +343,14 @@ def normalize_source_scenes(
             if original.get("source_word_count") != len(narration.split()):
                 raise RuntimeError(f"{scene_id}: Main narration word count mismatch.")
         else:
-            if narration or original.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{scene_id}: extra role must be visual-only.")
-            if original.get("narration_source") != "visual_only" or not clean(original.get("story_anchor")):
-                raise RuntimeError(f"{scene_id}: visual-only story anchor is missing.")
+            if len(narration.split()) < 8 or original.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{scene_id}: extra role narration/voiceover is invalid.")
+            if original.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{scene_id}: extra narration source is invalid.")
+            if original.get("source_text_sha256") != hashlib.sha256(narration.encode("utf-8")).hexdigest():
+                raise RuntimeError(f"{scene_id}: extra narration hash mismatch.")
+            if not clean(original.get("story_anchor")):
+                raise RuntimeError(f"{scene_id}: extra-role story anchor is missing.")
         counts.setdefault(part, {name: 0 for name in ROLE_ORDER})
         counts[part][role] += 1
         prepared.append({**dict(original), "part": part, "role": role,
@@ -471,8 +475,10 @@ def verify_visual_jobs(
             if job.get("source_text_sha256") != hashlib.sha256(clean(source.get("narration")).encode("utf-8")).hexdigest():
                 raise RuntimeError(f"{scene_id}: visual job narration hash mismatch.")
         else:
-            if clean(job.get("narration")) or job.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{scene_id}: visual-only job contains narration.")
+            if clean(job.get("narration")) != clean(source.get("narration")) or job.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{scene_id}: extra-role visual job narration mismatch.")
+            if job.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{scene_id}: extra-role visual job narration source mismatch.")
 
         if not clean(job.get("source_scene_signature")):
             raise RuntimeError(
@@ -1172,22 +1178,22 @@ def prepare_jobs(
                 "audio_model": measured_audio["audio_model"],
             }
         else:
-            if narration_row is not None or clean(source.get("narration")):
-                raise RuntimeError(f"{scene_id}: visual-only extra role cannot have TTS.")
-            narration = ""
-            duration = (
-                valid_duration(source.get("duration"))
-                or valid_duration(source.get("scene_duration"))
-                or DEFAULT_VISUAL_SCENE_SECONDS
-            )
+            if narration_row is None:
+                raise RuntimeError(f"{scene_id}: extra-role TTS record is missing.")
+            measured_audio = measured_audio_record(scene_id, narration_row, source)
+            narration = clean(narration_row.get("narration") or narration_row.get("text"))
+            if narration != clean(source.get("narration")):
+                raise RuntimeError(f"{scene_id}: extra-role TTS text differs from source narration.")
+            duration = measured_audio["duration"]
             audio_fields = {
-                "duration_source": "visual_scene_duration",
-                "audio_path": None,
-                "audio_sha256": "",
-                "audio_duration": None,
-                "actual_audio_duration_seconds": None,
-                "audio_duration_source": "visual_scene_duration",
-                "audio_provider": None,
+                "duration_source": "ffprobe_measured",
+                "audio_path": measured_audio["audio_path"],
+                "audio_sha256": measured_audio["audio_sha256"],
+                "audio_duration": duration,
+                "actual_audio_duration_seconds": duration,
+                "audio_duration_source": "ffprobe_measured",
+                "audio_provider": measured_audio["audio_provider"],
+                "audio_model": measured_audio["audio_model"],
                 "audio_model": None,
             }
 
@@ -1249,9 +1255,9 @@ def prepare_jobs(
             "narration": narration,
             "text": narration,
             "story_anchor": clean(source.get("story_anchor")),
-            "voiceover_enabled": role == "main",
-            "narration_source": "locked_part_text" if role == "main" else "visual_only",
-            "visual_only": role != "main",
+            "voiceover_enabled": True,
+            "narration_source": "locked_part_text" if role == "main" else "ai_generated_role_narration",
+            "visual_only": False,
             "dialogue": clean(
                 source.get("dialogue")
                 or visual_job.get("dialogue")
@@ -1284,13 +1290,10 @@ def prepare_jobs(
             "duration": duration,
             "scene_duration": duration,
             **audio_fields,
-            "voiceover_enabled": role == "main",
-            "narration_source": "locked_part_text" if role == "main" else "visual_only",
-            "source_text_sha256": (
-                hashlib.sha256(narration.encode("utf-8")).hexdigest()
-                if role == "main" else ""
-            ),
-            "source_word_count": len(narration.split()) if role == "main" else 0,
+            "voiceover_enabled": True,
+            "narration_source": "locked_part_text" if role == "main" else "ai_generated_role_narration",
+            "source_text_sha256": hashlib.sha256(narration.encode("utf-8")).hexdigest(),
+            "source_word_count": len(narration.split()),
 
             "character_ids": character_data["character_ids"],
             "characters": character_data["characters"],
@@ -1557,8 +1560,8 @@ def verify_written_outputs(
             if not clean(row.get("audio_sha256")):
                 raise RuntimeError(f"{row.get('scene_id')}: Main TTS SHA256 is missing.")
         else:
-            if row.get("actual_audio_duration_seconds") is not None or clean(row.get("audio_sha256")):
-                raise RuntimeError(f"{row.get('scene_id')}: visual-only role has TTS audio.")
+            if valid_duration(row.get("actual_audio_duration_seconds")) is None or not clean(row.get("audio_sha256")):
+                raise RuntimeError(f"{row.get('scene_id')}: extra-role measured TTS audio is missing.")
 
         if not clean(row.get("image_sha256")):
             raise RuntimeError(
@@ -1810,7 +1813,7 @@ def main() -> int:
         "measured_audio_count": len(jobs),
         "pending_audio_measurement_count": 0,
         "scene_role_counts": document["scene_role_counts"],
-        "status_detail": "all_images_verified_main_tts_verified_visual_only_roles_without_tts",
+        "status_detail": "all_images_and_all_role_tts_audio_verified",
     }
 
     if len(jobs) != len(source_scenes):
@@ -1825,10 +1828,10 @@ def main() -> int:
             if not row["audio_sha256"] or valid_duration(row["actual_audio_duration_seconds"]) is None:
                 raise RuntimeError(f"{row['scene_id']}: measured Main TTS audio is invalid.")
         else:
-            if row["audio_sha256"] or row["audio_path"] is not None:
-                raise RuntimeError(f"{row['scene_id']}: visual-only role has unexpected TTS audio.")
-            if row["voiceover_enabled"] is not False or row["narration"]:
-                raise RuntimeError(f"{row['scene_id']}: visual-only role contains narration.")
+            if not row["audio_sha256"] or valid_duration(row["actual_audio_duration_seconds"]) is None:
+                raise RuntimeError(f"{row['scene_id']}: extra-role TTS audio is missing or unmeasured.")
+            if row["voiceover_enabled"] is not True or not row["narration"]:
+                raise RuntimeError(f"{row['scene_id']}: extra-role narration/voiceover is missing.")
 
     atomic_json(PHOTO_JOBS_FILE, document)
     atomic_json(PHOTO_MANIFEST_FILE, manifest)
