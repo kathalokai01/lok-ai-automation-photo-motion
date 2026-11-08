@@ -584,19 +584,6 @@ def get_selected_model() -> str:
 
 
 def get_configured_model_order() -> list[str]:
-    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
-        "1", "true", "yes", "on", "enabled",
-    }:
-        raise RuntimeError(
-            "LLM_ZERO_COST_ONLY=true is required; paid LLM generation is blocked."
-        )
-
-    if os.environ.get("GEMINI_FREE_TIER_CONFIRMED", "").strip().lower() not in {
-        "1", "true", "yes", "on", "enabled",
-    }:
-        log("Gemini skipped: GEMINI_FREE_TIER_CONFIRMED is not true.")
-        return []
-
     data = read_json(MODEL_FILE)
     if not isinstance(data, dict) or data.get("status") != "selected":
         raise RuntimeError("Configured Gemini selector output is missing or invalid.")
@@ -659,26 +646,17 @@ class ModelError(RuntimeError):
     pass
 
 
-def _load_zero_cost_provider_order() -> list[str]:
-    """Load only providers already validated by select_llm_provider.py."""
-    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
-        "1", "true", "yes", "on", "enabled",
-    }:
-        return []
-
+def _load_configured_provider_order() -> list[str]:
+    """Load every locally validated configured non-Gemini provider."""
     selection_path = ROOT / "output" / "config" / "selected_llm_provider.json"
     selection = read_json(selection_path)
 
     if not isinstance(selection, dict):
-        log("Zero-cost provider fallback unavailable: selector output is missing.")
+        log("External LLM fallback unavailable: selector output is missing.")
         return []
 
-    if (
-        selection.get("enabled") is not True
-        or selection.get("zero_cost_only") is not True
-        or selection.get("status") != "ready"
-    ):
-        log("Zero-cost provider fallback unavailable: selector reports no ready provider.")
+    if selection.get("enabled") is not True or selection.get("status") != "ready":
+        log("External LLM fallback unavailable: no configured provider is ready.")
         return []
 
     allowed = {"groq", "openrouter", "cloudflare", "mistral"}
@@ -790,21 +768,12 @@ def call_model(
         },
     }
     failures = []
-    zero_cost_only = os.environ.get(
-        "LLM_ZERO_COST_ONLY", ""
-    ).strip().lower() in {"1", "true", "yes", "on", "enabled"}
-    if not zero_cost_only:
-        raise RuntimeError(
-            "LLM_ZERO_COST_ONLY=true is required; refusing any paid LLM request."
-        )
-
-    gemini_confirmed = os.environ.get(
-        "GEMINI_FREE_TIER_CONFIRMED", ""
-    ).strip().lower() in {"1", "true", "yes", "on", "enabled"}
-    configured_models = get_configured_model_order() if gemini_confirmed else []
+    configured_models = get_configured_model_order()
     retryable_http = {408, 429, 500, 502, 503, 504}
 
-    if api_key and gemini_confirmed and configured_models:
+    if api_key and configured_models:
+        from gemini_api_guard import require_gemini_generation
+        api_key = require_gemini_generation("story generation", api_key=api_key)
         for model_index, candidate_model in enumerate(configured_models):
             url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -896,18 +865,13 @@ def call_model(
                 f"Gemini model failed: {candidate_model}; "
                 "trying next configured model."
             )
-    elif not gemini_confirmed:
-        failures.append(
-            "Gemini skipped because GEMINI_FREE_TIER_CONFIRMED is not true."
-        )
     else:
-        failures.append("Gemini API key is absent; no Gemini request was made.")
+        failures.append("Gemini API key or configured Gemini models are absent.")
 
-    provider_order = _load_zero_cost_provider_order()
+    provider_order = _load_configured_provider_order()
     if not provider_order:
         raise RuntimeError(
-            "Gemini fallback order is exhausted or credentials are absent; "
-            "no validated zero-cost fallback is enabled. No paid provider was attempted. "
+            "All configured Gemini models failed and no configured external LLM provider is ready. "
             + " || ".join(failures)
         )
 
@@ -915,7 +879,7 @@ def call_model(
         from llm_provider_client import ProviderError, generate_text
     except Exception as exc:
         raise RuntimeError(
-            "Zero-cost provider client import failed; no paid provider was attempted: "
+            "External LLM provider client import failed: "
             f"{type(exc).__name__}: {exc}"
         ) from exc
 
@@ -937,10 +901,10 @@ def call_model(
                 f"{provider}:{clean(generated.get('model'))}"
             )
             parsed["_katha_provider_used"] = provider
-            parsed["_katha_generation_method"] = "zero_cost_external_fallback"
+            parsed["_katha_generation_method"] = "external_provider_fallback"
 
             log(
-                f"Zero-cost fallback succeeded: {provider}/"
+                f"External LLM fallback succeeded: {provider}/"
                 f"{clean(generated.get('model'))}"
             )
             return parsed
@@ -948,13 +912,12 @@ def call_model(
         except Exception as exc:
             failures.append(f"{provider}: {type(exc).__name__}: {exc}")
             log(
-                f"Zero-cost provider failed: {provider}; "
+                f"LLM provider failed: {provider}; "
                 "trying next validated provider."
             )
 
     raise RuntimeError(
-        "All configured Gemini models and validated zero-cost providers failed. "
-        "No paid provider was attempted. " + " || ".join(failures)
+         "All configured Gemini models and external LLM providers failed. " + " || ".join(failures)
     )
 
 
