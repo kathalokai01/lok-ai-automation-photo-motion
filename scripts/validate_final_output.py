@@ -53,7 +53,7 @@ REPORT = OUT / "validation_report.json"
 PACKAGE_REPORT = OUT / "package_manifest.json"
 PACKAGE_NAME = OUT / "package_archive_name.txt"
 
-VERSION = "final-validator-v101-strict-manifest-audio-caption-path-integrity"
+VERSION = "final-validator-v102-locked-text-visual-only-roles"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -104,6 +104,10 @@ def digest_json(value: Any) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def text_sha256(value: Any) -> str:
+    return hashlib.sha256(clean(value).encode("utf-8")).hexdigest()
 
 
 def relative(path: Path) -> str:
@@ -401,11 +405,19 @@ def validate_role_rows(
     part_numbers: list[int],
     scene_counts: dict[int, int],
     label: str,
+    roles: tuple[str, ...] = ("hook", "main", "suspense", "resolution"),
 ) -> dict:
     if not isinstance(rows, list):
         fail(f"{label}: scene rows are missing")
 
-    expected = expected_scene_keys(part_numbers, scene_counts)
+    if roles == ("main",):
+        expected = {
+            (part, "main", scene)
+            for part in part_numbers
+            for scene in range(1, scene_counts[part] + 1)
+        }
+    else:
+        expected = expected_scene_keys(part_numbers, scene_counts)
     mapping = {}
 
     for index, row in enumerate(rows, 1):
@@ -480,6 +492,12 @@ def validate_story(
         words = len(re.findall(r"\S+", narration))
         if positive_int(part.get("word_count"), "Story word_count") != words:
             fail(f"Story word_count metadata mismatch in Part {part_number}")
+        if part.get("text_locked") is not True:
+            fail(f"Story Part {part_number} text is not locked")
+        if positive_int(part.get("locked_word_count"), "Story locked_word_count") != words:
+            fail(f"Story Part {part_number} locked word count mismatch")
+        if clean(part.get("locked_text_sha256")) != text_sha256(narration):
+            fail(f"Story Part {part_number} locked text hash mismatch")
 
         if mode == "short":
             merged = part.get("final_part_merged") is True
@@ -561,8 +579,13 @@ def validate_story(
                 if scene.get(field) != expected:
                     fail(f"Story {field} mismatch: {sid}")
 
-            if not clean(scene.get("narration")):
+            scene_text = clean(scene.get("narration"))
+            if not scene_text:
                 fail(f"Scene narration missing: {sid}")
+            if scene.get("source_text_sha256") != text_sha256(scene_text):
+                fail(f"Scene source text hash mismatch: {sid}")
+            if scene.get("source_word_count") != len(re.findall(r"\S+", scene_text)):
+                fail(f"Scene source word count mismatch: {sid}")
             if not clean(scene.get("visual")):
                 fail(f"Scene visual missing: {sid}")
             if clean(scene.get("visual")) != clean(scene.get("visual_prompt")):
@@ -597,6 +620,10 @@ def validate_story(
         fail("Story total_main_scenes mismatch")
 
     full_text = clean(" ".join(part["narration"] for part in parts))
+    if story.get("story_text_locked") is not True:
+        fail("Complete corrected story is not marked as locked")
+    if clean(story.get("corrected_complete_story_sha256")) != text_sha256(full_text):
+        fail("Complete corrected story fingerprint mismatch")
     if clean(story.get("story_text")) != full_text:
         fail("Story story_text differs from ordered Part narration")
     if clean(story.get("corrected_complete_story")) != full_text:
@@ -700,6 +727,12 @@ def validate_extra_role_records(
                 fail(f"Story {role} affects Main scene numbering: {expected_id}")
             if row.get("scene") is not None:
                 fail(f"Story {role} must not have a Main scene number: {expected_id}")
+            if clean(row.get("narration")):
+                fail(f"Story {role} must be visual-only with empty narration: {expected_id}")
+            if row.get("voiceover_enabled") is not False:
+                fail(f"Story {role} voiceover must be disabled: {expected_id}")
+            if row.get("narration_source") != "visual_only":
+                fail(f"Story {role} must be marked visual_only: {expected_id}")
 
             for key in (
                 "story_anchor", "purpose", "instruction",
@@ -744,6 +777,7 @@ def validate_media_rows(
     fps: float | None = None,
     media_type: str = "video",
     require_audio: bool = False,
+    roles: tuple[str, ...] = ("hook", "main", "suspense", "resolution"),
 ) -> dict:
     data = read_json(manifest_path)
     if not isinstance(data, dict):
@@ -759,7 +793,7 @@ def validate_media_rows(
         "visual_jobs", "photo_motion_jobs",
     )
     mapping = validate_role_rows(
-        rows, part_numbers, scene_counts, label
+        rows, part_numbers, scene_counts, label, roles=roles
     )
 
     verified = []
@@ -941,12 +975,13 @@ def validate_narration(
         scene_counts,
         "Narration",
         media_type="audio",
+        roles=("main",),
     )
 
-    expected = sum(scene_counts.values()) + len(part_numbers) * 2
+    expected = sum(scene_counts.values())
     if result["record_count"] != expected:
         fail(
-            f"Narration record count mismatch: "
+            f"Main TTS record count mismatch: "
             f"{result['record_count']} != {expected}"
         )
 
@@ -1180,11 +1215,17 @@ def validate_captions(
     if declared_caption_manifest and declared_caption_manifest != relative(CAPTIONS):
         fail("Render manifest caption-manifest path mismatch")
     timeline = render_data.get("caption_timeline")
-    if not isinstance(timeline, dict) or any(
-        timeline.get(key) is not True
-        for key in ("includes_hook", "includes_main", "includes_suspense", "includes_resolution", "global_srt")
+    if not isinstance(timeline, dict):
+        fail("Burned-caption timeline metadata is missing")
+    if (
+        timeline.get("includes_main") is not True
+        or timeline.get("global_srt") is not True
+        or timeline.get("includes_hook") is not False
+        or timeline.get("includes_suspense") is not False
+        or timeline.get("includes_resolution") is not False
+        or render_data.get("visual_only_role_scenes_captioned") is not False
     ):
-        fail("Burned-caption timeline does not cover every required scene role")
+        fail("Caption timeline must cover Main narration only; extra roles are visual-only")
 
     return {
         "status": "valid",
@@ -1278,8 +1319,16 @@ def validate_render(
 
         if clean(row.get("status")).lower() not in SUCCESS:
             fail(f"Rendered scene is incomplete: {sid}")
-        if row.get("captions_burned") is not True:
-            fail(f"Rendered scene does not confirm burned captions: {sid}")
+        if key[1] == "main":
+            if row.get("captions_burned") is not True:
+                fail(f"Main scene does not confirm burned captions: {sid}")
+        else:
+            if row.get("captions_burned") is not False:
+                fail(f"Visual-only role must not contain captions: {sid}")
+            if row.get("voiceover_enabled") is not False:
+                fail(f"Visual-only role voiceover must be disabled: {sid}")
+            if clean(row.get("source_audio_sha256")):
+                fail(f"Visual-only role has a TTS audio fingerprint: {sid}")
 
         value = first_path(row, "video", "output", "path")
         path = safe_output(value, f"Rendered scene {sid}", MIN_VIDEO_BYTES)
