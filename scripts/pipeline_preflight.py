@@ -380,8 +380,10 @@ def check_font() -> tuple[bool, str]:
         )
         if scanned.returncode:
             return False, "fc-scan could not verify the selected font family."
-        actual = [item.strip().casefold() for item in scanned.stdout.split(",") if item.strip()]
-        if not any(item == family.casefold() or item.startswith(family.casefold() + " ") for item in actual):
+        normalized = scanned.stdout.replace("\\r", "\\n").replace(",", "\\n")
+        actual = [item.strip().casefold() for item in normalized.splitlines() if item.strip()]
+        expected = family.casefold()
+        if not any(item == expected or item.startswith(expected + " ") for item in actual):
             return False, f"Font family mismatch: expected {family}, got {scanned.stdout!r}."
         fallback_note = "primary font" if family == FONT_FAMILIES[0] else f"verified fallback for {FONT_FAMILIES[0]}"
         return True, f"{family} verified at {path} ({fallback_note}; SHA-256 matched)."
@@ -404,7 +406,10 @@ def check_font() -> tuple[bool, str]:
         path = Path(raw_path)
         if not path.is_file():
             continue
-        if actual_family.strip().casefold() == family.casefold():
+        normalized = actual_family.replace("\\r", "\\n").replace(",", "\\n")
+        actual_names = [item.strip().casefold() for item in normalized.splitlines() if item.strip()]
+        expected = family.casefold()
+        if any(item == expected or item.startswith(expected + " ") for item in actual_names):
             return True, f"{family} verified by fontconfig at {path}; installer manifest is absent."
     return False, "No exact Devanagari font family is installed and no verified fallback manifest exists."
 
