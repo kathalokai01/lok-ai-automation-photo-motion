@@ -827,6 +827,7 @@ def call_model(
             model_errors = []
 
             for attempt in range(len(RETRY_DELAYS) + 1):
+                retry_http_error = None
                 request = urllib.request.Request(
                     url,
                     data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -878,6 +879,7 @@ def call_model(
                     return parsed
 
                 except urllib.error.HTTPError as exc:
+                    retry_http_error = exc
                     body = http_error_body(exc, 1000)
                     model_errors.append(f"HTTP {exc.code}: {body[:1000]}")
                     if exc.code not in retryable_http:
@@ -896,8 +898,8 @@ def call_model(
 
                 if attempt < len(RETRY_DELAYS):
                     delay = (
-                        retry_after_seconds(exc, attempt + 1, default_base=12, maximum=120)
-                        if isinstance(exc, urllib.error.HTTPError) and http_status(exc) == 429
+                        retry_after_seconds(retry_http_error, attempt + 1, default_base=12, maximum=120)
+                        if retry_http_error is not None and http_status(retry_http_error) == 429
                         else RETRY_DELAYS[attempt]
                     )
                     log(
