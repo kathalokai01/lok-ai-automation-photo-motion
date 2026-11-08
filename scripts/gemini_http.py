@@ -46,8 +46,6 @@ def http_error_body(error: BaseException, limit: int = 3000) -> str:
                 body = raw.decode("utf-8", errors="replace")
             else:
                 body = str(raw or "")
-    except Exception:
-        body = ""
     try:
         setattr(error, "_gemini_error_body", body)
     except Exception:
