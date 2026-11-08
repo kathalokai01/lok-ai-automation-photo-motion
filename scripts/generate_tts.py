@@ -790,6 +790,8 @@ def synthesize_provider(
         temporary = output_path.with_name(
             output_path.stem + ".edge.partial.mp3"
         )
+        profile_pitch = float((voice_profile or {}).get("pitch", 1.0))
+        pitch_hz = int(round((profile_pitch - 1.0) * 100))
 
         try:
             run_command(
@@ -797,7 +799,7 @@ def synthesize_provider(
                     shutil.which("edge-tts") or "edge-tts",
                     "--voice", resolve_voice(provider, voice, voice_profile),
                     "--rate", speed,
-                    "--pitch", f"{int(round(((voice_profile or {}).get('pitch', 1.0) - 1.0) * 100)):+d}Hz",
+                    "--pitch", f"{pitch_hz:+d}Hz",
                     "--text", text,
                     "--write-media", temporary,
                 ]
@@ -906,16 +908,24 @@ def synthesize_provider(
             "gemini-2.5-flash-preview-tts",
         )
 
+        if voice_profile:
+            delivery_instruction = str(
+                voice_profile.get("emotion_instruction")
+                or voice_profile.get("emotion")
+                or "neutral"
+            )
+            profile_pitch = float(voice_profile.get("pitch", 1.0))
+            styled_text = (
+                f"Read with this delivery direction: {delivery_instruction}. "
+                f"Use a pitch level of {profile_pitch:.2f} relative to normal. "
+                f"Keep the Hindi pronunciation clear and say only the story text: {text}"
+            )
+        else:
+            styled_text = text
+
         payload = {
             "contents": [
-                {"parts": [{
-                    "text": (
-                        f"Read with this delivery direction: {str((voice_profile or {}).get('emotion_instruction') or (voice_profile or {}).get('emotion') or 'neutral')}. "
-                        f"Use a pitch level of {float((voice_profile or {}).get('pitch', 1.0)):.2f} relative to normal. "
-                        f"Keep the Hindi pronunciation clear and say only the story text: {text}"
-                        if voice_profile else text
-                    )
-                }]}
+                {"parts": [{"text": styled_text}]}
             ],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
