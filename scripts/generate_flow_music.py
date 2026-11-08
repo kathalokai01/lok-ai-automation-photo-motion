@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 AUDIO_JOBS = ROOT / "output" / "narration" / "audio_jobs.json"
+SCENES_FILE = ROOT / "output" / "scenes" / "scenes.json"
 
 AUDIO_DIR = ROOT / "output" / "music"
 SOURCE_DIR = AUDIO_DIR / "role_sources"
@@ -30,13 +31,14 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-lyria-role-segment-checkpoint-v16"
+VERSION = "photo-motion-lyria-role-segment-checkpoint-v16-visual-role-timeline"
 
 REQUEST_TIMEOUT = (30, 900)
 RETRY_DELAYS = (8, 20)
 MIN_AUDIO_BYTES = 10000
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 MIN_AUDIO_DURATION = 10.0
+DEFAULT_SCENE_SECONDS = 6.0
 DURATION_TOLERANCE = 0.65
 MUSIC_TARGET_LUFS = -20.0
 MUSIC_TRUE_PEAK_LIMIT = -3.0
@@ -296,39 +298,66 @@ def parse_scenes_range(config):
         if supplied != (minimum, maximum):
             raise RuntimeError("SCENES range settings do not match.")
     return minimum, maximum
-def read_narration_jobs():
-    manifest = read_json(AUDIO_JOBS, required=True)
-    if manifest.get("status") != "completed":
-        raise RuntimeError("TTS audio_jobs.json is not completed.")
-    jobs = manifest.get("jobs")
-    if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError("TTS audio_jobs.json contains no jobs.")
+def parse_scene_duration(value, config, scene_id):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        duration = float(value)
+    else:
+        raw = clean(value)
+        duration = 0.0
+        if raw:
+            try:
+                duration = float(raw.rstrip("sS"))
+            except ValueError:
+                parts = raw.split(":")
+                if len(parts) in {2, 3}:
+                    try:
+                        numbers = [float(item) for item in parts]
+                        duration = (
+                            numbers[-1]
+                            + numbers[-2] * 60
+                            + (numbers[-3] * 3600 if len(numbers) == 3 else 0)
+                        )
+                    except ValueError:
+                        duration = 0.0
+    if not math.isfinite(duration) or duration <= 0:
+        fallback = config.get("SCENE_DURATION_SECONDS") or config.get("SCENE_DURATION")
+        try:
+            duration = float(clean(fallback).rstrip("sS")) if fallback else DEFAULT_SCENE_SECONDS
+        except ValueError:
+            duration = DEFAULT_SCENE_SECONDS
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(f"Invalid visual Scene duration: {scene_id}")
+    return duration
 
-    rows, seen = [], set()
-    for row in jobs:
+
+def read_narration_jobs(config):
+    tts_manifest = read_json(AUDIO_JOBS, required=True)
+    if tts_manifest.get("status") != "completed":
+        raise RuntimeError("TTS audio_jobs.json is not completed.")
+    tts_jobs = tts_manifest.get("jobs")
+    if not isinstance(tts_jobs, list) or not tts_jobs:
+        raise RuntimeError("TTS audio_jobs.json contains no Main Scene jobs.")
+
+    main_audio = {}
+    for row in tts_jobs:
         if not isinstance(row, dict) or row.get("status") not in {"completed", "reused"}:
             raise RuntimeError("TTS manifest contains an incomplete job.")
         scene_id = clean(row.get("scene_id") or row.get("job_id"))
-        if not scene_id or scene_id in seen:
+        if not scene_id or scene_id in main_audio:
             raise RuntimeError(f"Missing or duplicate TTS scene_id: {scene_id}")
-        seen.add(scene_id)
         role = clean(row.get("role") or "main").lower()
-        if role not in ROLE_ORDER:
-            raise RuntimeError(f"Unsupported narration role: {role}")
+        if role != "main":
+            raise RuntimeError(
+                f"TTS manifest must contain Main narration only; found {role}."
+            )
         try:
             part = int(row["part"])
-            scene = int(row["scene"]) if role == "main" else None
+            scene = int(row["scene"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid narration identity: {scene_id}") from exc
-        if part < 1 or (role == "main" and (scene is None or scene < 1)):
-            raise RuntimeError(f"Invalid narration identity: {scene_id}")
-        expected_id = (
-            f"part_{part:02d}_scene_{scene:02d}" if role == "main"
-            else f"part_{part:02d}_{role}"
-        )
-        if scene_id != expected_id:
-            raise RuntimeError(f"Non-canonical narration Scene ID: {scene_id}; expected {expected_id}.")
-
+            raise RuntimeError(f"Invalid Main narration identity: {scene_id}") from exc
+        expected_id = f"part_{part:02d}_scene_{scene:02d}"
+        if part < 1 or scene < 1 or scene_id != expected_id:
+            raise RuntimeError(f"Non-canonical Main narration Scene ID: {scene_id}.")
         audio_value = next((
             row.get(key) for key in AUDIO_PATH_KEYS
             if isinstance(row.get(key), str) and row[key].strip()
@@ -339,30 +368,93 @@ def read_narration_jobs():
         declared_hash = clean(row.get("sha256") or row.get("audio_sha256")).lower()
         if declared_hash != checksum.lower():
             raise RuntimeError(f"TTS SHA256 mismatch: {scene_id}")
-        declared = row.get("actual_audio_duration_seconds", row.get("duration"))
         try:
-            declared = float(declared)
+            declared_duration = float(row.get("actual_audio_duration_seconds", row.get("duration")))
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"Measured duration missing: {scene_id}") from exc
-        if not math.isfinite(declared) or abs(declared - duration) > 0.20:
+        if not math.isfinite(declared_duration) or abs(declared_duration - duration) > 0.20:
             raise RuntimeError(f"TTS duration mismatch: {scene_id}")
-        source = row.get("duration_source") or row.get("audio_duration_source")
-        if source != "ffprobe_measured":
+        if (row.get("duration_source") or row.get("audio_duration_source")) != "ffprobe_measured":
             raise RuntimeError(f"Unverified TTS duration: {scene_id}")
-
-        rows.append({
-            "scene_id": scene_id, "part": part, "scene": scene,
-            "role": role, "duration_seconds": duration,
+        text = clean(row.get("text") or row.get("narration"))
+        if not text:
+            raise RuntimeError(f"Main narration text is missing: {scene_id}")
+        main_audio[scene_id] = {
+            "part": part, "scene": scene, "role": "main",
+            "duration_seconds": duration,
             "audio_path": path.relative_to(ROOT).as_posix(),
-            "audio_sha256": checksum,
-            "text": clean(row.get("text") or row.get("narration")),
-        })
+            "audio_sha256": checksum, "text": text,
+        }
 
+    scenes_data = read_json(SCENES_FILE, required=True)
+    if scenes_data.get("status") != "completed":
+        raise RuntimeError("scenes.json is not completed.")
+    scenes = scenes_data.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        raise RuntimeError("scenes.json contains no visual Scene records.")
+
+    rows, seen = [], set()
+    for source in scenes:
+        if not isinstance(source, dict):
+            raise RuntimeError("scenes.json contains an invalid Scene record.")
+        scene_id = clean(source.get("scene_id"))
+        role = clean(source.get("role")).lower()
+        if role not in ROLE_ORDER or not scene_id or scene_id in seen:
+            raise RuntimeError(f"Missing, duplicate or invalid visual Scene: {scene_id}")
+        seen.add(scene_id)
+        try:
+            part = int(source.get("part"))
+            scene = int(source.get("scene")) if role == "main" else None
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Invalid visual Scene identity: {scene_id}") from exc
+        expected_id = (
+            f"part_{part:02d}_scene_{scene:02d}"
+            if role == "main" else f"part_{part:02d}_{role}"
+        )
+        if part < 1 or scene_id != expected_id:
+            raise RuntimeError(f"Non-canonical visual Scene ID: {scene_id}")
+        if source.get("status") != "completed":
+            raise RuntimeError(f"Visual Scene is incomplete: {scene_id}")
+        source_signature = clean(source.get("source_scene_signature"))
+        if not re.fullmatch(r"[0-9a-f]{64}", source_signature):
+            raise RuntimeError(f"Visual Scene source signature is invalid: {scene_id}")
+
+        if role == "main":
+            audio = main_audio.pop(scene_id, None)
+            if audio is None:
+                raise RuntimeError(f"Main Scene has no matching TTS audio: {scene_id}")
+            if clean(source.get("narration")) != audio["text"]:
+                raise RuntimeError(f"Main Scene narration differs from TTS source: {scene_id}")
+            row = {**audio, "source_scene_signature": source_signature}
+        else:
+            narration = source.get("narration", "")
+            if not isinstance(narration, str) or narration.strip():
+                raise RuntimeError(f"{scene_id}: visual-only Scene must have empty narration.")
+            if source.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"{scene_id}: visual-only Scene voiceover must be disabled.")
+            duration_value = source.get("scene_duration") or source.get("duration")
+            duration = parse_scene_duration(duration_value, config, scene_id)
+            row = {
+                "part": part, "scene": None, "role": role,
+                "duration_seconds": duration,
+                "audio_path": None, "audio_sha256": "",
+                "text": "", "source_scene_signature": source_signature,
+                "visual_only": True,
+            }
+        row["scene_id"] = scene_id
+        rows.append(row)
+
+    if main_audio:
+        raise RuntimeError(
+            "TTS manifest contains Main Scene jobs absent from scenes.json: "
+            + ", ".join(sorted(main_audio)[:20])
+        )
     rows.sort(key=lambda item: (
         item["part"], ROLE_ORDER[item["role"]],
         item["scene"] or 0, item["scene_id"],
     ))
     return rows
+
 def validate_role_structure(rows, config):
     if not rows:
         raise RuntimeError("No completed narration records.")
@@ -405,8 +497,9 @@ def validate_role_structure(rows, config):
         raise RuntimeError("TTS manifest scenes_min does not match Input/topic.txt.")
     if manifest.get("scenes_max") is not None and manifest.get("scenes_max") != scenes_max:
         raise RuntimeError("TTS manifest scenes_max does not match Input/topic.txt.")
-    if manifest.get("total_jobs") is not None and manifest.get("total_jobs") != len(rows):
-        raise RuntimeError("TTS manifest total_jobs does not match narration records.")
+    main_count = sum(row["role"] == "main" for row in rows)
+    if manifest.get("total_jobs") is not None and manifest.get("total_jobs") != main_count:
+        raise RuntimeError("TTS manifest total_jobs does not match Main narration records.")
 
     return {
         "parts": parts, "scenes_min": scenes_min, "scenes_max": scenes_max,
@@ -1214,14 +1307,14 @@ def main():
         rows = read_narration_jobs()
         role_summary = validate_role_structure(rows, config)
 
-        narration_duration = sum(row["duration_seconds"] for row in rows)
-        if not math.isfinite(narration_duration) or narration_duration <= 0:
-            raise RuntimeError("Measured narration duration is invalid.")
-
-        target_duration = round(narration_duration + MASTER_TAIL_SECONDS, 3)
+        narration_duration = sum(
+            row["duration_seconds"] for row in rows if row["role"] == "main"
+        )
         timeline, timeline_duration = build_timeline(rows)
-        if abs(timeline_duration - narration_duration) > 0.05:
-            raise RuntimeError("Narration timeline duration mismatch.")
+        if not math.isfinite(timeline_duration) or timeline_duration <= 0:
+            raise RuntimeError("Visual scene timeline duration is invalid.")
+
+        target_duration = round(timeline_duration + MASTER_TAIL_SECONDS, 3)
 
         role_rows = {
             role: [row for row in rows if row["role"] == role]
@@ -1286,7 +1379,8 @@ def main():
             "version": VERSION,
             "source_fingerprint": source_sig,
             "target_duration_seconds": target_duration,
-            "narration_records": len(rows),
+            "narration_records": role_summary["main_count"],
+            "visual_scene_records": len(rows),
             "role_summary": role_summary,
             "role_durations": role_durations,
             "scenes_min": role_summary["scenes_min"],
@@ -1303,9 +1397,10 @@ def main():
         log("STORY:", title)
         log("PARTS:", len(role_summary["parts"]))
         log("ACTUAL SCENES PER PART:", role_summary["actual_scene_counts"])
-        log("NARRATION RECORDS:", len(rows))
+        log("VISUAL SCENE RECORDS:", len(rows))
         log("ROLE DURATIONS:", role_durations)
-        log("NARRATION DURATION:", round(narration_duration, 3))
+        log("MAIN TTS DURATION:", round(narration_duration, 3))
+        log("VISUAL TIMELINE DURATION:", round(timeline_duration, 3))
         log("REQUIRED MUSIC DURATION:", target_duration)
         log("TARGET MUSIC LOUDNESS:", MUSIC_TARGET_LUFS, "LUFS")
 
@@ -1385,7 +1480,8 @@ def main():
             "role_segment_summary": role_segment_summary,
             "role_segment_directory": SEGMENT_DIR.relative_to(ROOT).as_posix(),
             "role_segment_policy": (
-                "Every narration record receives a verified segment from its matching role composition."
+                "Every visual Scene, including visual-only Hook/Suspense/Resolution, "
+                "receives a verified segment from its matching role composition."
             ),
             "role_segment_timing_verified": True,
             "role_segment_checkpointed_per_scene": True,
