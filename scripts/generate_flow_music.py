@@ -31,7 +31,7 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-lyria-role-segment-checkpoint-v16-visual-role-timeline"
+VERSION = "photo-motion-lyria-role-segment-checkpoint-v17-all-role-narration-timeline"
 
 REQUEST_TIMEOUT = (30, 900)
 RETRY_DELAYS = (8, 20)
