@@ -1766,7 +1766,7 @@ def main():
         "part_cues": {
             key: value["sfx_cues"] for key, value in part_summary.items()
         },
-        "timing_basis": "Measured Main TTS duration; visual-only role Scenes use declared scene duration.",
+        "timing_basis": "Measured TTS narration duration for Hook, Main, Suspense and Resolution.",
         "timeline": timeline,
         "source_signature": source_sig,
         "source_audio_manifest_sha256": sha256_file(AUDIO_MANIFEST),
