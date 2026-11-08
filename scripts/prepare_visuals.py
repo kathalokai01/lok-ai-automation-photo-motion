@@ -1002,8 +1002,8 @@ def validate_narration_mapping(
         record = narration_records[scene_id]
         if positive_int(record.get("part"), scene_id + " narration part") != source["part"]:
             raise RuntimeError(f"{scene_id}: narration part mismatch.")
-        if normalize_role(record) != "main":
-            raise RuntimeError(f"{scene_id}: TTS record is not a Main Scene.")
+        if normalize_role(record) != source["role"]:
+            raise RuntimeError(f"{scene_id}: TTS role differs from the visual source.")
         narration_text = clean(record.get("narration") or record.get("text") or record.get("content"))
         source_text = clean(source.get("narration"))
         if not narration_text or narration_text != source_text:
@@ -1014,7 +1014,11 @@ def validate_narration_mapping(
             raise RuntimeError(f"{scene_id}: TTS source text hash mismatch.")
         if source.get("source_text_sha256") != expected_hash:
             raise RuntimeError(f"{scene_id}: source scene text hash mismatch.")
-        by_part.setdefault(source["part"], []).append((source["source_scene_number"], narration_text))
+        if source["role"] == "main":
+            by_part.setdefault(source["part"], []).append((source["source_scene_number"], narration_text))
+        else:
+            if record.get("voiceover_enabled") is not True or record.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{scene_id}: extra-role TTS metadata is invalid.")
 
     for part, values in by_part.items():
         values.sort(key=lambda item: item[0])
