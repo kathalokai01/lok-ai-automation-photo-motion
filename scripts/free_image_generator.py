@@ -12,6 +12,8 @@ import sys
 import time
 from io import BytesIO
 from pathlib import Path
+
+from gemini_http import http_status
 from urllib.parse import quote, urlparse
 
 import requests
@@ -1433,18 +1435,27 @@ def classify_provider_error(exc):
         "authentication", "permission denied", "forbidden",
     )
 
-    quota_or_billing = status in {402, 429} or any(
-        term in message for term in quota_terms
+    rate_limited = status == 429 and any(
+        term in message for term in (
+            "rate limit", "too many requests", "requests per minute",
+            "requests per second", "per minute", "per second",
+        )
     )
+    quota_or_billing = status == 402 or any(
+        term in message for term in quota_terms
+        if term not in {"rate limit", "too many requests"}
+    ) or (status == 429 and not rate_limited)
     authentication = status in {401, 403} or any(
         term in message for term in auth_terms
     )
 
     return {
-        "stop_retry": bool(quota_or_billing or authentication),
+        "stop_retry": bool(quota_or_billing or authentication or rate_limited),
         "stop_billable": bool(quota_or_billing or authentication),
         "category": (
             "quota_or_billing" if quota_or_billing
+            else "rate_limit" if rate_limited
+            else "model_unavailable" if status == 404
             else "authentication" if authentication
             else "provider_error"
         ),
