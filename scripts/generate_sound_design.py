@@ -1830,7 +1830,7 @@ def main():
         "actual_scene_counts": normalized_counts,
         "main_scene_counts": main_scene_counts,
         "role_counts": role_counts,
-        "total_audio_records": len(ordered),
+        "total_visual_scene_records": len(ordered),
         "total_scene_timeline_seconds": round(total_duration, 4),
         "background_duration_seconds": round(background_duration, 3),
         "sfx_duration_seconds": SFX_SECONDS,
@@ -1921,7 +1921,7 @@ def main():
         "version": VERSION,
         "source_signature": source_sig,
         "sound_design_signature": mix_signature,
-        "total_audio_records": len(ordered),
+        "total_visual_scene_records": len(ordered),
         "completed_tracks": [
             key for key, value in tracks.items()
             if isinstance(value, dict) and value.get("status") == "completed"
