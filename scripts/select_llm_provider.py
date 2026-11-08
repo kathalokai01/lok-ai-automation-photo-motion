@@ -93,7 +93,7 @@ def validate_provider(provider: str) -> tuple[bool, str, str]:
             if not _env_bool("GROQ_FREE_TIER_CONFIRMED", False):
                 raise ProviderError(
                     provider,
-                    "Groq free-tier confirmation is missing.",
+                    "GROQ_FREE_TIER_CONFIRMED is missing. Confirm the account's free-tier eligibility before enabling Groq.",
                 )
 
         return True, model, "Credentials and local free-mode settings are present."
