@@ -1820,6 +1820,22 @@ def _partition_and_revise(
                         "hard_maximum_words": SHORT_MERGED_MAX,
                     })
 
+    # The initial policy is deliberately marked not-yet-validated.
+    # Publish the result of the final validator only after all SHORT/FULL
+    # checks (including the final-Part merge exception) have completed.
+    final_validation_passed = bool(
+        validation.get(
+            "final_validation_passed",
+            validation.get("passed", validation.get("valid", False)),
+        )
+    )
+    if not final_validation_passed:
+        raise RuntimeError(
+            "Final story length validation did not pass; "
+            "refusing to publish a completed story."
+        )
+
+    policy["final_part_validation_passed"] = True
     policy["parts_validation"] = {
         "valid": True,
         "actual_parts": selected_count,
