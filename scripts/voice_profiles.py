@@ -88,6 +88,11 @@ def resolve_voice_profile(config: dict[str, Any], record: dict[str, Any] | None 
     profile["voice_id"] = _clean(config.get("TTS_VOICE_ID", ""))
     profile["provider_voice_id"] = _clean(config.get("TTS_VOICE_ID_" + preset.upper(), ""))
     try:
+        requested_pitch = float(config.get("TTS_PITCH", 1.0))
+        profile["pitch"] = max(0.85, min(1.15, profile["pitch"] * requested_pitch))
+    except (TypeError, ValueError):
+        raise ValueError("TTS_PITCH must be a number between 0.85 and 1.15.")
+    try:
         profile["emotion_strength"] = max(0.0, min(1.0, float(config.get("TTS_EMOTION_STRENGTH", 0.65))))
     except (TypeError, ValueError):
         profile["emotion_strength"] = 0.65
