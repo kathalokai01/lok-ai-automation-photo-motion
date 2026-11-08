@@ -33,7 +33,7 @@ OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
 VERSION = "photo-motion-scenes-v9-variable-range-story-anchor-continuity"
-PROMPT_VERSION = 9
+PROMPT_VERSION = 10
 
 ROLE_ORDER = {
     "hook": 0,
@@ -211,12 +211,26 @@ def validate_ai_story_record(
         raise RuntimeError(f"{scene_id}: role mismatch.")
 
     for field in REQUIRED_SOURCE_FIELDS:
+        if field == "narration" and expected_role != "main":
+            continue
         if not clean(record.get(field)):
             raise RuntimeError(
                 f"{scene_id}: AI Story field {field} is missing."
             )
 
-    validate_sentence_boundary(record["narration"], scene_id)
+    if expected_role == "main":
+        validate_sentence_boundary(record["narration"], scene_id)
+        if record.get("source_text_sha256") != digest(clean(record["narration"])):
+            raise RuntimeError(f"{scene_id}: locked narration hash mismatch.")
+        if record.get("source_word_count") != len(re.findall(r"\\S+", clean(record["narration"]))):
+            raise RuntimeError(f"{scene_id}: locked narration word count mismatch.")
+    else:
+        if clean(record.get("narration")):
+            raise RuntimeError(f"{scene_id}: extra role must not duplicate narration.")
+        if record.get("voiceover_enabled") is not False:
+            raise RuntimeError(f"{scene_id}: extra role voiceover must be disabled.")
+        if record.get("narration_source") != "visual_only":
+            raise RuntimeError(f"{scene_id}: extra role must be marked visual_only.")
 
 
 def validate_plan_role_record(
@@ -314,6 +328,12 @@ def validate_plan(
 
             validate_ai_story_record(generated, scene_id, "main")
 
+            source_narration = clean(source.get("narration"))
+            if not source_narration or clean(generated.get("narration")) != source_narration:
+                raise RuntimeError(f"{scene_id}: narration differs from locked Story Plan text.")
+            if source.get("source_text_sha256") != digest(source_narration):
+                raise RuntimeError(f"{scene_id}: Story Plan source text hash mismatch.")
+
             source_anchor = clean(source.get("story_anchor"))
             generated_anchor = clean(generated.get("story_anchor"))
 
@@ -356,8 +376,7 @@ def validate_plan(
             # Validate only fields that the Story Plan actually defines.
             validate_plan_role_record(plan_record, scene_id, role)
 
-            # Generated AI Story role records must contain narration and
-            # visual_prompt; they are validated separately.
+            # Extra role records are visual-only and cannot add voiceover text.
             validate_ai_story_record(ai_record, scene_id, role)
 
             for field_name in ("story_anchor", "purpose"):
@@ -367,6 +386,9 @@ def validate_plan(
                     raise RuntimeError(
                         f"{scene_id}: {field_name} changed from Story Plan."
                     )
+
+            if clean(ai_record.get("narration")):
+                raise RuntimeError(f"{scene_id}: extra narration must be empty.")
 
             if scene_id in seen_ids:
                 raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
@@ -436,6 +458,16 @@ def validate_story(
             })
             main_total += 1
 
+        main_part_text = " ".join(clean(scene["narration"]) for scene in scenes)
+        if clean(main_part_text) != clean(part.get("narration")):
+            raise RuntimeError(
+                f"Part {part_number}: Main Scenes do not exactly reconstruct locked Part text."
+            )
+        if part.get("text_locked") is not True:
+            raise RuntimeError(f"Part {part_number}: source narration is not locked.")
+        if part.get("locked_text_sha256") != digest(clean(part.get("narration"))):
+            raise RuntimeError(f"Part {part_number}: locked Part hash mismatch.")
+
         final_part = part_number == len(parts)
 
         for field, role, required in (
@@ -462,7 +494,7 @@ def validate_story(
                 "role": role,
                 "part_data": part,
                 "source": source,
-                "narration": clean(source["narration"]),
+                "narration": "",
                 "global_scene_number": None,
             })
 
@@ -966,6 +998,9 @@ def build_scene_record(
         "title": title,
         "status": "completed",
         "narration": item["narration"],
+        "voiceover_enabled": item["role"] == "main",
+        "narration_source": "locked_part_text" if item["role"] == "main" else "visual_only",
+        "source_text_sha256": digest(item["narration"]) if item["role"] == "main" else "",
         "dialogue": clean(source.get("dialogue")),
         "story_anchor": clean(source.get("story_anchor")),
         "beat": clean(source.get("beat")),
@@ -1067,9 +1102,23 @@ def scene_is_valid(
     elif scene.get("scene") is not None:
         return False
 
-    return all(
-        clean(scene.get(field))
-        for field in REQUIRED_OUTPUT_FIELDS
+    required = (
+        REQUIRED_OUTPUT_FIELDS
+        if expected["role"] == "main"
+        else tuple(field for field in REQUIRED_OUTPUT_FIELDS if field != "narration")
+    )
+    if not all(clean(scene.get(field)) for field in required):
+        return False
+    if expected["role"] == "main":
+        return (
+            scene.get("voiceover_enabled") is True
+            and scene.get("narration_source") == "locked_part_text"
+            and scene.get("source_text_sha256") == digest(expected["narration"])
+        )
+    return (
+        not clean(scene.get("narration"))
+        and scene.get("voiceover_enabled") is False
+        and scene.get("narration_source") == "visual_only"
     )
 
 
