@@ -35,8 +35,8 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v11-variable-scenes-story-entities"
-PROMPT_VERSION = 11
+VERSION = "photo-motion-visual-jobs-v11-variable-scenes-story-entities-locked-narration-visual-only-extras"
+PROMPT_VERSION = 12
 
 ROLE_ORDER = {
     "hook": 0,
@@ -150,6 +150,11 @@ def atomic_json(path: Path, data: Any) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def text_sha256(value: str) -> str:
+    normalized = clean(value)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def image_dimensions(format_name: str) -> tuple[int, int]:
@@ -352,10 +357,27 @@ def normalize_scene_rows(
             or original.get("description")
         )
 
-        if len(narration) < MIN_NARRATION_LENGTH:
-            raise RuntimeError(
-                f"{scene_id}: narration is missing or too short."
-            )
+        story_anchor = clean(original.get("story_anchor"))
+        if role == "main":
+            if len(narration) < MIN_NARRATION_LENGTH:
+                raise RuntimeError(
+                    f"{scene_id}: Main narration is missing or too short."
+                )
+            if original.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{scene_id}: Main voiceover must be enabled.")
+            if original.get("source_text_sha256") != text_sha256(narration):
+                raise RuntimeError(f"{scene_id}: locked narration hash mismatch.")
+            if original.get("source_word_count") != len(narration.split()):
+                raise RuntimeError(f"{scene_id}: locked narration word count mismatch.")
+        else:
+            if narration:
+                raise RuntimeError(f"{scene_id}: visual-only extra narration must be empty.")
+            if original.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"{scene_id}: extra voiceover must be disabled.")
+            if original.get("narration_source") != "visual_only":
+                raise RuntimeError(f"{scene_id}: extra role must be marked visual_only.")
+            if not story_anchor:
+                raise RuntimeError(f"{scene_id}: visual-only story anchor is missing.")
 
         if len(visual) < MIN_PROMPT_LENGTH:
             raise RuntimeError(
@@ -374,6 +396,11 @@ def normalize_scene_rows(
             "source_scene_number": local,
             "is_extra_scene": role != "main",
             "narration": narration,
+            "story_anchor": story_anchor,
+            "voiceover_enabled": role == "main",
+            "narration_source": "locked_part_text" if role == "main" else "visual_only",
+            "source_text_sha256": text_sha256(narration) if role == "main" else "",
+            "source_word_count": len(narration.split()) if role == "main" else 0,
             "visual_prompt": visual,
         })
 
@@ -905,12 +932,16 @@ def build_prompt(
             f"{source['scene_id']}: visual prompt is too short."
         )
 
-    if len(narration) < MIN_NARRATION_LENGTH:
-        raise RuntimeError(
-            f"{source['scene_id']}: narration is too short."
-        )
-
     role = normalize_role(source)
+    story_anchor = clean(source.get("story_anchor"))
+    if role == "main" and len(narration) < MIN_NARRATION_LENGTH:
+        raise RuntimeError(
+            f"{source['scene_id']}: Main narration is too short."
+        )
+    if role != "main" and (narration or not story_anchor):
+        raise RuntimeError(
+            f"{source['scene_id']}: extra role must be visual-only with a source anchor."
+        )
 
     style = clean(config.get("VISUAL_STYLE")) or "cinematic_realistic"
     realism = clean(config.get("REALISM")) or "high"
@@ -922,8 +953,12 @@ def build_prompt(
     sections = [
         "EXACT STORY EVENT — PRIMARY VISUAL INSTRUCTION:",
         visual,
-        "NARRATION CONTEXT — DO NOT PRINT THESE WORDS IN THE IMAGE:",
-        narration,
+        (
+            "LOCKED NARRATION CONTEXT — DO NOT PRINT THESE WORDS IN THE IMAGE:"
+            if role == "main"
+            else "VISUAL-ONLY STORY ANCHOR — NOT VOICEOVER:"
+        ),
+        narration if role == "main" else story_anchor,
         (
             "Create one photorealistic live-action cinematic film still. "
             "Depict the exact event in the primary visual instruction. "
@@ -1226,6 +1261,17 @@ def build_jobs(
             "is_extra_scene": role != "main",
             "title": clean(source.get("title")),
             "narration": clean(source.get("narration")),
+            "story_anchor": clean(source.get("story_anchor")),
+            "voiceover_enabled": role == "main",
+            "narration_source": "locked_part_text" if role == "main" else "visual_only",
+            "source_text_sha256": (
+                text_sha256(clean(source.get("narration")))
+                if role == "main" else ""
+            ),
+            "source_word_count": (
+                len(clean(source.get("narration")).split())
+                if role == "main" else 0
+            ),
             "dialogue": clean(source.get("dialogue")),
             "objects": source.get("objects", []),
             "animals": source.get("animals", []),
@@ -1256,7 +1302,11 @@ def build_jobs(
             "duration_source": (
                 "source_scene"
                 if isinstance(duration, (int, float))
-                else "pending_narration_audio_measurement"
+                else (
+                    "pending_narration_audio_measurement"
+                    if role == "main"
+                    else "visual_scene_default"
+                )
             ),
             "character_ids": character_ids,
             "characters": character_names,
@@ -1394,16 +1444,28 @@ def validate_jobs(
 
         for field in (
             "prompt",
-            "narration",
             "image_path",
             "prompt_signature",
             "source_scene_signature",
             "negative_prompt",
         ):
             if not clean(job.get(field)):
-                raise RuntimeError(
-                    f"{scene_id}: missing {field}."
-                )
+                raise RuntimeError(f"{scene_id}: missing {field}.")
+        if job.get("role") == "main":
+            narration = clean(job.get("narration"))
+            if not narration or job.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{scene_id}: Main narration/voiceover is invalid.")
+            if job.get("narration_source") != "locked_part_text":
+                raise RuntimeError(f"{scene_id}: Main narration source is not locked.")
+            if job.get("source_text_sha256") != text_sha256(narration):
+                raise RuntimeError(f"{scene_id}: Main narration hash mismatch.")
+            if job.get("source_word_count") != len(narration.split()):
+                raise RuntimeError(f"{scene_id}: Main narration word count mismatch.")
+        else:
+            if clean(job.get("narration")):
+                raise RuntimeError(f"{scene_id}: extra role narration must be empty.")
+            if job.get("voiceover_enabled") is not False or job.get("narration_source") != "visual_only":
+                raise RuntimeError(f"{scene_id}: extra role must be visual-only.")
 
         parsed = Path(clean(job["image_path"]))
 
