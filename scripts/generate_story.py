@@ -2520,10 +2520,9 @@ Story:
     )
 
     if not title:
-        title = clean(topic)
-
-    if not title:
-        raise RuntimeError("Could not determine a story title.")
+        raise RuntimeError(
+            "Could not derive a story title from the complete story."
+        )
 
     return title[:180]
 
@@ -2735,6 +2734,7 @@ def main() -> None:
     )
 
     checkpoint_data = {}
+    generated_title = ""
 
     if checkpoint:
         checkpoint_data = checkpoint["data"]
