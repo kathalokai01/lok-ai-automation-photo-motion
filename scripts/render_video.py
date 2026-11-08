@@ -698,7 +698,9 @@ def validate_photo_audio_pairing(photo_by_id, audio_by_id):
             ):
                 raise RuntimeError(f"{sid}: Photo Motion/Main narration mapping mismatch.")
             if photo.get("source_text_sha256") != audio["text_sha256"]:
-                raise RuntimeError(f"{sid}: Photo Motion/ TTS text fingerprint mismatch.")
+                raise RuntimeError(f"{sid}: Photo Motion/TTS text fingerprint mismatch.")
+            if photo.get("audio_sha256") != audio["audio_sha256"]:
+                raise RuntimeError(f"{sid}: Photo Motion/TTS audio fingerprint mismatch.")
             if photo.get("voiceover_enabled") is not True:
                 raise RuntimeError(f"{sid}: Main voiceover must be enabled.")
         else:
@@ -1088,16 +1090,15 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         input_index += 1
 
     mix_labels.extend(sfx_labels)
-    if not mix_labels:
-        inputs.extend([
-            "-f", "lavfi", "-t", f"{duration:.4f}",
-            "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo",
-        ])
-        filters.append(
-            f"[{input_index}:a]atrim=duration={duration:.4f},"
-            f"aresample={AUDIO_RATE}[silence]"
-        )
-        mix_labels.append("[silence]")
+    inputs.extend([
+        "-f", "lavfi", "-t", f"{duration:.4f}",
+        "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo",
+    ])
+    filters.append(
+        f"[{input_index}:a]atrim=duration={duration:.4f},"
+        f"aresample={AUDIO_RATE}[silence]"
+    )
+    mix_labels.append("[silence]")
 
     filters.append(
         "".join(mix_labels)
