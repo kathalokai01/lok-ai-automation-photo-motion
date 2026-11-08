@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from gemini_http import http_status, http_error_body, retry_after_seconds
+from voice_profiles import resolve_voice_profile
 from input_config import (
     load_and_validate,
     get_selected_parts,
@@ -767,6 +768,7 @@ def synthesize_provider(
     config: dict,
     speed: str,
     voice: str,
+    voice_profile: dict | None = None,
 ) -> dict:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -967,7 +969,9 @@ def synthesize_provider(
         key = os.getenv(
             "ELEVENLABS_API_KEY", ""
         ).strip()
-        voice_id = os.getenv(
+        profile_id = str((voice_profile or {}).get("profile_id") or "").upper()
+        mapped_voice_id = os.getenv(f"ELEVENLABS_VOICE_ID_{profile_id}", "").strip() if profile_id else ""
+        voice_id = mapped_voice_id or os.getenv(
             "ELEVENLABS_VOICE_ID", ""
         ).strip()
 
@@ -985,7 +989,7 @@ def synthesize_provider(
             "voice_settings": {
                 "stability": 0.48,
                 "similarity_boost": 0.78,
-                "style": 0.15,
+                "style": max(0.0, min(1.0, float((voice_profile or {}).get("emotion_strength", 0.35)))),
                 "use_speaker_boost": True,
             },
         }
@@ -1377,6 +1381,9 @@ def extract_jobs(data: Any) -> list[dict]:
             "text": normalized_text,
             "text_sha256": source_hash,
             "voice": voice,
+            "voice_profile": merged.get("voice_profile") if isinstance(merged.get("voice_profile"), dict) else {},
+            "emotion": str(merged.get("emotion") or "neutral"),
+            "speaker_id": str(merged.get("speaker_id") or "narrator"),
             "source": merged,
         })
 
@@ -1749,6 +1756,7 @@ def synthesize_chunk_with_fallback(
     allow_paid: bool,
     max_retries: int,
     blocked_paid_providers: set[str],
+    voice_profile: dict | None = None,
 ) -> tuple[dict, str]:
     failures = []
 
@@ -1786,6 +1794,7 @@ def synthesize_chunk_with_fallback(
                     config,
                     speed,
                     voice,
+                    voice_profile,
                 )
 
                 verified = validate_audio(provider_output)
@@ -2225,6 +2234,10 @@ def main() -> int:
         "min_chars": min_chars,
         "max_retries": max_retries,
         "voice": voice_setting,
+        "voice_profiles": [
+            job.get("voice_profile", {}) for job in jobs
+        ],
+        "emotion_tags": [job.get("emotion", "neutral") for job in jobs],
     })
 
     reusable = load_reusable_records(
@@ -2444,6 +2457,7 @@ def main() -> int:
                         allow_paid,
                         max_retries,
                         blocked_paid_providers,
+                        job.get("voice_profile") or {},
                     )
                 )
                 manifest["summary"]["generated_chunks"] += 1
