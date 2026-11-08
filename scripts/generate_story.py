@@ -697,7 +697,7 @@ def _load_configured_provider_order() -> list[str]:
         log("External LLM fallback unavailable: no configured provider is ready.")
         return []
 
-    allowed = {"groq", "openrouter", "cloudflare", "mistral"}
+    allowed = {"openai", "groq", "openrouter", "cloudflare"}
     order = selection.get("provider_order")
     if not isinstance(order, list):
         return []
