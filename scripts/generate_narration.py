@@ -1368,6 +1368,7 @@ def build_narration_record(
             "TTS_PROFILE": settings.get("tts_profile", "auto"),
             "TTS_PITCH": settings.get("tts_pitch", 1.0),
             "TTS_EMOTION_STRENGTH": settings.get("tts_emotion_strength", 0.65),
+            "TTS_CHILD_FRIENDLY": settings.get("tts_child_friendly", True),
             "CHARACTER_VOICES": settings.get("character_voices", True),
         }, {
             "role": role,
