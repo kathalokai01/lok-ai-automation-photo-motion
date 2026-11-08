@@ -1107,7 +1107,7 @@ def validate_sound_design(
         fail("Sound-design visual Scene count mismatch")
     if validation.get("total_visual_scene_records") != len(expected_visual_ids):
         fail("SFX validation visual Scene count mismatch")
-    if validation.get("duration_source") != "main_tts_audio_and_visual_scene_durations":
+    if validation.get("duration_source") != "all_role_tts_audio_durations":
         fail("SFX timing validation does not use Main TTS and visual Scene durations")
 
     cue_rows = rows_from(
