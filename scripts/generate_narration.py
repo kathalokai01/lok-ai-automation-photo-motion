@@ -1212,6 +1212,10 @@ def source_signature(
                 "duration": row.get("duration"),
                 "dialogue": row.get("dialogue", ""),
                 "character_ids": row.get("character_ids", []),
+                "speaker": row.get("speaker") or row.get("speaker_name") or "",
+                "speaker_id": row.get("speaker_id") or "",
+                "emotion": row.get("emotion") or row.get("emotion_tag") or "",
+                "music_mood": row.get("music_mood") or "",
                 "visual_prompt": row.get("visual_prompt", ""),
                 "source_scene_signature": row.get(
                     "source_scene_signature"
@@ -1552,6 +1556,10 @@ def reusable_record_matches(
         "sentence_units",
         "clause_units",
         "word_count",
+        "speaker_id",
+        "speaker",
+        "emotion",
+        "voice_profile",
     )
 
     return all(
