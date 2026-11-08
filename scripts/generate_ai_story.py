@@ -1356,11 +1356,14 @@ def is_completed_part_valid(
                     continue
                 if not clean(cached.get(field)):
                     return False
-            if clean(cached.get("narration")):
+            cached_text = clean(cached.get("narration"))
+            if not cached_text or word_count(cached_text) < 8:
                 return False
-            if cached.get("voiceover_enabled") is not False:
+            if cached.get("voiceover_enabled") is not True:
                 return False
-            if cached.get("narration_source") != "visual_only":
+            if cached.get("narration_source") != "ai_generated_role_narration":
+                return False
+            if cached.get("source_text_sha256") != text_sha256(cached_text):
                 return False
 
         return bool(clean(existing.get("story_title")))
