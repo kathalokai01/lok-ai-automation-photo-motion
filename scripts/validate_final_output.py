@@ -1056,7 +1056,11 @@ def validate_narration(
         fail("TTS jobs do not cover every Main Scene exactly once")
 
     narration_doc = read_json(NARRATION)
-    profile_rows = rows_from(narration_doc, "scenes", "extra_scenes", "jobs")
+    profile_rows = []
+    for profile_field in ("scenes", "extra_scenes"):
+        profile_values = narration_doc.get(profile_field, [])
+        if isinstance(profile_values, list):
+            profile_rows.extend(profile_values)
     if not profile_rows:
         fail("Narration metadata contains no voice profile records.")
     for profile_row in profile_rows:
