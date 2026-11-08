@@ -48,6 +48,9 @@ REQUIRED_SCRIPTS = (
     "generate_character_bible.py",
     "generate_scenes.py",
     "generate_narration.py",
+    "voice_profiles.py",
+    "preview_voice.py",
+    "music_provider_client.py",
     "prepare_captions.py",
     "generate_tts.py",
     "generate_flow_music.py",
@@ -1850,6 +1853,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             get_scenes_range,
             get_fps,
             get_tts_provider_order,
+            get_music_provider_order,
             get_image_provider_order,
             get_global_billable_permission,
             get_story_text,
@@ -1869,6 +1873,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
 
         fps = get_fps(config)
         tts_order = get_tts_provider_order(config)
+        music_order = get_music_provider_order(config)
         image_order = get_image_provider_order(config)
         billable = get_global_billable_permission(config)
         font = get_caption_font(config)
@@ -2179,6 +2184,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             "scenes_range": [scenes_min, scenes_max],
             "fps": fps,
             "tts_provider_order": tts_order,
+        "music_provider_order": music_order,
             "tts_primary_providers": primary,
             "image_provider_order": image_order,
             "billable_providers_allowed": billable,
