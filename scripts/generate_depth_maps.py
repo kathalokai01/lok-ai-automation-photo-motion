@@ -40,7 +40,7 @@ ALLOW_PSEUDO_FALLBACK = os.environ.get(
     "DEPTH_ALLOW_PSEUDO_FALLBACK", "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
-VERSION = "photo-motion-depth-v9-manifest-bound-resume-integrity"
+VERSION = "photo-motion-depth-v9-manifest-bound-resume-integrity-locked-source-role-provenance"
 FALLBACK_MODEL_ID = "content-aware-pseudo-depth-v9"
 
 MIN_IMAGE_BYTES = 1000
@@ -327,6 +327,23 @@ def load_jobs():
         role = str(job.get("role") or job.get("scene_type") or "main").strip().lower()
         if role not in {"hook", "main", "suspense", "resolution"}:
             raise RuntimeError(f"{scene_id}: unsupported scene role {role!r}.")
+        narration = str(job.get("narration") or "").strip()
+        source_text_hash = str(job.get("source_text_sha256") or "").strip().lower()
+        voiceover_enabled = job.get("voiceover_enabled")
+        narration_source = job.get("narration_source")
+        if role == "main":
+            expected_text_hash = hashlib.sha256(narration.encode("utf-8")).hexdigest()
+            if not narration or voiceover_enabled is not True or narration_source != "locked_part_text":
+                raise RuntimeError(f"{scene_id}: Main locked narration metadata is invalid.")
+            if source_text_hash != expected_text_hash:
+                raise RuntimeError(f"{scene_id}: Main source text hash mismatch.")
+            if job.get("source_word_count") != len(narration.split()):
+                raise RuntimeError(f"{scene_id}: Main source word count mismatch.")
+        else:
+            if narration or voiceover_enabled is not False or narration_source != "visual_only":
+                raise RuntimeError(f"{scene_id}: extra role must be visual-only.")
+            if source_text_hash:
+                raise RuntimeError(f"{scene_id}: visual-only role cannot have a narration hash.")
         local_raw = job.get("local_scene", job.get("scene", job.get("source_scene_number")))
         try:
             local_scene = int(local_raw)
@@ -403,6 +420,11 @@ def load_jobs():
             "part": part,
             "local_scene": local_scene,
             "role": role,
+            "voiceover_enabled": voiceover_enabled,
+            "narration_source": narration_source,
+            "source_text_sha256": source_text_hash,
+            "source_word_count": len(narration.split()) if role == "main" else 0,
+            "visual_only": role != "main",
             "job": job,
             "image_path": image_path,
             "image_sha256": image_hash,
@@ -564,6 +586,11 @@ def create_entry(item, path, model, status):
         "part": item["part"],
         "local_scene": item["local_scene"],
         "role": item["role"],
+        "voiceover_enabled": item["voiceover_enabled"],
+        "narration_source": item["narration_source"],
+        "source_text_sha256": item["source_text_sha256"],
+        "source_word_count": item["source_word_count"],
+        "visual_only": item["visual_only"],
         "image": relative_image,
         "image_path": relative_image,
         "image_sha256": item["image_sha256"],
@@ -587,7 +614,11 @@ def create_entry(item, path, model, status):
 def try_reuse(item, old):
     if not isinstance(old, dict):
         return None
-    for key in ("image_sha256", "job_signature", "source_fingerprint", "config_signature", "model_signature"):
+    for key in (
+        "image_sha256", "job_signature", "source_fingerprint",
+        "config_signature", "model_signature", "source_text_sha256",
+        "voiceover_enabled", "narration_source",
+    ):
         if old.get(key) != item.get(key):
             return None
 
@@ -858,6 +889,11 @@ def save_manifest(entries, metadata, total_scenes, status, error=None):
             "part": row.get("part") if row else None,
             "local_scene": row.get("local_scene") if row else None,
             "role": row.get("role") if row else None,
+            "voiceover_enabled": row.get("voiceover_enabled") if row else None,
+            "narration_source": row.get("narration_source") if row else None,
+            "source_text_sha256": row.get("source_text_sha256") if row else None,
+            "source_word_count": row.get("source_word_count") if row else None,
+            "visual_only": row.get("visual_only") if row else None,
             "image_sha256": row.get("image_sha256") if row else None,
             "job_signature": row.get("job_signature") if row else None,
             "source_fingerprint": row.get("source_fingerprint") if row else metadata.get("source_fingerprint"),
@@ -909,6 +945,8 @@ def validate_final_manifest(prepared, entries):
             raise RuntimeError(f"Scene {number}: depth manifest entry is missing.")
         for key in (
             "scene_id", "part", "local_scene", "role",
+            "voiceover_enabled", "narration_source", "source_text_sha256",
+            "source_word_count", "visual_only",
             "image_sha256", "job_signature", "source_fingerprint",
             "config_signature", "model_signature", "format",
         ):
