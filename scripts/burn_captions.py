@@ -1788,11 +1788,8 @@ def validate_manifest_role_sets(
             raise RuntimeError(f"{sid}: rendered narration source text hash mismatch.")
         if row.get("voiceover_enabled") is not True:
             raise RuntimeError(f"{sid}: rendered narration voiceover is disabled.")
-        raise RuntimeError(
-            "Rendered role/scene IDs do not match the selected Part/Scene plan: "
-            f"missing={sorted(expected_ids-set(render_by_id))[:15]}; "
-            f"extra={sorted(set(render_by_id)-expected_ids)[:15]}"
-        )
+    if set(render_by_id) != expected_render_ids:
+        raise RuntimeError("Rendered role/scene IDs do not match the selected plan.")
 
 
 def main():
@@ -2003,63 +2000,8 @@ def main():
 
         require_fps(source_info, fps, sid)
 
-        if row["role"] != "main":
-            if narration is not None:
-                raise RuntimeError(f"{sid}: visual-only role unexpectedly has TTS.")
-            completed[sid] = {
-                **row,
-                "status": "completed",
-                "scene_id": sid,
-                "role": row["role"],
-                "scene_type": row["role"],
-                "part": row["part"],
-                "local_scene": 0,
-                "source_rendered_video": relative(source),
-                "video": relative(source),
-                "output": relative(source),
-                "duration": round(source_info["duration"], 4),
-                "width": source_info["width"],
-                "height": source_info["height"],
-                "fps": round(source_info["fps"], 4),
-                "captions_burned": False,
-                "caption_timing": "visual-only-no-voiceover",
-                "caption_cue_count": 0,
-                "sha256": row["source_sha256"],
-                "cache_reused": True,
-            }
-            cached[sid] = {
-                "status": "completed",
-                "signature": row["source_sha256"],
-                "sha256": row["source_sha256"],
-                "path": relative(source),
-                "scene_id": sid,
-                "role": row["role"],
-                "part": row["part"],
-                "caption_timing": "visual-only-no-voiceover",
-                "caption_cue_count": 0,
-            }
-            global_cursor += source_info["duration"]
-            write_json(
-                PROGRESS_FILE,
-                {
-                    "status": "in_progress",
-                    "version": VERSION,
-                    "format": mode,
-                    "part_numbers": part_numbers,
-                    "total_parts": len(part_numbers),
-                    "scenes_range": [scenes_min, scenes_max],
-                    "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
-                    "fps": fps,
-                    "completed_count": index,
-                    "total_scenes": len(ordered),
-                    "scenes": cached,
-                },
-            )
-            log(f"KEPT VISUAL-ONLY {index}/{len(ordered)}: {sid}")
-            continue
-
         if narration is None:
-            raise RuntimeError(f"{sid}: Main TTS narration is missing.")
+            raise RuntimeError(f"{sid}: TTS narration is missing for role {row['role']}.")
 
         caption_text, language, caption_hash = caption_for_scene(
             row,
@@ -2437,13 +2379,14 @@ def main():
         ),
         "captions_burned_main_scenes": True,
         "visual_only_role_scenes_captioned": False,
+        "narrated_extra_roles_captioned": True,
         "caption_timeline": {
-            "includes_hook": False,
+            "includes_hook": True,
             "includes_main": True,
-            "includes_suspense": False,
-            "includes_resolution": False,
+            "includes_suspense": True,
+            "includes_resolution": True,
             "global_srt": True,
-            "scene_order": "main-scenes-only-with-visual-role-offsets",
+            "scene_order": "hook-main-suspense-or-resolution",
         },
     }
 
