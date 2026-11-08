@@ -758,7 +758,7 @@ def call_model(
     *,
     max_tokens: int = MAX_TOKENS,
 ) -> dict:
-    """Try configured Gemini models first, then validated zero-cost providers."""
+    """Try configured Gemini models first, then every ready external LLM provider."""
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -771,7 +771,12 @@ def call_model(
     configured_models = get_configured_model_order()
     retryable_http = {408, 429, 500, 502, 503, 504}
 
-    if api_key and configured_models:
+    gemini_authorized = (
+        os.environ.get("ALLOW_GEMINI_GENERATION", "").strip()
+        == "I_ACCEPT_POTENTIAL_GEMINI_CHARGES"
+    )
+
+    if api_key and configured_models and gemini_authorized:
         from gemini_api_guard import require_gemini_generation
         api_key = require_gemini_generation("story generation", api_key=api_key)
         for model_index, candidate_model in enumerate(configured_models):
@@ -865,6 +870,9 @@ def call_model(
                 f"Gemini model failed: {candidate_model}; "
                 "trying next configured model."
             )
+    elif api_key and configured_models:
+        log("Gemini skipped: explicit billable-generation opt-in is absent.")
+        failures.append("Gemini billing opt-in is absent; external providers will be tried.")
     else:
         failures.append("Gemini API key or configured Gemini models are absent.")
 
