@@ -51,7 +51,7 @@ VERSION = "thumbnail-v52-story-context-ranked-format-bound-source-verified"
 MIN_IMAGE_BYTES = 1000
 SHORT_SIZE = (720, 1280)
 FULL_SIZE = (1280, 720)
-MAX_TITLE_CHARS = 100
+MAX_TITLE_CHARS = 180
 
 TITLE_KEYS = (
     "final_title",
