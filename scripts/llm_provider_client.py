@@ -20,6 +20,7 @@ SUPPORTED_PROVIDERS = (
     "openrouter",
     "cloudflare",
     "mistral",
+    "openai",
 )
 
 DEFAULT_PROVIDER_ORDER = (
@@ -27,6 +28,7 @@ DEFAULT_PROVIDER_ORDER = (
     "openrouter",
     "cloudflare",
     "mistral",
+    "openai",
 )
 
 PROVIDER_ENV = {
@@ -49,6 +51,11 @@ PROVIDER_ENV = {
         "key": "MISTRAL_API_KEY",
         "model": "MISTRAL_MODEL",
         "url": "https://api.mistral.ai/v1/chat/completions",
+    },
+    "openai": {
+        "key": "OPENAI_API_KEY",
+        "model": "OPENAI_MODEL",
+        "url": "https://api.openai.com/v1/chat/completions",
     },
 }
 
