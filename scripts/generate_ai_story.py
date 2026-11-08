@@ -34,7 +34,7 @@ LLM_PROVIDER_FILE = ROOT / "output/config/selected_llm_provider.json"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v24-locked-source-narration-visual-only-extras"
+VERSION = "ai-story-v25-locked-main-with-narrated-extra-roles"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -672,9 +672,11 @@ NARRATION LOCK — ABSOLUTE:
 - किसी Main Scene के शब्द, spelling, matra, grammar, punctuation या क्रम न बदलें।
 - Main Scene narration को जोड़ना, घटाना, paraphrase, summarize या rewrite करना मना है।
 - सभी Main Scene narrations मिलकर इस Part के source narration को ठीक एक बार reconstruct करें।
-- Hook, Suspense और Resolution केवल visual-only records हैं; उनकी narration खाली string हो।
-- Extra role records में voiceover_enabled=false और narration_source="visual_only" रखें।
-- आपका काम केवल visual_prompt, camera_prompt, lighting_prompt, negative_prompt, sfx_prompt और music_prompt तैयार करना है।
+- Hook, Suspense और Resolution की अलग, संक्षिप्त, कहानी-आधारित हिंदी narration लिखें।
+- हर extra role narration आवाज़ में बोली जाएगी; voiceover_enabled=true और narration_source="ai_generated_role_narration" रखें।
+- Extra narration केवल पहले से स्थापित घटनाओं/तथ्यों पर आधारित हो; Main narration की नकल या कहानी में नई घटना/तथ्य न जोड़ें।
+- Hook शुरुआत में जिज्ञासा बनाए; Suspense अगले Part की ओर स्वाभाविक cliffhanger बनाए; Resolution केवल अंतिम Part में मूल कहानी का वास्तविक निष्कर्ष दे।
+- Main narration को जस का तस रखें; Hook/Suspense/Resolution के लिए narration सहित visual_prompt, camera_prompt, lighting_prompt, negative_prompt, sfx_prompt और music_prompt तैयार करें।
 - Story Plan के Part boundaries, scene_id और scene order न बदलें।
 - कोई नई घटना, पात्र, संवाद, वस्तु या परिणाम न जोड़ें।
 - Story-specific नाम, स्थान, वस्तुएँ, पशु, वाहन और कपड़े visual prompts में शामिल करें।
@@ -877,10 +879,17 @@ def validate_extra_record(
             source.get("scene_duration", source.get("duration", ""))
         ),
     }
-    fields["narration"] = ""
+    narration = clean(fields.get("narration"))
+    if not narration:
+        raise ValueError(f"{role} narration cannot be empty in part {part_number}.")
+    if word_count(narration) < 8:
+        raise ValueError(f"{role} narration is too short in part {part_number}.")
+    fields["narration"] = narration
     result.update(fields)
-    result["voiceover_enabled"] = False
-    result["narration_source"] = "visual_only"
+    result["voiceover_enabled"] = True
+    result["narration_source"] = "ai_generated_role_narration"
+    result["source_text_sha256"] = text_sha256(narration)
+    result["source_word_count"] = word_count(narration)
     return result
 
 
@@ -1528,14 +1537,17 @@ def validate_final_output(
                     raise RuntimeError(
                         f"{role} record missing {field} in part {index}."
                     )
-            if clean(actual_extra.get("narration")):
-                raise RuntimeError(
-                    f"{role} must be visual-only with no duplicate narration in part {index}."
-                )
-            if actual_extra.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{role} voiceover must be disabled in part {index}.")
-            if actual_extra.get("narration_source") != "visual_only":
-                raise RuntimeError(f"{role} narration source must be visual_only in part {index}.")
+            extra_text = clean(actual_extra.get("narration"))
+            if not extra_text or word_count(extra_text) < 8:
+                raise RuntimeError(f"{role} narration is missing or too short in part {index}.")
+            if actual_extra.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{role} voiceover must be enabled in part {index}.")
+            if actual_extra.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{role} narration source metadata mismatch in part {index}.")
+            if actual_extra.get("source_text_sha256") != text_sha256(extra_text):
+                raise RuntimeError(f"{role} narration hash mismatch in part {index}.")
+            if actual_extra.get("source_word_count") != word_count(extra_text):
+                raise RuntimeError(f"{role} narration word count mismatch in part {index}.")
 
         title = clean(output.get("story_title"))
 
