@@ -34,7 +34,7 @@ LLM_PROVIDER_FILE = ROOT / "output/config/selected_llm_provider.json"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v22-configured-llm-fallback"
+VERSION = "ai-story-v23-canonical-story-title-across-parts"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -1516,6 +1516,20 @@ def main() -> None:
     )
     apply_story_part_metadata(source_plan, source_story)
 
+    canonical_story_title = clean(
+        source_story.get("final_title")
+        or source_story.get("generated_title")
+        or source_story.get("story_title")
+        or source_story.get("title")
+        or source_plan.get("final_title")
+        or source_plan.get("title")
+    )
+    if not canonical_story_title:
+        raise RuntimeError(
+            "Canonical story title is missing from the corrected story. "
+            "Refusing to generate different titles for individual Parts."
+        )
+
     topic = (
         clean(get_topic(input_config))
         or clean(source_story.get("topic"))
@@ -1579,7 +1593,8 @@ def main() -> None:
             "version": VERSION,
             "status": "in_progress",
             "topic": topic,
-            "title": clean(source_story.get("title")) or topic,
+            "title": canonical_story_title,
+            "story_title": canonical_story_title,
             "story_text": story_text,
             "format": config["format"],
             "audience": config["audience"],
@@ -1602,6 +1617,8 @@ def main() -> None:
         "version": VERSION,
         "status": "in_progress",
         "topic": topic,
+        "title": canonical_story_title,
+        "story_title": canonical_story_title,
         "story_text": story_text,
         "format": config["format"],
         "audience": config["audience"],
@@ -1632,6 +1649,16 @@ def main() -> None:
     if not isinstance(cached_parts, list):
         cached_parts = []
 
+    # Normalize older reusable Part checkpoints to the corrected story title.
+    for cached_part in cached_parts:
+        if isinstance(cached_part, dict):
+            cached_part["story_title"] = canonical_story_title
+
+    ai_story["parts"] = cached_parts
+    ai_story["title"] = canonical_story_title
+    ai_story["story_title"] = canonical_story_title
+    write_json(OUTPUT_FILE, ai_story)
+
     for source_part in source_plan["parts"]:
         number = source_part["part"]
         cached = find_existing_part(cached_parts, number)
@@ -1657,6 +1684,9 @@ def main() -> None:
                 f"Part {number}: generator returned invalid result; "
                 "refusing to continue."
             )
+
+        # Model-generated titles are not authoritative at Part level.
+        completed["story_title"] = canonical_story_title
 
         used_provider = completed.pop("_katha_provider_used", None)
         used_model = completed.pop("_katha_model_used", None)
@@ -1711,17 +1741,13 @@ def main() -> None:
             "Final main scene count does not match Story Plan."
         )
 
-    titles = {
-        re.sub(r"\s+", " ", clean(item["story_title"])).strip()
-        for item in ai_story["parts"]
-    }
+    for item in ai_story["parts"]:
+        if not isinstance(item, dict):
+            raise RuntimeError("AI story contains an invalid Part record.")
+        item["story_title"] = canonical_story_title
 
-    if len(titles) != 1:
-        raise RuntimeError(
-            "Story titles are inconsistent across parts."
-        )
-
-    ai_story["title"] = next(iter(titles))
+    ai_story["title"] = canonical_story_title
+    ai_story["story_title"] = canonical_story_title
     ai_story["status"] = "completed"
     ai_story["total_parts"] = completed_parts
     ai_story["parts_count"] = completed_parts
