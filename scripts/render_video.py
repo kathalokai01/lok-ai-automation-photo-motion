@@ -1348,8 +1348,8 @@ def build_manifest(
             str(part): scene_counts[part] for part in part_numbers
         },
         "scenes_per_part": None,
-        "expected_scene_count": sum(scene_counts.values()),
-        "completed_count": len(main_rows),
+        "expected_scene_count": len(all_rows),
+        "completed_count": len(all_rows),
         "main_scene_count": len(main_rows),
         "all_completed_scene_count": len(all_rows),
         "extra_scene_count": len(extra_rows),
