@@ -32,6 +32,7 @@ MUSIC_FALLBACK_ENABLED = true
 MUSIC_ALLOW_PAID = false             # paid music only after explicit opt-in
 MUSIC_GENRE = "original cinematic score"
 MUSIC_INTENSITY = "evolving"
+MUSIC_GAIN = 0.35
 MUSIC_SCENE_ADAPTIVE = true
 MUSIC_DUCKING = true
 MUSIC_DUCKING_DB = -10.0
