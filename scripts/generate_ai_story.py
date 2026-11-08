@@ -34,7 +34,7 @@ LLM_PROVIDER_FILE = ROOT / "output/config/selected_llm_provider.json"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v23-canonical-story-title-across-parts"
+VERSION = "ai-story-v24-locked-source-narration-visual-only-extras"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -671,29 +671,17 @@ Format: {config['format']}
 WORD RULE:
 {rules}
 
-SHORT MODE SCENE-WISE WORD BUDGET:
-{json.dumps(per_scene_word_targets, ensure_ascii=False, indent=2)}
-- ऊपर हर Main Scene के लिए narration का अलग target दिया गया है।
-- सभी Main Scene narration मिलाकर लगभग 135 शब्द रखें।
-- सामान्यतः हर Scene अपने दिए गए target से 2 शब्द से अधिक न बढ़े।
-- 120–150 शब्द प्राथमिक सीमा है; 151–180 केवल सभी revision प्रयासों के बाद।
-- 180 शब्द hard maximum है; इससे अधिक उत्तर न दें।
-- दृश्य संख्या अधिक होने पर भी हर Scene में लंबा वर्णन न जोड़ें।
-- एक Scene में केवल उसी Scene का आवश्यक action और story detail लिखें।
-- अनावश्यक भूमिका, दोहराव, वातावरण-वर्णन और निष्कर्षात्मक filler न जोड़ें।
-- Hook, Suspense और Resolution की narration इस word budget में शामिल नहीं है।
-
-कहानी के अनिवार्य नियम:
-- Story Plan में तय Part boundaries, scene_id और scene order न बदलें।
-- इस Part की घटनाएँ उसी क्रम में रखें जिस क्रम में Plan में हैं।
-- पूरी कहानी के संदर्भ से narration लिखें, लेकिन दूसरे Part की घटनाएँ यहाँ न डालें।
-- मूल कहानी का अर्थ, घटनाएँ, पात्र, नाम, संबंध, स्थान और परिणाम सुरक्षित रखें।
-- कोई नई मुख्य घटना, पात्र या असंबंधित मोड़ न जोड़ें।
-- हिंदी मात्रा, वर्तनी, व्याकरण, लिंग, वचन और काल ठीक करें।
-- मुख्य narration में Hook, Suspense या Resolution न मिलाएँ।
-- हर scene narration उसके story_anchor से मेल खाए।
-- वाक्य को बीच में न काटें।
-- कहानी-विशिष्ट वास्तविक नाम, स्थान, वस्तुएँ, पशु, वाहन और कपड़े शामिल करें।
+NARRATION LOCK — ABSOLUTE:
+- हर Main Scene की narration उसके source Plan record के narration/story_anchor की हूबहू प्रति हो।
+- किसी Main Scene के शब्द, spelling, matra, grammar, punctuation या क्रम न बदलें।
+- Main Scene narration को जोड़ना, घटाना, paraphrase, summarize या rewrite करना मना है।
+- सभी Main Scene narrations मिलकर इस Part के source narration को ठीक एक बार reconstruct करें।
+- Hook, Suspense और Resolution केवल visual-only records हैं; उनकी narration खाली string हो।
+- Extra role records में voiceover_enabled=false और narration_source="visual_only" रखें।
+- आपका काम केवल visual_prompt, camera_prompt, lighting_prompt, negative_prompt, sfx_prompt और music_prompt तैयार करना है।
+- Story Plan के Part boundaries, scene_id और scene order न बदलें।
+- कोई नई घटना, पात्र, संवाद, वस्तु या परिणाम न जोड़ें।
+- Story-specific नाम, स्थान, वस्तुएँ, पशु, वाहन और कपड़े visual prompts में शामिल करें।
 - सभी Parts में recurring पात्रों का रूप एक जैसा रखें।
 
 HOOK:
@@ -819,10 +807,25 @@ def validate_generated_scenes(
                 source.get("scene_duration", source.get("duration", ""))
             ),
         }
+        locked_narration = clean(source.get("narration"))
+        if not locked_narration or locked_narration != clean(source.get("story_anchor")):
+            raise ValueError(
+                f"Source Plan narration/anchor mismatch: {source.get('scene_id')}."
+            )
+        fields["narration"] = locked_narration
         row.update(fields)
+        row["source_text_sha256"] = stable_hash(locked_narration)
+        row["source_word_count"] = word_count(locked_narration)
         result.append(row)
 
-    count = word_count(" ".join(row["narration"] for row in result))
+    combined_locked_text = " ".join(row["narration"] for row in result)
+    source_part_text = clean(source_part.get("narration"))
+    if clean(combined_locked_text) != source_part_text:
+        raise ValueError(
+            f"Part {source_part['part']}: Main Scene text does not exactly "
+            "reconstruct the locked source Part."
+        )
+    count = word_count(combined_locked_text)
     minimum, maximum = short_word_limits(
         source_part, config, total_parts
     )
@@ -887,7 +890,10 @@ def validate_extra_record(
             source.get("scene_duration", source.get("duration", ""))
         ),
     }
+    fields["narration"] = ""
     result.update(fields)
+    result["voiceover_enabled"] = False
+    result["narration_source"] = "visual_only"
     return result
 
 
@@ -941,6 +947,9 @@ def validate_generated_part(
         "story_title": title,
         "narration": narration,
         "word_count": word_count(narration),
+        "text_locked": True,
+        "locked_word_count": word_count(narration),
+        "locked_text_sha256": stable_hash(narration),
         "final_part_merged": bool(source_part.get("final_part_merged")),
         "scenes": scenes,
     }
@@ -1317,6 +1326,8 @@ def is_completed_part_valid(
                 return False
             if row.get("role") != "main" or row.get("status") != "completed":
                 return False
+            if clean(row.get("narration")) != clean(source.get("narration")):
+                return False
 
             for field in REQUIRED_NONEMPTY:
                 if not clean(row.get(field)):
@@ -1359,8 +1370,16 @@ def is_completed_part_valid(
                 return False
 
             for field in REQUIRED_NONEMPTY:
+                if field == "narration":
+                    continue
                 if not clean(cached.get(field)):
                     return False
+            if clean(cached.get("narration")):
+                return False
+            if cached.get("voiceover_enabled") is not False:
+                return False
+            if cached.get("narration_source") != "visual_only":
+                return False
 
         return bool(clean(existing.get("story_title")))
 
@@ -1461,6 +1480,16 @@ def validate_final_output(
 
         main_text = " ".join(row["narration"] for row in actual)
         count = word_count(main_text)
+        if clean(main_text) != clean(source.get("narration")):
+            raise RuntimeError(
+                f"Part {index} Main Scene narration differs from locked Part text."
+            )
+        if output.get("text_locked") is not True:
+            raise RuntimeError(f"Part {index} narration is not marked as locked.")
+        if output.get("locked_word_count") != count:
+            raise RuntimeError(f"Part {index} locked word count mismatch.")
+        if output.get("locked_text_sha256") != stable_hash(main_text):
+            raise RuntimeError(f"Part {index} locked text hash mismatch.")
 
         if output.get("word_count") != count:
             raise RuntimeError(
@@ -1520,10 +1549,20 @@ def validate_final_output(
                 )
 
             for field in REQUIRED_NONEMPTY:
+                if field == "narration":
+                    continue
                 if not clean(actual_extra.get(field)):
                     raise RuntimeError(
                         f"{role} record missing {field} in part {index}."
                     )
+            if clean(actual_extra.get("narration")):
+                raise RuntimeError(
+                    f"{role} must be visual-only with no duplicate narration in part {index}."
+                )
+            if actual_extra.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"{role} voiceover must be disabled in part {index}.")
+            if actual_extra.get("narration_source") != "visual_only":
+                raise RuntimeError(f"{role} narration source must be visual_only in part {index}.")
 
         title = clean(output.get("story_title"))
 
