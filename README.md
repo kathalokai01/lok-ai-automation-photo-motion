@@ -72,7 +72,7 @@ SCENES = 9
 
 ## Workflow
 
-GitHub repository में **Actions → Generate Katha Lok AI Photo Motion Video → Run workflow** चुनें. Workflow Python 3.11 environment तैयार करता है और क्रम से:
+GitHub repository में **Actions → Generate Katha Lok AI Photo Motion Video → Run workflow** चुनें और **format** में `short` या `full` चुनें. यह चयन केवल उस run के लिए `Input/topic.txt` के `FORMAT` को override करता है; बाकी सभी input settings और कहानी जस की तस रहती हैं. Local runs में `PHOTO_MOTION_FORMAT` environment variable न होने पर `Input/topic.txt` का `FORMAT` लागू होता है. SHORT और FULL के लिए अलग-अलग workflow runs शुरू करें. Workflow Python 3.11 environment तैयार करता है और क्रम से:
 
 1. Configuration तथा provider/model selection जाँचता है.
 2. कहानी बनाता/सुधारता है, Part count और story structure verify करता है.
