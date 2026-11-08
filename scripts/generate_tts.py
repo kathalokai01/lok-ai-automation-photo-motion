@@ -445,6 +445,14 @@ def resolve_voice(provider: str, voice: str) -> str:
     voice = str(voice or "male").strip()
 
     if provider == "edge_tts":
+        profile_id = str((voice_profile or {}).get("profile_id") or "").lower()
+        profile_voice = os.getenv(
+            "EDGE_TTS_VOICE_" + profile_id.upper(), ""
+        ).strip() if profile_id else ""
+        if profile_voice:
+            return profile_voice
+        if profile_id == "child_friendly":
+            return "hi-IN-SwaraNeural"
         if voice.lower() in {"female", "woman", "f"}:
             return os.getenv(
                 "EDGE_TTS_VOICE", "hi-IN-SwaraNeural"
@@ -458,6 +466,12 @@ def resolve_voice(provider: str, voice: str) -> str:
         return voice
 
     if provider == "gemini_tts":
+        profile_id = str((voice_profile or {}).get("profile_id") or "").upper()
+        profile_voice = os.getenv(
+            f"GEMINI_TTS_VOICE_{profile_id}", ""
+        ).strip() if profile_id else ""
+        if profile_voice:
+            return profile_voice
         configured = os.getenv(
             "GEMINI_TTS_VOICE", ""
         ).strip()
@@ -781,7 +795,7 @@ def synthesize_provider(
             run_command(
                 [
                     shutil.which("edge-tts") or "edge-tts",
-                    "--voice", resolve_voice(provider, voice),
+                    "--voice", resolve_voice(provider, voice, voice_profile),
                     "--rate", speed,
                     "--text", text,
                     "--write-media", temporary,
