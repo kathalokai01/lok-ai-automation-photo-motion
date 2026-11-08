@@ -42,7 +42,7 @@ PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 ALIGNMENT_CACHE = CAPTION_DIR / "word_alignment_cache.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v60-verified-role-audio-alignment"
+VERSION = "burn-captions-v61-main-only-voiceover-captions"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 1000
 FPS_TOLERANCE = 0.03
@@ -465,35 +465,9 @@ def load_caption_map(part_numbers, scene_counts):
             f"extra={sorted(set(mapping)-expected)}"
         )
 
+    if rows_from(data, "extra_captions"):
+        raise RuntimeError("Visual-only Hook/Suspense/Resolution cannot have captions.")
     extras = {}
-
-    for row in rows_from(data, "extra_captions"):
-        if not isinstance(row, dict):
-            raise RuntimeError("Invalid extra caption record")
-
-        sid = str(row.get("scene_id") or row.get("id") or "").strip()
-        text = clean_text(row.get("text") or row.get("caption") or "")
-
-        if not sid or not text:
-            raise RuntimeError("Extra caption has missing ID or text")
-
-        if sid in extras:
-            raise RuntimeError(f"Duplicate extra caption ID: {sid}")
-
-        actual_hash = sha256_text(text)
-        declared_hash = row.get("caption_sha256")
-
-        if declared_hash and declared_hash != actual_hash:
-            raise RuntimeError(f"Extra caption checksum mismatch: {sid}")
-
-        extras[sid] = {
-            "text": text,
-            "language": clean_text(
-                row.get("caption_language") or data.get("mode") or "hindi"
-            ),
-            "sha256": actual_hash,
-            "scene_id": sid,
-        }
 
     return mapping, extras, data
 
@@ -552,6 +526,8 @@ def load_audio_map():
             raise RuntimeError(f"Invalid TTS part/scene: {sid}") from exc
 
         role = normalize_role(row)
+        if role != "main":
+            raise RuntimeError(f"{sid}: TTS manifest must contain Main narration only.")
 
         if role == "main" and scene < 1:
             raise RuntimeError(f"Invalid Main audio scene number: {sid}")
@@ -588,6 +564,13 @@ def load_audio_map():
                     "text": text,
                 })
 
+        text = clean_text(
+            row.get("text") or row.get("narration_text") or row.get("narration")
+        )
+        text_hash = sha256_text(text)
+        if not text or row.get("text_sha256") != text_hash:
+            raise RuntimeError(f"{sid}: locked TTS text hash mismatch.")
+
         mapping[sid] = {
             "scene_id": sid,
             "part": part,
@@ -596,12 +579,9 @@ def load_audio_map():
             "path": path,
             "duration": info["duration"],
             "sha256": actual_hash,
+            "text_sha256": text_hash,
             "chunks": chunks,
-            "text": clean_text(
-                row.get("text")
-                or row.get("narration_text")
-                or row.get("narration")
-            ),
+            "text": text,
             "language": clean_text(
                 row.get("caption_language")
                 or row.get("language")
@@ -1590,6 +1570,8 @@ def caption_for_scene(
                 f"Main caption scene_id mismatch: {row['scene_id']}"
             )
 
+        if caption.get("source_text_sha256") != narration["text_sha256"]:
+            raise RuntimeError(f"{row['scene_id']}: caption source text hash mismatch.")
         return (
             caption["text"],
             caption["language"],
@@ -1760,45 +1742,42 @@ def validate_manifest_role_sets(
     part_numbers,
     scene_counts,
 ):
-    if set(render_by_id) != set(narration_by_id):
-        raise RuntimeError(
-            "Rendered and narration scene IDs differ: "
-            f"missing_audio={sorted(set(render_by_id)-set(narration_by_id))[:15]}; "
-            f"missing_video={sorted(set(narration_by_id)-set(render_by_id))[:15]}"
-        )
-
-    for sid, row in render_by_id.items():
-        audio = narration_by_id[sid]
-
-        if (
-            row["part"] != audio["part"]
-            or row["role"] != audio["role"]
-            or row["local_scene"] != audio["scene"]
-        ):
-            raise RuntimeError(
-                f"{sid}: narration/render mapping mismatch"
-            )
-
-    expected_ids = set()
-
+    expected_main_ids = {
+        f"part_{part:02d}_scene_{scene:02d}"
+        for part in part_numbers
+        for scene in range(1, scene_counts[part] + 1)
+    }
+    expected_render_ids = set()
     for part in part_numbers:
-        expected_ids.add(f"part_{part:02d}_hook")
-
-        for scene in range(1, scene_counts[part] + 1):
-            expected_ids.add(
-                f"part_{part:02d}_scene_{scene:02d}"
-            )
-
-    expected_ids = set()
-    for part in part_numbers:
-        expected_ids.add(f"part_{part:02d}_hook")
-        expected_ids.add(
+        expected_render_ids.add(f"part_{part:02d}_hook")
+        expected_render_ids.add(
             f"part_{part:02d}_" + ("resolution" if part == part_numbers[-1] else "suspense")
         )
-        for scene in range(1, scene_counts[part] + 1):
-            expected_ids.add(f"part_{part:02d}_scene_{scene:02d}")
+        expected_render_ids.update(
+            f"part_{part:02d}_scene_{scene:02d}"
+            for scene in range(1, scene_counts[part] + 1)
+        )
 
-    if set(render_by_id) != expected_ids:
+    if set(narration_by_id) != expected_main_ids:
+        raise RuntimeError("TTS manifest must map Main Scenes only.")
+    if set(render_by_id) != expected_render_ids:
+        raise RuntimeError(
+            "Rendered visual Scene IDs differ from the selected plan: "
+            f"missing={sorted(expected_render_ids-set(render_by_id))[:15]}; "
+            f"extra={sorted(set(render_by_id)-expected_render_ids)[:15]}"
+        )
+
+    for sid, audio in narration_by_id.items():
+        row = render_by_id[sid]
+        if row["part"] != audio["part"] or row["role"] != "main" or row["local_scene"] != audio["scene"]:
+            raise RuntimeError(f"{sid}: Main narration/render mapping mismatch.")
+        if row.get("source_text_sha256") != audio["text_sha256"]:
+            raise RuntimeError(f"{sid}: rendered Main source text hash mismatch.")
+
+    for sid, row in render_by_id.items():
+        if row["role"] != "main":
+            if row.get("voiceover_enabled") is not False or row.get("narration_source") != "visual_only":
+                raise RuntimeError(f"{sid}: Hook/Suspense/Resolution must remain visual-only.")
         raise RuntimeError(
             "Rendered role/scene IDs do not match the selected Part/Scene plan: "
             f"missing={sorted(expected_ids-set(render_by_id))[:15]}; "
@@ -1996,15 +1975,13 @@ def main():
 
     for index, row in enumerate(ordered, 1):
         sid = row["scene_id"]
-        narration = narration_by_id[sid]
+        narration = narration_by_id.get(sid)
         source = row["source_path"]
 
         source_info = media_info(source)
 
         if not source_info["has_video"] or not source_info["has_audio"]:
-            raise RuntimeError(
-                f"Rendered scene lacks audio/video: {sid}"
-            )
+            raise RuntimeError(f"Rendered scene lacks audio/video: {sid}")
 
         if (source_info["width"], source_info["height"]) != (
             width,
@@ -2015,6 +1992,64 @@ def main():
             )
 
         require_fps(source_info, fps, sid)
+
+        if row["role"] != "main":
+            if narration is not None:
+                raise RuntimeError(f"{sid}: visual-only role unexpectedly has TTS.")
+            completed[sid] = {
+                **row,
+                "status": "completed",
+                "scene_id": sid,
+                "role": row["role"],
+                "scene_type": row["role"],
+                "part": row["part"],
+                "local_scene": 0,
+                "source_rendered_video": relative(source),
+                "video": relative(source),
+                "output": relative(source),
+                "duration": round(source_info["duration"], 4),
+                "width": source_info["width"],
+                "height": source_info["height"],
+                "fps": round(source_info["fps"], 4),
+                "captions_burned": False,
+                "caption_timing": "visual-only-no-voiceover",
+                "caption_cue_count": 0,
+                "sha256": row["source_sha256"],
+                "cache_reused": True,
+            }
+            cached[sid] = {
+                "status": "completed",
+                "signature": row["source_sha256"],
+                "sha256": row["source_sha256"],
+                "path": relative(source),
+                "scene_id": sid,
+                "role": row["role"],
+                "part": row["part"],
+                "caption_timing": "visual-only-no-voiceover",
+                "caption_cue_count": 0,
+            }
+            global_cursor += source_info["duration"]
+            write_json(
+                PROGRESS_FILE,
+                {
+                    "status": "in_progress",
+                    "version": VERSION,
+                    "format": mode,
+                    "part_numbers": part_numbers,
+                    "total_parts": len(part_numbers),
+                    "scenes_range": [scenes_min, scenes_max],
+                    "actual_scene_counts": {str(part): scene_counts[part] for part in part_numbers},
+                    "fps": fps,
+                    "completed_count": index,
+                    "total_scenes": len(ordered),
+                    "scenes": cached,
+                },
+            )
+            log(f"KEPT VISUAL-ONLY {index}/{len(ordered)}: {sid}")
+            continue
+
+        if narration is None:
+            raise RuntimeError(f"{sid}: Main TTS narration is missing.")
 
         caption_text, language, caption_hash = caption_for_scene(
             row,
@@ -2390,15 +2425,15 @@ def main():
             row["role"] == "resolution"
             for row in extra_rows
         ),
+        "captions_burned_main_scenes": True,
+        "visual_only_role_scenes_captioned": False,
         "caption_timeline": {
-            "includes_hook": True,
+            "includes_hook": False,
             "includes_main": True,
-            "includes_suspense": True,
-            "includes_resolution": True,
+            "includes_suspense": False,
+            "includes_resolution": False,
             "global_srt": True,
-            "scene_order": (
-                "hook-main-suspense-per-part-final-resolution"
-            ),
+            "scene_order": "main-scenes-only-with-visual-role-offsets",
         },
     }
 
