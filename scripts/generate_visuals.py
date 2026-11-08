@@ -345,10 +345,14 @@ def normalize_scene_rows(
 
         counts[role][part] = counts[role].get(part, 0) + 1
 
-        narration = clean(
-            original.get("narration")
-            or original.get("text")
-            or original.get("story_text")
+        narration = (
+            clean(
+                original.get("narration")
+                or original.get("text")
+                or original.get("story_text")
+            )
+            if role == "main"
+            else clean(original.get("narration"))
         )
 
         visual = clean(
