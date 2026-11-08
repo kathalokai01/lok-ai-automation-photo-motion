@@ -1923,6 +1923,9 @@ def reusable_legacy_scene(
         record.get("scene_id") != job["scene_id"]
         or record.get("part") != job["part"]
         or record.get("role") != job["role"]
+        or re.sub(r"\s+", " ", str(record.get("text") or record.get("narration") or "")).strip()
+        != re.sub(r"\s+", " ", str(job.get("text") or "")).strip()
+        or text_value(record.get("voice")) != text_value(job.get("voice"))
     ):
         return None
 
@@ -2163,7 +2166,6 @@ def main() -> int:
         and previous_manifest.get("status") in {
             "completed", "failed", "running"
         }
-        and previous_manifest.get("source_sha256") == source_hash
         and previous_manifest.get("config_sha256") == config_hash
         and isinstance(previous_manifest.get("jobs"), list)
     ):
