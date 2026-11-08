@@ -1096,7 +1096,7 @@ def main():
         or saved.get("sfx_cue_manifest_sha256") != sha256_file(CUES_FILE)
         or saved.get("validator_source_signature") != report["validator_source_signature"]
         or saved.get("sfx", {}).get("cue_count") != len(sfx_report["cues"])
-        or saved.get("sfx", {}).get("duration_source") != "ffprobe_measured_main_tts_and_visual_scene_durations_plus_sfx_files"
+        or saved.get("sfx", {}).get("duration_source") != "ffprobe_measured_all_role_tts_audio_plus_sfx_files"
     ):
         raise RuntimeError("SFX timing validation report read-back failed.")
 
