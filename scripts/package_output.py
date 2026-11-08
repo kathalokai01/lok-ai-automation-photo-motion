@@ -55,7 +55,7 @@ METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v103-ffprobe-verified-complete-scene-asset-package"
+VERSION = "output-packager-v104-main-tts-visual-only-role-assets"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
@@ -541,8 +541,16 @@ def validate_render(
         scene_id = clean(row.get("scene_id") or row.get("id"))
         if clean(row.get("status")).lower() not in SUCCESS:
             fail(f"Rendered scene is incomplete: {scene_id}")
-        if row.get("captions_burned") is not True:
-            fail(f"Rendered scene captions are not confirmed: {scene_id}")
+        if key[1] == "main":
+            if row.get("captions_burned") is not True:
+                fail(f"Main rendered scene captions are not confirmed: {scene_id}")
+        else:
+            if row.get("captions_burned") is not False:
+                fail(f"Visual-only role must not have captions: {scene_id}")
+            if row.get("voiceover_enabled") is not False:
+                fail(f"Visual-only role voiceover must be disabled: {scene_id}")
+            if clean(row.get("source_audio_sha256")):
+                fail(f"Visual-only role has a TTS audio hash: {scene_id}")
 
         path = safe_output(
             row.get("video") or row.get("output") or row.get("path"),
@@ -884,6 +892,13 @@ def validate_captions() -> tuple[Path, Path, dict]:
     )
     if not isinstance(caption_rows, list) or not caption_rows:
         fail("Caption manifest contains no caption records")
+    if caption_data.get("total_extra_scenes") != 0:
+        fail("Visual-only Hook/Suspense/Resolution cannot have captions")
+    if any(
+        not isinstance(row, dict) or normalize_role(row) != "main"
+        for row in caption_rows
+    ):
+        fail("Caption manifest contains a non-Main caption record")
 
     declared_count = (
         caption_data.get("caption_count")
@@ -917,6 +932,11 @@ def validate_sound_and_audio() -> dict:
             fail(f"Invalid narration job {index}")
         if clean(row.get("status")).lower() not in SUCCESS:
             fail(f"Narration job {index} is incomplete")
+        if normalize_role(row) != "main":
+            fail("TTS manifest must contain Main Scene narration only")
+        text_value = clean(row.get("text") or row.get("narration"))
+        if not text_value or row.get("text_sha256") != sha256_bytes(text_value.encode("utf-8")):
+            fail(f"Main narration source-text fingerprint mismatch: {row.get('scene_id')}")
 
     sound = read_json(SOUND)
     if clean(sound.get("status")).lower() not in SUCCESS:
@@ -930,11 +950,24 @@ def validate_sound_and_audio() -> dict:
         read_json(VALIDATION).get("format")
     ).lower()}:
         fail("Sound-design FORMAT mismatch")
+    render_data = read_json(RENDER)
+    parts = len(render_data.get("parts") or [])
+    visual_scene_count = len(collect_render_rows(render_data))
+    if sound.get("total_visual_scene_records") != visual_scene_count:
+        fail("Sound-design visual Scene count mismatch")
+    if sfx.get("total_visual_scene_records") != visual_scene_count:
+        fail("SFX validation visual Scene count mismatch")
+    if sfx.get("duration_source") != "main_tts_audio_and_visual_scene_durations":
+        fail("SFX validation duration source is invalid")
+    if audio.get("total_jobs") is not None and int(audio["total_jobs"]) != len(jobs):
+        fail("TTS manifest total_jobs mismatch")
+    if any(normalize_role(row) != "main" for row in jobs):
+        fail("Extra visual roles must not have TTS records")
 
     return {
         "narration": {
             "path": "output/narration/audio_jobs.json",
-            "job_count": len(jobs),
+            "main_tts_job_count": len(jobs),
             "sha256": sha256_file(AUDIO),
         },
         "sound_design": {
@@ -1067,6 +1100,11 @@ def selected_package_files(render: dict) -> list[Path]:
         for row in render["scene_rows"]
         if isinstance(row, dict)
     }
+    expected_main_ids = {
+        clean(row.get("scene_id"))
+        for row in render["scene_rows"]
+        if isinstance(row, dict) and normalize_role(row) == "main"
+    }
     photo_by_id = {}
     for row in photo_rows:
         if not isinstance(row, dict):
@@ -1083,78 +1121,82 @@ def selected_package_files(render: dict) -> list[Path]:
         if not sid or sid in audio_by_id:
             fail(f"Missing or duplicate narration audio scene ID: {sid}")
         audio_by_id[sid] = row
-    if set(photo_by_id) != expected_scene_ids or set(audio_by_id) != expected_scene_ids:
-        fail("Scene image/audio manifests do not match the complete rendered scene-role set")
+    if set(photo_by_id) != expected_scene_ids or set(audio_by_id) != expected_main_ids:
+        fail("Photo Motion must cover all visual scenes; TTS must cover Main scenes only")
 
     scene_image_paths = set()
     scene_audio_paths = set()
     flow_audio_paths = set()
     for sid in sorted(expected_scene_ids):
         photo_row = photo_by_id[sid]
-        audio_row = audio_by_id[sid]
+        role = normalize_role(photo_row)
+        audio_row = audio_by_id.get(sid)
         image_value = (
             photo_row.get("image_path")
             or photo_row.get("image")
             or photo_row.get("output_path")
         )
-        audio_value = (
-            audio_row.get("audio_path")
-            or audio_row.get("audio_file")
-            or audio_row.get("audio")
-            or audio_row.get("output")
-        )
         image_path = safe_output(image_value, f"Scene image {sid}", MIN_IMAGE_BYTES)
-        audio_path = safe_output(audio_value, f"Scene narration audio {sid}", 100)
         if image_path.suffix.lower() not in IMAGE_SUFFIXES:
             fail(f"Scene image is not a supported image file: {sid}")
-        if audio_path.suffix.lower() not in AUDIO_SUFFIXES:
-            fail(f"Scene narration is not a supported audio file: {sid}")
-
         declared_image_hash = clean(photo_row.get("image_sha256")).lower()
-        if not re.fullmatch(r"[a-f0-9]{64}", declared_image_hash):
-            fail(f"Scene image SHA-256 is missing or invalid: {sid}")
-        if declared_image_hash != sha256_file(image_path):
+        if not re.fullmatch(r"[a-f0-9]{64}", declared_image_hash) or declared_image_hash != sha256_file(image_path):
             fail(f"Scene image SHA-256 mismatch: {sid}")
 
-        declared_audio_hash = clean(
-            audio_row.get("audio_sha256") or audio_row.get("sha256")
-        ).lower()
-        photo_audio_hash = clean(photo_row.get("audio_sha256")).lower()
-        if not re.fullmatch(r"[a-f0-9]{64}", declared_audio_hash):
-            fail(f"Scene narration SHA-256 is missing or invalid: {sid}")
-        if declared_audio_hash != sha256_file(audio_path):
-            fail(f"Scene narration SHA-256 mismatch: {sid}")
-        if photo_audio_hash != declared_audio_hash:
-            fail(f"Photo Motion/narration audio hashes differ: {sid}")
-        photo_audio_path = (
-            photo_row.get("audio_path")
-            or photo_row.get("narration_audio")
-        )
-        if not isinstance(photo_audio_path, str) or safe_output(
-            photo_audio_path, f"Photo Motion narration path {sid}", 100
-        ).resolve() != audio_path.resolve():
-            fail(f"Photo Motion/narration audio paths differ: {sid}")
-        measured_audio_duration = probe_audio_duration(audio_path)
-        if abs(measured_audio_duration - declared_duration) > 0.2:
-            fail(f"Scene narration file duration differs from TTS manifest: {sid}")
-
-        declared_duration = audio_row.get(
-            "actual_audio_duration_seconds",
-            audio_row.get("audio_duration", audio_row.get("duration")),
-        )
-        try:
-            declared_duration = float(declared_duration)
-        except (TypeError, ValueError):
-            fail(f"Measured narration duration is missing: {sid}")
-        if not math.isfinite(declared_duration) or declared_duration <= 0:
-            fail(f"Measured narration duration is invalid: {sid}")
-        if (
-            audio_row.get("duration_source") != "ffprobe_measured"
-            and audio_row.get("audio_duration_source") != "ffprobe_measured"
-        ):
-            fail(f"Narration duration is not ffprobe-measured: {sid}")
-        if abs(float(photo_row.get("duration", 0)) - declared_duration) > 0.2:
-            fail(f"Photo Motion/narration duration mismatch: {sid}")
+        if role == "main":
+            if audio_row is None:
+                fail(f"Main Scene TTS audio is missing: {sid}")
+            audio_value = (
+                audio_row.get("audio_path") or audio_row.get("audio_file")
+                or audio_row.get("audio") or audio_row.get("output")
+            )
+            audio_path = safe_output(audio_value, f"Scene narration audio {sid}", 100)
+            if audio_path.suffix.lower() not in AUDIO_SUFFIXES:
+                fail(f"Scene narration is not a supported audio file: {sid}")
+            declared_audio_hash = clean(
+                audio_row.get("audio_sha256") or audio_row.get("sha256")
+            ).lower()
+            photo_audio_hash = clean(photo_row.get("audio_sha256")).lower()
+            if not re.fullmatch(r"[a-f0-9]{64}", declared_audio_hash) or declared_audio_hash != sha256_file(audio_path):
+                fail(f"Scene narration SHA-256 mismatch: {sid}")
+            if photo_audio_hash != declared_audio_hash:
+                fail(f"Photo Motion/narration audio hashes differ: {sid}")
+            photo_audio_path = photo_row.get("audio_path") or photo_row.get("narration_audio")
+            if not isinstance(photo_audio_path, str) or safe_output(
+                photo_audio_path, f"Photo Motion narration path {sid}", 100
+            ).resolve() != audio_path.resolve():
+                fail(f"Photo Motion/narration audio paths differ: {sid}")
+            declared_duration = audio_row.get(
+                "actual_audio_duration_seconds",
+                audio_row.get("audio_duration", audio_row.get("duration")),
+            )
+            try:
+                declared_duration = float(declared_duration)
+            except (TypeError, ValueError):
+                fail(f"Measured narration duration is missing: {sid}")
+            if not math.isfinite(declared_duration) or declared_duration <= 0:
+                fail(f"Measured narration duration is invalid: {sid}")
+            if (
+                audio_row.get("duration_source") != "ffprobe_measured"
+                and audio_row.get("audio_duration_source") != "ffprobe_measured"
+            ):
+                fail(f"Narration duration is not ffprobe-measured: {sid}")
+            if abs(probe_audio_duration(audio_path) - declared_duration) > 0.2:
+                fail(f"Scene narration file duration differs from TTS manifest: {sid}")
+            if abs(float(photo_row.get("duration", 0)) - declared_duration) > 0.2:
+                fail(f"Photo Motion/narration duration mismatch: {sid}")
+            if photo_row.get("source_text_sha256") != audio_row.get("text_sha256"):
+                fail(f"Photo Motion/TTS source text hash mismatch: {sid}")
+            scene_audio_paths.add(audio_path.resolve())
+        else:
+            if audio_row is not None:
+                fail(f"Visual-only role must not have a TTS record: {sid}")
+            if photo_row.get("voiceover_enabled") is not False or clean(photo_row.get("narration")):
+                fail(f"Visual-only role contains narration: {sid}")
+            if photo_row.get("audio_path") not in (None, "") or clean(photo_row.get("audio_sha256")):
+                fail(f"Visual-only role contains TTS audio: {sid}")
+            if not math.isfinite(float(photo_row.get("duration", 0))) or float(photo_row.get("duration", 0)) <= 0:
+                fail(f"Visual-only Scene duration is invalid: {sid}")
 
         try:
             from PIL import Image
@@ -1168,14 +1210,12 @@ def selected_package_files(render: dict) -> list[Path]:
                     fail(f"Scene image dimensions mismatch: {sid}")
         except Exception as exc:
             fail(f"Scene image integrity check failed: {sid}: {exc}")
-
         scene_image_paths.add(image_path.resolve())
-        scene_audio_paths.add(audio_path.resolve())
 
     if len(scene_image_paths) != len(expected_scene_ids):
         fail("Multiple scenes reference the same source image")
-    if len(scene_audio_paths) != len(expected_scene_ids):
-        fail("Multiple scenes reference the same narration audio")
+    if len(scene_audio_paths) != len(expected_main_ids):
+        fail("Main Scenes do not have unique narration audio files")
 
     selected.update(scene_image_paths)
     selected.update(scene_audio_paths)
