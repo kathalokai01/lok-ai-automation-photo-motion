@@ -23,6 +23,7 @@ from input_config import (
 from select_gemini_model import configured_fallbacks
 from llm_provider_client import generate_text as generate_provider_text
 from gemini_api_guard import require_gemini_generation
+from gemini_http import http_status, is_retryable_http_status, retry_after_seconds
 
 ROOT = Path(__file__).resolve().parent.parent
 STORY_FILE = ROOT / "output/story/story.json"
@@ -1024,12 +1025,11 @@ def build_revision_prompt(
 
 
 def retryable_http_error(code: int) -> bool:
-    return code in {408, 425, 429, 500, 502, 503, 504}
+    return is_retryable_http_status(code)
 
 
-def retry_delay(code: int, attempt: int) -> int:
-    base = 12 if code == 429 else 8
-    return min(60, base * (2 ** (attempt - 1)))
+def retry_delay(error: BaseException, attempt: int) -> int:
+    return retry_after_seconds(error, attempt, default_base=12, maximum=120)
 
 
 def request_selected_model(
@@ -1178,10 +1178,10 @@ def generate_part(
                     )
 
                 if retryable and attempt < max_attempts:
-                    status = getattr(exc, "status_code", None)
+                    status = http_status(exc)
                     delay = (
-                        retry_delay(status, attempt)
-                        if status is not None
+                        retry_delay(exc, attempt)
+                        if status == 429
                         else min(30, 5 * (2 ** (attempt - 1)))
                     )
                     log(
