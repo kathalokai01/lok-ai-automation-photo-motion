@@ -113,6 +113,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TTS_VOICE_ID_CHARACTER": "",
     "TTS_PITCH": 1.0,
     "TTS_EMOTION_STRENGTH": 0.65,
+    "MUSIC_GAIN": 0.35,
     "TTS_FALLBACK_ENABLED": True,
     "TTS_FALLBACK_ORDER": ",".join(ALL_TTS_PROVIDERS),
     "TTS_ALLOW_PAID": True,
@@ -1542,6 +1543,24 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         ).strip()
 
     mode = normalize_format(config)
+
+    profile = str(config.get("TTS_PROFILE", "auto")).strip().lower()
+    if profile not in {"auto", "child_friendly", "female_storyteller", "male_storyteller", "character"}:
+        raise ValueError("TTS_PROFILE must be auto, child_friendly, female_storyteller, male_storyteller or character.")
+    config["TTS_PROFILE"] = profile
+    for key, minimum, maximum in (
+        ("TTS_PITCH", 0.85, 1.15),
+        ("TTS_EMOTION_STRENGTH", 0.0, 1.0),
+        ("MUSIC_GAIN", 0.0, 1.0),
+        ("MUSIC_DUCKING_DB", -30.0, 0.0),
+    ):
+        try:
+            numeric = float(config.get(key, DEFAULT_CONFIG.get(key)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be numeric.") from exc
+        if not minimum <= numeric <= maximum:
+            raise ValueError(f"{key} must be between {minimum} and {maximum}.")
+        config[key] = numeric
 
     for key in BOOL_KEYS:
         config[key] = parse_bool(
