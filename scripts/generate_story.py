@@ -31,6 +31,7 @@ from story_length_policy import (
     SHORT_PREFERRED_MAX_WORDS_PER_PART, SHORT_HARD_MAX_WORDS_PER_PART,
     SHORT_FINAL_MERGED_MAX_WORDS,
 )
+from gemini_http import http_status, http_error_body, retry_after_seconds
 from generate_story_plan import (
     build_plan as build_story_plan,
     validate_plan as validate_story_plan,
@@ -877,7 +878,7 @@ def call_model(
                     return parsed
 
                 except urllib.error.HTTPError as exc:
-                    body = exc.read().decode("utf-8", errors="replace")
+                    body = http_error_body(exc, 1000)
                     model_errors.append(f"HTTP {exc.code}: {body[:1000]}")
                     if exc.code not in retryable_http:
                         break
@@ -894,7 +895,11 @@ def call_model(
                         break
 
                 if attempt < len(RETRY_DELAYS):
-                    delay = RETRY_DELAYS[attempt]
+                    delay = (
+                        retry_after_seconds(exc, attempt + 1, default_base=12, maximum=120)
+                        if isinstance(exc, urllib.error.HTTPError) and http_status(exc) == 429
+                        else RETRY_DELAYS[attempt]
+                    )
                     log(
                         f"Transient Gemini failure on {candidate_model}; "
                         f"retrying in {delay}s ({attempt + 1}/{len(RETRY_DELAYS)})."
