@@ -8,6 +8,7 @@ import sys
 import io
 import urllib.error
 from email.message import Message
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -63,6 +64,17 @@ class GeminiHttpFallbackTests(unittest.TestCase):
         headers.add_header("Retry-After", "900")
         error = self._http_error(429, headers=headers)
         self.assertEqual(gemini_http.retry_after_seconds(error, 1), 120)
+
+    def test_retry_after_works_with_direct_requests_response(self):
+        headers = Message()
+        headers.add_header("Retry-After", "31")
+        response = SimpleNamespace(
+            status_code=429,
+            headers=headers,
+            text="Too many requests",
+        )
+        self.assertEqual(gemini_http.http_status(response), 429)
+        self.assertEqual(gemini_http.retry_after_seconds(response, 1), 31)
 
 
 class TTSFallbackHttpTests(unittest.TestCase):
