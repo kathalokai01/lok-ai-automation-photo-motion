@@ -1087,6 +1087,31 @@ def selected_package_files(render: dict) -> list[Path]:
     if not isinstance(photo_rows, list) or not photo_rows:
         fail("Photo Motion manifest has no scene asset references")
 
+    narration_metadata = read_json(OUT / "narration" / "narration.json")
+    for field in ("scenes", "extra_scenes"):
+        records = narration_metadata.get(field, [])
+        if not isinstance(records, list):
+            fail(f"Narration metadata {field} must be a list")
+        for record in records:
+            if not isinstance(record, dict):
+                fail(f"Narration metadata {field} contains an invalid record")
+            profile = record.get("voice_profile")
+            if not isinstance(profile, dict) or not clean(profile.get("profile_id")):
+                fail(f"{clean(record.get('scene_id'))}: voice profile is missing from package metadata")
+            if not re.fullmatch(r"[0-9a-f]{64}", clean(profile.get("fingerprint"))):
+                fail(f"{clean(record.get('scene_id'))}: voice profile fingerprint is invalid")
+
+    music_metadata = read_json(FLOW_MANIFEST)
+    compositions = music_metadata.get("role_compositions", {})
+    if compositions and not isinstance(compositions, dict):
+        fail("Music role composition metadata is invalid")
+    for role, composition in (compositions.items() if isinstance(compositions, dict) else []):
+        if not isinstance(composition, dict):
+            fail(f"Music role composition {role} is invalid")
+        provider = clean(composition.get("provider") or "lyria").lower()
+        if provider not in {"lyria", "eleven_music", "stable_audio", "local"}:
+            fail(f"Unsupported music provider in package: {provider}")
+
     audio_data = read_json(AUDIO)
     audio_rows = (
         audio_data.get("jobs")
