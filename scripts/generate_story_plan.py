@@ -31,7 +31,7 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v18-locked-part-and-scene-text"
+VERSION = "story-plan-v18-locked-part-and-scene-text-visual-only-extra-role-narration"
 MAPPING_VERSION = 18
 
 MAX_PARTS = 1000
@@ -563,6 +563,11 @@ def _make_extra_scene(
         "beat_description": purposes[role],
         "purpose": purposes[role],
         "story_anchor": anchor,
+        "narration": "",
+        "voiceover_enabled": False,
+        "narration_source": "visual_only",
+        "source_text_sha256": "",
+        "source_word_count": 0,
         "source_format": format_type,
         "is_final_part": bool(final_part),
         "separate_from_main_scenes": True,
@@ -926,6 +931,14 @@ def validate_plan(
                 )
             if record.get("source_format") != clean_text(format_type).lower():
                 raise RuntimeError(f"Extra Scene format mismatch: {expected_id}.")
+            if clean_text(record.get("narration")):
+                raise RuntimeError(f"Extra Scene narration must be empty: {expected_id}.")
+            if record.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"Extra Scene voiceover must be disabled: {expected_id}.")
+            if record.get("narration_source") != "visual_only":
+                raise RuntimeError(f"Extra Scene must be marked visual_only: {expected_id}.")
+            if record.get("source_text_sha256") or record.get("source_word_count") != 0:
+                raise RuntimeError(f"Extra Scene must not carry narration text metadata: {expected_id}.")
 
             for required_field in (
                 "title", "beat", "beat_description", "purpose",
