@@ -2118,7 +2118,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             )
             if not 0 <= strength <= 0.10:
                 motion_errors.append(
-                    "PHOTO_MOTION_PARALLAX_STRENGTH outside 0-0.10"
+                    "PHOTO_MOTION_PARALLAX_STRENGTH outside 0-0.055"
                 )
         except (TypeError, ValueError):
             strength = None
