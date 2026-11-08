@@ -102,7 +102,8 @@ SPEED = "+0%"                      # -10% slow | +0% normal | +10% fast
 # तीन प्राथमिक मॉडल इसी क्रम में चलेंगे।
 # इनके बाद configured fallback list के शेष मॉडल चलेंगे।
 # Primary में चुना गया मॉडल fallback में दोबारा नहीं चलेगा।
-TTS_MAIN_1 = "elevenlabs"
+# प्राथमिकता: Fish Audio → Gemini TTS → Edge TTS → Piper
+TTS_MAIN_1 = "fish_audio"
 TTS_MAIN_2 = "gemini_tts"
 TTS_MAIN_3 = "edge_tts"
 
