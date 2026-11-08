@@ -30,7 +30,7 @@ SOUND_MANIFEST = ROOT / "output" / "sound_design" / "sound_design_manifest.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-validator-v13-visual-role-scene-timing"
+VERSION = "sfx-validator-v14-all-role-measured-tts-timing"
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 0.20
 SFX_END_MARGIN = 0.08
