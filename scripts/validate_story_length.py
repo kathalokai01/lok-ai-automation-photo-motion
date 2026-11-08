@@ -42,7 +42,7 @@ PLAN_FILE = STORY_DIR / "story_plan.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 REPORT_FILE = STORY_DIR / "story_length_validation.json"
 
-REPORT_VERSION = "story-length-validation-v13-planned-contract"
+REPORT_VERSION = "story-length-validation-v14-natural-boundary-reporting"
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -1015,7 +1015,7 @@ def main() -> int:
             "scenes_expected": sum(actual_counts),
             "scenes_found": len(all_scenes),
             "total_words": total_words,
-            "parts_needing_revision": 0,
+            "parts_needing_revision": sum(\n                1 for row in part_results if row.get("passed") is not True\n            ),
             "structure_errors": boundary_errors,
             "valid": valid,
             "passed": valid,
