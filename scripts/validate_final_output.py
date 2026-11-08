@@ -40,6 +40,8 @@ AI_STORY = OUT / "story" / "ai_story.json"
 STORY_VERIFICATION = OUT / "story" / "story_verification.json"
 PHOTO = OUT / "photo_motion" / "photo_motion_manifest.json"
 AUDIO = OUT / "narration" / "audio_jobs.json"
+NARRATION = OUT / "narration" / "narration.json"
+FLOW_MUSIC = OUT / "music" / "flow_music_manifest.json"
 SOUND = OUT / "sound_design" / "sound_design_manifest.json"
 SFX = OUT / "sound_design" / "sfx_cues.json"
 SFX_VALIDATION = OUT / "sound_design" / "sfx_timing_validation.json"
@@ -1053,6 +1055,23 @@ def validate_narration(
     if seen != set(source_by_id):
         fail("TTS jobs do not cover every Main Scene exactly once")
 
+    narration_doc = read_json(NARRATION)
+    profile_rows = rows_from(narration_doc, "scenes", "extra_scenes", "jobs")
+    if not profile_rows:
+        fail("Narration metadata contains no voice profile records.")
+    for profile_row in profile_rows:
+        profile = profile_row.get("voice_profile")
+        if not isinstance(profile, dict):
+            fail(f"{clean(profile_row.get('scene_id'))}: voice profile metadata is missing.")
+        if clean(profile.get("profile_id")) not in {
+            "child_friendly", "female_storyteller", "male_storyteller", "character"
+        }:
+            fail(f"{clean(profile_row.get('scene_id'))}: unsupported voice profile.")
+        if not re.fullmatch(r"[0-9a-f]{64}", clean(profile.get("fingerprint"))):
+            fail(f"{clean(profile_row.get('scene_id'))}: voice profile fingerprint is invalid.")
+        if not clean(profile.get("speaker_id")):
+            fail(f"{clean(profile_row.get('scene_id'))}: stable speaker identity is missing.")
+
     return result
 
 
@@ -1082,6 +1101,21 @@ def validate_sound_design(
             fail(f"SFX timing validation contains {key}: {value[:5]}")
         if isinstance(value, (int, float)) and value != 0:
             fail(f"SFX timing validation reports {key}={value}")
+
+    music_manifest = read_json(FLOW_MUSIC, optional=True)
+    role_compositions = (
+        music_manifest.get("role_compositions", {})
+        if isinstance(music_manifest, dict) else {}
+    )
+    if role_compositions and not isinstance(role_compositions, dict):
+        fail("Music role compositions must be an object.")
+    allowed_music_providers = {"lyria", "eleven_music", "stable_audio", "local"}
+    for role_name, composition in role_compositions.items():
+        if not isinstance(composition, dict):
+            fail(f"Music composition {role_name} is invalid.")
+        provider = clean(composition.get("provider") or "lyria").lower()
+        if provider not in allowed_music_providers:
+            fail(f"Music composition {role_name} uses unsupported provider {provider}.")
 
     tracks = sound.get("tracks", {})
     if tracks is not None and not isinstance(tracks, (dict, list)):
