@@ -740,7 +740,7 @@ def validate_settings(config: dict) -> dict:
         ).lower(),
         "parallax_enabled": config.get("PHOTO_MOTION_PARALLAX", True),
         "parallax_strength": float(
-            config.get("PHOTO_MOTION_PARALLAX_STRENGTH", 0.032)
+            config.get("PHOTO_MOTION_PARALLAX_STRENGTH", 0.045)
         ),
         "preserve_subject": config.get(
             "PHOTO_MOTION_PRESERVE_SUBJECT", True
@@ -768,7 +768,7 @@ def validate_settings(config: dict) -> dict:
 
     if not math.isfinite(strength) or not 0.0 <= strength <= 0.055:
         raise RuntimeError(
-            "PHOTO_MOTION_PARALLAX_STRENGTH must be between 0 and 0.04."
+            "PHOTO_MOTION_PARALLAX_STRENGTH must be between 0 and 0.055."
         )
 
     return settings
