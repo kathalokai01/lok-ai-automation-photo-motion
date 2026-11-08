@@ -822,19 +822,19 @@ def validate_ai_story(
                         f"Part {part_number} {role} scene ID mismatch."
                     )
 
-                narration = record.get("narration", "")
-                if not isinstance(narration, str) or narration.strip():
-                    raise RuntimeError(
-                        f"{expected_id}: visual-only extra role must have empty narration."
-                    )
-                if record.get("voiceover_enabled") is not False:
-                    raise RuntimeError(
-                        f"{expected_id}: extra role voiceover must be disabled."
-                    )
-                if record.get("narration_source") != "visual_only":
-                    raise RuntimeError(
-                        f"{expected_id}: extra role must be visual_only."
-                    )
+                narration = clean_narration(
+                    record.get("narration"),
+                    expected_id,
+                )
+                validate_sentence_integrity(narration, expected_id)
+                if len(narration.split()) < 8:
+                    raise RuntimeError(f"{expected_id}: extra-role narration is too short.")
+                if record.get("voiceover_enabled") is not True:
+                    raise RuntimeError(f"{expected_id}: extra-role voiceover must be enabled.")
+                if record.get("narration_source") != "ai_generated_role_narration":
+                    raise RuntimeError(f"{expected_id}: extra-role narration source is invalid.")
+                if record.get("source_text_sha256") != text_sha256(narration):
+                    raise RuntimeError(f"{expected_id}: extra-role narration hash mismatch.")
 
     declared = story.get("actual_scene_counts")
     if declared is not None and (
