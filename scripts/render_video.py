@@ -860,14 +860,16 @@ def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash
                 raise RuntimeError(f"SFX cue measured narration duration mismatch: {sid}")
             duration = audio_row["duration"]
         else:
-            if cue.get("timing_basis") != "visual_scene_duration":
-                raise RuntimeError(f"SFX cue visual timing basis mismatch: {sid}")
-            if cue.get("narration_sha256", "") or cue.get("narration_file") is not None:
-                raise RuntimeError(f"SFX cue visual-only role has narration mapping: {sid}")
-            declared_duration = finite_number(cue.get("scene_duration_seconds"), f"SFX visual Scene duration {sid}", minimum=0.01)
-            if abs(declared_duration - scene_row["duration"]) > 0.15:
-                raise RuntimeError(f"SFX visual Scene duration mismatch: {sid}")
-            duration = scene_row["duration"]
+            if cue.get("timing_basis") != "measured_tts_audio_duration":
+                raise RuntimeError(f"SFX cue narrated-role timing basis mismatch: {sid}")
+            if cue.get("narration_sha256") != audio_row["audio_sha256"]:
+                raise RuntimeError(f"SFX cue narrated-role audio hash mismatch: {sid}")
+            if cue.get("narration_file") != relative(audio_row["audio"]):
+                raise RuntimeError(f"SFX cue narrated-role audio path mismatch: {sid}")
+            declared_duration = finite_number(cue.get("narration_duration_seconds"), f"SFX narrated-role duration {sid}", minimum=0.01)
+            if abs(declared_duration - audio_row["duration"]) > 0.15:
+                raise RuntimeError(f"SFX narrated-role duration mismatch: {sid}")
+            duration = audio_row["duration"]
         if start >= duration:
             raise RuntimeError(f"SFX cue starts outside narration: {sid}")
 
