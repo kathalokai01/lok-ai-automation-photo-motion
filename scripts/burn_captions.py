@@ -42,7 +42,7 @@ PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 ALIGNMENT_CACHE = CAPTION_DIR / "word_alignment_cache.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v61-main-only-voiceover-captions"
+VERSION = "burn-captions-v62-all-role-voiceover-captions"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 1000
 FPS_TOLERANCE = 0.03
@@ -408,20 +408,19 @@ def load_caption_map(part_numbers, scene_counts):
 
     mapping = {}
 
-    for row in rows_from(data, "captions", "scenes"):
+    caption_rows = rows_from(data, "captions", "scenes")
+    extra_caption_rows = rows_from(data, "extra_captions")
+    for row in caption_rows + extra_caption_rows:
         if not isinstance(row, dict):
             raise RuntimeError("Invalid caption record")
 
         role = normalize_role(row)
 
-        if role != "main":
-            continue
-
         try:
             part = int(row["part"])
-            scene = int(row.get("scene", row.get("local_scene", 0)))
+            scene = int(row.get("scene") or row.get("local_scene") or 0)
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("Invalid main caption part/scene") from exc
+            raise RuntimeError("Invalid caption part/scene") from exc
 
         text = clean_text(
             row.get("text")
@@ -432,10 +431,11 @@ def load_caption_map(part_numbers, scene_counts):
         if not text:
             raise RuntimeError(f"Empty caption for {(part, scene)}")
 
-        key = (part, scene)
+        key = (part, scene) if role == "main" else str(row.get("scene_id") or "").strip()
 
-        if key in mapping:
-            raise RuntimeError(f"Duplicate main caption {key}")
+        target = mapping if role == "main" else extras
+        if key in target:
+            raise RuntimeError(f"Duplicate caption mapping {key}")
 
         declared_hash = row.get("caption_sha256")
         actual_hash = sha256_text(text)
@@ -447,7 +447,7 @@ def load_caption_map(part_numbers, scene_counts):
         if len(source_text_hash) != 64 or any(ch not in "0123456789abcdef" for ch in source_text_hash):
             raise RuntimeError(f"Caption source text hash is invalid: {key}")
 
-        mapping[key] = {
+        target[key] = {
             "text": text,
             "language": clean_text(
                 row.get("caption_language") or data.get("mode") or "hindi"
@@ -470,9 +470,13 @@ def load_caption_map(part_numbers, scene_counts):
             f"extra={sorted(set(mapping)-expected)}"
         )
 
-    if rows_from(data, "extra_captions"):
-        raise RuntimeError("Visual-only Hook/Suspense/Resolution cannot have captions.")
-    extras = {}
+    expected_extra_ids = {
+        f"part_{part:02d}_{role}"
+        for part in part_numbers
+        for role in (("hook", "suspense") if part < part_numbers[-1] else ("hook", "resolution"))
+    }
+    if set(extras) != expected_extra_ids:
+        raise RuntimeError("Hook/Suspense/Resolution caption mapping is incomplete.")
 
     return mapping, extras, data
 
@@ -531,13 +535,9 @@ def load_audio_map():
             raise RuntimeError(f"Invalid TTS part/scene: {sid}") from exc
 
         role = normalize_role(row)
-        if role != "main":
-            raise RuntimeError(f"{sid}: TTS manifest must contain Main narration only.")
-
         if role == "main" and scene < 1:
             raise RuntimeError(f"Invalid Main audio scene number: {sid}")
-
-        if role != "main" and scene not in {0, None}:
+        if role != "main" and scene != 0:
             raise RuntimeError(f"Extra role has Main scene number: {sid}")
 
         chunks = []
@@ -1763,8 +1763,13 @@ def validate_manifest_role_sets(
             for scene in range(1, scene_counts[part] + 1)
         )
 
-    if set(narration_by_id) != expected_main_ids:
-        raise RuntimeError("TTS manifest must map Main Scenes only.")
+    expected_all_audio_ids = set(expected_main_ids) | {
+        f"part_{part:02d}_{role}"
+        for part in part_numbers
+        for role in (("hook", "suspense") if part < part_numbers[-1] else ("hook", "resolution"))
+    }
+    if set(narration_by_id) != expected_all_audio_ids:
+        raise RuntimeError("TTS manifest must map Hook, Main, Suspense and Resolution narration.")
     if set(render_by_id) != expected_render_ids:
         raise RuntimeError(
             "Rendered visual Scene IDs differ from the selected plan: "
@@ -1774,15 +1779,14 @@ def validate_manifest_role_sets(
 
     for sid, audio in narration_by_id.items():
         row = render_by_id[sid]
-        if row["part"] != audio["part"] or row["role"] != "main" or row["local_scene"] != audio["scene"]:
-            raise RuntimeError(f"{sid}: Main narration/render mapping mismatch.")
+        if row["part"] != audio["part"] or row["role"] != audio["role"]:
+            raise RuntimeError(f"{sid}: narration/render role mapping mismatch.")
+        if row["role"] == "main" and row["local_scene"] != audio["scene"]:
+            raise RuntimeError(f"{sid}: Main narration/render scene mapping mismatch.")
         if row.get("source_text_sha256") != audio["text_sha256"]:
-            raise RuntimeError(f"{sid}: rendered Main source text hash mismatch.")
-
-    for sid, row in render_by_id.items():
-        if row["role"] != "main":
-            if row.get("voiceover_enabled") is not False or row.get("narration_source") != "visual_only":
-                raise RuntimeError(f"{sid}: Hook/Suspense/Resolution must remain visual-only.")
+            raise RuntimeError(f"{sid}: rendered narration source text hash mismatch.")
+        if row.get("voiceover_enabled") is not True:
+            raise RuntimeError(f"{sid}: rendered narration voiceover is disabled.")
         raise RuntimeError(
             "Rendered role/scene IDs do not match the selected Part/Scene plan: "
             f"missing={sorted(expected_ids-set(render_by_id))[:15]}; "
