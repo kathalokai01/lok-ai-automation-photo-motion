@@ -710,8 +710,8 @@ def validate_job_metadata(
         raise RuntimeError("Prepared manifest Scene ID order does not match jobs.")
     main_count = sum(item["role"] == "main" for item in prepared)
     visual_only_count = 0
-    if metadata.get("pending_audio_measurement_count") != 0 or metadata.get("measured_audio_count") != main_count:
-        raise RuntimeError("Photo Motion preparation metadata does not confirm measured Main TTS.")
+    if metadata.get("pending_audio_measurement_count") != 0 or metadata.get("measured_audio_count") != len(prepared):
+        raise RuntimeError("Photo Motion preparation metadata does not confirm measured TTS for every role.")
     if metadata.get("visual_only_scene_count") != visual_only_count:
         raise RuntimeError("Photo Motion visual-only Scene count mismatch.")
 def validate_output_dimensions(mode: str) -> tuple[int, int]:
@@ -1475,8 +1475,8 @@ def build_manifest(
         "scenes_max": settings["scenes_max"],
         "actual_scene_counts": settings["actual_scene_counts"],
         "expected_scene_count": len(prepared),
-        "measured_audio_count": main_count,
-        "visual_only_scene_count": len(prepared) - main_count,
+        "measured_audio_count": len(prepared),
+        "visual_only_scene_count": 0,
         "completed_count": sum(row.get("status") == "completed" for row in rows),
         "total_scenes": len(prepared),
         "scene_role_counts": {
