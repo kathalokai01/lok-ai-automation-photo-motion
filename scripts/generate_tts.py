@@ -20,10 +20,12 @@ import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from gemini_http import http_status, http_error_body, retry_after_seconds
 from input_config import (
     load_and_validate,
     get_selected_parts,
@@ -216,6 +218,22 @@ def run_command(
     return result
 
 
+class TTSProviderHTTPError(RuntimeError):
+    """HTTP failure retaining status, response body and retry headers."""
+
+    def __init__(self, status, reason, body="", headers=None):
+        self.code = int(status)
+        self.headers = headers
+        self.response = SimpleNamespace(
+            status_code=self.code,
+            headers=headers,
+            text=str(body or ""),
+        )
+        super().__init__(
+            f"Provider HTTP {self.code}: {reason}: {str(body or '')[:1000]}"
+        )
+
+
 def request_bytes(
     url: str,
     headers: dict | None = None,
@@ -258,19 +276,18 @@ def request_bytes(
             return data, content_type
 
     except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403}:
-            reason = "authentication_or_permission"
-        elif exc.code == 402:
-            reason = "payment_required"
-        elif exc.code == 429:
-            reason = "quota_or_rate_limit"
-        elif exc.code >= 500:
-            reason = "provider_server_error"
-        else:
-            reason = "provider_request_rejected"
-
-        raise RuntimeError(
-            f"Provider HTTP {exc.code}: {reason}"
+        status = int(exc.code)
+        error_body = http_error_body(exc, 1500)
+        reason = (
+            "authentication_or_permission" if status in {401, 403}
+            else "payment_required" if status == 402
+            else "rate_limit_or_quota" if status == 429
+            else "model_unavailable" if status == 404
+            else "provider_server_error" if status >= 500
+            else "provider_request_rejected"
+        )
+        raise TTSProviderHTTPError(
+            status, reason, error_body, exc.headers
         ) from None
 
     except urllib.error.URLError:
@@ -581,25 +598,34 @@ def provider_available(
 
 
 def classify_provider_error(error: Exception) -> str:
-    message = str(error).lower()
+    status = http_status(error)
+    message = (str(error) + " " + http_error_body(error, 1500)).lower()
 
-    if "http 401" in message or "http 403" in message:
+    if status in {401, 403} or "invalid api key" in message:
         return "authentication_or_permission"
 
-    if "http 402" in message:
+    if status == 402 or any(term in message for term in (
+        "payment required", "billing", "insufficient credit",
+        "insufficient funds", "credit balance", "account suspended",
+    )):
         return "payment_required"
 
-    if "http 429" in message:
-        return "quota_or_rate_limit"
+    if status == 404:
+        return "model_unavailable"
+
+    if status == 429:
+        rate_limited = any(term in message for term in (
+            "rate limit", "too many requests", "requests per minute",
+            "requests per second", "per minute", "per second",
+        ))
+        quota_exhausted = any(term in message for term in (
+            "quota exceeded", "daily quota", "monthly quota",
+            "resource_exhausted", "resource exhausted",
+        ))
+        return "rate_limit" if rate_limited or not quota_exhausted else "quota_or_billing"
 
     if "quota" in message or "billing" in message:
         return "quota_or_billing"
-
-    if (
-        "payment" in message
-        or "insufficient credit" in message
-    ):
-        return "payment_required"
 
     return "transient_or_unknown"
 
@@ -884,8 +910,8 @@ def synthesize_provider(
         result = request_json(
             "https://generativelanguage.googleapis.com/"
             "v1beta/models/"
-            f"{model}:generateContent?key={key}",
-            {},
+            f"{model}:generateContent",
+            {"x-goog-api-key": key},
             payload,
         )
 
@@ -893,19 +919,30 @@ def synthesize_provider(
             parts = result["candidates"][0]["content"]["parts"]
             item = next(
                 part for part in parts
-                if isinstance(part.get("inlineData"), dict)
+                if isinstance(part, dict)
+                and (
+                    isinstance(part.get("inlineData"), dict)
+                    or isinstance(part.get("inline_data"), dict)
+                )
             )
-            pcm = base64.b64decode(
-                item["inlineData"]["data"],
+            inline = item.get("inlineData") or item.get("inline_data")
+            audio_data = base64.b64decode(
+                inline["data"],
                 validate=True,
             )
+            mime_type = str(
+                inline.get("mimeType") or inline.get("mime_type") or ""
+            ).lower()
 
         except Exception as exc:
             raise RuntimeError(
                 "Gemini TTS returned no valid audio."
             ) from exc
 
-        return pcm_to_mp3(pcm, output_path, 24000)
+        if "wav" in mime_type or "mpeg" in mime_type or "mp3" in mime_type:
+            return write_audio_bytes(output_path, audio_data)
+
+        return pcm_to_mp3(audio_data, output_path, 24000)
 
     if provider == "elevenlabs":
         key = os.getenv(
@@ -1764,17 +1801,30 @@ def synthesize_chunk_with_fallback(
                 if classification in {
                     "authentication_or_permission",
                     "payment_required",
-                    "quota_or_rate_limit",
                     "quota_or_billing",
                 }:
                     if provider in BILLABLE_PROVIDERS:
                         blocked_paid_providers.add(provider)
                     break
 
+                if classification == "model_unavailable":
+                    break
+
+                if classification == "rate_limit":
+                    if attempt < max_retries:
+                        delay = retry_after_seconds(
+                            exc, attempt, default_base=12, maximum=120
+                        )
+                        log(
+                            f"TTS provider {provider} rate-limited; "
+                            f"retrying in {delay}s."
+                        )
+                        time.sleep(delay)
+                        continue
+                    break
+
                 if attempt < max_retries:
-                    time.sleep(
-                        min(2 ** (attempt - 1), 12)
-                    )
+                    time.sleep(min(2 ** (attempt - 1), 12))
 
     raise RuntimeError(
         "All configured TTS providers failed for a narration chunk. "
