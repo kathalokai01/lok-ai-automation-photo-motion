@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v18-locked-part-and-scene-text-visual-only-extra-role-narration"
-MAPPING_VERSION = 18
+VERSION = "story-plan-v19-extra-role-narration-pending-ai-generation"
+MAPPING_VERSION = 19
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -565,7 +565,7 @@ def _make_extra_scene(
         "story_anchor": anchor,
         "narration": "",
         "voiceover_enabled": False,
-        "narration_source": "visual_only",
+        "narration_source": "pending_ai_narration",
         "source_text_sha256": "",
         "source_word_count": 0,
         "source_format": format_type,
@@ -932,13 +932,13 @@ def validate_plan(
             if record.get("source_format") != clean_text(format_type).lower():
                 raise RuntimeError(f"Extra Scene format mismatch: {expected_id}.")
             if clean_text(record.get("narration")):
-                raise RuntimeError(f"Extra Scene narration must be empty: {expected_id}.")
+                raise RuntimeError(f"Extra Scene narration must remain pending before AI generation: {expected_id}.")
             if record.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"Extra Scene voiceover must be disabled: {expected_id}.")
-            if record.get("narration_source") != "visual_only":
-                raise RuntimeError(f"Extra Scene must be marked visual_only: {expected_id}.")
+                raise RuntimeError(f"Extra Scene voiceover must remain disabled before AI generation: {expected_id}.")
+            if record.get("narration_source") != "pending_ai_narration":
+                raise RuntimeError(f"Extra Scene must be marked pending_ai_narration: {expected_id}.")
             if record.get("source_text_sha256") or record.get("source_word_count") != 0:
-                raise RuntimeError(f"Extra Scene must not carry narration text metadata: {expected_id}.")
+                raise RuntimeError(f"Pending extra Scene must not carry narration text metadata: {expected_id}.")
 
             for required_field in (
                 "title", "beat", "beat_description", "purpose",
