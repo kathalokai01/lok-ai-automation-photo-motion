@@ -282,7 +282,7 @@ def _balanced_unit_partition(
                         continue
                     if amount < SHORT_MIN and not allow_final_short:
                         continue
-                elif not SHORT_MIN <= amount <= SHORT_HARD_MAX:
+                elif not SHORT_MIN <= amount <= SHORT_MAX:
                     continue
 
                 segment_cost = abs(amount - SHORT_TARGET)
