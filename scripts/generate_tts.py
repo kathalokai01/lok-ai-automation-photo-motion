@@ -909,8 +909,8 @@ def synthesize_provider(
             "contents": [
                 {"parts": [{
                     "text": (
-                        f"Say this in a {str((voice_profile or {}).get('emotion') or 'neutral')} "
-                        f"storytelling tone with clear Hindi pronunciation: {text}"
+                        f"Read with this delivery direction: {str((voice_profile or {}).get('emotion_instruction') or (voice_profile or {}).get('emotion') or 'neutral')}. "
+                        f"Keep the Hindi pronunciation clear and say only the story text: {text}"
                         if voice_profile else text
                     )
                 }]}
