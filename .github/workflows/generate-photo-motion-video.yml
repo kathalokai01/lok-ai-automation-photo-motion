@@ -686,7 +686,7 @@ jobs:
           print("VERIFIED HINDI FONT:", selected["family"])
           PY
 
-      - name: Test zero-cost LLM provider safeguards
+      - name: Test configured paid and free LLM provider fallback
         shell: bash
         run: |
           set -euo pipefail
