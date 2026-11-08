@@ -51,7 +51,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v36-locked-part-text-integrity-language-first-exact-partition-lock"
+VERSION = "story-builder-v37-final-short-tail-merge-239-natural-scene-partition"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -495,6 +495,7 @@ def _partition_short_story(
     ):
         variants.append(expanded_units)
 
+    # First prefer the strict 120-150 word range for every Part.
     for units_source in variants:
         for part_count in candidates:
             units = list(units_source)
@@ -524,6 +525,41 @@ def _partition_short_story(
 
             if groups is not None:
                 return groups, part_count, False
+
+    # If the strict partition leaves a short tail, keep all complete story
+    # units in order and absorb that tail into the final Part. The final
+    # combined Part may contain up to 239 words; no sentence is discarded.
+    for units_source in variants:
+        for part_count in candidates:
+            units = list(units_source)
+            required = part_count * scenes_min
+
+            if len(units) < required:
+                try:
+                    units = _expand_to_scene_minimum(
+                        units,
+                        required,
+                    )
+                except RuntimeError as exc:
+                    last_errors.append(str(exc))
+                    continue
+
+            if len(units) > part_count * scenes_max:
+                continue
+
+            groups = _balanced_unit_partition(
+                units,
+                part_count,
+                scenes_min,
+                scenes_max,
+                allow_final_short=False,
+                final_max=SHORT_MERGED_MAX,
+            )
+
+            if groups is not None:
+                counts = [word_count(group) for group in groups]
+                if counts[-1] > SHORT_MAX and counts[-1] <= SHORT_MERGED_MAX:
+                    return groups, part_count, True
 
     merged_candidates = [
         number for number in range(max(1, minimum_parts - 1), preferred_count)
