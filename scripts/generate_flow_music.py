@@ -912,6 +912,8 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                     fallback_errors.append(f"{provider}: paid music permission disabled")
                     continue
                 try:
+                    if truthy(config.get("MUSIC_ALLOW_PAID", False), False):
+                        os.environ["MUSIC_ALLOW_PAID"] = "true"
                     generate_music(
                         provider,
                         prompts[role],
