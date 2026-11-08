@@ -994,15 +994,17 @@ def validate_narration(
     audio_data = read_json(AUDIO)
     audio_rows = rows_from(audio_data, "jobs", "audio_jobs", "scenes")
     story = read_json(STORY)
-    source_by_id = {
-        clean(scene.get("scene_id")): scene
-        for part in story.get("parts", [])
-        for scene in (
-            list(part.get("scenes", []))
-            + list(part.get("extra_scenes", []))
+    source_by_id = {}
+    for part in story.get("parts", []):
+        candidates = list(part.get("scenes", []))
+        candidates.extend(
+            part.get(field)
+            for field in ("hook_scene", "suspense_scene", "resolution_scene")
+            if isinstance(part.get(field), dict)
         )
-        if isinstance(scene, dict)
-    }
+        for scene in candidates:
+            if isinstance(scene, dict) and clean(scene.get("scene_id")):
+                source_by_id[clean(scene.get("scene_id"))] = scene
     seen = set()
     for row in audio_rows:
         sid = clean(row.get("scene_id") or row.get("job_id"))
