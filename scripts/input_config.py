@@ -102,6 +102,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TTS_MAIN_1": "fish_audio",
     "TTS_MAIN_2": "gemini_tts",
     "TTS_MAIN_3": "edge_tts",
+    "TTS_PROFILE": "auto",
+    "CHARACTER_VOICES": True,
+    "TTS_EMOTION_CONTROL": True,
+    "TTS_CHILD_FRIENDLY": True,
+    "TTS_VOICE_ID": "",
+    "TTS_VOICE_ID_CHILD_FRIENDLY": "",
+    "TTS_VOICE_ID_FEMALE_STORYTELLER": "",
+    "TTS_VOICE_ID_MALE_STORYTELLER": "",
+    "TTS_VOICE_ID_CHARACTER": "",
+    "TTS_PITCH": 1.0,
+    "TTS_EMOTION_STRENGTH": 0.65,
+    "MUSIC_PROVIDER_ORDER": "lyria,eleven_music,stable_audio,local",
+    "MUSIC_FALLBACK_ENABLED": True,
+    "MUSIC_ALLOW_PAID": False,
+    "MUSIC_GENRE": "original cinematic score",
+    "MUSIC_INTENSITY": "evolving",
+    "MUSIC_SCENE_ADAPTIVE": True,
+    "MUSIC_DUCKING": True,
+    "MUSIC_DUCKING_DB": -10.0,
     "TTS_FALLBACK_ENABLED": True,
     "TTS_FALLBACK_ORDER": ",".join(ALL_TTS_PROVIDERS),
     "TTS_ALLOW_PAID": True,
@@ -157,6 +176,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     "MUSIC": True,
     "MUSIC_STYLE": "cinematic",
+    "MUSIC_PROVIDER_ORDER": "lyria,eleven_music,stable_audio,local",
+    "MUSIC_FALLBACK_ENABLED": True,
+    "MUSIC_ALLOW_PAID": False,
+    "MUSIC_GENRE": "original cinematic score",
+    "MUSIC_INTENSITY": "evolving",
+    "MUSIC_SCENE_ADAPTIVE": True,
+    "MUSIC_DUCKING": True,
+    "MUSIC_DUCKING_DB": -10.0,
     "SFX": True,
     "AMBIENT_SOUND": True,
     "TRANSITIONS": "cinematic",
@@ -1085,6 +1112,29 @@ def _split_provider_list(raw: Any) -> list[str]:
             result.append(text_value)
     return result
 
+
+def get_music_provider_order(config: dict[str, Any]) -> list[str]:
+    """Validate and return the configured music provider order."""
+    allowed = {"lyria", "eleven_music", "stable_audio", "local"}
+    raw = config.get("MUSIC_PROVIDER_ORDER", "lyria,eleven_music,stable_audio,local")
+    if isinstance(raw, (list, tuple)):
+        values = raw
+    else:
+        values = str(raw or "").split(",")
+    order: list[str] = []
+    for item in values:
+        provider = str(item).strip().lower().replace("-", "_").replace(" ", "_")
+        if not provider:
+            continue
+        if provider not in allowed:
+            raise ValueError(f"Unsupported music provider {item!r}; allowed: {', '.join(sorted(allowed))}")
+        if provider not in order:
+            order.append(provider)
+    if not order:
+        raise ValueError("MUSIC_PROVIDER_ORDER must contain at least one provider.")
+    config["MUSIC_PROVIDER_ORDER"] = ",".join(order)
+    return order
+
 def get_tts_provider_order(config: dict[str, Any]) -> list[str]:
     """Return three primary providers followed by configured fallbacks."""
 
@@ -1616,6 +1666,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     _validate_general_settings(config)
 
     config.update(get_image_provider_settings(config))
+    get_music_provider_order(config)
     return config
 
 
