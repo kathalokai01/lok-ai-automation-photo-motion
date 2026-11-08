@@ -443,12 +443,17 @@ def load_caption_map(part_numbers, scene_counts):
         if declared_hash and declared_hash != actual_hash:
             raise RuntimeError(f"Caption checksum mismatch: {key}")
 
+        source_text_hash = clean_text(row.get("source_text_sha256"))
+        if len(source_text_hash) != 64 or any(ch not in "0123456789abcdef" for ch in source_text_hash):
+            raise RuntimeError(f"Caption source text hash is invalid: {key}")
+
         mapping[key] = {
             "text": text,
             "language": clean_text(
                 row.get("caption_language") or data.get("mode") or "hindi"
             ),
             "sha256": actual_hash,
+            "source_text_sha256": source_text_hash,
             "scene_id": str(row.get("scene_id") or "").strip(),
         }
 
