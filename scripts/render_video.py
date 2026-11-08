@@ -523,6 +523,20 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
             raise RuntimeError(f"Photo Motion {sid} dimensions mismatch")
         validate_fps(info, fps, sid)
 
+        voiceover_enabled = row.get("voiceover_enabled")
+        narration_source = row.get("narration_source")
+        source_text_hash = str(row.get("source_text_sha256") or "")
+        if role == "main":
+            if voiceover_enabled is not True or narration_source != "locked_part_text":
+                raise RuntimeError(f"{sid}: Main voiceover metadata is invalid.")
+            if len(source_text_hash) != 64 or any(ch not in "0123456789abcdef" for ch in source_text_hash):
+                raise RuntimeError(f"{sid}: Main source text fingerprint is invalid.")
+        else:
+            if voiceover_enabled is not False or narration_source != "visual_only":
+                raise RuntimeError(f"{sid}: extra role must be visual-only.")
+            if row.get("audio_path") not in (None, "") or row.get("audio_sha256") not in ("", None):
+                raise RuntimeError(f"{sid}: visual-only role has unexpected TTS audio.")
+
         by_id[sid] = {
             "scene_id": sid,
             "part": part,
@@ -532,6 +546,10 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
             "video": video,
             "video_sha256": checksum,
             "duration": info["duration"],
+            "audio_sha256": str(row.get("audio_sha256") or ""),
+            "voiceover_enabled": voiceover_enabled,
+            "narration_source": narration_source,
+            "source_text_sha256": source_text_hash,
             "width": width,
             "height": height,
             "fps": fps,
@@ -984,9 +1002,9 @@ def reusable_scene(output, old_row, signature, width, height, fps, duration):
 
 
 def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, height, fps):
+    duration = audio["duration"] if audio else photo["duration"]
     inputs = [
         "-stream_loop", "-1", "-i", str(photo["video"]),
-        "-i", str(audio["audio"]),
     ]
     filters = [
         (
@@ -994,30 +1012,29 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
             "force_original_aspect_ratio=increase,"
             f"crop={width}:{height},setsar=1,fps={fps},"
             "format=yuv420p[v]"
-        ),
-        (
-            f"[1:a]aresample={AUDIO_RATE},"
+        )
+    ]
+    mix_labels = []
+    input_index = 1
+
+    if audio:
+        inputs.extend(["-i", str(audio["audio"])])
+        filters.append(
+            f"[{input_index}:a]aresample={AUDIO_RATE},"
             f"volume={NARRATION_GAIN:.3f},"
             "asetpts=PTS-STARTPTS[narr]"
-        ),
-    ]
+        )
+        mix_labels.append("[narr]")
+        input_index += 1
 
-    duration = audio["duration"]
     bed_labels = []
-    input_index = 2
-
-    for category, gain in (
-        ("music", MUSIC_GAIN),
-        ("ambient", AMBIENT_GAIN),
-    ):
+    for category, gain in (("music", MUSIC_GAIN), ("ambient", AMBIENT_GAIN)):
         track = sound_assets.get(category)
         if not track:
             continue
-
         offset = timeline_offset % track["duration"]
         inputs.extend([
-            "-stream_loop", "-1",
-            "-ss", f"{offset:.4f}",
+            "-stream_loop", "-1", "-ss", f"{offset:.4f}",
             "-i", str(track["path"]),
         ])
         label = f"bed{input_index}"
@@ -1033,14 +1050,27 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         bed_labels.append(f"[{label}]")
         input_index += 1
 
+    if bed_labels:
+        filters.append(
+            "".join(bed_labels)
+            + f"amix=inputs={len(bed_labels)}:duration=longest:normalize=0,"
+            "volume=1.0[bed]"
+        )
+        if audio:
+            filters.append(
+                "[bed][narr]sidechaincompress="
+                "threshold=0.025:ratio=5:attack=180:release=700:"
+                "makeup=1[ducked]"
+            )
+            mix_labels.append("[ducked]")
+        else:
+            mix_labels.append("[bed]")
+
     sfx_labels = []
-    for cue_index, cue in enumerate(
-        sound_assets["sfx"].get(photo["scene_id"], [])
-    ):
+    for cue_index, cue in enumerate(sound_assets["sfx"].get(photo["scene_id"], [])):
         usable = min(cue["duration"], duration - cue["start"])
         if usable <= 0:
             continue
-
         inputs.extend(["-i", str(cue["path"])])
         label = f"sfx{cue_index}"
         delay = max(0, int(round(cue["start"] * 1000)))
@@ -1057,25 +1087,22 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         sfx_labels.append(f"[{label}]")
         input_index += 1
 
-    mix_labels = ["[narr]"]
-    if bed_labels:
-        filters.append(
-            "".join(bed_labels)
-            + f"amix=inputs={len(bed_labels)}:duration=longest:normalize=0,"
-            "volume=1.0[bed]"
-        )
-        filters.append(
-            "[bed][narr]sidechaincompress="
-            "threshold=0.025:ratio=5:attack=180:release=700:"
-            "makeup=1[ducked]"
-        )
-        mix_labels.append("[ducked]")
-
     mix_labels.extend(sfx_labels)
+    if not mix_labels:
+        inputs.extend([
+            "-f", "lavfi", "-t", f"{duration:.4f}",
+            "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo",
+        ])
+        filters.append(
+            f"[{input_index}:a]atrim=duration={duration:.4f},"
+            f"aresample={AUDIO_RATE}[silence]"
+        )
+        mix_labels.append("[silence]")
+
     filters.append(
         "".join(mix_labels)
-        + f"amix=inputs={len(mix_labels)}:"
-        "duration=first:dropout_transition=0:normalize=0,"
+        + f"amix=inputs={len(mix_labels)}:duration=first:"
+        "dropout_transition=0:normalize=0,"
         f"alimiter=limit={MASTER_LIMIT:.3f}:level=disabled,"
         f"aresample={AUDIO_RATE}[aout]"
     )
@@ -1089,8 +1116,9 @@ def render_scene(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     if resume and skip_completed:
+        expected_duration = audio["duration"] if audio else photo["duration"]
         cached = reusable_scene(
-            output, old_row, signature, width, height, fps, audio["duration"]
+            output, old_row, signature, width, height, fps, expected_duration
         )
         if cached:
             log("REUSED:", photo["scene_id"])
@@ -1099,6 +1127,7 @@ def render_scene(
     temporary = output.with_name(output.stem + ".rendering.mp4")
     temporary.unlink(missing_ok=True)
 
+    duration = audio["duration"] if audio else photo["duration"]
     inputs, filters = build_audio_filter(
         photo, audio, sound_assets, timeline_offset,
         width, height, fps,
@@ -1109,7 +1138,7 @@ def render_scene(
         "-filter_complex", ";".join(filters),
         "-map", "[v]",
         "-map", "[aout]",
-        "-t", f"{audio['duration']:.4f}",
+        "-t", f"{duration:.4f}",
         "-r", str(fps),
         "-fps_mode", "cfr",
         "-c:v", "libx264",
@@ -1137,10 +1166,8 @@ def render_scene(
                 f"{photo['scene_id']}: rendered dimensions mismatch"
             )
         validate_fps(info, fps, photo["scene_id"])
-        if abs(info["duration"] - audio["duration"]) > DURATION_TOLERANCE:
-            raise RuntimeError(
-                f"{photo['scene_id']}: rendered duration mismatch"
-            )
+        if abs(info["duration"] - duration) > DURATION_TOLERANCE:
+            raise RuntimeError(f"{photo['scene_id']}: rendered duration mismatch")
 
         os.replace(temporary, output)
         return probe(output), sha256_file(output), False
@@ -1233,9 +1260,12 @@ def make_render_row(
         "photo_motion_global_scene": photo["global_scene"],
         "status": "completed",
         "source_photo_motion_video": relative(photo["video"]),
-        "source_audio": relative(audio["audio"]),
+        "source_audio": relative(audio["audio"]) if audio else None,
         "source_photo_sha256": photo["video_sha256"],
-        "source_audio_sha256": audio["audio_sha256"],
+        "source_audio_sha256": audio["audio_sha256"] if audio else "",
+        "voiceover_enabled": bool(audio),
+        "narration_source": "locked_part_text" if audio else "visual_only",
+        "source_text_sha256": photo.get("source_text_sha256", ""),
         "source_rendered_video": relative(output),
         "video": relative(output),
         "output": relative(output),
@@ -1249,7 +1279,7 @@ def make_render_row(
         "captions_burned": False,
         "cache_reused": reused,
         "audio_mix": {
-            "narration": True,
+            "narration": bool(audio),
             "music": bool(sound_assets["music"]),
             "ambient": bool(sound_assets["ambient"]),
             "sfx_count": len(sound_assets["sfx"].get(photo["scene_id"], [])),
@@ -1450,6 +1480,7 @@ def main():
     audio_manifest_hash = sha256_file(AUDIO_MANIFEST)
     sound_assets, sound_data = load_sound_assets(
         part_numbers,
+        photo_by_id,
         audio_by_id,
         mode,
         audio_manifest_hash,
@@ -1472,7 +1503,7 @@ def main():
     for photo in ordered_photos:
         sid = photo["scene_id"]
         timeline_offsets[sid] = total_duration
-        total_duration += audio_by_id[sid]["duration"]
+        total_duration += photo["duration"]
 
     completed = {}
     part_rows = []
@@ -1512,7 +1543,7 @@ def main():
     log("RESOLUTION:", f"{width}x{height}", "FPS:", fps)
     log("MAIN SCENES:", sum(scene_counts.values()))
     log("ALL ROLE CLIPS:", len(ordered_photos))
-    log("MEASURED NARRATION SECONDS:", round(total_duration, 3))
+    log("VISUAL SCENE TIMELINE SECONDS:", round(total_duration, 3))
     log("MUSIC:", bool(sound_assets["music"]))
     log("AMBIENT:", bool(sound_assets["ambient"]))
     log("SFX CUES:", sum(len(items) for items in sound_assets["sfx"].values()))
@@ -1530,7 +1561,11 @@ def main():
             scene_paths = []
             for item in part_photos:
                 sid = item["scene_id"]
-                audio = audio_by_id[sid]
+                audio = audio_by_id.get(sid)
+                if item["role"] == "main" and audio is None:
+                    raise RuntimeError(f"{sid}: Main TTS audio is missing.")
+                if item["role"] != "main" and audio is not None:
+                    raise RuntimeError(f"{sid}: visual-only role unexpectedly has TTS audio.")
                 signature = scene_fingerprint(
                     item,
                     audio,
