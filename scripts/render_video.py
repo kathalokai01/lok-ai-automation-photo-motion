@@ -41,7 +41,7 @@ RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 PRE_CAPTION_VIDEO = VIDEO_DIR / "pre_caption_render.mp4"
 
-VERSION = "render-video-v64-locked-main-visual-role-timeline"
+VERSION = "render-video-v65-all-role-voiceover-timeline"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -532,10 +532,10 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
             if len(source_text_hash) != 64 or any(ch not in "0123456789abcdef" for ch in source_text_hash):
                 raise RuntimeError(f"{sid}: Main source text fingerprint is invalid.")
         else:
-            if voiceover_enabled is not False or narration_source != "visual_only":
-                raise RuntimeError(f"{sid}: extra role must be visual-only.")
-            if row.get("audio_path") not in (None, "") or row.get("audio_sha256") not in ("", None):
-                raise RuntimeError(f"{sid}: visual-only role has unexpected TTS audio.")
+            if voiceover_enabled is not True or narration_source != "ai_generated_role_narration":
+                raise RuntimeError(f"{sid}: narrated extra-role metadata is invalid.")
+            if not row.get("audio_path") or not row.get("audio_sha256"):
+                raise RuntimeError(f"{sid}: narrated extra-role TTS audio is missing.")
 
         by_id[sid] = {
             "scene_id": sid,
@@ -627,12 +627,16 @@ def load_audio_map(parts, scene_counts):
         if part not in parts:
             raise RuntimeError(f"{sid}: narration Part outside selection")
         role = normalize_role(row)
-        if role != "main":
-            raise RuntimeError("TTS manifest must contain Main Scene narration only.")
-        local_scene = positive_int(row.get("scene", row.get("local_scene")), f"{sid} scene number")
-        if local_scene > scene_counts[part]:
-            raise RuntimeError(f"{sid}: narration scene exceeds actual scene count")
-        expected_id = f"part_{part:02d}_scene_{local_scene:02d}"
+        if role == "main":
+            local_scene = positive_int(row.get("scene", row.get("local_scene")), f"{sid} scene number")
+            if local_scene > scene_counts[part]:
+                raise RuntimeError(f"{sid}: narration scene exceeds actual scene count")
+            expected_id = f"part_{part:02d}_scene_{local_scene:02d}"
+        else:
+            local_scene = 0
+            expected_id = f"part_{part:02d}_{role}"
+            if row.get("voiceover_enabled") is not True or row.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{sid}: extra-role narration metadata is invalid.")
         if sid != expected_id:
             raise RuntimeError(f"Narration {sid}: expected canonical ID {expected_id}")
 
@@ -659,7 +663,7 @@ def load_audio_map(parts, scene_counts):
             raise RuntimeError(f"Locked narration text hash mismatch: {sid}")
 
         mapping[sid] = {
-            "scene_id": sid, "part": part, "role": "main",
+            "scene_id": sid, "part": part, "role": role,
             "local_scene": local_scene, "audio": audio,
             "audio_sha256": checksum, "text_sha256": text_hash,
             "text": text_value, "duration": info["duration"],
@@ -670,6 +674,10 @@ def load_audio_map(parts, scene_counts):
         f"part_{part:02d}_scene_{scene:02d}"
         for part in parts
         for scene in range(1, scene_counts[part] + 1)
+    } | {
+        f"part_{part:02d}_{role}"
+        for part in parts
+        for role in (("hook", "suspense") if part < parts[-1] else ("hook", "resolution"))
     }
     if set(mapping) != expected_ids:
         raise RuntimeError(
@@ -681,33 +689,22 @@ def load_audio_map(parts, scene_counts):
 
 
 def validate_photo_audio_pairing(photo_by_id, audio_by_id):
-    expected_main = {sid for sid, photo in photo_by_id.items() if photo["role"] == "main"}
-    if set(audio_by_id) != expected_main:
+    if set(audio_by_id) != set(photo_by_id):
         raise RuntimeError(
-            "TTS jobs must match Main Photo Motion scenes only; "
-            f"missing_audio={sorted(expected_main-set(audio_by_id))}; "
-            f"unexpected_audio={sorted(set(audio_by_id)-expected_main)}"
+            "TTS jobs must match every Photo Motion role; "
+            f"missing_audio={sorted(set(photo_by_id)-set(audio_by_id))}; "
+            f"unexpected_audio={sorted(set(audio_by_id)-set(photo_by_id))}"
         )
     for sid, photo in photo_by_id.items():
-        if photo["role"] == "main":
-            audio = audio_by_id[sid]
-            if (
-                photo["part"] != audio["part"]
-                or photo["role"] != audio["role"]
-                or photo["local_scene"] != audio["local_scene"]
-            ):
-                raise RuntimeError(f"{sid}: Photo Motion/Main narration mapping mismatch.")
-            if photo.get("source_text_sha256") != audio["text_sha256"]:
-                raise RuntimeError(f"{sid}: Photo Motion/TTS text fingerprint mismatch.")
-            if photo.get("audio_sha256") != audio["audio_sha256"]:
-                raise RuntimeError(f"{sid}: Photo Motion/TTS audio fingerprint mismatch.")
-            if photo.get("voiceover_enabled") is not True:
-                raise RuntimeError(f"{sid}: Main voiceover must be enabled.")
-        else:
-            if photo.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{sid}: visual-only role voiceover must be disabled.")
-            if photo.get("narration_source") != "visual_only":
-                raise RuntimeError(f"{sid}: visual-only role metadata is invalid.")
+        audio = audio_by_id[sid]
+        if photo["part"] != audio["part"] or photo["role"] != audio["role"] or photo["local_scene"] != audio["local_scene"]:
+            raise RuntimeError(f"{sid}: Photo Motion/TTS role mapping mismatch.")
+        if photo.get("source_text_sha256") != audio["text_sha256"]:
+            raise RuntimeError(f"{sid}: Photo Motion/TTS text fingerprint mismatch.")
+        if photo.get("audio_sha256") != audio["audio_sha256"]:
+            raise RuntimeError(f"{sid}: Photo Motion/TTS audio fingerprint mismatch.")
+        if photo.get("voiceover_enabled") is not True:
+            raise RuntimeError(f"{sid}: role voiceover must be enabled.")
 
 
 def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash):
@@ -1265,7 +1262,9 @@ def make_render_row(
         "source_photo_sha256": photo["video_sha256"],
         "source_audio_sha256": audio["audio_sha256"] if audio else "",
         "voiceover_enabled": bool(audio),
-        "narration_source": "locked_part_text" if audio else "visual_only",
+        "narration_source": (
+            "locked_part_text" if photo["role"] == "main" else "ai_generated_role_narration"
+        ),
         "source_text_sha256": photo.get("source_text_sha256", ""),
         "source_rendered_video": relative(output),
         "video": relative(output),
@@ -1563,10 +1562,8 @@ def main():
             for item in part_photos:
                 sid = item["scene_id"]
                 audio = audio_by_id.get(sid)
-                if item["role"] == "main" and audio is None:
-                    raise RuntimeError(f"{sid}: Main TTS audio is missing.")
-                if item["role"] != "main" and audio is not None:
-                    raise RuntimeError(f"{sid}: visual-only role unexpectedly has TTS audio.")
+                if audio is None:
+                    raise RuntimeError(f"{sid}: TTS audio is missing for role {item['role']}.")
                 signature = scene_fingerprint(
                     item,
                     audio,
