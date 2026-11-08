@@ -376,15 +376,80 @@ jobs:
 
             [ -s "$INPUT_FILE" ] || continue
             [ -s "$PIPELINE_FILE" ] || continue
-            [ -s "$STORY_CODE_FILE" ] || continue
-            [ -s "$CONTEXT_FILE" ] || continue
 
             SAVED_INPUT_HASH="$(tr -d '\r\n' < "$INPUT_FILE")"
             SAVED_PIPELINE_HASH="$(tr -d '\r\n' < "$PIPELINE_FILE")"
-            SAVED_STORY_CODE_HASH="$(tr -d '\r\n' < "$STORY_CODE_FILE")"
 
             [ "$SAVED_INPUT_HASH" = "$CURRENT_INPUT_HASH" ] || continue
+
+            SAVED_STORY_CODE_HASH=""
+            if [ -s "$STORY_CODE_FILE" ]; then
+              SAVED_STORY_CODE_HASH="$(tr -d '\r\n' < "$STORY_CODE_FILE")"
+            fi
+
+            # A corrected story is an independent completed stage. If only
+            # the story partitioning code changed, restore the verified
+            # proofreading checkpoint and let the current code rebuild Parts.
+            if [ "$SAVED_STORY_CODE_HASH" != "$CURRENT_STORY_CODE_HASH" ]; then
+              STORY_CHECKPOINT="$SAVED_OUTPUT/story/story_checkpoint.json"
+              CORRECTED_STORY="$SAVED_OUTPUT/story/corrected_complete_story.txt"
+
+              if [ -s "$STORY_CHECKPOINT" ] && [ -s "$CORRECTED_STORY" ] &&
+                 python - "$STORY_CHECKPOINT" "$CORRECTED_STORY" <<'PY'
+            import json
+            import re
+            import sys
+            from pathlib import Path
+
+            checkpoint_path = Path(sys.argv[1])
+            corrected_path = Path(sys.argv[2])
+
+            try:
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8-sig"))
+                corrected = corrected_path.read_text(encoding="utf-8-sig").strip()
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                raise SystemExit(1)
+
+            proof = checkpoint.get("proofreading")
+            preservation = (
+                proof.get("source_preservation_verification", {})
+                if isinstance(proof, dict) else {}
+            )
+            stored_story = str(checkpoint.get("corrected_complete_story") or "").strip()
+            stored_words = checkpoint.get("corrected_complete_story_word_count")
+
+            if (
+                checkpoint.get("status") != "corrected_story_ready"
+                or not re.fullmatch(r"[0-9a-f]{64}", str(checkpoint.get("source_fingerprint", "")))
+                or not corrected
+                or re.sub(r"\s+", " ", corrected) != re.sub(r"\s+", " ", stored_story)
+                or not isinstance(stored_words, int)
+                or stored_words != len(re.findall(r"\S+", corrected))
+                or not isinstance(proof, dict)
+                or proof.get("complete_story_reviewed") is not True
+                or preservation.get("passed") is not True
+                or not str(checkpoint.get("final_title") or "").strip()
+            ):
+                raise SystemExit(1)
+            PY
+              then
+                mkdir -p output/story
+                cp -f "$STORY_CHECKPOINT" output/story/story_checkpoint.json
+                cp -f "$CORRECTED_STORY" output/story/corrected_complete_story.txt
+                for name in title_cache.json final_title.txt; do
+                  if [ -s "$SAVED_OUTPUT/story/$name" ]; then
+                    cp -f "$SAVED_OUTPUT/story/$name" "output/story/$name"
+                  fi
+                done
+                echo "Verified corrected-story checkpoint restored from run $RUN_ID; current code will rebuild Parts without repeating proofreading."
+                break
+              fi
+            fi
+
+            [ -s "$STORY_CODE_FILE" ] || continue
+            [ -s "$CONTEXT_FILE" ] || continue
             [ "$SAVED_STORY_CODE_HASH" = "$CURRENT_STORY_CODE_HASH" ] || continue
+
             PIPELINE_MATCH=false
             [ "$SAVED_PIPELINE_HASH" = "$CURRENT_PIPELINE_HASH" ] && PIPELINE_MATCH=true
 
