@@ -816,6 +816,7 @@ def generate_gemini_metadata(
     last_error = None
     last_http_error = None
     for attempt in range(1, MAX_RETRIES + 1):
+        retry_http_error = None
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
@@ -850,7 +851,7 @@ def generate_gemini_metadata(
             )
 
         except urllib.error.HTTPError as exc:
-            last_http_error = exc
+            retry_http_error = exc
             last_error = RuntimeError(
                 f"Gemini HTTP {exc.code}: "
                 f"{http_error_body(exc, 1500)}"
@@ -872,8 +873,8 @@ def generate_gemini_metadata(
         log("Gemini attempt failed:", last_error)
         if attempt < MAX_RETRIES:
             delay = (
-                retry_after_seconds(last_http_error, attempt, default_base=12, maximum=120)
-                if last_http_error is not None
+                retry_after_seconds(retry_http_error, attempt, default_base=12, maximum=120)
+                if retry_http_error is not None
                 else min(2 ** attempt, 12)
             )
             time.sleep(delay)
