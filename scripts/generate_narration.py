@@ -596,6 +596,8 @@ def build_settings(config: dict) -> dict:
         "character_voices": cfg_bool(config, "CHARACTER_VOICES", True),
         "tts_emotion_control": cfg_bool(config, "TTS_EMOTION_CONTROL", True),
         "tts_child_friendly": cfg_bool(config, "TTS_CHILD_FRIENDLY", True),
+        "tts_pitch": float(config.get("TTS_PITCH", 1.0)),
+        "tts_emotion_strength": float(config.get("TTS_EMOTION_STRENGTH", 0.65)),
     }
 
 
@@ -1364,6 +1366,8 @@ def build_narration_record(
             "AUDIENCE": settings["audience"],
             "VOICE": settings["voice"],
             "TTS_PROFILE": settings.get("tts_profile", "auto"),
+            "TTS_PITCH": settings.get("tts_pitch", 1.0),
+            "TTS_EMOTION_STRENGTH": settings.get("tts_emotion_strength", 0.65),
             "CHARACTER_VOICES": settings.get("character_voices", True),
         }, {
             "role": role,
