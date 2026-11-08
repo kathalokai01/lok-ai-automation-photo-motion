@@ -21,6 +21,7 @@ import llm_provider_client as client
 import select_llm_provider as selector
 import gemini_api_guard
 import gemini_http
+import generate_tts
 
 
 class GeminiHttpFallbackTests(unittest.TestCase):
@@ -62,6 +63,29 @@ class GeminiHttpFallbackTests(unittest.TestCase):
         headers.add_header("Retry-After", "900")
         error = self._http_error(429, headers=headers)
         self.assertEqual(gemini_http.retry_after_seconds(error, 1), 120)
+
+
+class TTSFallbackHttpTests(unittest.TestCase):
+    def _error(self, status, body="", retry_after=None):
+        headers = Message()
+        if retry_after is not None:
+            headers.add_header("Retry-After", str(retry_after))
+        return generate_tts.TTSProviderHTTPError(
+            status, "test", body, headers
+        )
+
+    def test_tts_404_skips_unavailable_provider_without_blocking_paid_chain(self):
+        error = self._error(404, "model not found")
+        self.assertEqual(generate_tts.classify_provider_error(error), "model_unavailable")
+
+    def test_tts_429_rate_limit_retries_same_provider(self):
+        error = self._error(429, "Too many requests per minute", 17)
+        self.assertEqual(generate_tts.classify_provider_error(error), "rate_limit")
+        self.assertEqual(gemini_http.retry_after_seconds(error, 1), 17)
+
+    def test_tts_429_daily_quota_blocks_only_that_paid_provider(self):
+        error = self._error(429, "RESOURCE_EXHAUSTED: daily quota exceeded")
+        self.assertEqual(generate_tts.classify_provider_error(error), "quota_or_billing")
 
 
 class ProviderConfigurationTests(unittest.TestCase):
