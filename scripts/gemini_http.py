@@ -40,7 +40,9 @@ def http_error_body(error: BaseException, limit: int = 3000) -> str:
         except Exception:
             body = ""
     else:
-        response = getattr(error, "response", None) or error
+        response = getattr(error, "response", None)
+        if response is None:
+            response = error
         body = getattr(response, "text", "") if response is not None else ""
         if not body and response is not None:
             raw = getattr(response, "content", b"")
@@ -87,7 +89,9 @@ def retry_after_seconds(
     """Honor Retry-After / Google RetryInfo, then use bounded backoff."""
     headers = getattr(error, "headers", None)
     if headers is None:
-        response = getattr(error, "response", None) or error
+        response = getattr(error, "response", None)
+        if response is None:
+            response = error
         headers = getattr(response, "headers", None)
     retry_after = None
     if headers is not None:
