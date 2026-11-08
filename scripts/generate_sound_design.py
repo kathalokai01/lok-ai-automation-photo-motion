@@ -795,6 +795,8 @@ def load_audio_records():
             raise RuntimeError(f"Visual Scene identity mismatch: {scene_id}")
         if scene_id in records:
             raise RuntimeError(f"Duplicate visual Scene ID: {scene_id}")
+        if scene_row.get("status") != "completed":
+            raise RuntimeError(f"Visual Scene is incomplete: {scene_id}")
         source_signature = str(scene_row.get("source_scene_signature") or "").strip()
         if not re.fullmatch(r"[0-9a-f]{64}", source_signature):
             raise RuntimeError(f"Visual Scene source signature is invalid: {scene_id}")
@@ -803,8 +805,8 @@ def load_audio_records():
             audio = main_records.pop(scene_id, None)
             if audio is None:
                 raise RuntimeError(f"Main Scene has no TTS audio: {scene_id}")
-            if re.sub(r"\\s+", " ", audio["text"]).strip() != re.sub(
-                r"\\s+", " ", str(scene_row.get("narration", ""))
+            if re.sub(r"\s+", " ", audio["text"]).strip() != re.sub(
+                r"\s+", " ", str(scene_row.get("narration", ""))
             ).strip():
                 raise RuntimeError(f"Main Scene narration differs from TTS text: {scene_id}")
             audio["source_scene_signature"] = source_signature
@@ -1274,6 +1276,8 @@ def validate_flow_manifest(ordered):
             raise RuntimeError(f"Flow Music role/Part mismatch: {row['scene_id']}")
         if item.get("narration_sha256") != row["audio_sha256"]:
             raise RuntimeError(f"Flow Music narration hash mismatch: {row['scene_id']}")
+        if item.get("source_scene_signature") != row.get("source_scene_signature", ""):
+            raise RuntimeError(f"Flow Music visual Scene source signature mismatch: {row['scene_id']}")
         try:
             start = float(item["start_seconds"])
             duration = float(item["duration_seconds"])
