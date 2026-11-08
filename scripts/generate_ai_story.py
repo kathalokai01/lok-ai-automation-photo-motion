@@ -1569,6 +1569,42 @@ def validate_final_output(
     return len(output_parts), total_main, narrations
 
 
+def annotate_audio_direction(ai_story: dict) -> None:
+    """Attach conservative audio direction without altering locked narration."""
+    for part in ai_story.get("parts", []):
+        if not isinstance(part, dict):
+            continue
+        rows = list(part.get("scenes", []))
+        for role_key in ("hook_scene", "suspense_scene", "resolution_scene"):
+            item = part.get(role_key)
+            if isinstance(item, dict):
+                rows.append(item)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            role = clean(row.get("role") or row.get("scene_type")).lower()
+            existing = clean(row.get("emotion_tag") or row.get("emotion")).lower()
+            if existing not in {"curiosity", "happy", "sad", "fear", "suspense", "angry", "excited", "dramatic", "calm", "warm", "neutral"}:
+                existing = {
+                    "hook": "curiosity",
+                    "suspense": "suspense",
+                    "resolution": "warm",
+                }.get(role, "neutral")
+            row["emotion_tag"] = existing
+            mood = clean(row.get("music_mood")).lower()
+            if not mood:
+                mood = {
+                    "hook": "intriguing cinematic",
+                    "suspense": "tense suspense",
+                    "resolution": "warm emotional resolution",
+                }.get(role, "story-matched cinematic")
+            row["music_mood"] = mood
+            row["voice_delivery"] = {
+                "emotion": existing,
+                "preserve_narration_text": True,
+                "speaker_id": clean(row.get("speaker_id") or "narrator"),
+            }
+
 def main() -> None:
     api_key = (
         os.environ.get("GEMINI_API_KEY", "").strip()
@@ -1860,6 +1896,7 @@ def main() -> None:
 
     ai_story["title"] = canonical_story_title
     ai_story["story_title"] = canonical_story_title
+    annotate_audio_direction(ai_story)
     ai_story["status"] = "completed"
     ai_story["total_parts"] = completed_parts
     ai_story["parts_count"] = completed_parts
