@@ -40,7 +40,7 @@ ALLOW_PSEUDO_FALLBACK = os.environ.get(
     "DEPTH_ALLOW_PSEUDO_FALLBACK", "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
-VERSION = "photo-motion-depth-v9-manifest-bound-resume-integrity-locked-source-role-provenance"
+VERSION = "photo-motion-depth-v10-all-role-narration-provenance"
 FALLBACK_MODEL_ID = "content-aware-pseudo-depth-v9"
 
 MIN_IMAGE_BYTES = 1000
