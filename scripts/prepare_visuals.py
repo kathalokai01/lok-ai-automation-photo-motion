@@ -986,18 +986,18 @@ def validate_narration_mapping(
     source_scenes: list[dict],
     narration_records: dict[str, dict],
 ) -> dict[str, dict]:
-    main_sources = [row for row in source_scenes if row["role"] == "main"]
-    expected_ids = {row["scene_id"] for row in main_sources}
+    expected_sources = source_scenes
+    expected_ids = {row["scene_id"] for row in expected_sources}
     actual_ids = set(narration_records)
     if expected_ids != actual_ids:
         raise RuntimeError(
-            "TTS narration records must match Main Scene IDs only. "
+            "TTS narration records must match every scene role. "
             f"Missing={sorted(expected_ids - actual_ids)[:20]}, "
             f"extra={sorted(actual_ids - expected_ids)[:20]}."
         )
 
     by_part = {}
-    for source in main_sources:
+    for source in expected_sources:
         scene_id = source["scene_id"]
         record = narration_records[scene_id]
         if positive_int(record.get("part"), scene_id + " narration part") != source["part"]:
