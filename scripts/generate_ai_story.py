@@ -166,7 +166,7 @@ def validate_provider_model(provider: str, model: str) -> str:
     """Validate a selected provider/model pair before any network request."""
     provider = clean(provider).lower()
     model = clean(model)
-    if provider not in {"groq", "openrouter", "cloudflare", "mistral"}:
+    if provider not in {"openai", "groq", "openrouter", "cloudflare"}:
         raise RuntimeError(f"Unsupported LLM provider: {provider!r}.")
     if not model or len(model) > 200 or any(ch.isspace() for ch in model):
         raise RuntimeError(f"Invalid model identifier for {provider}.")
@@ -199,7 +199,7 @@ def load_configured_provider_order() -> list[str]:
         if not isinstance(item, dict):
             raise RuntimeError("Invalid provider record in LLM selector.")
         name = clean(item.get("provider")).lower()
-        if name not in {"groq", "openrouter", "cloudflare", "mistral"}:
+        if name not in {"openai", "groq", "openrouter", "cloudflare"}:
             raise RuntimeError(f"Unsupported provider record: {name!r}.")
         if item.get("ready") is True:
             if name in model_by_provider:
@@ -212,7 +212,7 @@ def load_configured_provider_order() -> list[str]:
     seen = set()
     for provider in order:
         name = clean(provider).lower()
-        if name not in {"groq", "openrouter", "cloudflare", "mistral"}:
+        if name not in {"openai", "groq", "openrouter", "cloudflare"}:
             raise RuntimeError(f"Invalid provider order entry: {name!r}.")
         if name in seen:
             continue
