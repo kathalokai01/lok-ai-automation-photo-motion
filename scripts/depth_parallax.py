@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-VERSION = "depth-parallax-v8-cinematic-depth-motion"
+VERSION = "depth-parallax-v9-faster-stronger-variable-camera-motion"
 
 MIN_BYTES = 1000
 MIN_DIMENSION = 64
@@ -22,11 +22,11 @@ MAX_DIMENSION = 4096
 MAX_FPS = 60
 MAX_SECONDS = 600
 
-DEFAULT_STRENGTH = 0.026
-MAX_STRENGTH = 0.04
+DEFAULT_STRENGTH = 0.045
+MAX_STRENGTH = 0.055
 
-MIN_ZOOM = 1.035
-MAX_ZOOM = 1.115
+MIN_ZOOM = 1.025
+MAX_ZOOM = 1.22
 BORDER_MODE = cv2.BORDER_REFLECT_101
 
 
@@ -292,6 +292,38 @@ def make_motion_profile(seed):
             "roll": -0.10,
             "zoom_bias": 0.00,
         },
+        {
+            "name": "curved_orbit_left",
+            "direction": (-0.45, 0.89),
+            "cross": 0.18,
+            "phase": 4.8,
+            "roll": -0.34,
+            "zoom_bias": 0.28,
+        },
+        {
+            "name": "curved_orbit_right",
+            "direction": (0.45, 0.89),
+            "cross": -0.18,
+            "phase": 5.4,
+            "roll": 0.34,
+            "zoom_bias": 0.22,
+        },
+        {
+            "name": "center_push",
+            "direction": (0.0, -1.0),
+            "cross": 0.20,
+            "phase": 5.9,
+            "roll": 0.18,
+            "zoom_bias": 0.35,
+        },
+        {
+            "name": "center_pull",
+            "direction": (0.0, 1.0),
+            "cross": -0.20,
+            "phase": 6.4,
+            "roll": -0.18,
+            "zoom_bias": 0.02,
+        },
     ]
 
     return profiles[seed % len(profiles)]
@@ -336,7 +368,7 @@ def calculate_camera_transform(
 
     breathing = (
         math.sin(phase + phase_offset)
-        * 0.004
+        * 0.006
         * math.sin(math.pi * progress)
     )
 
@@ -345,14 +377,14 @@ def calculate_camera_transform(
         min(MAX_ZOOM, zoom + breathing),
     )
 
-    pan_x_limit = width * strength * 1.05
-    pan_y_limit = height * strength * 1.05
+    pan_x_limit = width * strength * 1.25
+    pan_y_limit = height * strength * 1.25
 
     primary_x = (
         math.sin(math.pi * eased)
         * direction_x
         * pan_x_limit
-        * 0.72
+        * 0.82
     )
 
     primary_y = (
@@ -377,7 +409,7 @@ def calculate_camera_transform(
     micro_x = (
         math.sin(phase * 1.5 + phase_offset)
         * pan_x_limit
-        * 0.035
+        * 0.05
     )
 
     micro_y = (
@@ -389,7 +421,7 @@ def calculate_camera_transform(
     roll = (
         float(profile["roll"])
         * math.sin(math.pi * eased)
-        * 0.22
+        * 0.24
     )
 
     return {
@@ -435,7 +467,7 @@ def build_remap(
         camera["depth_x"]
         * strength
         * width
-        * 1.45
+        * 1.65
         * displacement
     )
 
