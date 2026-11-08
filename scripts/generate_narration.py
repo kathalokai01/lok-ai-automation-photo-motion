@@ -31,7 +31,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 12
+SCRIPT_VERSION = 13
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -822,19 +822,19 @@ def validate_ai_story(
                         f"Part {part_number} {role} scene ID mismatch."
                     )
 
-                narration = record.get("narration", "")
-                if not isinstance(narration, str) or narration.strip():
-                    raise RuntimeError(
-                        f"{expected_id}: visual-only extra role must have empty narration."
-                    )
-                if record.get("voiceover_enabled") is not False:
-                    raise RuntimeError(
-                        f"{expected_id}: extra role voiceover must be disabled."
-                    )
-                if record.get("narration_source") != "visual_only":
-                    raise RuntimeError(
-                        f"{expected_id}: extra role must be visual_only."
-                    )
+                narration = clean_narration(
+                    record.get("narration"),
+                    expected_id,
+                )
+                validate_sentence_integrity(narration, expected_id)
+                if len(narration.split()) < 8:
+                    raise RuntimeError(f"{expected_id}: extra-role narration is too short.")
+                if record.get("voiceover_enabled") is not True:
+                    raise RuntimeError(f"{expected_id}: extra-role voiceover must be enabled.")
+                if record.get("narration_source") != "ai_generated_role_narration":
+                    raise RuntimeError(f"{expected_id}: extra-role narration source is invalid.")
+                if record.get("source_text_sha256") != text_sha256(narration):
+                    raise RuntimeError(f"{expected_id}: extra-role narration hash mismatch.")
 
     declared = story.get("actual_scene_counts")
     if declared is not None and (
@@ -949,15 +949,23 @@ def validate_scene_collection(
             )
             validate_sentence_integrity(item["narration"], scene_label)
         else:
-            if not isinstance(raw_narration, str) or raw_narration.strip():
+            item["narration"] = clean_narration(
+                raw_narration,
+                f"Part {part} {role}",
+            )
+            validate_sentence_integrity(item["narration"], scene_label)
+            if source.get("voiceover_enabled") is not True:
                 raise RuntimeError(
-                    f"{scene_label}: visual-only extra scene must have empty narration."
+                    f"{scene_label}: narrated extra role voiceover must be enabled."
                 )
-            if source.get("voiceover_enabled") is not False:
+            if source.get("narration_source") != "ai_generated_role_narration":
                 raise RuntimeError(
-                    f"{scene_label}: visual-only voiceover must be disabled."
+                    f"{scene_label}: extra narration source metadata is invalid."
                 )
-            item["narration"] = ""
+            if source.get("source_text_sha256") != text_sha256(item["narration"]):
+                raise RuntimeError(f"{scene_label}: extra narration hash mismatch.")
+            if source.get("source_word_count") != count_words(item["narration"]):
+                raise RuntimeError(f"{scene_label}: extra narration word count mismatch.")
 
         if role == "main":
             scene_number = positive_int(
@@ -1253,11 +1261,6 @@ def build_narration_record(
         label,
     )
 
-    if role != "main":
-        raise RuntimeError(
-            f"{scene_id}: visual-only role cannot create a TTS narration record."
-        )
-
     validate_sentence_integrity(
         narration,
         label,
@@ -1300,6 +1303,13 @@ def build_narration_record(
         ),
         "role": role,
         "scene_type": role,
+        "voiceover_enabled": True,
+        "narration_source": (
+            "locked_part_text" if role == "main"
+            else "ai_generated_role_narration"
+        ),
+        "source_text_sha256": digest,
+        "source_word_count": count_words(narration),
         "title": str(
             scene.get("title", "")
         ).strip(),
@@ -1739,10 +1749,15 @@ def validate_final_records(
         "Main narration",
     )
 
-    if extra_records:
-        raise RuntimeError(
-            "Hook/Suspense/Resolution are visual-only and cannot have TTS records."
-        )
+    expected_extra_ids = [
+        canonical_extra_id(part, role)
+        for part in range(1, parts + 1)
+        for role in (("hook", "suspense") if part < parts else ("hook", "resolution"))
+    ]
+    actual_extra_ids = [row.get("scene_id") for row in extra_records]
+    if actual_extra_ids != expected_extra_ids:
+        raise RuntimeError("Hook/Suspense/Resolution narration order/count is incorrect.")
+    validate_record_group(extra_records, expected_extra_ids, "Extra-role narration")
 
     all_ids = [
         row["scene_id"]
@@ -1780,10 +1795,13 @@ def make_output_document(
     narration_order = []
 
     for part in range(1, settings["parts"] + 1):
+        narration_order.append(extra_by_key[(part, "hook")]["scene_id"])
         for scene_number in range(1, actual_counts[part - 1] + 1):
             main = main_by_key.get((part, scene_number))
             if main is not None:
                 narration_order.append(main["scene_id"])
+        ending_role = "resolution" if part == settings["parts"] else "suspense"
+        narration_order.append(extra_by_key[(part, ending_role)]["scene_id"])
 
     document = {
         "status": status,
@@ -1806,7 +1824,7 @@ def make_output_document(
         ],
         "actual_scene_counts": actual_counts,
         "scenes_per_part": None,
-        "total_scenes": len(main_records),
+        "total_scenes": len(all_records),
         "total_main_scenes": len(main_records),
         "total_extra_scenes": len(extra_records),
         "total_narration_records": len(all_records),
@@ -1855,13 +1873,13 @@ def make_output_document(
             "text_sha256_per_record": True,
         },
         "role_policy": {
-            "hook": "visual-only; no narration or TTS",
+            "hook": "spoken AI-generated narration with TTS audio",
             "main": (
                 "only voiceover source; exact locked Part text "
                 "split across variable Main Scenes"
             ),
-            "suspense": "visual-only; no narration or TTS",
-            "resolution": "visual-only; no narration or TTS",
+            "suspense": "spoken AI-generated narration with TTS audio",
+            "resolution": "spoken AI-generated narration with TTS audio",
         },
         "scenes": main_records,
         "extra_scenes": extra_records,
@@ -1989,12 +2007,10 @@ def verify_saved_output(
             "Narration output Main Scene count mismatch."
         )
 
-    if expected_extras != 0 or saved.get("extra_scenes") != []:
-        raise RuntimeError(
-            "Visual-only Hook/Suspense/Resolution records must not enter TTS narration."
-        )
+    if len(saved.get("extra_scenes", [])) != expected_extras:
+        raise RuntimeError("Narrated extra-role record count mismatch.")
 
-    if len(saved.get("all_scene_ids", [])) != expected_main:
+    if len(saved.get("all_scene_ids", [])) != expected_main + expected_extras:
         raise RuntimeError(
             "Narration output scene ID count mismatch."
         )
@@ -2026,11 +2042,15 @@ def verify_saved_output(
         (int(row["part"]), str(row["role"])): row
         for row in saved["extra_scenes"]
     }
-    expected_order = [
-        f"part_{part:02d}_scene_{scene_number:02d}"
-        for part, count in enumerate(actual_counts, 1)
-        for scene_number in range(1, count + 1)
-    ]
+    expected_order = []
+    for part, count in enumerate(actual_counts, 1):
+        expected_order.append(f"part_{part:02d}_hook")
+        expected_order.extend(
+            f"part_{part:02d}_scene_{scene_number:02d}"
+            for scene_number in range(1, count + 1)
+        )
+        ending_role = "resolution" if part == settings["parts"] else "suspense"
+        expected_order.append(f"part_{part:02d}_{ending_role}")
 
     if saved.get("narration_order") != expected_order:
         raise RuntimeError("Narration Part/Scene timeline order mismatch.")
@@ -2091,7 +2111,7 @@ def main() -> int:
     )
 
     expected_main_total = sum(actual_counts)
-    expected_extras_total = 0
+    expected_extras_total = settings["parts"] * 2
 
     if expected_main_total > MAX_TOTAL_RECORDS:
         raise RuntimeError(
@@ -2124,7 +2144,11 @@ def main() -> int:
     }
     global_number = 0
 
+    extra_by_key = {
+        (row["part"], row["role"]): row for row in extra_sources
+    }
     for part in range(1, parts + 1):
+        ordered_sources.append((extra_by_key[(part, "hook")], "hook", None))
         for scene_number in range(1, actual_counts[part - 1] + 1):
             global_number += 1
             ordered_sources.append((
@@ -2132,6 +2156,8 @@ def main() -> int:
                 "main",
                 global_number,
             ))
+        ending_role = "resolution" if part == parts else "suspense"
+        ordered_sources.append((extra_by_key[(part, ending_role)], ending_role, None))
 
     log("FORMAT             :", settings["format"])
     log("TITLE              :", title)
@@ -2244,7 +2270,11 @@ def main() -> int:
             for scene in range(1, count + 1)
         ]
 
-        final_extras = []
+        final_extras = [
+            extra_map[canonical_extra_id(part, role)]
+            for part in range(1, parts + 1)
+            for role in (("hook", "suspense") if part < parts else ("hook", "resolution"))
+        ]
 
         validate_final_records(
             final_main,
@@ -2289,7 +2319,7 @@ def main() -> int:
 
         expected_texts = {
             row["scene_id"]: row["narration"]
-            for row in main_sources
+            for row in main_sources + extra_sources
         }
 
         verify_saved_output(
@@ -2318,7 +2348,7 @@ def main() -> int:
 
         raise
 
-    all_records = final_main
+    all_records = final_extras + final_main
 
     estimate_total = sum(
         row["narration_duration_estimate_seconds"]

@@ -30,7 +30,7 @@ SOUND_MANIFEST = ROOT / "output" / "sound_design" / "sound_design_manifest.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-validator-v13-visual-role-scene-timing"
+VERSION = "sfx-validator-v14-all-role-measured-tts-timing"
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 0.20
 SFX_END_MARGIN = 0.08
@@ -311,15 +311,13 @@ def load_narration(configured_parts, scenes_min, scenes_max, mode):
         raise RuntimeError(f"TTS FORMAT mismatch: Input={mode}, manifest={manifest_format}.")
     jobs = rows_from(data, "jobs", "audio_jobs", "scenes")
     if not jobs:
-        raise RuntimeError("TTS manifest contains no Main Scene audio jobs.")
+        raise RuntimeError("TTS manifest contains no narration audio jobs.")
 
-    main_audio = {}
+    narration_audio = {}
     for index, row in enumerate(jobs, 1):
         identity = narration_identity(row, index)
         scene_id = identity["scene_id"]
-        if identity["role"] != "main":
-            raise RuntimeError("TTS manifest must contain Main Scene audio only.")
-        if scene_id in main_audio:
+        if scene_id in narration_audio:
             raise RuntimeError(f"Duplicate TTS scene_id: {scene_id}")
         if str(row.get("status", "")).strip().lower() not in {"completed", "reused"}:
             raise RuntimeError(f"TTS job is incomplete: {scene_id}")
@@ -340,7 +338,12 @@ def load_narration(configured_parts, scenes_min, scenes_max, mode):
         text = str(row.get("text") or row.get("narration") or "")
         if not text.strip():
             raise RuntimeError(f"Locked Main narration text is empty: {scene_id}")
-        main_audio[scene_id] = {
+        if identity["role"] != "main" and (
+            row.get("voiceover_enabled") is not True
+            or row.get("narration_source") != "ai_generated_role_narration"
+        ):
+            raise RuntimeError(f"{scene_id}: extra-role TTS metadata is invalid.")
+        narration_audio[scene_id] = {
             **identity, "path": path, "relative_path": relative(path),
             "duration": info["duration"], "bytes": info["bytes"],
             "sha256": actual_hash, "text": text,
@@ -366,37 +369,28 @@ def load_narration(configured_parts, scenes_min, scenes_max, mode):
         if len(source_signature) != 64 or any(ch not in "0123456789abcdef" for ch in source_signature):
             raise RuntimeError(f"Visual Scene source signature is invalid: {scene_id}")
 
+        audio = narration_audio.pop(scene_id, None)
+        if audio is None:
+            raise RuntimeError(f"Scene has no matching TTS audio: {scene_id}")
+        source_text = str(row.get("narration") or "")
+        if " ".join(source_text.split()) != " ".join(audio["text"].split()):
+            raise RuntimeError(f"Scene narration differs from TTS source: {scene_id}")
+        if row.get("voiceover_enabled") is not True:
+            raise RuntimeError(f"{scene_id}: role voiceover must be enabled.")
+        if identity["role"] != "main" and row.get("narration_source") != "ai_generated_role_narration":
+            raise RuntimeError(f"{scene_id}: extra-role narration source is invalid.")
+        item = {**audio, "source_scene_signature": source_signature}
         if identity["role"] == "main":
-            audio = main_audio.pop(scene_id, None)
-            if audio is None:
-                raise RuntimeError(f"Main Scene has no matching TTS audio: {scene_id}")
-            source_text = str(row.get("narration") or "")
-            if " ".join(source_text.split()) != " ".join(audio["text"].split()):
-                raise RuntimeError(f"Main Scene narration differs from TTS source: {scene_id}")
-            item = {**audio, "source_scene_signature": source_signature}
             key = (identity["part"], identity["scene"])
             if key in main_scenes:
                 raise RuntimeError(f"Duplicate Main scene mapping: {key}")
             main_scenes[key] = item
-        else:
-            narration = row.get("narration", "")
-            if not isinstance(narration, str) or narration.strip():
-                raise RuntimeError(f"{scene_id}: visual-only role narration must be empty.")
-            if row.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{scene_id}: visual-only role voiceover must be disabled.")
-            item = {
-                **identity, "path": None, "relative_path": None,
-                "duration": visual_scene_duration(row, scene_id),
-                "bytes": 0, "sha256": "", "text": "",
-                "tts_fingerprint": "", "source_scene_signature": source_signature,
-                "visual_only": True,
-            }
         mapping[scene_id] = item
         role_counts.setdefault(identity["part"], {role: 0 for role in ROLE_ORDER})
         role_counts[identity["part"]][identity["role"]] += 1
 
-    if main_audio:
-        raise RuntimeError("TTS Main jobs do not match scenes.json: " + ", ".join(sorted(main_audio)[:20]))
+    if narration_audio:
+        raise RuntimeError("TTS jobs do not match scenes.json: " + ", ".join(sorted(narration_audio)[:20]))
 
     discovered_parts = sorted({row["part"] for row in mapping.values()})
     if discovered_parts != list(range(1, configured_parts + 1)):
@@ -962,7 +956,7 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
         "overlap_warnings": overlap_warnings,
         "max_allowed_overlap_seconds": MAX_OVERLAP_SECONDS,
         "max_cue_duration_seconds": MAX_CUE_DURATION_SECONDS,
-        "duration_source": "ffprobe_measured_main_tts_and_visual_scene_durations_plus_sfx_files",
+        "duration_source": "ffprobe_measured_all_role_tts_audio_plus_sfx_files",
     }
 
 
@@ -1049,7 +1043,7 @@ def main():
         "total_visual_scene_records": len(narration),
         "visual_scenes_checked": len(narration),
         "scene_timeline_seconds": round(narration_duration, 4),
-        "duration_source": "main_tts_audio_and_visual_scene_durations",
+        "duration_source": "all_role_tts_audio_durations",
         "narration_manifest": relative(AUDIO_FILE),
         "narration_manifest_sha256": audio_hash,
         "sound_design_manifest": relative(SOUND_MANIFEST),
@@ -1102,7 +1096,7 @@ def main():
         or saved.get("sfx_cue_manifest_sha256") != sha256_file(CUES_FILE)
         or saved.get("validator_source_signature") != report["validator_source_signature"]
         or saved.get("sfx", {}).get("cue_count") != len(sfx_report["cues"])
-        or saved.get("sfx", {}).get("duration_source") != "ffprobe_measured_main_tts_and_visual_scene_durations_plus_sfx_files"
+        or saved.get("sfx", {}).get("duration_source") != "ffprobe_measured_all_role_tts_audio_plus_sfx_files"
     ):
         raise RuntimeError("SFX timing validation report read-back failed.")
 

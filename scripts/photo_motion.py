@@ -36,7 +36,7 @@ RENDER_DIR = OUTPUT / "photo_motion"
 MANIFEST_FILE = RENDER_DIR / "photo_motion_manifest.json"
 CHECKPOINT_FILE = OUTPUT / "checkpoints" / "photo_motion_progress.json"
 
-VERSION = "photo-motion-v23-stronger-parallax-visual-only-scenes"
+VERSION = "photo-motion-v24-stronger-parallax-all-role-audio"
 
 MIN_IMAGE_BYTES = 1000
 MIN_DEPTH_BYTES = 100
@@ -593,19 +593,12 @@ def prepare_jobs(
             audio_path, audio_hash, duration = resolve_audio(row, scene_id, ffprobe)
             duration_source = "ffprobe_measured"
         else:
-            if row.get("voiceover_enabled") is not False or text(row.get("narration")):
-                raise RuntimeError(f"{scene_id}: visual-only role cannot contain narration.")
-            if text(row.get("narration_source")) != "visual_only":
-                raise RuntimeError(f"{scene_id}: extra role is not marked visual_only.")
-            if text(row.get("audio_sha256")) or row.get("audio_path") not in (None, ""):
-                raise RuntimeError(f"{scene_id}: visual-only role has unexpected TTS audio.")
-            duration = (
-                valid_duration(row.get("scene_duration"))
-                or valid_duration(row.get("duration"))
-                or DEFAULT_VISUAL_SCENE_SECONDS
-            )
-            audio_path, audio_hash = None, ""
-            duration_source = "visual_scene_duration"
+            if row.get("voiceover_enabled") is not True or not text(row.get("narration")):
+                raise RuntimeError(f"{scene_id}: narrated extra role is missing narration/voiceover.")
+            if text(row.get("narration_source")) != "ai_generated_role_narration":
+                raise RuntimeError(f"{scene_id}: extra narration source is invalid.")
+            audio_path, audio_hash, duration = resolve_audio(row, scene_id, ffprobe)
+            duration_source = "ffprobe_measured"
         prompt = text(row.get("prompt") or row.get("image_prompt"))
         if len(prompt) < 24:
             raise RuntimeError(f"{scene_id}: story visual prompt is missing or too short.")
@@ -627,9 +620,9 @@ def prepare_jobs(
             "audio_sha256": audio_hash,
             "duration": duration,
             "duration_source": duration_source,
-            "voiceover_enabled": role == "main",
-            "narration_source": "locked_part_text" if role == "main" else "visual_only",
-            "source_text_sha256": text(row.get("source_text_sha256")) if role == "main" else "",
+            "voiceover_enabled": True,
+            "narration_source": "locked_part_text" if role == "main" else "ai_generated_role_narration",
+            "source_text_sha256": text(row.get("source_text_sha256")),
             "target": resolve_output_target(part, scene_id),
             "source_job": dict(row),
         })
@@ -716,9 +709,9 @@ def validate_job_metadata(
     if declared_ids != actual_ids:
         raise RuntimeError("Prepared manifest Scene ID order does not match jobs.")
     main_count = sum(item["role"] == "main" for item in prepared)
-    visual_only_count = len(prepared) - main_count
-    if metadata.get("pending_audio_measurement_count") != 0 or metadata.get("measured_audio_count") != main_count:
-        raise RuntimeError("Photo Motion preparation metadata does not confirm measured Main TTS.")
+    visual_only_count = 0
+    if metadata.get("pending_audio_measurement_count") != 0 or metadata.get("measured_audio_count") != len(prepared):
+        raise RuntimeError("Photo Motion preparation metadata does not confirm measured TTS for every role.")
     if metadata.get("visual_only_scene_count") != visual_only_count:
         raise RuntimeError("Photo Motion visual-only Scene count mismatch.")
 def validate_output_dimensions(mode: str) -> tuple[int, int]:
@@ -1364,7 +1357,7 @@ def try_reuse(
                 if item["audio_path"] is not None else None
             ),
             "audio_sha256": item["audio_sha256"],
-            "audio_duration": item["duration"] if item["role"] == "main" else None,
+            "audio_duration": item["duration"],
             "duration_source": item["duration_source"],
             "video": path.relative_to(ROOT).as_posix(),
             "video_sha256": checksum,
@@ -1482,8 +1475,8 @@ def build_manifest(
         "scenes_max": settings["scenes_max"],
         "actual_scene_counts": settings["actual_scene_counts"],
         "expected_scene_count": len(prepared),
-        "measured_audio_count": main_count,
-        "visual_only_scene_count": len(prepared) - main_count,
+        "measured_audio_count": len(prepared),
+        "visual_only_scene_count": 0,
         "completed_count": sum(row.get("status") == "completed" for row in rows),
         "total_scenes": len(prepared),
         "scene_role_counts": {

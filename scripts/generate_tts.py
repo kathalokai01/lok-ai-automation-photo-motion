@@ -37,7 +37,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 14
+VERSION = 15
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -1173,15 +1173,18 @@ def extract_jobs(data: Any) -> list[dict]:
             or ""
         )
         if role_probe in {"hook", "suspense", "resolution"}:
-            if not isinstance(narration_probe, str) or narration_probe.strip():
+            if not isinstance(narration_probe, str) or len(narration_probe.strip().split()) < 8:
                 raise RuntimeError(
-                    f"{role_probe} is visual-only and must not contain TTS text."
+                    f"{role_probe} must contain spoken narration of at least 8 words."
                 )
-            if merged.get("voiceover_enabled") is not False:
+            if merged.get("voiceover_enabled") is not True:
                 raise RuntimeError(
-                    f"{role_probe} visual-only voiceover must be disabled."
+                    f"{role_probe} voiceover must be enabled."
                 )
-            return
+            if merged.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(
+                    f"{role_probe} narration source metadata is invalid."
+                )
 
         narration = (
             merged.get("text")
@@ -1494,10 +1497,14 @@ def validate_role_structure(
             )
 
         roles = [job["role"] for job in rows]
-        if any(role != "main" for role in roles):
+        expected_extra_roles = (
+            ["hook", "suspense"] if part < actual_parts else ["hook", "resolution"]
+        )
+        actual_extra_roles = [role for role in roles if role != "main"]
+        if actual_extra_roles != expected_extra_roles:
             raise RuntimeError(
-                f"Part {part}: TTS accepts Main narration only; "
-                "Hook/Suspense/Resolution are visual-only."
+                f"Part {part}: expected narrated extra roles {expected_extra_roles}, "
+                f"found {actual_extra_roles}."
             )
 
         main_rows = [
@@ -1519,7 +1526,7 @@ def validate_role_structure(
                 f"expected {expected_numbers}, found {main_numbers}."
             )
 
-        expected_total = actual_counts[part - 1]
+        expected_total = actual_counts[part - 1] + len(expected_extra_roles)
 
         if len(rows) != expected_total:
             raise RuntimeError(
@@ -1889,6 +1896,14 @@ def stable_source_signature(
             "scene_id": job["scene_id"],
             "role": job["role"],
             "text": job["text"],
+            "text_sha256": job["text_sha256"],
+            "voiceover_enabled": True,
+            "narration_source": (
+                "locked_part_text" if job["role"] == "main"
+                else "ai_generated_role_narration"
+            ),
+            "source_text_sha256": job["text_sha256"],
+            "source_word_count": len(job["text"].split()),
             "voice": job["voice"],
         }
         for job in jobs
@@ -1916,6 +1931,9 @@ def reusable_legacy_scene(
         record.get("scene_id") != job["scene_id"]
         or record.get("part") != job["part"]
         or record.get("role") != job["role"]
+        or re.sub(r"\s+", " ", str(record.get("text") or record.get("narration") or "")).strip()
+        != re.sub(r"\s+", " ", str(job.get("text") or "")).strip()
+        or text_value(record.get("voice")) != text_value(job.get("voice"))
     ):
         return None
 
@@ -2156,7 +2174,6 @@ def main() -> int:
         and previous_manifest.get("status") in {
             "completed", "failed", "running"
         }
-        and previous_manifest.get("source_sha256") == source_hash
         and previous_manifest.get("config_sha256") == config_hash
         and isinstance(previous_manifest.get("jobs"), list)
     ):
@@ -2183,8 +2200,8 @@ def main() -> int:
         "scenes_range": [scenes_min, scenes_max],
         "actual_scene_counts": actual_counts,
         "total_main_scenes": sum(actual_counts),
-        "total_extra_scenes": 0,
-        "visual_only_extra_scenes": parts_count * 2,
+        "total_extra_scenes": parts_count * 2,
+        "visual_only_extra_scenes": 0,
         "configured_provider_order": providers,
         "billable_providers_allowed": allow_paid,
         "source_sha256": source_hash,

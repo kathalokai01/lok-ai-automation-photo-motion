@@ -30,7 +30,7 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v16-locked-main-only-captions"
+VERSION = "prepare-captions-v17-all-narration-role-captions"
 MIN_AUDIO_BYTES = 1000
 DURATION_TOLERANCE = 0.15
 
@@ -334,17 +334,31 @@ def validate_narration_records(
             f"extra={sorted(set(main_map)-expected_main)}."
         )
 
-    if extra_rows:
-        raise RuntimeError(
-            "Hook/Suspense/Resolution are visual-only and cannot create captions."
-        )
+    expected_extra_roles = [
+        (part, role)
+        for part in range(1, parts + 1)
+        for role in (("hook", "suspense") if part < parts else ("hook", "resolution"))
+    ]
+    for row in extra_rows:
+        sid, part, role, scene = scene_identity(row)
+        if role not in EXTRA_ROLES or (part, role) not in expected_extra_roles or scene not in (None, 0):
+            raise RuntimeError(f"{sid}: invalid extra-role caption mapping.")
+        if sid in all_ids or row.get("status") != "completed" or not narration_text(row):
+            raise RuntimeError(f"{sid}: extra-role narration is incomplete or duplicated.")
+        if row.get("audio_duration_source") != "ffprobe_measured":
+            raise RuntimeError(f"{sid}: extra-role measured TTS audio is missing.")
+        extra_map[(part, role)] = row
+        all_ids.add(sid)
+    if set(extra_map) != set(expected_extra_roles):
+        raise RuntimeError("Hook/Suspense/Resolution narration records are incomplete.")
 
     ordered_main = [
         main_map[(part, scene)]
         for part, count in enumerate(actual_counts, 1)
         for scene in range(1, count + 1)
     ]
-    return ordered_main, []
+    ordered_extras = [extra_map[key] for key in expected_extra_roles]
+    return ordered_main, ordered_extras
 
 
 def validate_audio_manifest(
@@ -712,8 +726,15 @@ def validate_prepared_records(
             f"extra={sorted(actual_main-expected_main)}."
         )
 
-    if extra_records:
-        raise RuntimeError("Visual-only Hook/Suspense/Resolution cannot have captions.")
+    for row in extra_records:
+        sid = clean_text(row.get("scene_id"))
+        if not sid or sid in all_ids or row.get("role") not in EXTRA_ROLES:
+            raise RuntimeError(f"{sid}: invalid or duplicate extra caption.")
+        if not clean_text(row.get("text")) or row.get("caption_sha256") != sha256(row["text"]):
+            raise RuntimeError(f"{sid}: extra caption text/hash is invalid.")
+        if sid not in audio_map or row.get("audio_sha256") != audio_map[sid]["sha256"]:
+            raise RuntimeError(f"{sid}: extra caption/TTS audio mapping mismatch.")
+        all_ids.add(sid)
 
     if all_ids != set(audio_map):
         raise RuntimeError(
@@ -794,7 +815,7 @@ def main() -> int:
         actual_counts,
     )
 
-    all_rows = ordered_main
+    all_rows = ordered_main + ordered_extras
     audio_map, audio_manifest_hash = validate_audio_manifest(
         narration_data,
         all_rows,
@@ -821,7 +842,11 @@ def main() -> int:
 
     ordered_rows = sorted(
         all_rows,
-        key=lambda row: (int(row["part"]), int(row["scene"])),
+        key=lambda row: (
+            int(row["part"]),
+            ROLE_ORDER[scene_identity(row)[2]],
+            int(scene_identity(row)[3] or 0),
+        ),
     )
 
     main_ids = {scene_identity(row)[0] for row in ordered_main}
@@ -901,10 +926,10 @@ def main() -> int:
         "dynamic_short_parts": video_format == "short",
         "scenes_range": [scenes_min, scenes_max],
         "actual_scene_counts": actual_counts,
-        "total_scenes": len(prepared_main),
-        "total_extra_scenes": 0,
-        "visual_only_extra_scenes": parts + max(0, parts - 1) + 1,
-        "total_caption_records": len(prepared_main),
+        "total_scenes": len(prepared_main) + len(prepared_extras),
+        "total_extra_scenes": len(prepared_extras),
+        "visual_only_extra_scenes": 0,
+        "total_caption_records": len(prepared_main) + len(prepared_extras),
         "role_counts": role_counts,
         "caption_font": font,
         "caption_font_size": font_size,
@@ -943,7 +968,7 @@ def main() -> int:
     log("SCENES range:", f"{scenes_min}-{scenes_max}")
     log("Actual Scene counts:", actual_counts)
     log("Main captions:", len(prepared_main))
-    log("Extra-role captions:", 0)
+    log("Extra-role captions:", len(prepared_extras))
     log("Role counts:", role_counts)
     log("Language:", mode)
     log("Font:", font)

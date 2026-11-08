@@ -44,7 +44,7 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
 CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v33-loudness-duration-resume-verified-visual-role-scene-timeline"
+VERSION = "photo-motion-sound-design-v34-all-role-measured-tts-timeline"
 RATE = 22050
 SFX_SECONDS = 8.0
 DEFAULT_VISUAL_SCENE_SECONDS = 6.0
@@ -744,16 +744,14 @@ def load_audio_records():
         raise RuntimeError("TTS audio manifest is missing or incomplete.")
     jobs = data.get("jobs")
     if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError("TTS audio manifest contains no Main Scene jobs.")
+        raise RuntimeError("TTS audio manifest contains no narration jobs.")
 
-    main_records = {}
+    audio_records = {}
     for row in jobs:
         if not isinstance(row, dict) or row.get("status") not in {"completed", "reused"}:
             raise RuntimeError("TTS manifest contains an incomplete job.")
         scene_id, part, role, scene = record_identity(row)
-        if role != "main":
-            raise RuntimeError("TTS manifest must contain Main Scene jobs only.")
-        if scene_id in main_records:
+        if scene_id in audio_records:
             raise RuntimeError(f"Duplicate narration scene_id: {scene_id}")
         audio_value = next((
             row.get(key) for key in (
@@ -777,9 +775,14 @@ def load_audio_records():
         fingerprint = row.get("tts_fingerprint") or row.get("fingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
             raise RuntimeError(f"TTS fingerprint is missing: {scene_id}")
-        main_records[scene_id] = {
+        if role != "main" and (
+            row.get("voiceover_enabled") is not True
+            or row.get("narration_source") != "ai_generated_role_narration"
+        ):
+            raise RuntimeError(f"{scene_id}: extra-role TTS metadata is invalid.")
+        audio_records[scene_id] = {
             "scene_id": scene_id, "part": part, "scene": scene,
-            "role": "main", "duration": duration,
+            "role": role, "duration": duration,
             "path": path, "path_relative": path.relative_to(ROOT).as_posix(),
             "sha256": checksum,
             "text": str(row.get("text", row.get("narration", ""))),
@@ -801,35 +804,24 @@ def load_audio_records():
         if not re.fullmatch(r"[0-9a-f]{64}", source_signature):
             raise RuntimeError(f"Visual Scene source signature is invalid: {scene_id}")
 
-        if role == "main":
-            audio = main_records.pop(scene_id, None)
-            if audio is None:
-                raise RuntimeError(f"Main Scene has no TTS audio: {scene_id}")
-            if re.sub(r"\s+", " ", audio["text"]).strip() != re.sub(
-                r"\s+", " ", str(scene_row.get("narration", ""))
-            ).strip():
-                raise RuntimeError(f"Main Scene narration differs from TTS text: {scene_id}")
-            audio["source_scene_signature"] = source_signature
-            records[scene_id] = audio
-        else:
-            narration = scene_row.get("narration", "")
-            if not isinstance(narration, str) or narration.strip():
-                raise RuntimeError(f"{scene_id}: visual-only Scene narration must be empty.")
-            if scene_row.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{scene_id}: visual-only Scene voiceover must be disabled.")
-            records[scene_id] = {
-                "scene_id": scene_id, "part": part, "scene": None,
-                "role": role, "duration": parse_visual_duration(scene_row, scene_id),
-                "path": None, "path_relative": "", "sha256": "", "text": "",
-                "provider": None, "voice": None, "tts_fingerprint": "",
-                "source_scene_signature": source_signature,
-                "visual_only": True,
-            }
+        audio = audio_records.pop(scene_id, None)
+        if audio is None:
+            raise RuntimeError(f"Scene has no matching TTS audio: {scene_id}")
+        if re.sub(r"\s+", " ", audio["text"]).strip() != re.sub(
+            r"\s+", " ", str(scene_row.get("narration", ""))
+        ).strip():
+            raise RuntimeError(f"Scene narration differs from TTS text: {scene_id}")
+        if scene_row.get("voiceover_enabled") is not True:
+            raise RuntimeError(f"{scene_id}: role voiceover must be enabled.")
+        if role != "main" and scene_row.get("narration_source") != "ai_generated_role_narration":
+            raise RuntimeError(f"{scene_id}: extra-role narration source is invalid.")
+        audio["source_scene_signature"] = source_signature
+        records[scene_id] = audio
 
-    if main_records:
+    if audio_records:
         raise RuntimeError(
-            "TTS jobs do not match Main Scenes in scenes.json: "
-            + ", ".join(sorted(main_records)[:20])
+            "TTS jobs do not match scenes.json: "
+            + ", ".join(sorted(audio_records)[:20])
         )
     return records
 
@@ -1507,7 +1499,7 @@ def build_validation_report(fmt, ordered, cues, total_duration, scenes_min, scen
         "status": "completed" if not cue_errors else "failed",
         "version": VERSION,
         "format": fmt,
-        "timing_basis": "Main TTS audio plus visual-only Scene durations",
+        "timing_basis": "Measured TTS audio for Hook, Main, Suspense and Resolution",
         "total_visual_scene_records": len(ordered),
         "total_scene_timeline_seconds": round(total_duration, 4),
         "scenes_min": scenes_min,
@@ -1774,7 +1766,7 @@ def main():
         "part_cues": {
             key: value["sfx_cues"] for key, value in part_summary.items()
         },
-        "timing_basis": "Measured Main TTS duration; visual-only role Scenes use declared scene duration.",
+        "timing_basis": "Measured TTS narration duration for Hook, Main, Suspense and Resolution.",
         "timeline": timeline,
         "source_signature": source_sig,
         "source_audio_manifest_sha256": sha256_file(AUDIO_MANIFEST),

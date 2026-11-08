@@ -31,7 +31,7 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-lyria-role-segment-checkpoint-v16-visual-role-timeline"
+VERSION = "photo-motion-lyria-role-segment-checkpoint-v17-all-role-narration-timeline"
 
 REQUEST_TIMEOUT = (30, 900)
 RETRY_DELAYS = (8, 20)
@@ -336,28 +336,34 @@ def read_narration_jobs(config):
         raise RuntimeError("TTS audio_jobs.json is not completed.")
     tts_jobs = tts_manifest.get("jobs")
     if not isinstance(tts_jobs, list) or not tts_jobs:
-        raise RuntimeError("TTS audio_jobs.json contains no Main Scene jobs.")
+        raise RuntimeError("TTS audio_jobs.json contains no narration jobs.")
 
-    main_audio = {}
+    role_audio = {}
     for row in tts_jobs:
         if not isinstance(row, dict) or row.get("status") not in {"completed", "reused"}:
             raise RuntimeError("TTS manifest contains an incomplete job.")
         scene_id = clean(row.get("scene_id") or row.get("job_id"))
-        if not scene_id or scene_id in main_audio:
+        if not scene_id or scene_id in role_audio:
             raise RuntimeError(f"Missing or duplicate TTS scene_id: {scene_id}")
         role = clean(row.get("role") or "main").lower()
-        if role != "main":
-            raise RuntimeError(
-                f"TTS manifest must contain Main narration only; found {role}."
-            )
+        if role not in ROLE_ORDER:
+            raise RuntimeError(f"Unsupported TTS role: {role}")
         try:
             part = int(row["part"])
-            scene = int(row["scene"])
+            scene = int(row["scene"]) if role == "main" else None
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Invalid Main narration identity: {scene_id}") from exc
-        expected_id = f"part_{part:02d}_scene_{scene:02d}"
-        if part < 1 or scene < 1 or scene_id != expected_id:
-            raise RuntimeError(f"Non-canonical Main narration Scene ID: {scene_id}.")
+            raise RuntimeError(f"Invalid narration identity: {scene_id}") from exc
+        expected_id = (
+            f"part_{part:02d}_scene_{scene:02d}"
+            if role == "main" else f"part_{part:02d}_{role}"
+        )
+        if part < 1 or (role == "main" and scene < 1) or scene_id != expected_id:
+            raise RuntimeError(f"Non-canonical narration Scene ID: {scene_id}.")
+        if role != "main" and (
+            row.get("voiceover_enabled") is not True
+            or row.get("narration_source") != "ai_generated_role_narration"
+        ):
+            raise RuntimeError(f"{scene_id}: extra-role TTS metadata is invalid.")
         audio_value = next((
             row.get(key) for key in AUDIO_PATH_KEYS
             if isinstance(row.get(key), str) and row[key].strip()
@@ -379,8 +385,8 @@ def read_narration_jobs(config):
         text = clean(row.get("text") or row.get("narration"))
         if not text:
             raise RuntimeError(f"Main narration text is missing: {scene_id}")
-        main_audio[scene_id] = {
-            "part": part, "scene": scene, "role": "main",
+        role_audio[scene_id] = {
+            "part": part, "scene": scene, "role": role,
             "duration_seconds": duration,
             "audio_path": path.relative_to(ROOT).as_posix(),
             "audio_sha256": checksum, "text": text,
@@ -419,35 +425,23 @@ def read_narration_jobs(config):
         if not re.fullmatch(r"[0-9a-f]{64}", source_signature):
             raise RuntimeError(f"Visual Scene source signature is invalid: {scene_id}")
 
-        if role == "main":
-            audio = main_audio.pop(scene_id, None)
-            if audio is None:
-                raise RuntimeError(f"Main Scene has no matching TTS audio: {scene_id}")
-            if clean(source.get("narration")) != audio["text"]:
-                raise RuntimeError(f"Main Scene narration differs from TTS source: {scene_id}")
-            row = {**audio, "source_scene_signature": source_signature}
-        else:
-            narration = source.get("narration", "")
-            if not isinstance(narration, str) or narration.strip():
-                raise RuntimeError(f"{scene_id}: visual-only Scene must have empty narration.")
-            if source.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{scene_id}: visual-only Scene voiceover must be disabled.")
-            duration_value = source.get("scene_duration") or source.get("duration")
-            duration = parse_scene_duration(duration_value, config, scene_id)
-            row = {
-                "part": part, "scene": None, "role": role,
-                "duration_seconds": duration,
-                "audio_path": None, "audio_sha256": "",
-                "text": "", "source_scene_signature": source_signature,
-                "visual_only": True,
-            }
+        audio = role_audio.pop(scene_id, None)
+        if audio is None:
+            raise RuntimeError(f"Scene has no matching TTS audio: {scene_id}")
+        if clean(source.get("narration")) != audio["text"]:
+            raise RuntimeError(f"Scene narration differs from TTS source: {scene_id}")
+        if source.get("voiceover_enabled") is not True:
+            raise RuntimeError(f"{scene_id}: role voiceover must be enabled.")
+        if role != "main" and source.get("narration_source") != "ai_generated_role_narration":
+            raise RuntimeError(f"{scene_id}: extra-role narration source is invalid.")
+        row = {**audio, "source_scene_signature": source_signature, "visual_only": False}
         row["scene_id"] = scene_id
         rows.append(row)
 
-    if main_audio:
+    if role_audio:
         raise RuntimeError(
-            "TTS manifest contains Main Scene jobs absent from scenes.json: "
-            + ", ".join(sorted(main_audio)[:20])
+            "TTS manifest contains jobs absent from scenes.json: "
+            + ", ".join(sorted(role_audio)[:20])
         )
     rows.sort(key=lambda item: (
         item["part"], ROLE_ORDER[item["role"]],
@@ -1496,7 +1490,7 @@ def main():
             "role_segment_summary": role_segment_summary,
             "role_segment_directory": SEGMENT_DIR.relative_to(ROOT).as_posix(),
             "role_segment_policy": (
-                "Every visual Scene, including visual-only Hook/Suspense/Resolution, "
+                "Every narrated visual Scene, including Hook/Suspense/Resolution, "
                 "receives a verified segment from its matching role composition."
             ),
             "role_segment_timing_verified": True,
