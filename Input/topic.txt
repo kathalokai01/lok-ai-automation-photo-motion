@@ -8,6 +8,34 @@
 FORMAT = "short"
 AUDIENCE = "adult"                 # adult | kids
 
+
+# ============================================================
+# NARRATION VOICE AND EMOTION
+# ============================================================
+TTS_PROFILE = "auto"              # auto | child_friendly | female_storyteller | male_storyteller
+CHARACTER_VOICES = true            # अलग किरदारों की अलग स्थायी voice identity
+TTS_EMOTION_CONTROL = true
+TTS_CHILD_FRIENDLY = true
+TTS_VOICE_ID = ""
+TTS_VOICE_ID_CHILD_FRIENDLY = ""
+TTS_VOICE_ID_FEMALE_STORYTELLER = ""
+TTS_VOICE_ID_MALE_STORYTELLER = ""
+TTS_VOICE_ID_CHARACTER = ""
+TTS_PITCH = 1.0
+TTS_EMOTION_STRENGTH = 0.65
+
+# ============================================================
+# MUSIC PROVIDERS AND MIXING
+# ============================================================
+MUSIC_PROVIDER_ORDER = "lyria,eleven_music,stable_audio,local"
+MUSIC_FALLBACK_ENABLED = true
+MUSIC_ALLOW_PAID = false             # paid music only after explicit opt-in
+MUSIC_GENRE = "original cinematic score"
+MUSIC_INTENSITY = "evolving"
+MUSIC_SCENE_ADAPTIVE = true
+MUSIC_DUCKING = true
+MUSIC_DUCKING_DB = -10.0
+
 # ============================================================
 # TITLE AND STORY INPUT
 # ============================================================
