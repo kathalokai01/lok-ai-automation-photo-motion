@@ -491,8 +491,17 @@ def validate_role_structure(rows, config):
     manifest = read_json(AUDIO_JOBS, required=True)
     if manifest.get("actual_scene_counts") is not None:
         declared = manifest["actual_scene_counts"]
-        if not isinstance(declared, dict) or {str(k): int(v) for k, v in declared.items()} != counts:
-            raise RuntimeError("TTS manifest actual_scene_counts do not match narration records.")
+        if isinstance(declared, list):
+            normalized_counts = {
+                str(index + 1): int(value)
+                for index, value in enumerate(declared)
+            }
+        elif isinstance(declared, dict):
+            normalized_counts = {str(key): int(value) for key, value in declared.items()}
+        else:
+            normalized_counts = {}
+        if normalized_counts != counts:
+            raise RuntimeError("TTS manifest actual_scene_counts do not match Main narration records.")
     if manifest.get("scenes_min") is not None and manifest.get("scenes_min") != scenes_min:
         raise RuntimeError("TTS manifest scenes_min does not match Input/topic.txt.")
     if manifest.get("scenes_max") is not None and manifest.get("scenes_max") != scenes_max:
@@ -692,6 +701,7 @@ def source_fingerprint(
             "scene": row["scene"], "role": row["role"],
             "duration": round(row["duration_seconds"], 4),
             "audio_sha256": row["audio_sha256"],
+            "source_scene_signature": row.get("source_scene_signature", ""),
         } for row in rows],
         "settings": {
             key: config.get(key) for key in (
@@ -814,6 +824,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
             "narration": [{
                 "scene_id": row["scene_id"],
                 "sha256": row["audio_sha256"],
+                "source_scene_signature": row.get("source_scene_signature", ""),
                 "duration": round(row["duration_seconds"], 4),
             } for row in role_rows[role]],
         })
@@ -928,6 +939,7 @@ def build_role_segments(compositions, timeline, signature):
             "source_fingerprint": signature,
             "scene_id": row["scene_id"],
             "narration_sha256": row["audio_sha256"],
+            "source_scene_signature": row.get("source_scene_signature", ""),
             "composition_sha256": composition["sha256"],
             "start": round(offset, 4),
             "duration": round(duration, 4),
@@ -960,6 +972,7 @@ def build_role_segments(compositions, timeline, signature):
             "role": role,
             "scene": row["scene"],
             "narration_sha256": row["audio_sha256"],
+            "source_scene_signature": row.get("source_scene_signature", ""),
             "start_seconds": row["start_seconds"],
             "end_seconds": row["end_seconds"],
             "duration_seconds": row["duration_seconds"],
@@ -1078,6 +1091,7 @@ def verify_segment_records(segments, timeline, narration_by_id, compositions=Non
             raise RuntimeError(f"Music segment has no narration: {scene_id}")
         for key, expected in (
             ("narration_sha256", narration["audio_sha256"]),
+            ("source_scene_signature", narration.get("source_scene_signature", "")),
             ("role", narration["role"]),
             ("part", narration["part"]),
             ("start_seconds", timeline_row["start_seconds"]),
@@ -1197,7 +1211,8 @@ def validate_published_manifest(signature, final_checksum, duration, timeline):
         or published.get("size_bytes") != FINAL_AUDIO.stat().st_size
         or published.get("mastering_target_lufs") != MUSIC_TARGET_LUFS
         or published.get("mastering_true_peak_limit_dbtp") != MUSIC_TRUE_PEAK_LIMIT
-        or published.get("narration_records") != len(timeline)
+        or published.get("narration_records") != sum(row["role"] == "main" for row in timeline)
+        or published.get("visual_scene_records") != len(timeline)
         or published.get("role_segment_count") != len(timeline)
     ):
         raise RuntimeError("Published Flow Music manifest failed verification.")
@@ -1469,7 +1484,8 @@ def main():
             "instrumental_only": True,
             "lyrics_requested": False,
             "narration_duration_source": "sum_of_ffprobe_measured_tts_audio_files",
-            "narration_records": len(rows),
+            "narration_records": role_summary["main_count"],
+            "visual_scene_records": len(rows),
             "role_summary": role_summary,
             "role_compositions": compositions,
             "role_composition_count": len(compositions),
