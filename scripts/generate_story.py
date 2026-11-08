@@ -1808,6 +1808,18 @@ def make_story(
                 f"Non-final Part {part_number} has no separate Suspense record."
             )
 
+        for extra in (hook, suspense, resolution):
+            if extra is None:
+                continue
+            if (
+                clean(extra.get("narration"))
+                or extra.get("voiceover_enabled") is not False
+                or extra.get("narration_source") != "visual_only"
+            ):
+                raise RuntimeError(
+                    f"{extra.get('scene_id')}: Hook/Suspense/Resolution must be visual-only."
+                )
+
         all_hooks.append(hook)
 
         if suspense:
@@ -1911,7 +1923,7 @@ def make_story(
         ),
         "proofreading": proofreading,
         "source_text": source_text,
-        "source_word_count": word_count(source_text),
+        "source_character_count": len(source_text),
         "corrected_complete_story": final_story_text,
         "corrected_complete_story_word_count": word_count(final_story_text),
         "corrected_complete_story_sha256": sha256(final_story_text),
@@ -2019,6 +2031,20 @@ def validate_story(
 
         if not isinstance(part.get("hook_scene"), dict):
             raise RuntimeError(f"Part {number} Hook Scene is missing.")
+        extra_records = [
+            row for row in (
+                part.get("hook_scene"),
+                part.get("suspense_scene"),
+                part.get("resolution_scene"),
+            ) if isinstance(row, dict)
+        ]
+        for extra in extra_records:
+            if clean(extra.get("narration")):
+                raise RuntimeError(f"{extra.get('scene_id')}: extra narration must be empty.")
+            if extra.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"{extra.get('scene_id')}: extra voiceover must be disabled.")
+            if extra.get("narration_source") != "visual_only":
+                raise RuntimeError(f"{extra.get('scene_id')}: extra role is not visual_only.")
 
         if number < expected_parts:
             if not isinstance(part.get("suspense_scene"), dict):
@@ -2071,7 +2097,11 @@ def validate_story(
         or not isinstance(maximum_parts, int)
         or minimum_parts < 1
         or maximum_parts < minimum_parts
-        or not minimum_parts <= expected_parts <= maximum_parts
+        or not (
+            max(1, minimum_parts - 1)
+            if selection.get("final_part_merged")
+            else minimum_parts
+        ) <= expected_parts <= maximum_parts
     ):
         raise RuntimeError("Story selected Part count is outside its configured range.")
 
@@ -2093,7 +2123,7 @@ def validate_story(
             maximum = (
                 SHORT_MERGED_MAX
                 if merged and number == expected_parts
-                else SHORT_HARD_MAX
+                else SHORT_MAX
             )
 
             if count < SHORT_MIN or count > maximum:
