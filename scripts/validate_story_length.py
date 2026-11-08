@@ -1015,7 +1015,9 @@ def main() -> int:
             "scenes_expected": sum(actual_counts),
             "scenes_found": len(all_scenes),
             "total_words": total_words,
-            "parts_needing_revision": sum(\n                1 for row in part_results if row.get("passed") is not True\n            ),
+            "parts_needing_revision": sum(
+                1 for row in part_results if row.get("passed") is not True
+            ),
             "structure_errors": boundary_errors,
             "valid": valid,
             "passed": valid,
