@@ -1442,10 +1442,14 @@ def validate_render(
         source_text = next(
             (
                 item.get("narration")
-                for part in read_json(STORY).get("parts", [])
+                for part in read_json(AI_STORY).get("parts", [])
                 for item in (
                     list(part.get("scenes", []))
-                    + list(part.get("extra_scenes", []))
+                    + [
+                        part.get(field)
+                        for field in ("hook_scene", "suspense_scene", "resolution_scene")
+                        if isinstance(part.get(field), dict)
+                    ]
                 )
                 if isinstance(item, dict) and item.get("scene_id") == sid
             ),
