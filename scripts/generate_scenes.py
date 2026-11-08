@@ -33,7 +33,7 @@ OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
 VERSION = "photo-motion-scenes-v9-variable-range-story-anchor-continuity"
-PROMPT_VERSION = 10
+PROMPT_VERSION = 11
 
 ROLE_ORDER = {
     "hook": 0,
@@ -229,12 +229,15 @@ def validate_ai_story_record(
         if record.get("source_word_count") != len(re.findall(r"\S+", clean(record["narration"]))):
             raise RuntimeError(f"{scene_id}: locked narration word count mismatch.")
     else:
-        if clean(record.get("narration")):
-            raise RuntimeError(f"{scene_id}: extra role must not duplicate narration.")
-        if record.get("voiceover_enabled") is not False:
-            raise RuntimeError(f"{scene_id}: extra role voiceover must be disabled.")
-        if record.get("narration_source") != "visual_only":
-            raise RuntimeError(f"{scene_id}: extra role must be marked visual_only.")
+        narration = clean(record.get("narration"))
+        if not narration or len(narration.split()) < 8:
+            raise RuntimeError(f"{scene_id}: narrated extra role text is missing or too short.")
+        if record.get("voiceover_enabled") is not True:
+            raise RuntimeError(f"{scene_id}: extra role voiceover must be enabled.")
+        if record.get("narration_source") != "ai_generated_role_narration":
+            raise RuntimeError(f"{scene_id}: extra narration source is invalid.")
+        if record.get("source_text_sha256") != text_sha256(narration):
+            raise RuntimeError(f"{scene_id}: extra narration hash mismatch.")
 
 
 def validate_plan_role_record(
@@ -380,7 +383,7 @@ def validate_plan(
             # Validate only fields that the Story Plan actually defines.
             validate_plan_role_record(plan_record, scene_id, role)
 
-            # Extra role records are visual-only and cannot add voiceover text.
+            # AI Story provides spoken narration and visual prompts for each extra role.
             validate_ai_story_record(ai_record, scene_id, role)
 
             for field_name in ("story_anchor", "purpose"):
@@ -391,8 +394,8 @@ def validate_plan(
                         f"{scene_id}: {field_name} changed from Story Plan."
                     )
 
-            if clean(ai_record.get("narration")):
-                raise RuntimeError(f"{scene_id}: extra narration must be empty.")
+            if not clean(ai_record.get("narration")):
+                raise RuntimeError(f"{scene_id}: narrated extra role text is missing.")
 
             if scene_id in seen_ids:
                 raise RuntimeError(f"Duplicate scene ID: {scene_id}.")
@@ -1002,9 +1005,9 @@ def build_scene_record(
         "title": title,
         "status": "completed",
         "narration": item["narration"],
-        "voiceover_enabled": item["role"] == "main",
-        "narration_source": "locked_part_text" if item["role"] == "main" else "visual_only",
-        "source_text_sha256": text_sha256(item["narration"]) if item["role"] == "main" else "",
+        "voiceover_enabled": True,
+        "narration_source": "locked_part_text" if item["role"] == "main" else "ai_generated_role_narration",
+        "source_text_sha256": text_sha256(item["narration"]),
         "dialogue": clean(source.get("dialogue")),
         "story_anchor": clean(source.get("story_anchor")),
         "beat": clean(source.get("beat")),
@@ -1120,9 +1123,10 @@ def scene_is_valid(
             and scene.get("source_text_sha256") == text_sha256(expected["narration"])
         )
     return (
-        not clean(scene.get("narration"))
-        and scene.get("voiceover_enabled") is False
-        and scene.get("narration_source") == "visual_only"
+        bool(clean(scene.get("narration")))
+        and scene.get("voiceover_enabled") is True
+        and scene.get("narration_source") == "ai_generated_role_narration"
+        and scene.get("source_text_sha256") == text_sha256(clean(scene.get("narration")))
     )
 
 
