@@ -37,7 +37,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 13
+VERSION = 14
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -1150,6 +1150,38 @@ def extract_jobs(data: Any) -> list[dict]:
     ) -> None:
         parent = parent or {}
         merged = {**parent, **item}
+        role_probe = text_value(
+            merged.get("role")
+            or merged.get("scene_role")
+            or merged.get("scene_type")
+            or merged.get("type")
+            or "main"
+        ).lower()
+        role_aliases = {
+            "opening": "hook", "intro": "hook", "hook_scene": "hook",
+            "story": "main", "narration": "main", "body": "main",
+            "cliffhanger": "suspense", "ending": "resolution",
+            "final": "resolution", "final_resolution": "resolution",
+        }
+        role_probe = role_aliases.get(role_probe, role_probe)
+        narration_probe = (
+            merged.get("text")
+            or merged.get("narration")
+            or merged.get("script")
+            or merged.get("content")
+            or merged.get("voice_text")
+            or ""
+        )
+        if role_probe in {"hook", "suspense", "resolution"}:
+            if not isinstance(narration_probe, str) or narration_probe.strip():
+                raise RuntimeError(
+                    f"{role_probe} is visual-only and must not contain TTS text."
+                )
+            if merged.get("voiceover_enabled") is not False:
+                raise RuntimeError(
+                    f"{role_probe} visual-only voiceover must be disabled."
+                )
+            return
 
         narration = (
             merged.get("text")
@@ -1270,14 +1302,21 @@ def extract_jobs(data: Any) -> list[dict]:
             "male",
         )
 
+        normalized_text = re.sub(r"\s+", " ", narration).strip()
+        source_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
+        declared_hash = merged.get("text_sha256") or merged.get("narration_sha256")
+        if declared_hash and declared_hash != source_hash:
+            raise RuntimeError(
+                f"{scene_id}: source narration text hash mismatch."
+            )
+
         jobs.append({
             "part": part,
             "scene": scene,
             "scene_id": scene_id,
             "role": role,
-            "text": re.sub(
-                r"\s+", " ", narration
-            ).strip(),
+            "text": normalized_text,
+            "text_sha256": source_hash,
             "voice": voice,
             "source": merged,
         })
@@ -1454,26 +1493,11 @@ def validate_role_structure(
                 f"Part {part} has no narration."
             )
 
-        roles = [
-            job["role"] for job in rows
-        ]
-
-        expected_suspense = 1 if part < actual_parts else 0
-        expected_resolution = 1 if part == actual_parts else 0
-
-        if roles.count("hook") != 1:
+        roles = [job["role"] for job in rows]
+        if any(role != "main" for role in roles):
             raise RuntimeError(
-                f"Part {part} must contain exactly one Hook narration."
-            )
-
-        if roles.count("suspense") != expected_suspense:
-            raise RuntimeError(
-                f"Part {part} has an invalid Suspense narration count."
-            )
-
-        if roles.count("resolution") != expected_resolution:
-            raise RuntimeError(
-                f"Part {part} has an invalid Resolution narration count."
+                f"Part {part}: TTS accepts Main narration only; "
+                "Hook/Suspense/Resolution are visual-only."
             )
 
         main_rows = [
@@ -1495,12 +1519,7 @@ def validate_role_structure(
                 f"expected {expected_numbers}, found {main_numbers}."
             )
 
-        expected_total = (
-            actual_counts[part - 1]
-            + 1
-            + expected_suspense
-            + expected_resolution
-        )
+        expected_total = actual_counts[part - 1]
 
         if len(rows) != expected_total:
             raise RuntimeError(
@@ -2164,7 +2183,8 @@ def main() -> int:
         "scenes_range": [scenes_min, scenes_max],
         "actual_scene_counts": actual_counts,
         "total_main_scenes": sum(actual_counts),
-        "total_extra_scenes": parts_count * 2,
+        "total_extra_scenes": 0,
+        "visual_only_extra_scenes": parts_count * 2,
         "configured_provider_order": providers,
         "billable_providers_allowed": allow_paid,
         "source_sha256": source_hash,
