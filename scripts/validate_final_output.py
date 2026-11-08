@@ -36,6 +36,7 @@ OUT = ROOT / "output"
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 
 STORY = OUT / "story" / "story.json"
+AI_STORY = OUT / "story" / "ai_story.json"
 STORY_VERIFICATION = OUT / "story" / "story_verification.json"
 PHOTO = OUT / "photo_motion" / "photo_motion_manifest.json"
 AUDIO = OUT / "narration" / "audio_jobs.json"
@@ -731,17 +732,12 @@ def validate_extra_role_records(
                 fail(f"Story {role} affects Main scene numbering: {expected_id}")
             if row.get("scene") is not None:
                 fail(f"Story {role} must not have a Main scene number: {expected_id}")
-            role_text = clean(row.get("narration"))
-            if len(role_text.split()) < 8:
-                fail(f"Story {role} narration is missing or too short: {expected_id}")
-            if row.get("voiceover_enabled") is not True:
-                fail(f"Story {role} voiceover must be enabled: {expected_id}")
-            if row.get("narration_source") != "ai_generated_role_narration":
-                fail(f"Story {role} narration source is invalid: {expected_id}")
-            if row.get("source_text_sha256") != story_text_sha256(role_text):
-                fail(f"Story {role} narration hash mismatch: {expected_id}")
-            if row.get("source_word_count") != len(role_text.split()):
-                fail(f"Story {role} narration word count mismatch: {expected_id}")
+            if clean(row.get("narration")):
+                fail(f"Story Plan {role} narration must remain pending before AI Story: {expected_id}")
+            if row.get("voiceover_enabled") is not False:
+                fail(f"Story Plan {role} pending voiceover must be disabled: {expected_id}")
+            if row.get("narration_source") != "pending_ai_narration":
+                fail(f"Story Plan {role} narration source must be pending: {expected_id}")
 
             for key in (
                 "story_anchor", "purpose", "instruction",
@@ -770,11 +766,46 @@ def validate_extra_role_records(
         if part.get("extra_scenes") != expected_extras:
             fail(f"Part {part_number} extra_scenes mismatch")
 
+    ai_story = read_json(AI_STORY)
+    if clean(ai_story.get("status")).lower() != "completed":
+        fail("AI Story with narrated extra roles is not completed")
+    ai_parts = ai_story.get("parts")
+    if not isinstance(ai_parts, list) or len(ai_parts) != len(part_numbers):
+        fail("AI Story Part count differs from the locked Story")
+    for part_number, ai_part in enumerate(ai_parts, 1):
+        if ai_part.get("part") != part_number:
+            fail(f"AI Story Part order mismatch: {part_number}")
+        for field, role, required in (
+            ("hook_scene", "hook", True),
+            ("suspense_scene", "suspense", part_number < len(part_numbers)),
+            ("resolution_scene", "resolution", part_number == len(part_numbers)),
+        ):
+            row = ai_part.get(field)
+            if not required:
+                if row is not None:
+                    fail(f"AI Story Part {part_number} has unexpected {role}")
+                continue
+            expected_id = canonical_id(part_number, role)
+            if not isinstance(row, dict) or row.get("scene_id") != expected_id:
+                fail(f"AI Story {role} record is missing or misidentified: {expected_id}")
+            narration = clean(row.get("narration"))
+            if len(narration.split()) < 8:
+                fail(f"AI Story {role} narration is missing or too short: {expected_id}")
+            if row.get("voiceover_enabled") is not True or row.get("narration_source") != "ai_generated_role_narration":
+                fail(f"AI Story {role} voiceover metadata is invalid: {expected_id}")
+            if row.get("source_text_sha256") != story_text_sha256(narration):
+                fail(f"AI Story {role} narration hash mismatch: {expected_id}")
+            if row.get("source_word_count") != len(narration.split()):
+                fail(f"AI Story {role} narration word count mismatch: {expected_id}")
+            if clean(row.get("story_anchor")) != clean(story["parts"][part_number - 1][field].get("story_anchor")):
+                fail(f"AI Story {role} anchor mismatch: {expected_id}")
+
     return {
         "status": "valid",
         "hook_count": len(hooks),
         "suspense_count": len(suspenses),
         "resolution_count": len(resolutions),
+        "narrated_extra_roles": len(part_numbers) * 2,
     }
 
 def validate_media_rows(
@@ -993,7 +1024,7 @@ def validate_narration(
 
     audio_data = read_json(AUDIO)
     audio_rows = rows_from(audio_data, "jobs", "audio_jobs", "scenes")
-    story = read_json(STORY)
+    story = read_json(AI_STORY)
     source_by_id = {}
     for part in story.get("parts", []):
         candidates = list(part.get("scenes", []))
