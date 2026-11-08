@@ -1614,7 +1614,16 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 def load_and_validate(
     path: str | Path = "Input/topic.txt",
 ) -> dict[str, Any]:
-    return validate_config(load_input_config(path))
+    config = load_input_config(path)
+
+    # GitHub Actions can select SHORT or FULL per workflow dispatch.
+    # Local runs remain controlled by Input/topic.txt unless this override
+    # is explicitly supplied.
+    format_override = os.environ.get("PHOTO_MOTION_FORMAT", "").strip()
+    if format_override:
+        config["FORMAT"] = format_override
+
+    return validate_config(config)
 
 
 def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
