@@ -36,7 +36,7 @@ RENDER_DIR = OUTPUT / "photo_motion"
 MANIFEST_FILE = RENDER_DIR / "photo_motion_manifest.json"
 CHECKPOINT_FILE = OUTPUT / "checkpoints" / "photo_motion_progress.json"
 
-VERSION = "photo-motion-v22-variable-scenes-faster-motion-strict-depth-visual-only-role-scenes"
+VERSION = "photo-motion-v23-stronger-parallax-visual-only-scenes"
 
 MIN_IMAGE_BYTES = 1000
 MIN_DEPTH_BYTES = 100
@@ -766,7 +766,7 @@ def validate_settings(config: dict) -> dict:
 
     strength = settings["parallax_strength"]
 
-    if not math.isfinite(strength) or not 0.0 <= strength <= 0.04:
+    if not math.isfinite(strength) or not 0.0 <= strength <= 0.055:
         raise RuntimeError(
             "PHOTO_MOTION_PARALLAX_STRENGTH must be between 0 and 0.04."
         )
