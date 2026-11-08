@@ -417,6 +417,31 @@ def short_word_limits(part: dict, config: dict, total_parts: int):
     return SHORT_MIN_WORDS, SHORT_HARD_MAX
 
 
+def scene_word_targets(
+    part: dict,
+    config: dict,
+    total_parts: int,
+    target_total: int = 135,
+) -> list[dict]:
+    """Allocate a concrete narration budget across the Part's main scenes."""
+    if config["format"] != "short":
+        return []
+
+    scenes = part.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        return []
+
+    base, remainder = divmod(target_total, len(scenes))
+    return [
+        {
+            "scene": scene.get("scene"),
+            "scene_id": clean(scene.get("scene_id")),
+            "target_words": base + (1 if index < remainder else 0),
+        }
+        for index, scene in enumerate(scenes)
+    ]
+
+
 def build_response_schema(part: dict) -> dict:
     scene_properties = {
         "scene": {"type": "integer"},
@@ -596,6 +621,9 @@ def build_part_prompt(
     final = number == total_parts
     merged = final and part.get("final_part_merged") is True
     minimum, maximum = short_word_limits(part, config, total_parts)
+    per_scene_word_targets = scene_word_targets(
+        part, config, total_parts, target_total=135
+    )
 
     if config["format"] == "short":
         if merged:
@@ -642,6 +670,18 @@ Format: {config['format']}
 
 WORD RULE:
 {rules}
+
+SHORT MODE SCENE-WISE WORD BUDGET:
+{json.dumps(per_scene_word_targets, ensure_ascii=False, indent=2)}
+- ऊपर हर Main Scene के लिए narration का अलग target दिया गया है।
+- सभी Main Scene narration मिलाकर लगभग 135 शब्द रखें।
+- सामान्यतः हर Scene अपने दिए गए target से 2 शब्द से अधिक न बढ़े।
+- 120–150 शब्द प्राथमिक सीमा है; 151–180 केवल सभी revision प्रयासों के बाद।
+- 180 शब्द hard maximum है; इससे अधिक उत्तर न दें।
+- दृश्य संख्या अधिक होने पर भी हर Scene में लंबा वर्णन न जोड़ें।
+- एक Scene में केवल उसी Scene का आवश्यक action और story detail लिखें।
+- अनावश्यक भूमिका, दोहराव, वातावरण-वर्णन और निष्कर्षात्मक filler न जोड़ें।
+- Hook, Suspense और Resolution की narration इस word budget में शामिल नहीं है।
 
 कहानी के अनिवार्य नियम:
 - Story Plan में तय Part boundaries, scene_id और scene order न बदलें।
@@ -938,6 +978,9 @@ def build_revision_prompt(
     minimum, maximum = short_word_limits(
         source_part, config, total_parts
     )
+    per_scene_word_targets = scene_word_targets(
+        source_part, config, total_parts, target_total=135
+    )
 
     if minimum is None:
         rule = "FULL: preserve complete story content."
@@ -973,6 +1016,13 @@ def build_revision_prompt(
         + f"\nवर्तमान main narration शब्द: {count}"
         + f"\nनियम: {rule}"
         + f"\nसुधार: {correction}"
+        + "\nScene-wise narration targets: "
+        + json.dumps(per_scene_word_targets, ensure_ascii=False)
+        + "\nसभी main scene narration का कुल लक्ष्य 135 शब्द है।"
+        + "\nहर Scene अपने दिए गए target के आसपास रहे; अनावश्यक विस्तार न करें।"
+        + "\nSHORT में 150 शब्द लक्ष्य सीमा, 180 शब्द hard maximum है।"
+        + "\nयदि वर्तमान उत्तर सीमा से बड़ा है तो हर Scene को संक्षिप्त करें; "
+        + "किसी Scene को हटाएँ नहीं और story_anchor/event न छोड़ें।"
         + "\nयह नया कहानी-लेखन नहीं, मौजूदा उत्तर का सुधार है।"
         + "\nHook/Suspense/Resolution की शब्द संख्या main narration में न गिनें।"
         + "\nसभी scene_id, role और scene क्रम source plan के समान रखें।"
@@ -1125,15 +1175,16 @@ def generate_part(
                 model_errors.append(message)
                 log(f"Model {selected_model}: {message}")
 
-                retryable = (
-                    isinstance(exc, (TimeoutError, ConnectionError))
-                    or (
-                        isinstance(exc, urllib.error.URLError)
+                if isinstance(exc, urllib.error.HTTPError):
+                    # HTTP 404/400 are permanent model/request errors.
+                    # Do not repeat a request for an unavailable model.
+                    retryable = retryable_http_error(int(exc.code))
+                else:
+                    retryable = (
+                        isinstance(exc, (TimeoutError, ConnectionError))
+                        or isinstance(exc, urllib.error.URLError)
+                        or getattr(exc, "retryable", False) is True
                     )
-                    or (
-                        getattr(exc, "retryable", False) is True
-                    )
-                )
 
                 if retryable and attempt < max_attempts:
                     status = getattr(exc, "status_code", None)
