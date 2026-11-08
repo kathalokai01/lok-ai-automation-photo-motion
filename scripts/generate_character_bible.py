@@ -1578,6 +1578,17 @@ def build_bible(
         build_character(item, index)
         for index, item in enumerate(ordered, 1)
     ]
+    # Stable voice identity metadata; actual provider voice IDs are resolved later.
+    for item in characters:
+        gender = clean(item.get("gender", "unspecified")).lower()
+        item["voice_identity"] = {
+            "speaker_id": clean(item.get("id")),
+            "speaker_name": clean(item.get("name")),
+            "voice_style": clean(item.get("voice_description")) or "distinct, intelligible character performance",
+            "gender_presentation": gender if gender in {"male", "female", "non_binary"} else "unspecified",
+            "provider_voice_id": None,
+            "identity_locked": True,
+        }
 
     scene_map = build_scene_character_map(scenes, characters)
     scene_roles = build_scene_roles(scene_map)
