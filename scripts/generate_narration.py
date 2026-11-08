@@ -2010,7 +2010,7 @@ def verify_saved_output(
     if len(saved.get("extra_scenes", [])) != expected_extras:
         raise RuntimeError("Narrated extra-role record count mismatch.")
 
-    if len(saved.get("all_scene_ids", [])) != expected_main:
+    if len(saved.get("all_scene_ids", [])) != expected_main + expected_extras:
         raise RuntimeError(
             "Narration output scene ID count mismatch."
         )
