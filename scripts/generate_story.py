@@ -1959,6 +1959,7 @@ def make_story(
         ),
         "proofreading": proofreading,
         "source_text": source_text,
+        "source_word_count": word_count(source_text),
         "source_character_count": len(source_text),
         "corrected_complete_story": final_story_text,
         "corrected_complete_story_word_count": word_count(final_story_text),
