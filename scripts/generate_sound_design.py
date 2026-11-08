@@ -44,9 +44,10 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
 CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v33-loudness-duration-resume-verified"
+VERSION = "photo-motion-sound-design-v33-loudness-duration-resume-verified-visual-role-scene-timeline"
 RATE = 22050
 SFX_SECONDS = 8.0
+DEFAULT_VISUAL_SCENE_SECONDS = 6.0
 MIN_AUDIO_BYTES = 100
 
 ROLE_ORDER = {
@@ -726,23 +727,34 @@ def record_identity(row):
     return scene_id, part, role, scene
 
 
+def parse_visual_duration(scene, scene_id):
+    value = scene.get("scene_duration") or scene.get("duration")
+    try:
+        duration = float(str(value).strip().rstrip("sS"))
+    except (TypeError, ValueError):
+        duration = DEFAULT_VISUAL_SCENE_SECONDS
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(f"Invalid visual Scene duration: {scene_id}")
+    return duration
+
+
 def load_audio_records():
     data = read_json(AUDIO_MANIFEST)
     if not isinstance(data, dict) or data.get("status") != "completed":
         raise RuntimeError("TTS audio manifest is missing or incomplete.")
     jobs = data.get("jobs")
     if not isinstance(jobs, list) or not jobs:
-        raise RuntimeError("TTS audio manifest contains no jobs.")
+        raise RuntimeError("TTS audio manifest contains no Main Scene jobs.")
 
-    records = {}
+    main_records = {}
     for row in jobs:
         if not isinstance(row, dict) or row.get("status") not in {"completed", "reused"}:
             raise RuntimeError("TTS manifest contains an incomplete job.")
-
         scene_id, part, role, scene = record_identity(row)
-        if scene_id in records:
+        if role != "main":
+            raise RuntimeError("TTS manifest must contain Main Scene jobs only.")
+        if scene_id in main_records:
             raise RuntimeError(f"Duplicate narration scene_id: {scene_id}")
-
         audio_value = next((
             row.get(key) for key in (
                 "audio_path", "audio_file", "path", "file", "audio"
@@ -752,43 +764,72 @@ def load_audio_records():
         path = safe_project_path(audio_value, f"Narration audio {scene_id}")
         duration = ffprobe_audio(path)
         checksum = sha256_file(path)
-
         if row.get("sha256") != checksum:
             raise RuntimeError(f"Narration SHA256 mismatch: {scene_id}")
-
-        declared = row.get("actual_audio_duration_seconds", row.get("duration"))
         try:
-            declared = float(declared)
+            declared = float(row.get("actual_audio_duration_seconds", row.get("duration")))
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"Missing measured duration: {scene_id}") from exc
-
         if not math.isfinite(declared) or abs(declared - duration) > 0.20:
             raise RuntimeError(f"Measured duration mismatch: {scene_id}")
-
-        duration_source = row.get("duration_source") or row.get("audio_duration_source")
-        if duration_source != "ffprobe_measured":
+        if (row.get("duration_source") or row.get("audio_duration_source")) != "ffprobe_measured":
             raise RuntimeError(f"Unverified audio duration source: {scene_id}")
-
         fingerprint = row.get("tts_fingerprint") or row.get("fingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
             raise RuntimeError(f"TTS fingerprint is missing: {scene_id}")
-
-        records[scene_id] = {
-            "scene_id": scene_id,
-            "part": part,
-            "scene": scene,
-            "role": role,
-            "duration": duration,
-            "path": path,
-            "path_relative": path.relative_to(ROOT).as_posix(),
+        main_records[scene_id] = {
+            "scene_id": scene_id, "part": part, "scene": scene,
+            "role": "main", "duration": duration,
+            "path": path, "path_relative": path.relative_to(ROOT).as_posix(),
             "sha256": checksum,
             "text": str(row.get("text", row.get("narration", ""))),
-            "provider": row.get("provider"),
-            "voice": row.get("voice"),
-            "tts_fingerprint": fingerprint,
+            "provider": row.get("provider"), "voice": row.get("voice"),
+            "tts_fingerprint": fingerprint, "visual_only": False,
         }
-    return records
 
+    scene_records = load_scene_records()
+    records = {}
+    for scene_id, scene_row in scene_records.items():
+        scene_id_check, part, role, scene = record_identity(scene_row)
+        if scene_id_check != scene_id:
+            raise RuntimeError(f"Visual Scene identity mismatch: {scene_id}")
+        if scene_id in records:
+            raise RuntimeError(f"Duplicate visual Scene ID: {scene_id}")
+        source_signature = str(scene_row.get("source_scene_signature") or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", source_signature):
+            raise RuntimeError(f"Visual Scene source signature is invalid: {scene_id}")
+
+        if role == "main":
+            audio = main_records.pop(scene_id, None)
+            if audio is None:
+                raise RuntimeError(f"Main Scene has no TTS audio: {scene_id}")
+            if re.sub(r"\\s+", " ", audio["text"]).strip() != re.sub(
+                r"\\s+", " ", str(scene_row.get("narration", ""))
+            ).strip():
+                raise RuntimeError(f"Main Scene narration differs from TTS text: {scene_id}")
+            audio["source_scene_signature"] = source_signature
+            records[scene_id] = audio
+        else:
+            narration = scene_row.get("narration", "")
+            if not isinstance(narration, str) or narration.strip():
+                raise RuntimeError(f"{scene_id}: visual-only Scene narration must be empty.")
+            if scene_row.get("voiceover_enabled") is not False:
+                raise RuntimeError(f"{scene_id}: visual-only Scene voiceover must be disabled.")
+            records[scene_id] = {
+                "scene_id": scene_id, "part": part, "scene": None,
+                "role": role, "duration": parse_visual_duration(scene_row, scene_id),
+                "path": None, "path_relative": "", "sha256": "", "text": "",
+                "provider": None, "voice": None, "tts_fingerprint": "",
+                "source_scene_signature": source_signature,
+                "visual_only": True,
+            }
+
+    if main_records:
+        raise RuntimeError(
+            "TTS jobs do not match Main Scenes in scenes.json: "
+            + ", ".join(sorted(main_records)[:20])
+        )
+    return records
 
 def ordered_audio_records(records):
     return sorted(
@@ -953,8 +994,10 @@ def build_timeline(ordered):
             "start_seconds": round(offset, 4),
             "duration_seconds": round(row["duration"], 4),
             "end_seconds": round(end, 4),
-            "audio": row["path_relative"],
-            "audio_sha256": row["sha256"],
+            "audio": row.get("path_relative", ""),
+            "audio_sha256": row.get("sha256", ""),
+            "source_scene_signature": row.get("source_scene_signature", ""),
+            "visual_only": bool(row.get("visual_only", False)),
         })
         offset = end
     return timeline, round(offset, 4)
@@ -1014,11 +1057,17 @@ def validate_cues(cues, ordered):
         if not sid or sid in seen:
             raise RuntimeError("Duplicate or missing SFX cue scene_id.")
         seen.add(sid)
-        if cue.get("timing_basis") != "measured_tts_audio_duration":
-            raise RuntimeError(f"Invalid SFX timing basis: {sid}")
         audio = audio_map.get(sid)
-        if audio is None or cue.get("narration_sha256") != audio["sha256"]:
-            raise RuntimeError(f"SFX cue narration mapping mismatch: {sid}")
+        if audio is None:
+            raise RuntimeError(f"SFX cue source mapping is missing: {sid}")
+        expected_basis = (
+            "visual_scene_duration" if audio.get("visual_only")
+            else "measured_tts_audio_duration"
+        )
+        if cue.get("timing_basis") != expected_basis:
+            raise RuntimeError(f"Invalid SFX timing basis: {sid}")
+        if cue.get("narration_sha256", "") != audio["sha256"]:
+            raise RuntimeError(f"SFX cue source hash mismatch: {sid}")
 
         start = float(cue["start_seconds"])
         duration = float(cue["duration_seconds"])
@@ -1088,9 +1137,15 @@ def create_cue(audio, scene_row, tracks):
         "sha256": track["sha256"],
         "gain": SFX_GAINS[kind],
         "selection_basis": "story_event_keywords_and_scene_context",
-        "timing_basis": "measured_tts_audio_duration",
-        "narration_duration_seconds": round(narration_duration, 3),
-        "narration_file": audio["path_relative"],
+        "timing_basis": (
+            "visual_scene_duration" if audio.get("visual_only")
+            else "measured_tts_audio_duration"
+        ),
+        "scene_duration_seconds": round(narration_duration, 3),
+        "narration_duration_seconds": (
+            None if audio.get("visual_only") else round(narration_duration, 3)
+        ),
+        "narration_file": audio.get("path_relative") or None,
         "narration_sha256": audio["sha256"],
     }
 
@@ -1448,9 +1503,9 @@ def build_validation_report(fmt, ordered, cues, total_duration, scenes_min, scen
         "status": "completed" if not cue_errors else "failed",
         "version": VERSION,
         "format": fmt,
-        "timing_basis": "ffprobe_measured_tts_audio",
-        "total_narration_records": len(ordered),
-        "total_narration_seconds": round(total_duration, 4),
+        "timing_basis": "Main TTS audio plus visual-only Scene durations",
+        "total_visual_scene_records": len(ordered),
+        "total_scene_timeline_seconds": round(total_duration, 4),
         "scenes_min": scenes_min,
         "scenes_max": scenes_max,
         "actual_scene_counts": actual_scene_counts,
@@ -1708,14 +1763,14 @@ def main():
         "actual_scene_counts": normalized_counts,
         "main_scene_counts": main_scene_counts,
         "role_counts": role_counts,
-        "total_audio_records": len(ordered),
+        "total_visual_scene_records": len(ordered),
         "cue_count": len(cues),
         "cues": cues,
         "scene_cues": cue_map,
         "part_cues": {
             key: value["sfx_cues"] for key, value in part_summary.items()
         },
-        "timing_basis": "Measured TTS audio duration from ffprobe.",
+        "timing_basis": "Measured Main TTS duration; visual-only role Scenes use declared scene duration.",
         "timeline": timeline,
         "source_signature": source_sig,
         "source_audio_manifest_sha256": sha256_file(AUDIO_MANIFEST),
@@ -1772,7 +1827,7 @@ def main():
         "main_scene_counts": main_scene_counts,
         "role_counts": role_counts,
         "total_audio_records": len(ordered),
-        "total_narration_seconds": round(total_duration, 4),
+        "total_scene_timeline_seconds": round(total_duration, 4),
         "background_duration_seconds": round(background_duration, 3),
         "sfx_duration_seconds": SFX_SECONDS,
         "sfx_normalization_target_lufs": -16.0,
