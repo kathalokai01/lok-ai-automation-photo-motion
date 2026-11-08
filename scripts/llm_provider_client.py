@@ -16,19 +16,17 @@ from typing import Any
 VERSION = "llm-provider-client-v1"
 
 SUPPORTED_PROVIDERS = (
+    "openai",
     "groq",
     "openrouter",
     "cloudflare",
-    "mistral",
-    "openai",
 )
 
 DEFAULT_PROVIDER_ORDER = (
+    "openai",
     "groq",
     "openrouter",
     "cloudflare",
-    "mistral",
-    "openai",
 )
 
 PROVIDER_ENV = {
@@ -46,11 +44,6 @@ PROVIDER_ENV = {
         "key": "CLOUDFLARE_API_TOKEN",
         "model": "CLOUDFLARE_MODEL",
         "url": "",
-    },
-    "mistral": {
-        "key": "MISTRAL_API_KEY",
-        "model": "MISTRAL_MODEL",
-        "url": "https://api.mistral.ai/v1/chat/completions",
     },
     "openai": {
         "key": "OPENAI_API_KEY",
