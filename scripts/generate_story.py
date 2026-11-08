@@ -51,7 +51,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v35-pasted-story-authority-and-title-topic-metadata"
+VERSION = "story-builder-v36-locked-part-text-integrity"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -2142,6 +2142,9 @@ def make_story(
             "narration": narration,
             "story_anchor": narration,
             "word_count": word_count(narration),
+            "text_locked": True,
+            "locked_word_count": word_count(narration),
+            "locked_text_sha256": sha256(narration),
             "revision_attempted": bool(evidence),
             "revision_evidence": evidence,
             "final_part_merged": bool(
@@ -2211,6 +2214,8 @@ def make_story(
         "source_word_count": word_count(source_text),
         "corrected_complete_story": final_story_text,
         "corrected_complete_story_word_count": word_count(final_story_text),
+        "corrected_complete_story_sha256": sha256(final_story_text),
+        "story_text_locked": True,
         "story_text": final_story_text,
         "total_story_words": word_count(final_story_text),
         "total_parts": len(story_parts),
@@ -2281,6 +2286,15 @@ def validate_story(
         if not narration:
             raise RuntimeError(f"Part {number} narration is empty.")
 
+        expected_part_hash = sha256(narration)
+        expected_part_words = word_count(narration)
+        if part.get("text_locked") is not True:
+            raise RuntimeError(f"Part {number} narration is not marked as locked.")
+        if part.get("locked_text_sha256") != expected_part_hash:
+            raise RuntimeError(f"Part {number} locked text fingerprint mismatch.")
+        if part.get("locked_word_count") != expected_part_words:
+            raise RuntimeError(f"Part {number} locked word-count mismatch.")
+
         reconstructed.append(narration)
         part_scenes = part.get("scenes")
 
@@ -2324,6 +2338,11 @@ def validate_story(
         raise RuntimeError(
             "Part narration does not reconstruct the complete story."
         )
+
+    if story.get("story_text_locked") is not True:
+        raise RuntimeError("Corrected complete story is not marked as locked.")
+    if story.get("corrected_complete_story_sha256") != sha256(reconstructed_story):
+        raise RuntimeError("Corrected complete story fingerprint mismatch.")
 
     if len(scenes) != sum(len(part["scenes"]) for part in parts):
         raise RuntimeError("Global Main Scene count mismatch.")
