@@ -1008,6 +1008,7 @@ def build_scene_record(
         "voiceover_enabled": True,
         "narration_source": "locked_part_text" if item["role"] == "main" else "ai_generated_role_narration",
         "source_text_sha256": text_sha256(item["narration"]),
+        "source_word_count": len(item["narration"].split()),
         "dialogue": clean(source.get("dialogue")),
         "story_anchor": clean(source.get("story_anchor")),
         "beat": clean(source.get("beat")),
