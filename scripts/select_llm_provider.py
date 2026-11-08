@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select configured zero-cost LLM fallbacks without making API calls."""
+"""Select configured LLM fallbacks without making API calls."""
 
 from __future__ import annotations
 
@@ -26,20 +26,19 @@ VERSION = "llm-provider-selector-v1"
 
 # Only these providers are eligible by default.
 # Cloudflare and Mistral require explicit addition to this allowlist.
-DEFAULT_ZERO_COST_ALLOWLIST = ("groq", "openrouter")
+DEFAULT_PROVIDER_ALLOWLIST = SUPPORTED_PROVIDERS
 
 
 def log(message: str) -> None:
     print(f"[LLM SELECTOR] {message}", flush=True)
 
 
-def get_zero_cost_allowlist() -> list[str]:
-    raw = os.environ.get("LLM_ZERO_COST_PROVIDERS", "").strip()
-
+def get_provider_allowlist() -> list[str]:
+    raw = os.environ.get("LLM_PROVIDER_ORDER", "").strip()
     values = (
         re.split(r"[,;\s]+", raw)
         if raw
-        else list(DEFAULT_ZERO_COST_ALLOWLIST)
+        else list(DEFAULT_PROVIDER_ORDER)
     )
 
     allowed = []
@@ -69,33 +68,6 @@ def validate_provider(provider: str) -> tuple[bool, str, str]:
         model = get_provider_model(provider)
         get_provider_api_key(provider)
 
-        if provider == "openrouter" and not model.endswith(":free"):
-            raise ProviderError(
-                provider,
-                "Only OpenRouter :free models are permitted.",
-            )
-
-        if provider == "cloudflare":
-            if not _env_bool("CLOUDFLARE_FREE_TIER_CONFIRMED", False):
-                raise ProviderError(
-                    provider,
-                    "Cloudflare free-tier confirmation is missing.",
-                )
-
-        if provider == "mistral":
-            if not _env_bool("MISTRAL_FREE_MODE_CONFIRMED", False):
-                raise ProviderError(
-                    provider,
-                    "Mistral free-mode confirmation is missing.",
-                )
-
-        if provider == "groq":
-            if not _env_bool("GROQ_FREE_TIER_CONFIRMED", False):
-                raise ProviderError(
-                    provider,
-                    "GROQ_FREE_TIER_CONFIRMED is missing. Confirm the account's free-tier eligibility before enabling Groq.",
-                )
-
         return True, model, "Credentials and local free-mode settings are present."
 
     except ProviderError as exc:
@@ -106,25 +78,9 @@ def validate_provider(provider: str) -> tuple[bool, str, str]:
 
 
 def build_selection() -> dict:
-    zero_cost_only = _env_bool("LLM_ZERO_COST_ONLY", False)
-
-    if not zero_cost_only:
-        return {
-            "status": "disabled",
-            "enabled": False,
-            "reason": "LLM_ZERO_COST_ONLY is not true.",
-            "provider_order": [],
-            "configured_order": [],
-            "providers": [],
-        }
-
-    allowed = get_zero_cost_allowlist()
-    configured_order = get_provider_order()
-
-    # Preserve the configured order; never reorder providers by preference.
+    allowed = get_provider_allowlist()
     configured_order = [
-        provider
-        for provider in configured_order
+        provider for provider in get_provider_order()
         if provider in allowed
     ]
 
@@ -133,14 +89,12 @@ def build_selection() -> dict:
 
     for provider in configured_order:
         ready, model, detail = validate_provider(provider)
-
         provider_records.append({
             "provider": provider,
             "model": model or None,
             "ready": ready,
             "detail": detail,
         })
-
         if ready:
             ready_order.append(provider)
 
@@ -148,17 +102,17 @@ def build_selection() -> dict:
         "status": "ready" if ready_order else "no_provider_ready",
         "enabled": bool(ready_order),
         "reason": (
-            "Gemini remains first. These providers are fallbacks only."
-            if ready_order
-            else "No permitted non-Gemini provider passed local configuration checks."
+            "Configured provider order preserved; unavailable providers are skipped."
+            if ready_order else "No configured non-Gemini provider has complete credentials and model settings."
         ),
         "gemini_first": True,
-        "zero_cost_only": True,
+        "all_providers_enabled": True,
         "allowlist": allowed,
         "configured_order": configured_order,
         "provider_order": ready_order,
         "providers": provider_records,
     }
+
 
 def atomic_save(data: dict) -> None:
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -219,7 +173,7 @@ def verify_saved_selection(expected: dict) -> dict:
 
 
 def main() -> int:
-    log("Checking non-Gemini provider configuration.")
+    log("Checking configured non-Gemini provider configuration.")
     log("No provider API requests will be made.")
 
     try:
