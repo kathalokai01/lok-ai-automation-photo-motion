@@ -51,7 +51,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v37-final-short-tail-merge-239-natural-scene-partition"
+VERSION = "story-builder-v38-pending-extra-role-narration-until-ai-story"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -1850,10 +1850,10 @@ def make_story(
             if (
                 clean(extra.get("narration"))
                 or extra.get("voiceover_enabled") is not False
-                or extra.get("narration_source") != "visual_only"
+                or extra.get("narration_source") != "pending_ai_narration"
             ):
                 raise RuntimeError(
-                    f"{extra.get('scene_id')}: Hook/Suspense/Resolution must be visual-only."
+                    f"{extra.get('scene_id')}: extra narration must remain pending until AI Story generation."
                 )
 
         all_hooks.append(hook)
@@ -2077,11 +2077,11 @@ def validate_story(
         ]
         for extra in extra_records:
             if clean(extra.get("narration")):
-                raise RuntimeError(f"{extra.get('scene_id')}: extra narration must be empty.")
+                raise RuntimeError(f"{extra.get('scene_id')}: extra narration must remain pending.")
             if extra.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{extra.get('scene_id')}: extra voiceover must be disabled.")
-            if extra.get("narration_source") != "visual_only":
-                raise RuntimeError(f"{extra.get('scene_id')}: extra role is not visual_only.")
+                raise RuntimeError(f"{extra.get('scene_id')}: pending extra voiceover must be disabled.")
+            if extra.get("narration_source") != "pending_ai_narration":
+                raise RuntimeError(f"{extra.get('scene_id')}: extra narration source must be pending_ai_narration.")
 
         if number < expected_parts:
             if not isinstance(part.get("suspense_scene"), dict):
