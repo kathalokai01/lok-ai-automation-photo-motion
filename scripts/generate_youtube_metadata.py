@@ -39,7 +39,7 @@ OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 CHECKPOINT = ROOT / "output" / "checkpoints" / "youtube_metadata.json"
 
-VERSION = "youtube-metadata-v24-configured-llm-fallback"
+VERSION = "youtube-metadata-v25-preserve-canonical-story-title"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
@@ -499,12 +499,10 @@ def normalize_title(value: Any) -> str:
     if not title:
         raise RuntimeError("Generated YouTube title is empty.")
     if len(title) > MAX_TITLE_CHARS:
-        title = title[:MAX_TITLE_CHARS]
-        if " " in title:
-            title = title.rsplit(" ", 1)[0]
-        title = title.rstrip(" ,.!?;:।")
-    if not title:
-        raise RuntimeError("Generated title cannot fit YouTube limit.")
+        raise RuntimeError(
+            "Canonical story title exceeds YouTube 100-character limit; "
+            "it will not be silently shortened or replaced."
+        )
     return title
 
 
