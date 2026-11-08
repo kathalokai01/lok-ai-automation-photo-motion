@@ -579,7 +579,9 @@ def validate_metadata(
         "topic": clean(topic),
         "provider": provider,
         "model": clean(model),
-        "title": normalize_title(data.get("title")),
+        "title": normalize_title(
+            story.get("existing_title") or data.get("title")
+        ),
         "description": normalize_description(data.get("description")),
         "tags": normalize_tags(data.get("tags")),
         "input_fingerprint": fingerprint,
