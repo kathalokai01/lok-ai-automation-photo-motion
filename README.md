@@ -106,7 +106,7 @@ ZIP के अंदर story-slug और mode वाला root folder हो�
 
 - Valid story, image, audio, depth, scene-render और thumbnail checkpoints fingerprint/hash validation के बाद reuse किए जाते हैं; stale या invalid artifacts ही दोबारा बनते हैं.
 - Configured image और TTS provider order तथा fallback order को `Input/topic.txt` में जैसा रखा है वैसा ही रखें.
-- Workflow configured LLM providers (Gemini, Groq, OpenRouter, Cloudflare और Mistral) को तय priority में आज़माता है. Free और paid दोनों model इस्तेमाल हो सकते हैं; paid API calls पर provider charges लग सकते हैं. Gemini generation के लिए explicit billing opt-in और API key आवश्यक हैं. Image/TTS providers की configuration अलग रहती है.
+- Workflow Gemini के बाद configured LLM providers को `LLM_PROVIDER_ORDER` के क्रम में आज़माता है: OpenAI, Groq, OpenRouter और Cloudflare. Free और paid दोनों model इस्तेमाल हो सकते हैं; paid API calls पर provider charges लग सकते हैं. Gemini generation के लिए explicit billing opt-in और API key आवश्यक हैं. Image/TTS providers की configuration अलग रहती है.
 - API keys GitHub Actions Secrets में रखें; उन्हें `Input/topic.txt`, source files या README में न लिखें.
 
 ## Dependencies
