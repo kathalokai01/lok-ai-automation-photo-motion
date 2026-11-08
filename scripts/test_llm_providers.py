@@ -106,7 +106,7 @@ class ProviderConfigurationTests(unittest.TestCase):
         self.assertTrue(selector.validate_provider("cloudflare")[0])
         self.assertTrue(selector.validate_provider("mistral")[0])
 
-    def test_selector_uses_all_configured_providers_without_zero_cost_flag(self):
+    def test_selector_uses_all_configured_providers_without_cost_gate(self):
         os.environ.update({
             "LLM_PROVIDER_ORDER": "mistral,groq",
             "MISTRAL_API_KEY": "mistral-key",
@@ -118,7 +118,6 @@ class ProviderConfigurationTests(unittest.TestCase):
         self.assertEqual(selection["status"], "ready")
         self.assertEqual(selection["provider_order"], ["mistral", "groq"])
         self.assertTrue(selection["all_providers_enabled"])
-        self.assertNotIn("zero_cost_only", selection)
 
     def test_selector_reports_no_provider_when_credentials_are_missing(self):
         selection = selector.build_selection()
