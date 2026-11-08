@@ -16,6 +16,8 @@ PERMANENT_MODEL_STATUSES = {400, 404}
 def http_status(error: BaseException) -> int | None:
     value = getattr(error, "code", None)
     if value is None:
+        value = getattr(error, "status_code", None)
+    if value is None:
         response = getattr(error, "response", None)
         value = getattr(response, "status_code", None)
     try:
@@ -38,7 +40,7 @@ def http_error_body(error: BaseException, limit: int = 3000) -> str:
         except Exception:
             body = ""
     else:
-        response = getattr(error, "response", None)
+        response = getattr(error, "response", None) or error
         body = getattr(response, "text", "") if response is not None else ""
         if not body and response is not None:
             raw = getattr(response, "content", b"")
@@ -85,7 +87,7 @@ def retry_after_seconds(
     """Honor Retry-After / Google RetryInfo, then use bounded backoff."""
     headers = getattr(error, "headers", None)
     if headers is None:
-        response = getattr(error, "response", None)
+        response = getattr(error, "response", None) or error
         headers = getattr(response, "headers", None)
     retry_after = None
     if headers is not None:
