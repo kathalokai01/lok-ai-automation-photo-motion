@@ -22,6 +22,7 @@ from input_config import load_and_validate, get_format, get_topic, get_parts
 from select_gemini_model import configured_fallbacks
 from llm_provider_client import generate_text as generate_provider_text
 from gemini_api_guard import require_gemini_generation
+from gemini_http import http_error_body, retry_after_seconds
 
 INPUT_TOPIC = ROOT / "Input" / "topic.txt"
 STORY_FILES = (
@@ -813,6 +814,7 @@ def generate_gemini_metadata(
     )
 
     last_error = None
+    last_http_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -848,9 +850,10 @@ def generate_gemini_metadata(
             )
 
         except urllib.error.HTTPError as exc:
+            last_http_error = exc
             last_error = RuntimeError(
                 f"Gemini HTTP {exc.code}: "
-                f"{exc.read(1500).decode('utf-8', errors='replace')}"
+                f"{http_error_body(exc, 1500)}"
             )
             if exc.code in PERMANENT_HTTP or exc.code not in RETRYABLE_HTTP:
                 break
@@ -868,7 +871,12 @@ def generate_gemini_metadata(
 
         log("Gemini attempt failed:", last_error)
         if attempt < MAX_RETRIES:
-            time.sleep(min(2 ** attempt, 12))
+            delay = (
+                retry_after_seconds(last_http_error, attempt, default_base=12, maximum=120)
+                if last_http_error is not None
+                else min(2 ** attempt, 12)
+            )
+            time.sleep(delay)
 
     raise RuntimeError(
         f"Gemini model {model} failed: {last_error}"
