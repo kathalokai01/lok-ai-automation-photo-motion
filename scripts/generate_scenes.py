@@ -94,6 +94,10 @@ def digest(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def text_sha256(value: Any) -> str:
+    return hashlib.sha256(clean(value).encode("utf-8")).hexdigest()
+
+
 def read_json(path: Path, required: bool = False) -> dict | None:
     if not path.is_file():
         if required:
@@ -220,7 +224,7 @@ def validate_ai_story_record(
 
     if expected_role == "main":
         validate_sentence_boundary(record["narration"], scene_id)
-        if record.get("source_text_sha256") != digest(clean(record["narration"])):
+        if record.get("source_text_sha256") != text_sha256(clean(record["narration"])):
             raise RuntimeError(f"{scene_id}: locked narration hash mismatch.")
         if record.get("source_word_count") != len(re.findall(r"\S+", clean(record["narration"]))):
             raise RuntimeError(f"{scene_id}: locked narration word count mismatch.")
@@ -331,7 +335,7 @@ def validate_plan(
             source_narration = clean(source.get("narration"))
             if not source_narration or clean(generated.get("narration")) != source_narration:
                 raise RuntimeError(f"{scene_id}: narration differs from locked Story Plan text.")
-            if source.get("source_text_sha256") != digest(source_narration):
+            if source.get("source_text_sha256") != text_sha256(source_narration):
                 raise RuntimeError(f"{scene_id}: Story Plan source text hash mismatch.")
 
             source_anchor = clean(source.get("story_anchor"))
@@ -465,7 +469,7 @@ def validate_story(
             )
         if part.get("text_locked") is not True:
             raise RuntimeError(f"Part {part_number}: source narration is not locked.")
-        if part.get("locked_text_sha256") != digest(clean(part.get("narration"))):
+        if part.get("locked_text_sha256") != text_sha256(clean(part.get("narration"))):
             raise RuntimeError(f"Part {part_number}: locked Part hash mismatch.")
 
         final_part = part_number == len(parts)
@@ -1000,7 +1004,7 @@ def build_scene_record(
         "narration": item["narration"],
         "voiceover_enabled": item["role"] == "main",
         "narration_source": "locked_part_text" if item["role"] == "main" else "visual_only",
-        "source_text_sha256": digest(item["narration"]) if item["role"] == "main" else "",
+        "source_text_sha256": text_sha256(item["narration"]) if item["role"] == "main" else "",
         "dialogue": clean(source.get("dialogue")),
         "story_anchor": clean(source.get("story_anchor")),
         "beat": clean(source.get("beat")),
@@ -1113,7 +1117,7 @@ def scene_is_valid(
         return (
             scene.get("voiceover_enabled") is True
             and scene.get("narration_source") == "locked_part_text"
-            and scene.get("source_text_sha256") == digest(expected["narration"])
+            and scene.get("source_text_sha256") == text_sha256(expected["narration"])
         )
     return (
         not clean(scene.get("narration"))
