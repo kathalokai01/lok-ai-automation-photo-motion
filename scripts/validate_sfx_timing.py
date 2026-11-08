@@ -27,10 +27,11 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 SCENES_FILE = ROOT / "output" / "scenes" / "scenes.json"
 DEFAULT_VISUAL_SCENE_SECONDS = 6.0
 SOUND_MANIFEST = ROOT / "output" / "sound_design" / "sound_design_manifest.json"
+FLOW_MANIFEST = ROOT / "output" / "music" / "flow_music_manifest.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-validator-v14-all-role-measured-tts-timing"
+VERSION = "sfx-validator-v15-music-segment-and-role-timeline"
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 0.20
 SFX_END_MARGIN = 0.08
@@ -994,6 +995,49 @@ def main():
         scenes_max,
         mode,
     )
+
+    music_segments_checked = 0
+    music_providers = []
+    if FLOW_MANIFEST.is_file():
+        music_manifest = read_json(FLOW_MANIFEST)
+        if music_manifest.get("status") == "completed":
+            compositions = music_manifest.get("role_compositions", {})
+            if not isinstance(compositions, dict):
+                raise RuntimeError("Music role_compositions must be an object.")
+            music_providers = sorted({
+                str(item.get("provider") or "lyria")
+                for item in compositions.values()
+                if isinstance(item, dict)
+            })
+            segments = music_manifest.get("role_segments", [])
+            if not isinstance(segments, list):
+                raise RuntimeError("Music role_segments must be a list.")
+            seen_music = set()
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    raise RuntimeError("Invalid music segment record.")
+                scene_id = str(segment.get("scene_id") or "").strip()
+                if not scene_id or scene_id in seen_music or scene_id not in narration:
+                    raise RuntimeError(f"Music segment has duplicate or unknown scene ID: {scene_id}")
+                seen_music.add(scene_id)
+                narration_row = narration[scene_id]
+                expected_duration = float(narration_row["duration"])
+                actual_duration = float(segment.get("duration_seconds", -1))
+                if abs(actual_duration - expected_duration) > DURATION_TOLERANCE:
+                    raise RuntimeError(f"{scene_id}: music segment duration is not aligned to narration.")
+                if segment.get("narration_sha256") != narration_row["sha256"]:
+                    raise RuntimeError(f"{scene_id}: music segment is linked to different narration audio.")
+                path_value = segment.get("path")
+                if not path_value:
+                    raise RuntimeError(f"{scene_id}: music segment path is missing.")
+                music_path = Path(path_value)
+                if not music_path.is_absolute():
+                    music_path = ROOT / music_path
+                if not music_path.is_file() or music_path.stat().st_size < MIN_AUDIO_BYTES:
+                    raise RuntimeError(f"{scene_id}: music segment file is missing or too small.")
+                music_segments_checked += 1
+            if segments and seen_music != set(narration):
+                raise RuntimeError("Music segments do not cover every narration scene exactly once.")
 
     sound_manifest, validated_tracks = validate_sound_manifest(
         mode,
