@@ -441,7 +441,7 @@ def normalize_speed(value: Any) -> str:
     return f"{amount:+d}%"
 
 
-def resolve_voice(provider: str, voice: str) -> str:
+def resolve_voice(provider: str, voice: str, voice_profile: dict | None = None) -> str:
     voice = str(voice or "male").strip()
 
     if provider == "edge_tts":
@@ -907,7 +907,13 @@ def synthesize_provider(
 
         payload = {
             "contents": [
-                {"parts": [{"text": text}]}
+                {"parts": [{
+                    "text": (
+                        f"Say this in a {str((voice_profile or {}).get('emotion') or 'neutral')} "
+                        f"storytelling tone with clear Hindi pronunciation: {text}"
+                        if voice_profile else text
+                    )
+                }]}
             ],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
@@ -915,7 +921,7 @@ def synthesize_provider(
                     "voiceConfig": {
                         "prebuiltVoiceConfig": {
                             "voiceName": resolve_voice(
-                                provider, voice
+                                provider, voice, voice_profile
                             )
                         }
                     }
