@@ -2027,6 +2027,16 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
         )
 
         add(
+            "music_provider_order",
+            (
+                bool(music_order)
+                and len(music_order) == len(set(music_order))
+                and all(item in {"lyria", "eleven_music", "stable_audio", "local"} for item in music_order)
+            ),
+            "Configured music order: " + " -> ".join(music_order),
+        )
+
+        add(
             "image_provider_order",
             (
                 bool(image_order)
