@@ -1521,6 +1521,7 @@ def main() -> None:
     # reject an otherwise matching story_plan.json file.
     source_plan_file_signature = stable_hash(source_plan)
     apply_story_part_metadata(source_plan, source_story)
+    legacy_enriched_plan_signature = stable_hash(source_plan)
 
     canonical_story_title = clean(
         source_story.get("final_title")
@@ -1587,13 +1588,40 @@ def main() -> None:
     else:
         reusable = []
 
-        if (
+        # Older runs hashed the in-memory plan after adding
+        # final_part_merged metadata. Accept that legacy fingerprint only
+        # when the story, generation settings, and every reused Part are
+        # independently verified against the current source files.
+        legacy_artifact_compatible = (
             isinstance(existing, dict)
+            and existing.get("version") == VERSION
             and existing.get("source_story_signature") == story_signature
-            and existing.get("source_plan_signature") == plan_signature
+            and existing.get("source_plan_signature")
+            == legacy_enriched_plan_signature
+            and existing.get("input_config") == config
+            and clean(existing.get("topic")) == topic
+            and clean(existing.get("story_text")) == story_text
+            and clean(existing.get("format")).lower() == config["format"]
+            and clean(existing.get("audience")) == config["audience"]
+            and clean(existing.get("story_length")) == config["story_length"]
+            and clean(existing.get("scene_duration")) == config["scene_duration"]
             and isinstance(existing.get("parts"), list)
-        ):
-            reusable = existing["parts"]
+        )
+
+        if legacy_artifact_compatible:
+            for source_part in source_plan["parts"]:
+                cached_part = find_existing_part(
+                    existing["parts"], source_part["part"]
+                )
+                if is_completed_part_valid(
+                    cached_part, source_part, config, total_parts
+                ):
+                    reusable.append(cached_part)
+
+            log(
+                "Legacy AI Story checkpoint verified: "
+                f"reusing {len(reusable)}/{total_parts} completed Parts."
+            )
 
         ai_story = {
             "version": VERSION,
