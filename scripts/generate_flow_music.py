@@ -555,9 +555,19 @@ def build_role_prompt(title, story_text, summary, role, rows, config):
     genre = clean(config.get("MUSIC_GENRE", "original film score"))
     mood = clean(config.get("MOOD", "dramatic")) or "dramatic"
     intensity = clean(config.get("MUSIC_INTENSITY", "evolving"))
+    scene_moods = []
+    if truthy(config.get("MUSIC_SCENE_ADAPTIVE", True), True):
+        for row in role_rows:
+            mood_value = clean(row.get("music_mood"))
+            if mood_value and mood_value not in scene_moods:
+                scene_moods.append(mood_value)
+    mood_direction = (
+        "Scene mood progression: " + "; ".join(scene_moods[:12]) + ". "
+        if scene_moods else ""
+    )
     return (
         "Create original instrumental cinematic music for a Hindi storytelling video. "
-        f"Independent {role.upper()} composition. No vocals, lyrics, speech or chanting. "
+        f"Independent {role.upper()} composition. " + mood_direction + "No vocals, lyrics, speech or chanting. "
         "Do not imitate existing songs, artists or soundtracks. Avoid abrupt cuts and silence. "
         "Use a memorable evolving original motif, varied instrumentation and dynamics; "
         "avoid a short loop repeated unchanged across the composition. "
