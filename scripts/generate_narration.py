@@ -16,6 +16,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from voice_profiles import profile_summary
 from input_config import (
     get_format,
     get_parts_range,
@@ -591,6 +592,10 @@ def build_settings(config: dict) -> dict:
             "TRANSITIONS",
             "cinematic",
         ),
+        "tts_profile": cfg_text(config, "TTS_PROFILE", "auto"),
+        "character_voices": cfg_bool(config, "CHARACTER_VOICES", True),
+        "tts_emotion_control": cfg_bool(config, "TTS_EMOTION_CONTROL", True),
+        "tts_child_friendly": cfg_bool(config, "TTS_CHILD_FRIENDLY", True),
     }
 
 
@@ -1345,6 +1350,26 @@ def build_narration_record(
         "tts_fingerprint": None,
         "dialogue": dialogue,
         "character_ids": character_ids,
+        "speaker_id": str(scene.get("speaker_id") or "narrator"),
+        "speaker": str(scene.get("speaker") or scene.get("speaker_name") or "Narrator"),
+        "emotion": str(scene.get("emotion") or scene.get("emotion_tag") or {
+            "hook": "curiosity", "suspense": "suspense",
+            "resolution": "warm", "main": "neutral",
+        }.get(role, "neutral")),
+        "voice_profile": profile_summary({
+            "AUDIENCE": settings["audience"],
+            "VOICE": settings["voice"],
+            "TTS_PROFILE": settings.get("tts_profile", "auto"),
+            "CHARACTER_VOICES": settings.get("character_voices", True),
+        }, {
+            "role": role,
+            "speaker_id": str(scene.get("speaker_id") or "narrator"),
+            "speaker": str(scene.get("speaker") or scene.get("speaker_name") or "Narrator"),
+            "emotion": str(scene.get("emotion") or scene.get("emotion_tag") or {
+                "hook": "curiosity", "suspense": "suspense",
+                "resolution": "warm", "main": "neutral",
+            }.get(role, "neutral")),
+        }),
         "status": "completed",
     }
 
