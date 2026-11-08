@@ -1514,6 +1514,12 @@ def main() -> None:
     total_parts, total_scenes = validate_source_plan(
         source_plan, config["format"]
     )
+
+    # Keep the signature tied to the exact on-disk Story Plan. The
+    # metadata enrichment below mutates the in-memory plan for per-Part
+    # validation, so hashing after enrichment makes downstream consumers
+    # reject an otherwise matching story_plan.json file.
+    source_plan_file_signature = stable_hash(source_plan)
     apply_story_part_metadata(source_plan, source_story)
 
     canonical_story_title = clean(
@@ -1551,7 +1557,7 @@ def main() -> None:
         )
 
     story_signature = stable_hash(source_story)
-    plan_signature = stable_hash(source_plan)
+    plan_signature = source_plan_file_signature
 
     signature = build_generation_signature(
         {
