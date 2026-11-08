@@ -1032,8 +1032,11 @@ def validate_narration_mapping(
 
     for source in source_scenes:
         if source["role"] != "main":
-            if clean(source.get("narration")) or source.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{source['scene_id']}: extra role must be visual-only.")
+            narration_text = clean(source.get("narration"))
+            if len(narration_text.split()) < 8 or source.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{source['scene_id']}: extra-role narration/voiceover is missing.")
+            if source.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{source['scene_id']}: extra-role narration source is invalid.")
     return narration_records
 
 
