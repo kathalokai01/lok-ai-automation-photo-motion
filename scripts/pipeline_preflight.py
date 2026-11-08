@@ -406,7 +406,7 @@ def check_font() -> tuple[bool, str]:
         path = Path(raw_path)
         if not path.is_file():
             continue
-        normalized = actual_family.replace("\\r", "\\n").replace(",", "\\n")
+        normalized = actual_family.replace("\r", "\n").replace(",", "\n")
         actual_names = [item.strip().casefold() for item in normalized.splitlines() if item.strip()]
         expected = family.casefold()
         if any(item == expected or item.startswith(expected + " ") for item in actual_names):
