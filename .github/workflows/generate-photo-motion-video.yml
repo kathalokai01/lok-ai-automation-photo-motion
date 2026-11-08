@@ -2,6 +2,15 @@ name: Generate Katha Lok AI Photo Motion Video
 
 on:
   workflow_dispatch:
+    inputs:
+      format:
+        description: "Output mode for this run"
+        required: true
+        type: choice
+        options:
+          - short
+          - full
+        default: short
 
 permissions:
   contents: read
@@ -17,6 +26,7 @@ jobs:
     timeout-minutes: 360
 
     env:
+      PHOTO_MOTION_FORMAT: ${{ inputs.format }}
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       TOKENIZERS_PARALLELISM: "false"
