@@ -616,10 +616,10 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
     if cue_counts != actual_counts:
         raise RuntimeError("SFX cue scene counts do not match narration.")
 
-    declared_total = data.get("total_audio_records")
+    declared_total = data.get("total_visual_scene_records")
     if declared_total is not None:
-        if positive_int(declared_total, "SFX narration record count") != len(narration):
-            raise RuntimeError("SFX cue narration record count mismatch.")
+        if positive_int(declared_total, "SFX visual Scene record count") != len(narration):
+            raise RuntimeError("SFX cue visual Scene record count mismatch.")
 
     audio_hash = sha256_file(AUDIO_FILE)
     if data.get("source_audio_manifest_sha256") != audio_hash:
