@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v17-source-fingerprint-fix"
-MAPPING_VERSION = 17
+VERSION = "story-plan-v18-locked-part-and-scene-text"
+MAPPING_VERSION = 18
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -505,6 +505,8 @@ def _make_main_scene(
         ),
         "story_anchor": anchor,
         "narration": anchor,
+        "source_text_sha256": sha256_text(anchor),
+        "source_word_count": word_count(anchor),
         "continuity_rule": (
             "Maintain established character identity, appearance, "
             "clothing, location, objects and chronology."
@@ -665,13 +667,18 @@ def build_plan(
             if isinstance(row, dict)
         ]
 
+        locked_part_text = clean_text(narration)
+        locked_part_hash = sha256_text(locked_part_text)
         parts.append({
             "part": part_number,
             "part_id": f"part_{part_number:02d}",
             "title": f"भाग {part_number}",
-            "narration": clean_text(narration),
-            "story_anchor": clean_text(narration),
-            "word_count": word_count(narration),
+            "narration": locked_part_text,
+            "story_anchor": locked_part_text,
+            "word_count": word_count(locked_part_text),
+            "text_locked": True,
+            "locked_word_count": word_count(locked_part_text),
+            "locked_text_sha256": locked_part_hash,
             "actual_scene_count": len(scenes),
             "main_scene_count": len(scenes),
             "scenes": scenes,
@@ -810,6 +817,12 @@ def validate_plan(
             raise RuntimeError(f"Part {part_number} actual Scene count mismatch.")
         if part.get("word_count") != word_count(narration):
             raise RuntimeError(f"Part {part_number} word count mismatch.")
+        if part.get("text_locked") is not True:
+            raise RuntimeError(f"Part {part_number} text is not locked.")
+        if part.get("locked_word_count") != word_count(narration):
+            raise RuntimeError(f"Part {part_number} locked word count mismatch.")
+        if part.get("locked_text_sha256") != sha256_text(narration):
+            raise RuntimeError(f"Part {part_number} locked text hash mismatch.")
 
         final_part = part_number == len(parts)
         if part.get("hook_required") is not True:
@@ -851,6 +864,10 @@ def validate_plan(
             anchor = clean_text(scene.get("story_anchor"))
             if not anchor or clean_text(scene.get("narration")) != anchor:
                 raise RuntimeError(f"Invalid Scene narration: {expected_id}.")
+            if scene.get("source_text_sha256") != sha256_text(anchor):
+                raise RuntimeError(f"Scene source text hash mismatch: {expected_id}.")
+            if scene.get("source_word_count") != word_count(anchor):
+                raise RuntimeError(f"Scene source word count mismatch: {expected_id}.")
             if expected_id in all_main_ids:
                 raise RuntimeError(f"Duplicate Main Scene ID: {expected_id}")
 
