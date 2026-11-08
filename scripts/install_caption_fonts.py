@@ -225,12 +225,14 @@ def require_tools():
 
 
 def family_matches(actual, expected):
+    # fontconfig may emit one family per line for variable-font instances.
+    normalized = str(actual).replace("\\r", "\\n").replace(",", "\\n")
     names = [
         item.strip().casefold()
-        for item in actual.split(",")
+        for item in normalized.splitlines()
         if item.strip()
     ]
-    target = expected.casefold()
+    target = expected.strip().casefold()
     return any(
         name == target or name.startswith(target + " ")
         for name in names
