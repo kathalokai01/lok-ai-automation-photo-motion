@@ -378,6 +378,14 @@ def load_input_config(
         config["SCENES_SPEC"] = str(config["SCENES"]).strip()
 
     config["_INPUT_CONFIG_PATH"] = str(resolved_path)
+
+    # GitHub Actions selects SHORT or FULL per workflow dispatch. Applying
+    # the override here also covers scripts that intentionally use the raw
+    # loader instead of load_and_validate().
+    format_override = os.environ.get("PHOTO_MOTION_FORMAT", "").strip()
+    if format_override:
+        config["FORMAT"] = format_override
+
     return config
 
 
@@ -1614,16 +1622,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 def load_and_validate(
     path: str | Path = "Input/topic.txt",
 ) -> dict[str, Any]:
-    config = load_input_config(path)
-
-    # GitHub Actions can select SHORT or FULL per workflow dispatch.
-    # Local runs remain controlled by Input/topic.txt unless this override
-    # is explicitly supplied.
-    format_override = os.environ.get("PHOTO_MOTION_FORMAT", "").strip()
-    if format_override:
-        config["FORMAT"] = format_override
-
-    return validate_config(config)
+    return validate_config(load_input_config(path))
 
 
 def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
