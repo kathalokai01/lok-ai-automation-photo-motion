@@ -228,7 +228,7 @@ jobs:
           print("TTS FALLBACK ORDER:", " -> ".join(tts))
           print("IMAGE FALLBACK ORDER:", " -> ".join(images))
           print("BILLABLE PROVIDERS: enabled")
-          print("LLM ZERO-COST MODE:", "enabled")
+          print("LLM BILLABLE PROVIDERS:", "permitted by configured credentials and model settings")
           PY
 
       - name: Calculate input and pipeline fingerprints
@@ -768,7 +768,7 @@ jobs:
           print("NO GENERATION TEST PERFORMED")
           PY
 
-      - name: Select configured zero-cost LLM fallbacks
+      - name: Select all configured LLM fallbacks
         shell: bash
         run: |
           set -euo pipefail
@@ -784,9 +784,6 @@ jobs:
           path = Path("output/config/selected_llm_provider.json")
           data = json.loads(path.read_text(encoding="utf-8"))
 
-          if data.get("zero_cost_only") is not True:
-              raise SystemExit("Provider selection is not zero-cost-only.")
-
           if data.get("api_calls_made") != 0:
               raise SystemExit("Provider selector unexpectedly made API calls.")
 
@@ -800,14 +797,13 @@ jobs:
           if data.get("status") not in {
               "ready",
               "no_provider_ready",
-              "disabled",
           }:
               raise SystemExit(
-                  "Unexpected zero-cost provider selector status: "
+                  "Unexpected LLM provider selector status: "
                   + str(data.get("status"))
               )
 
-          print("ZERO-COST PROVIDER SELECTION VERIFIED")
+          print("LLM PROVIDER SELECTION VERIFIED")
           print("STATUS:", data.get("status"))
           print("ORDER:", " -> ".join(order) if order else "none")
           print("API CALLS: 0")
