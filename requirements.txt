@@ -1,5 +1,6 @@
 # Python 3.11 runtime dependencies for Photo Motion.
 # CPU PyTorch is installed separately by the workflow from the official CPU wheel index.
+# requests is also used by the optional Eleven Music and Stable Audio adapters; no provider SDK is required.
 requests==2.32.4
 Pillow==11.3.0
 numpy==2.2.6
