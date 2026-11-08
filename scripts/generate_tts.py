@@ -1896,6 +1896,14 @@ def stable_source_signature(
             "scene_id": job["scene_id"],
             "role": job["role"],
             "text": job["text"],
+            "text_sha256": job["text_sha256"],
+            "voiceover_enabled": True,
+            "narration_source": (
+                "locked_part_text" if job["role"] == "main"
+                else "ai_generated_role_narration"
+            ),
+            "source_text_sha256": job["text_sha256"],
+            "source_word_count": len(job["text"].split()),
             "voice": job["voice"],
         }
         for job in jobs
