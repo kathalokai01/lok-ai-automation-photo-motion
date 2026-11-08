@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate story-grounded AI narration with zero-cost-only provider fallback."""
+"""Generate story-grounded AI narration with configured LLM provider fallback."""
 
 from __future__ import annotations
 
@@ -21,19 +21,20 @@ from input_config import (
     get_story_text,
 )
 from select_gemini_model import configured_fallbacks
-from llm_provider_client import generate_text as generate_free_provider_text
+from llm_provider_client import generate_text as generate_provider_text
+from gemini_api_guard import require_gemini_generation
 
 ROOT = Path(__file__).resolve().parent.parent
 STORY_FILE = ROOT / "output/story/story.json"
 PLAN_FILE = ROOT / "output/story/story_plan.json"
 OUTPUT_FILE = ROOT / "output/story/ai_story.json"
 MODEL_FILE = ROOT / "output/config/selected_model.json"
-FREE_PROVIDER_FILE = ROOT / "output/config/selected_llm_provider.json"
+LLM_PROVIDER_FILE = ROOT / "output/config/selected_llm_provider.json"
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v21-strict-zero-cost-json-validation"
+VERSION = "ai-story-v22-configured-llm-fallback"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
@@ -157,59 +158,49 @@ def normalize_model(value: Any) -> str:
     return model
 
 
-def validate_free_provider_model(provider: str, model: str) -> str:
+def validate_provider_model(provider: str, model: str) -> str:
     """Validate a selected provider/model pair before any network request."""
     provider = clean(provider).lower()
     model = clean(model)
     if provider not in {"groq", "openrouter", "cloudflare", "mistral"}:
-        raise RuntimeError(f"Unsupported zero-cost LLM provider: {provider!r}.")
+        raise RuntimeError(f"Unsupported LLM provider: {provider!r}.")
     if not model or len(model) > 200 or any(ch.isspace() for ch in model):
         raise RuntimeError(f"Invalid model identifier for {provider}.")
-    if provider == "openrouter" and not model.endswith(":free"):
-        raise RuntimeError("Only OpenRouter :free models are permitted.")
     if provider == "cloudflare" and not model.startswith("@cf/"):
         raise RuntimeError("Cloudflare model must use the @cf/ namespace.")
     return model
 
 
-def load_free_provider_order() -> list[str]:
-    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
-        "1", "true", "yes", "on", "enabled",
-    }:
-        raise RuntimeError(
-            "LLM_ZERO_COST_ONLY must be true. Paid fallback is disabled."
-        )
-
-    data = read_json(FREE_PROVIDER_FILE, required=False)
+def load_configured_provider_order() -> list[str]:
+    data = read_json(LLM_PROVIDER_FILE, required=False)
     if not isinstance(data, dict):
-        log("No validated zero-cost provider selection file was found.")
+        log("No configured LLM provider selection file was found.")
         return []
 
     if (
         data.get("enabled") is not True
-        or data.get("zero_cost_only") is not True
         or data.get("status") != "ready"
     ):
-        log("Zero-cost provider selector reports no ready fallback.")
+        log("LLM provider selector reports no ready fallback.")
         return []
 
     order = data.get("provider_order")
     records = data.get("providers")
 
     if not isinstance(order, list) or not isinstance(records, list):
-        raise RuntimeError("Invalid zero-cost provider selection schema.")
+        raise RuntimeError("Invalid LLM provider selection schema.")
 
     model_by_provider = {}
     for item in records:
         if not isinstance(item, dict):
-            raise RuntimeError("Invalid provider record in zero-cost selector.")
+            raise RuntimeError("Invalid provider record in LLM selector.")
         name = clean(item.get("provider")).lower()
         if name not in {"groq", "openrouter", "cloudflare", "mistral"}:
             raise RuntimeError(f"Unsupported provider record: {name!r}.")
         if item.get("ready") is True:
             if name in model_by_provider:
                 raise RuntimeError(f"Duplicate ready provider record: {name}.")
-            model_by_provider[name] = validate_free_provider_model(
+            model_by_provider[name] = validate_provider_model(
                 name, item.get("model")
             )
 
@@ -232,17 +223,15 @@ def load_free_provider_order() -> list[str]:
 
 
 def load_model_order() -> list[str]:
-    """Keep configured Gemini order first, then validated free providers."""
+    """Keep configured Gemini order first, then configured external providers."""
     order = []
     api_key = (
         os.environ.get("GEMINI_API_KEY", "").strip()
         or os.environ.get("GOOGLE_API_KEY", "").strip()
     )
-    gemini_free_confirmed = os.environ.get(
-        "GEMINI_FREE_TIER_CONFIRMED", ""
-    ).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    gemini_allowed = os.environ.get("ALLOW_GEMINI_GENERATION", "").strip() == "I_ACCEPT_POTENTIAL_GEMINI_CHARGES"
 
-    if api_key and gemini_free_confirmed:
+    if api_key and gemini_allowed:
         data = read_json(MODEL_FILE, required=False)
         if isinstance(data, dict) and data.get("status") == "selected":
             primary = normalize_model(data.get("model"))
@@ -274,23 +263,19 @@ def load_model_order() -> list[str]:
         else:
             log("Gemini model selection file unavailable; skipping Gemini.")
     elif api_key:
-        log(
-            "Gemini API key exists, but GEMINI_FREE_TIER_CONFIRMED "
-            "is not true; Gemini requests are blocked."
-        )
+        log("Gemini skipped: explicit billable-generation opt-in is absent.")
     else:
         log("Gemini API key is absent; skipping Gemini.")
 
-    free_order = load_free_provider_order()
-    order.extend(free_order)
+    provider_order = load_configured_provider_order()
+    order.extend(provider_order)
 
     if not order:
         raise RuntimeError(
-            "No permitted zero-cost model is ready. "
-            "No paid provider will be attempted."
+            "No configured LLM provider is ready."
         )
 
-    log("Validated zero-cost model order:")
+    log("Configured LLM model order:")
     for index, item in enumerate(order, 1):
         provider, model = item.split("|", 1)
         log(f"  {index}. {provider}: {model}")
@@ -1027,30 +1012,17 @@ def request_selected_model(
         )
 
     if provider == "gemini":
-        if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
-            "1", "true", "yes", "on", "enabled",
-        }:
-            raise RuntimeError("Gemini is blocked unless LLM_ZERO_COST_ONLY=true.")
-        if os.environ.get("GEMINI_FREE_TIER_CONFIRMED", "").strip().lower() not in {
-            "1", "true", "yes", "on", "enabled",
-        }:
-            raise RuntimeError(
-                "Gemini is blocked until GEMINI_FREE_TIER_CONFIRMED=true."
-            )
         if not api_key:
             raise RuntimeError(
                 "Gemini was selected but no Gemini API key is configured."
             )
-        parsed = request_gemini(api_key, model, prompt, schema)
+        authorized_key = require_gemini_generation("AI story narration", api_key=api_key)
+        parsed = request_gemini(authorized_key, model, prompt, schema)
         return parsed
 
-    if os.environ.get("LLM_ZERO_COST_ONLY", "").strip().lower() not in {
-        "1", "true", "yes", "on", "enabled",
-    }:
-        raise RuntimeError("Non-Gemini LLM calls require LLM_ZERO_COST_ONLY=true.")
-    validate_free_provider_model(provider, model)
+    validate_provider_model(provider, model)
 
-    result = generate_free_provider_text(
+    result = generate_provider_text(
         provider=provider,
         model=model,
         prompt=prompt,
@@ -1223,13 +1195,13 @@ def generate_part(
 
         log(
             f"Provider/model exhausted: {selected_model}. "
-            "Moving to the next configured zero-cost option."
+            "Moving to the next configured LLM option."
         )
 
     summary = json.dumps(errors, ensure_ascii=False)
     raise RuntimeError(
-        f"Part {source_part['part']} failed: all permitted zero-cost "
-        f"models were exhausted. No paid fallback was attempted. "
+        f"Part {source_part['part']} failed: all configured LLM "
+        f"models were exhausted. "
         f"Details: {summary[:5000]}"
     )
 
@@ -1531,9 +1503,7 @@ def main() -> None:
 
     if not models:
         raise RuntimeError(
-            "No permitted zero-cost model is available. "
-            "Configure a confirmed free Gemini tier or a ready "
-            "zero-cost fallback provider. No paid fallback is permitted."
+            "No configured LLM model is available. Check provider credentials, model settings, provider order, and Gemini billing opt-in."
         )
 
     primary_model = models[0]
