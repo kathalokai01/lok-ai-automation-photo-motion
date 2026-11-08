@@ -797,6 +797,7 @@ def synthesize_provider(
                     shutil.which("edge-tts") or "edge-tts",
                     "--voice", resolve_voice(provider, voice, voice_profile),
                     "--rate", speed,
+                    "--pitch", f"{int(round(((voice_profile or {}).get('pitch', 1.0) - 1.0) * 100)):+d}Hz",
                     "--text", text,
                     "--write-media", temporary,
                 ]
@@ -910,6 +911,7 @@ def synthesize_provider(
                 {"parts": [{
                     "text": (
                         f"Read with this delivery direction: {str((voice_profile or {}).get('emotion_instruction') or (voice_profile or {}).get('emotion') or 'neutral')}. "
+                        f"Use a pitch level of {float((voice_profile or {}).get('pitch', 1.0)):.2f} relative to normal. "
                         f"Keep the Hindi pronunciation clear and say only the story text: {text}"
                         if voice_profile else text
                     )
