@@ -814,7 +814,6 @@ def generate_gemini_metadata(
     )
 
     last_error = None
-    last_http_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         retry_http_error = None
         payload = {
