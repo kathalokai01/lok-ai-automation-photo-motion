@@ -616,6 +616,15 @@ def check_story_progression_quality_integration() -> tuple[bool, str]:
             "def validate_story_part", "def validate_story_output",
             "source_part_signature",
         ),
+        "llm_provider_client.py": (
+            "selected_story_provider_candidates",
+        ),
+        "select_llm_provider.py": (
+            "story_order_signature", "story_candidates",
+        ),
+        "checkpoint_manager.py": (
+            "story/story_model_progression.json", "valid_ai_story",
+        ),
     }
     missing = []
     for filename, markers in required.items():
