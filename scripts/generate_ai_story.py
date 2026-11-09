@@ -1099,11 +1099,14 @@ def generate_part(
     errors: list[dict] = []
     last_position = start_model_index
     last_attempt = 0
+    blocked_models: set[str] = set()
 
     for retry_round in range(1, MAX_RETRY_ROUNDS + 1):
         log("Part " + str(source_part["part"]) + ": model progression round "
             + str(retry_round) + "/" + str(MAX_RETRY_ROUNDS) + ".")
         for original_index, selected_model in ordered:
+            if selected_model in blocked_models:
+                continue
             last_position = original_index
             model_errors: list[str] = []
             prompt = original_prompt
@@ -1144,7 +1147,8 @@ def generate_part(
                     log("Model " + selected_model + ": " + message)
                     status = http_status(exc)
                     if is_quota_exhausted(exc) or status in {400, 401, 403, 404}:
-                        log("Permanent/quota failure; advancing to the next model.")
+                        blocked_models.add(selected_model)
+                        log("Permanent/quota failure; model blocked for this run.")
                         break
                     retryable = (
                         retryable_http_error(status) if status is not None else
@@ -1158,6 +1162,11 @@ def generate_part(
                         time.sleep(delay)
                         continue
                     if isinstance(exc, (ValueError, TypeError, KeyError)) and attempt < MAX_MODEL_ATTEMPTS:
+                        if last_generated is not None:
+                            prompt = build_revision_prompt(
+                                original_prompt, last_generated, source_part,
+                                config, total_parts,
+                            )
                         time.sleep(30)
                         continue
                     break
