@@ -44,7 +44,7 @@ AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 REPORT_FILE = ROOT / "output" / "story" / "story_verification.json"
 
-VERSION = "story-verifier-v19-locked-text-fingerprints"
+VERSION = "story-verifier-v20-ai-story-quality-gate"
 
 SHORT_MIN_WORDS = SHORT_MIN_WORDS_PER_PART
 SHORT_PREFERRED_MAX_WORDS = SHORT_PREFERRED_MAX_WORDS_PER_PART
