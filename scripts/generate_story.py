@@ -23,7 +23,7 @@ from input_config import (
     get_scenes_range, set_selected_parts, load_and_validate,
     get_title_source,
 )
-from select_gemini_model import configured_fallbacks
+from select_gemini_model import (\n    configured_fallbacks, load_story_model_cursor, save_story_model_cursor,\n)
 from story_length_policy import (
     parse_parts_range, build_length_policy, select_final_part_count,
     update_policy_with_corrected_story, validate_all_parts,
@@ -790,6 +790,33 @@ def parse_model_response(raw: str) -> dict:
         "response_format": "plain_text",
     }
 
+def get_story_model_order(api_key: str) -> list[str]:
+    """Return Gemini plus configured external Story models in their exact priority order."""
+    order = []
+    authorized = (
+        bool(api_key)
+        and os.environ.get("ALLOW_GEMINI_GENERATION", "").strip()
+        == "I_ACCEPT_POTENTIAL_GEMINI_CHARGES"
+    )
+    if authorized:
+        order.extend("gemini|" + item for item in get_configured_model_order())
+
+    selection = read_json(ROOT / "output" / "config" / "selected_llm_provider.json")
+    if isinstance(selection, dict) and selection.get("enabled") is True:
+        records = selection.get("providers", [])
+        model_map = {
+            clean(item.get("provider")).lower(): clean(item.get("model"))
+            for item in records
+            if isinstance(item, dict) and item.get("ready") is True
+        }
+        for provider in _load_configured_provider_order():
+            model = model_map.get(provider, "")
+            if model:
+                order.append(provider + "|" + model)
+
+    return list(dict.fromkeys(order))
+
+
 def call_model(
     prompt: str,
     model: str,
@@ -797,7 +824,18 @@ def call_model(
     *,
     max_tokens: int = MAX_TOKENS,
 ) -> dict:
-    """Try configured Gemini models first, then every ready external LLM provider."""
+    """Use the persistent Story cursor and retry the full configured model list in rounds."""
+    model_order = get_story_model_order(api_key)
+    if not model_order:
+        raise RuntimeError(
+            "No configured Story model is available. Check Gemini opt-in and external provider settings."
+        )
+    start_index = load_story_model_cursor(model_order)
+    ordered = [
+        ((start_index + offset) % len(model_order),
+         model_order[(start_index + offset) % len(model_order)])
+        for offset in range(len(model_order))
+    ]
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -807,170 +845,96 @@ def call_model(
         },
     }
     failures = []
-    configured_models = get_configured_model_order()
-    retryable_http = {408, 429, 500, 502, 503, 504}
-
-    gemini_authorized = (
-        os.environ.get("ALLOW_GEMINI_GENERATION", "").strip()
-        == "I_ACCEPT_POTENTIAL_GEMINI_CHARGES"
-    )
-
-    if api_key and configured_models and gemini_authorized:
+    max_rounds = 3
+    gemini_key = api_key
+    if any(item.startswith("gemini|") for item in model_order):
         from gemini_api_guard import require_gemini_generation
-        api_key = require_gemini_generation("story generation", api_key=api_key)
-        for model_index, candidate_model in enumerate(configured_models):
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                + urllib.parse.quote(candidate_model, safe="-._")
-                + ":generateContent"
-            )
-            model_errors = []
+        gemini_key = require_gemini_generation("story generation", api_key=api_key)
 
-            for attempt in range(len(RETRY_DELAYS) + 1):
-                retry_http_error = None
-                request = urllib.request.Request(
-                    url,
-                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/json",
-                        "x-goog-api-key": api_key,
-                    },
-                    method="POST",
-                )
-                try:
+    from llm_provider_client import generate_text
+    for retry_round in range(1, max_rounds + 1):
+        log("Story model progression round " + str(retry_round) + "/" + str(max_rounds))
+        for model_index, selected in ordered:
+            provider, candidate_model = selected.split("|", 1)
+            try:
+                if provider == "gemini":
+                    url = (
+                        "https://generativelanguage.googleapis.com/v1beta/models/"
+                        + urllib.parse.quote(candidate_model, safe="-._")
+                        + ":generateContent"
+                    )
+                    request = urllib.request.Request(
+                        url,
+                        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-goog-api-key": gemini_key,
+                        },
+                        method="POST",
+                    )
                     with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
                         response_data = json.loads(
                             response.read().decode("utf-8", errors="replace")
                         )
-
                     candidates = response_data.get("candidates") or []
                     if not candidates:
-                        raise ModelError(f"{candidate_model}: no response candidate.")
-
-                    content_parts = candidates[0].get("content", {}).get("parts", [])
+                        raise ModelError("Gemini returned no response candidate.")
+                    parts = candidates[0].get("content", {}).get("parts", [])
                     response_text = "".join(
-                        item.get("text", "")
-                        for item in content_parts
-                        if isinstance(item, dict)
+                        item.get("text", "") for item in parts if isinstance(item, dict)
                     ).strip()
+                else:
+                    generated = generate_text(
+                        provider, prompt, model=candidate_model,
+                        max_tokens=max(1, min(int(max_tokens), 32768)),
+                        temperature=0.25, timeout=TIMEOUT,
+                    )
+                    response_text = clean(generated.get("text"))
 
-                    if not response_text:
-                        raise ModelError(f"{candidate_model}: empty response.")
-
-                    parsed = parse_model_response(response_text)
-                    if not isinstance(parsed, dict):
-                        raise ModelError(f"{candidate_model}: invalid parsed response.")
-
-                    if candidate_model != clean(model):
-                        log(f"Runtime Gemini fallback succeeded: {candidate_model}")
-
+                parsed = parse_model_response(response_text)
+                if not isinstance(parsed, dict):
+                    raise ModelError("Model returned an invalid response object.")
+                if provider == "gemini":
                     save_selected_model(
                         candidate_model,
-                        reason=(
-                            "Primary Gemini model succeeded."
-                            if model_index == 0
-                            else "Earlier configured Gemini model failed; "
-                                 "this configured fallback succeeded."
-                        ),
+                        reason="Story progression accepted this configured Gemini model.",
                     )
-                    parsed["_katha_model_used"] = candidate_model
-                    parsed["_katha_provider_used"] = "gemini"
-                    parsed["_katha_generation_method"] = "configured_gemini"
-                    return parsed
+                    method = "configured_gemini"
+                else:
+                    method = "external_provider_fallback"
+                parsed["_katha_model_used"] = candidate_model
+                parsed["_katha_provider_used"] = provider
+                parsed["_katha_generation_method"] = method
+                save_story_model_cursor(
+                    model_order, model_index, stage="story_correction",
+                    status="succeeded",
+                    detail="Accepted syntactically valid Story model response.",
+                )
+                log("Story model accepted: " + selected)
+                return parsed
 
-                except urllib.error.HTTPError as exc:
-                    retry_http_error = exc
-                    body = http_error_body(exc, 1000)
-                    model_errors.append(f"HTTP {exc.code}: {body[:1000]}")
-                    if exc.code not in retryable_http:
-                        break
+            except Exception as exc:
+                status = http_status(exc)
+                failures.append({
+                    "round": retry_round, "model": selected,
+                    "error_type": type(exc).__name__,
+                    "status": status,
+                    "detail": str(exc)[:500],
+                })
+                log("Story model failed: " + selected + " (" + type(exc).__name__ + ")")
 
-                except (
-                    urllib.error.URLError,
-                    TimeoutError,
-                    OSError,
-                    ModelError,
-                    json.JSONDecodeError,
-                ) as exc:
-                    model_errors.append(f"{type(exc).__name__}: {exc}")
-                    if isinstance(exc, (ModelError, json.JSONDecodeError)):
-                        break
+        if retry_round < max_rounds:
+            # Retry the entire configured list in the same priority rotation.
+            time.sleep(min(12 * retry_round, 30))
 
-                if attempt < len(RETRY_DELAYS):
-                    delay = (
-                        retry_after_seconds(retry_http_error, attempt + 1, default_base=12, maximum=120)
-                        if retry_http_error is not None and http_status(retry_http_error) == 429
-                        else RETRY_DELAYS[attempt]
-                    )
-                    log(
-                        f"Transient Gemini failure on {candidate_model}; "
-                        f"retrying in {delay}s ({attempt + 1}/{len(RETRY_DELAYS)})."
-                    )
-                    time.sleep(delay)
-
-            failures.append(
-                f"Gemini {candidate_model}: " + " | ".join(model_errors)
-            )
-            log(
-                f"Gemini model failed: {candidate_model}; "
-                "trying next configured model."
-            )
-    elif api_key and configured_models:
-        log("Gemini skipped: explicit billable-generation opt-in is absent.")
-        failures.append("Gemini billing opt-in is absent; external providers will be tried.")
-    else:
-        failures.append("Gemini API key or configured Gemini models are absent.")
-
-    provider_order = _load_configured_provider_order()
-    if not provider_order:
-        raise RuntimeError(
-            "All configured Gemini models failed and no configured external LLM provider is ready. "
-            + " || ".join(failures)
-        )
-
-    try:
-        from llm_provider_client import ProviderError, generate_text
-    except Exception as exc:
-        raise RuntimeError(
-            "External LLM provider client import failed: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-
-    for provider in provider_order:
-        try:
-            generated = generate_text(
-                provider,
-                prompt,
-                max_tokens=max(1, min(int(max_tokens), 32768)),
-                temperature=0.25,
-                timeout=TIMEOUT,
-            )
-            response_text = clean(generated.get("text"))
-            if not response_text:
-                raise ModelError(f"{provider}: provider returned empty text.")
-
-            parsed = parse_model_response(response_text)
-            parsed["_katha_model_used"] = (
-                f"{provider}:{clean(generated.get('model'))}"
-            )
-            parsed["_katha_provider_used"] = provider
-            parsed["_katha_generation_method"] = "external_provider_fallback"
-
-            log(
-                f"External LLM fallback succeeded: {provider}/"
-                f"{clean(generated.get('model'))}"
-            )
-            return parsed
-
-        except Exception as exc:
-            failures.append(f"{provider}: {type(exc).__name__}: {exc}")
-            log(
-                f"LLM provider failed: {provider}; "
-                "trying next validated provider."
-            )
-
+    save_story_model_cursor(
+        model_order, ordered[-1][0], stage="story_correction",
+        status="all_models_failed",
+        detail=json.dumps(failures, ensure_ascii=False)[:900],
+    )
     raise RuntimeError(
-         "All configured Gemini models and external LLM providers failed. " + " || ".join(failures)
+        "All configured Story models failed in " + str(max_rounds)
+        + " complete rounds. " + json.dumps(failures, ensure_ascii=False)[:5000]
     )
 
 
