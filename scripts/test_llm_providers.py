@@ -415,7 +415,7 @@ class AIStoryFallbackTests(unittest.TestCase):
         models = ["gemini|first", "openai|second"]
         failure = client.ProviderError("test", "permanent failure")
         patches = self._patch_generation()
-        with patches[0], patches[1], patches[2], \
+        with patches[0], patches[1], patches[2], patches[3], \
              patch.object(
                  generate_ai_story,
                  "request_selected_model",
@@ -430,6 +430,7 @@ class AIStoryFallbackTests(unittest.TestCase):
         self.assertEqual(caught.exception.state["model_index"], 1)
         self.assertEqual(caught.exception.state["model"], "openai|second")
         self.assertEqual(caught.exception.state["max_attempts"], 3)
+        self.assertEqual(caught.exception.state["retry_rounds"], 3)
 
     def test_quota_exhaustion_is_classified_for_immediate_provider_switch(self):
         failure = client.ProviderError(
