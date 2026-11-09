@@ -339,6 +339,7 @@ def list_runs(repository: str, workflow: str, branch: str, limit: int) -> list[i
         "--repo", repository,
         "--workflow", workflow,
         "--branch", branch,
+        "--status", "completed",
         "--limit", str(limit),
         "--json", "databaseId,status",
     ]
@@ -422,6 +423,8 @@ def restore(args: argparse.Namespace) -> int:
 
             if accepted:
                 log(f"Run {run_id}: restored stages: {', '.join(accepted)}")
+            if len(restored) == len(STAGES):
+                break
 
     report = {
         "status": "completed",
