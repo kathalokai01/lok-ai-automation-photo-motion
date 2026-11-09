@@ -41,7 +41,6 @@ STAGES = (
     ("scenes", ("scenes/scenes.json",)),
     ("thumbnail", ("thumbnail/thumbnail_manifest.json",)),
     ("metadata", ("publish/youtube_metadata.json",)),
-    ("package", ("package_manifest.json",)),
 )
 
 
