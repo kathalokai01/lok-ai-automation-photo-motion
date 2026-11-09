@@ -608,8 +608,7 @@ jobs:
                 -o -name 'title_cache.json' \
                 -o -name 'story_length_policy.json' \
                 -o -name 'story_plan.json' \) \
-                -exec cp -f {} output/story/ \
-                ;
+                -exec cp -f {} output/story/ +
               echo "Story-stage checkpoint restored from run $RUN_ID; downstream outputs were not restored because the pipeline changed."
             fi
             break
