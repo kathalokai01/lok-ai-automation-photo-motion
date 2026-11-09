@@ -32,7 +32,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 17
+SCRIPT_VERSION = 18
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -268,7 +268,21 @@ def clean_narration(value: Any, label: str) -> str:
 
 
 def _has_unclosed_double_quote(value: str) -> bool:
-    return value.count('"') % 2 == 1
+    """
+    Return True only when the last straight quote opens dialogue.
+
+    A Part can begin in the middle of dialogue, so its first quote may be
+    a closing quote inherited from the previous Part. Odd quote parity
+    alone incorrectly treats that closing quote as an opening quote and
+    merges every later sentence into one Scene.
+    """
+    positions = [match.start() for match in re.finditer('"', value)]
+    if len(positions) % 2 == 0 or not positions:
+        return False
+
+    last = positions[-1]
+    following = value[last + 1:last + 2]
+    return bool(following and re.match(r"\w", following, flags=re.UNICODE))
 
 
 def sentence_units(value: str) -> list[str]:
