@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v21-quoted-dialogue-units"
-MAPPING_VERSION = 21
+VERSION = "story-plan-v22-part-boundary-quote-safe"
+MAPPING_VERSION = 22
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -150,9 +150,21 @@ def write_json(path: Path, data: dict) -> None:
 
 
 def _has_unclosed_double_quote(value: str) -> bool:
-    # The story commonly uses straight double quotes around dialogue.
-    # Sentence punctuation inside those quotes must not split the dialogue.
-    return value.count('"') % 2 == 1
+    """
+    Return True only when the last straight quote opens dialogue.
+
+    A Part can begin in the middle of dialogue, so its first quote may be
+    a closing quote inherited from the previous Part. Odd quote parity
+    alone incorrectly treats that closing quote as an opening quote and
+    merges every later sentence into one Scene.
+    """
+    positions = [match.start() for match in re.finditer('"', value)]
+    if len(positions) % 2 == 0 or not positions:
+        return False
+
+    last = positions[-1]
+    following = value[last + 1:last + 2]
+    return bool(following and re.match(r"\w", following, flags=re.UNICODE))
 
 
 def split_sentences(text: str) -> list[str]:
