@@ -1705,32 +1705,67 @@ def run_provider_attempts(
 
     last_error = "All configured provider attempts failed."
     succeeded = False
+    permanently_skipped = set()
+    retry_not_before = {}
 
-    for provider_name, provider_key, billable, generate in attempts:
-        if succeeded:
-            break
+    # MAX_RETRIES is the number of complete rounds, not consecutive
+    # retries on one model. Every round visits the full model list once.
+    for round_number in range(1, MAX_RETRIES + 1):
+        log(
+            "IMAGE FALLBACK ROUND:",
+            round_number,
+            "of",
+            MAX_RETRIES,
+        )
 
-        if billable and BILLABLE_BLOCKED:
-            log("Skipping billable provider after quota/billing failure:", provider_name)
-            continue
+        for provider_name, provider_key, billable, generate in attempts:
+            if succeeded:
+                break
 
-        retry_limit = MAX_RETRIES
+            if provider_key in permanently_skipped:
+                log("Skipping permanently unavailable model:", provider_name)
+                continue
 
-        for retry_number in range(1, retry_limit + 1):
+            if billable and BILLABLE_BLOCKED:
+                log("Skipping billable provider after quota/billing/auth failure:", provider_name)
+                continue
+
+            # A rate-limited model gets time to recover while the remaining
+            # providers in this round are tried. Wait only when its next turn
+            # arrives and its advertised cooldown has not elapsed.
+            not_before = retry_not_before.get(provider_key, 0)
+            remaining_wait = not_before - time.time()
+            if remaining_wait > 0:
+                log(
+                    "Waiting for provider cooldown:",
+                    provider_name,
+                    "| seconds:",
+                    round(remaining_wait),
+                )
+                time.sleep(remaining_wait)
+
             try:
                 log(
-                    "Generating:", item["scene_id"],
-                    "| Part:", item["part"],
-                    "| Role:", item["role"],
-                    "| Provider:", provider_name,
-                    "| Attempt:", retry_number,
+                    "Generating:",
+                    item["scene_id"],
+                    "| Part:",
+                    item["part"],
+                    "| Role:",
+                    item["role"],
+                    "| Provider:",
+                    provider_name,
+                    "| Round:",
+                    round_number,
+                    "of",
+                    MAX_RETRIES,
                 )
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
 
                 record["status"] = "pending"
                 record["current_provider"] = provider_name
-                record["current_attempt"] = retry_number
+                record["current_attempt"] = round_number
+                record["current_round"] = round_number
 
                 save_checkpoints(records, metadata, build_policy(), counters)
 
@@ -1747,7 +1782,8 @@ def run_provider_attempts(
                     "provider": provider_name,
                     "provider_key": provider_key,
                     "billable": billable,
-                    "attempt": retry_number,
+                    "attempt": round_number,
+                    "round": round_number,
                     "status": "success",
                     "image_sha256": integrity["sha256"],
                     "timestamp": int(time.time()),
@@ -1764,13 +1800,21 @@ def run_provider_attempts(
 
                 record.pop("current_provider", None)
                 record.pop("current_attempt", None)
+                record.pop("current_round", None)
                 record.pop("last_provider_error", None)
                 record.pop("error", None)
 
                 succeeded = True
                 save_checkpoints(records, metadata, build_policy(), counters)
 
-                log("IMAGE CHECKPOINT SAVED:", item["scene_id"])
+                log(
+                    "IMAGE CHECKPOINT SAVED:",
+                    item["scene_id"],
+                    "| successful provider:",
+                    provider_name,
+                    "| round:",
+                    round_number,
+                )
                 break
 
             except Exception as exc:
@@ -1788,7 +1832,8 @@ def run_provider_attempts(
                     "provider": provider_name,
                     "provider_key": provider_key,
                     "billable": billable,
-                    "attempt": retry_number,
+                    "attempt": round_number,
+                    "round": round_number,
                     "status": "failed",
                     "error": last_error[:800],
                     "error_category": classification["category"],
@@ -1800,7 +1845,10 @@ def run_provider_attempts(
                 record["last_provider_error"] = last_error[:800]
 
                 log(
-                    "Provider failed:", provider_name,
+                    "Provider failed:",
+                    provider_name,
+                    "| round:",
+                    round_number,
                     "|", classification["category"],
                     "|", last_error[:350],
                 )
@@ -1814,24 +1862,26 @@ def run_provider_attempts(
 
                 save_checkpoints(records, metadata, build_policy(), counters)
 
-                if classification["category"] == "rate_limit" and retry_number < retry_limit:
+                if classification["category"] == "rate_limit":
                     delay = retry_after_seconds(
-                        exc, retry_number, default_base=12, maximum=120
+                        exc, round_number, default_base=12, maximum=120
                     )
+                    retry_not_before[provider_key] = time.time() + delay
                     log(
-                        "Gemini/image provider rate-limited; retrying after",
-                        delay, "seconds."
+                        "Rate-limited provider will be reconsidered in a later round "
+                        "after its cooldown:",
+                        provider_name,
+                        "| seconds:",
+                        delay,
                     )
-                    time.sleep(delay)
-                    continue
+                elif classification["category"] in {
+                    "model_unavailable",
+                    "authentication",
+                    "quota_or_billing",
+                }:
+                    permanently_skipped.add(provider_key)
 
-                if classification["stop_retry"]:
-                    break
-
-                if not IMAGE_FALLBACK_ENABLED:
-                    break
-
-        if not IMAGE_FALLBACK_ENABLED:
+        if succeeded:
             break
 
     if not succeeded:
@@ -1839,8 +1889,16 @@ def run_provider_attempts(
         record["error"] = last_error[:1000]
         record.pop("current_provider", None)
         record.pop("current_attempt", None)
+        record.pop("current_round", None)
 
-        log("IMAGE FAILED:", item["scene_id"], "|", last_error[:350])
+        log(
+            "IMAGE FAILED:",
+            item["scene_id"],
+            "| all",
+            MAX_RETRIES,
+            "rounds exhausted |",
+            last_error[:350],
+        )
 
 
 def validate_output_format(format_name, metadata, items):
