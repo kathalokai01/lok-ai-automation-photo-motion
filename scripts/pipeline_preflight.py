@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v68-stage-aware-resume-policy"
+VERSION = "photo-motion-preflight-v69-tts-before-caption-source"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -83,8 +83,8 @@ WORKFLOW_ORDER = (
     "generate_character_bible.py",
     "generate_scenes.py",
     "generate_narration.py",
-    "prepare_captions.py",
     "generate_tts.py",
+    "prepare_captions.py",
     "generate_flow_music.py",
     "generate_visuals.py",
     "free_image_generator.py",
