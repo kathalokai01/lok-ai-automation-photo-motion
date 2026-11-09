@@ -425,6 +425,50 @@ class AIStoryFallbackTests(unittest.TestCase):
         self.assertTrue(generate_ai_story.is_quota_exhausted(failure))
 
 
+    def test_429_retry_after_is_honored_before_same_model_retry(self):
+        headers = Message()
+        headers.add_header("Retry-After", "41")
+        failure = client.ProviderError(
+            "gemini", "temporary rate limit", status_code=429,
+            retryable=True, headers=headers,
+        )
+        models = ["gemini|first", "openai|second"]
+        patches = self._patch_generation()
+        with patches[0], patches[1], patches[2], \
+             patch.object(
+                 generate_ai_story,
+                 "request_selected_model",
+                 side_effect=[failure, failure, failure, {"text": "ok"}],
+             ), \
+             patch.object(generate_ai_story.time, "sleep") as sleep:
+            generate_ai_story.generate_part(
+                "", models, "topic", "story", self.source_part,
+                self.config, 1,
+            )
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [41, 41])
+
+    def test_quota_exhaustion_switches_without_retry_wait(self):
+        quota = client.ProviderError(
+            "gemini", "RESOURCE_EXHAUSTED: daily quota exceeded",
+            status_code=429, retryable=True,
+        )
+        models = ["gemini|first", "openai|second"]
+        patches = self._patch_generation()
+        with patches[0], patches[1], patches[2], \
+             patch.object(
+                 generate_ai_story,
+                 "request_selected_model",
+                 side_effect=[quota, {"text": "ok"}],
+             ) as request, \
+             patch.object(generate_ai_story.time, "sleep") as sleep:
+            generate_ai_story.generate_part(
+                "", models, "topic", "story", self.source_part,
+                self.config, 1,
+            )
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_not_called()
+
+
 def run_tests() -> int:
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
