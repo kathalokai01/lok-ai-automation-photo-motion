@@ -137,6 +137,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "REPLICATE_IMAGE_MODEL": "black-forest-labs/flux-schnell",
     "CLOUDFLARE_IMAGE_MODEL": "@cf/black-forest-labs/flux-2-klein-4b",
     "CLOUDFLARE_IMAGE_FALLBACK_MODEL": "@cf/black-forest-labs/flux-1-schnell",
+    "IMAGE_QUALITY_VISION_ENABLED": True,
+    "IMAGE_QUALITY_VISION_MODEL": "gemini-2.5-flash",
+    "IMAGE_QUALITY_MIN_SCORE": 7,
+    "IMAGE_QUALITY_MAX_FAILURES_PER_MODEL": 2,
+    "IMAGE_QUALITY_SKIP_SCENES": 3,
 
     "PART_HOOK": True,
     "PART_SUSPENSE": True,
