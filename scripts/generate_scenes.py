@@ -32,7 +32,7 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v12-narration-word-count-consistency"
+VERSION = "photo-motion-scenes-v13-unified-whitespace-word-count"
 PROMPT_VERSION = 11
 
 ROLE_ORDER = {
@@ -71,8 +71,8 @@ def clean(value: Any) -> str:
 
 
 def count_narration_words(value: Any) -> int:
-    """Use the same Unicode word-count rule as narration preparation."""
-    return len(re.findall(r"\b[\w\'-]+\b", clean(value), flags=re.UNICODE))
+    """Match Story and narration preparation whitespace-token counting."""
+    return len(re.findall(r"\S+", clean(value)))
 
 
 def as_bool(value: Any, default: bool = False) -> bool:
@@ -231,7 +231,7 @@ def validate_ai_story_record(
         validate_sentence_boundary(record["narration"], scene_id)
         if record.get("source_text_sha256") != text_sha256(clean(record["narration"])):
             raise RuntimeError(f"{scene_id}: locked narration hash mismatch.")
-        if record.get("source_word_count") != len(re.findall(r"\S+", clean(record["narration"]))):
+        if record.get("source_word_count") != count_narration_words(record["narration"]):
             raise RuntimeError(f"{scene_id}: locked narration word count mismatch.")
     else:
         narration = clean(record.get("narration"))
