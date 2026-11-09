@@ -294,6 +294,85 @@ def build_selection(
     return result
 
 
+
+STORY_PROGRESSION_FILE = Path("output/story/story_model_progression.json")
+STORY_PROGRESSION_VERSION = "story-model-progression-v1"
+
+
+def story_model_signature(models: list[str]) -> str:
+    payload = json.dumps(
+        [str(item).strip() for item in models],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def load_story_model_cursor(models: list[str]) -> int:
+    """Restore the last successful Story model only for an identical model order."""
+    if not models:
+        return 0
+    try:
+        data = json.loads(
+            STORY_PROGRESSION_FILE.read_text(encoding="utf-8-sig")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    if (
+        data.get("version") != STORY_PROGRESSION_VERSION
+        or data.get("model_order_signature") != story_model_signature(models)
+        or data.get("model_order") != list(models)
+    ):
+        return 0
+    index = data.get("successful_model_index")
+    if isinstance(index, bool) or not isinstance(index, int):
+        return 0
+    return index if 0 <= index < len(models) else 0
+
+
+def save_story_model_cursor(
+    models: list[str],
+    index: int,
+    *,
+    stage: str,
+    part: int | None = None,
+    status: str = "succeeded",
+    detail: str = "",
+) -> None:
+    """Atomically persist Story-only model progression; TTS never reads this file."""
+    if not models:
+        raise ValueError("Cannot save Story model progression without a model order.")
+    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(models):
+        raise ValueError("Story model progression index is outside the configured order.")
+    STORY_PROGRESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "version": STORY_PROGRESSION_VERSION,
+        "model_order": list(models),
+        "model_order_signature": story_model_signature(models),
+        "successful_model_index": index,
+        "successful_model": models[index],
+        "stage": str(stage),
+        "part": part,
+        "status": str(status),
+        "detail": str(detail)[:1000],
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    temporary = STORY_PROGRESSION_FILE.with_name(
+        STORY_PROGRESSION_FILE.name + ".tmp"
+    )
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, STORY_PROGRESSION_FILE)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def main() -> None:
     log("Preparing configured Gemini model order.")
 
