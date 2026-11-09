@@ -1791,13 +1791,8 @@ def run_provider_attempts(
     negative = build_negative_prompt(item)
     seed = deterministic_seed(item)
     destination = item["destination"]
-
     attempts = build_provider_attempts(
-        prompt,
-        destination,
-        item["size"],
-        seed,
-        negative,
+        prompt, destination, item["size"], seed, negative
     )
 
     if not attempts:
@@ -1808,201 +1803,234 @@ def run_provider_attempts(
         )
         return
 
-    last_error = "All configured provider attempts failed."
-    succeeded = False
-    permanently_skipped = set()
+    attempt_count = len(attempts)
+    provider_keys = [row[1] for row in attempts]
+    cursor_key = clean(MODEL_PROGRESS_STATE.get("cursor_key"))
+    cursor_index = provider_keys.index(cursor_key) if cursor_key in provider_keys else 0
+    disabled_models = set(
+        clean(value) for value in MODEL_PROGRESS_STATE.get("disabled_models", [])
+    )
+    quality_failed_this_scene = set()
     retry_not_before = {}
+    last_error = "All configured image models failed generation or quality validation."
+    succeeded = False
 
-    # MAX_RETRIES is the number of complete rounds, not consecutive
-    # retries on one model. Every round visits the full model list once.
     for round_number in range(1, MAX_RETRIES + 1):
+        if succeeded:
+            break
+        round_start_index = cursor_index
         log(
-            "IMAGE FALLBACK ROUND:",
-            round_number,
-            "of",
-            MAX_RETRIES,
+            "IMAGE FALLBACK ROUND:", round_number, "of", MAX_RETRIES,
+            "| starting model:", attempts[round_start_index][0],
         )
 
-        for provider_name, provider_key, billable, generate in attempts:
-            if succeeded:
-                break
+        for offset in range(attempt_count):
+            index = (round_start_index + offset) % attempt_count
+            provider_name, provider_key, billable, generate = attempts[index]
 
-            if provider_key in permanently_skipped:
-                log("Skipping permanently unavailable model:", provider_name)
+            if provider_key in disabled_models:
+                log("Skipping persistently unavailable model:", provider_name)
                 continue
-
+            if provider_key in quality_failed_this_scene:
+                log("Skipping this model for this Scene after quality rejection:", provider_name)
+                continue
             if billable and BILLABLE_BLOCKED:
-                log("Skipping billable provider after quota/billing/auth failure:", provider_name)
+                log("Skipping billable provider after billing/authentication block:", provider_name)
                 continue
 
-            # A rate-limited model gets time to recover while the remaining
-            # providers in this round are tried. Wait only when its next turn
-            # arrives and its advertised cooldown has not elapsed.
+            skip_until = MODEL_PROGRESS_STATE.get("skip_until_scene", {}).get(provider_key)
+            if isinstance(skip_until, int) and item["global_scene"] < skip_until:
+                log(
+                    "Temporarily skipping model after repeated quality failures:",
+                    provider_name, "| until Scene", skip_until,
+                )
+                continue
+            elif skip_until is not None:
+                MODEL_PROGRESS_STATE["skip_until_scene"].pop(provider_key, None)
+
             not_before = retry_not_before.get(provider_key, 0)
             remaining_wait = not_before - time.time()
             if remaining_wait > 0:
                 log(
-                    "Waiting for provider cooldown:",
-                    provider_name,
-                    "| seconds:",
-                    round(remaining_wait),
+                    "Waiting for provider cooldown:", provider_name,
+                    "| seconds:", round(remaining_wait),
                 )
                 time.sleep(remaining_wait)
 
+            cursor_index = index
+            MODEL_PROGRESS_STATE["cursor_key"] = provider_key
+            save_model_progress(metadata)
+
             try:
                 log(
-                    "Generating:",
-                    item["scene_id"],
-                    "| Part:",
-                    item["part"],
-                    "| Role:",
-                    item["role"],
-                    "| Provider:",
-                    provider_name,
-                    "| Round:",
-                    round_number,
-                    "of",
-                    MAX_RETRIES,
+                    "Generating:", item["scene_id"],
+                    "| Provider:", provider_name,
+                    "| Round:", round_number, "of", MAX_RETRIES,
+                    "| Cursor:", provider_key,
                 )
-
                 destination.parent.mkdir(parents=True, exist_ok=True)
-
                 record["status"] = "pending"
                 record["current_provider"] = provider_name
-                record["current_attempt"] = round_number
                 record["current_round"] = round_number
-
+                record["current_model_index"] = index
                 save_checkpoints(records, metadata, build_policy(), counters)
 
                 counters["external_api_calls"] += 1
                 if billable:
                     counters["billable_api_calls"] += 1
-
                 generate()
 
-                integrity = image_integrity(destination, item["size"])
+                quality = validate_scene_image(
+                    destination,
+                    prompt,
+                    item["size"],
+                    enabled=IMAGE_QUALITY_VISION_ENABLED,
+                    minimum_score=IMAGE_QUALITY_MIN_SCORE,
+                    model=IMAGE_QUALITY_VISION_MODEL,
+                    timeout=min(TIMEOUT, 120),
+                )
+                if not quality.get("accepted"):
+                    raise ImageQualityRejected(
+                        json.dumps(quality, ensure_ascii=False)[:1200]
+                    )
 
+                integrity = image_integrity(destination, item["size"])
                 success_attempts = list(record.get("attempts", []))
                 success_attempts.append({
                     "provider": provider_name,
                     "provider_key": provider_key,
                     "billable": billable,
-                    "attempt": round_number,
+                    "attempt": len(success_attempts) + 1,
                     "round": round_number,
                     "status": "success",
                     "image_sha256": integrity["sha256"],
+                    "quality_score": quality["vision"]["quality_score"],
                     "timestamp": int(time.time()),
                 })
-
                 record.update(
-                    make_record(
-                        item,
-                        "generated",
-                        provider_name,
-                        success_attempts,
-                    )
+                    make_record(item, "generated", provider_name, success_attempts)
                 )
-
+                record["quality_verification"] = quality
+                record["semantic_story_match"] = "verified"
+                record["last_successful_model"] = provider_key
                 record.pop("current_provider", None)
-                record.pop("current_attempt", None)
                 record.pop("current_round", None)
+                record.pop("current_model_index", None)
                 record.pop("last_provider_error", None)
+                record.pop("quality_verification_error", None)
                 record.pop("error", None)
 
+                MODEL_PROGRESS_STATE["cursor_key"] = provider_key
+                MODEL_PROGRESS_STATE["last_successful_model"] = provider_key
+                MODEL_PROGRESS_STATE["quality_failure_streaks"][provider_key] = 0
+                MODEL_PROGRESS_STATE["skip_until_scene"].pop(provider_key, None)
                 succeeded = True
                 save_checkpoints(records, metadata, build_policy(), counters)
-
                 log(
-                    "IMAGE CHECKPOINT SAVED:",
-                    item["scene_id"],
-                    "| successful provider:",
-                    provider_name,
-                    "| round:",
-                    round_number,
+                    "IMAGE ACCEPTED:", item["scene_id"],
+                    "| model:", provider_name,
+                    "| vision score:", quality["vision"]["quality_score"],
+                    "| next Scene starts with this model.",
                 )
                 break
 
+            except VisionVerificationUnavailable as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                if destination.is_file():
+                    destination.unlink(missing_ok=True)
+                record["status"] = "pending"
+                record["quality_verification_error"] = last_error[:1000]
+                record.pop("current_provider", None)
+                record.pop("current_round", None)
+                record.pop("current_model_index", None)
+                save_checkpoints(records, metadata, build_policy(), counters)
+                raise
+
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                classification = classify_provider_error(exc)
+                if isinstance(exc, ImageQualityRejected):
+                    category = "quality_failure"
+                    classification = {
+                        "category": category,
+                        "stop_billable": False,
+                        "http_status": None,
+                    }
+                    quality_failed_this_scene.add(provider_key)
+                    streaks = MODEL_PROGRESS_STATE["quality_failure_streaks"]
+                    streaks[provider_key] = int(streaks.get(provider_key, 0)) + 1
+                    if streaks[provider_key] >= IMAGE_QUALITY_MAX_FAILURES_PER_MODEL:
+                        MODEL_PROGRESS_STATE["skip_until_scene"][provider_key] = (
+                            item["global_scene"] + IMAGE_QUALITY_SKIP_SCENES + 1
+                        )
+                else:
+                    classification = classify_provider_error(exc)
+                    category = classification["category"]
 
-                # Never leave a corrupt or partial image at the final path.
                 if destination.is_file():
-                    try:
-                        image_integrity(destination, item["size"])
-                    except Exception:
-                        destination.unlink(missing_ok=True)
+                    destination.unlink(missing_ok=True)
 
                 record.setdefault("attempts", []).append({
                     "provider": provider_name,
                     "provider_key": provider_key,
                     "billable": billable,
-                    "attempt": round_number,
+                    "attempt": len(record.get("attempts", [])) + 1,
                     "round": round_number,
                     "status": "failed",
-                    "error": last_error[:800],
-                    "error_category": classification["category"],
-                    "http_status": classification["http_status"],
+                    "error": last_error[:1000],
+                    "error_category": category,
+                    "http_status": classification.get("http_status"),
                     "timestamp": int(time.time()),
                 })
-
                 record["status"] = "pending"
-                record["last_provider_error"] = last_error[:800]
-
+                record["last_provider_error"] = last_error[:1000]
                 log(
-                    "Provider failed:",
-                    provider_name,
-                    "| round:",
-                    round_number,
-                    "|", classification["category"],
+                    "Model failed:", provider_name,
+                    "| category:", category,
+                    "| round:", round_number,
                     "|", last_error[:350],
                 )
 
-                if billable and classification["stop_billable"]:
+                if billable and classification.get("stop_billable"):
                     BILLABLE_BLOCKED = True
-                    log(
-                        "Further billable image providers are blocked "
-                        "for this run after a billing/quota/authentication failure."
-                    )
-
-                save_checkpoints(records, metadata, build_policy(), counters)
-
-                if classification["category"] == "rate_limit":
+                    MODEL_PROGRESS_STATE["billable_blocked"] = True
+                    log("Further billable image providers are blocked for this run.")
+                if category in {
+                    "model_unavailable", "authentication", "quota_or_billing"
+                }:
+                    disabled_models.add(provider_key)
+                    MODEL_PROGRESS_STATE["disabled_models"] = sorted(disabled_models)
+                if category == "rate_limit":
                     delay = retry_after_seconds(
                         exc, round_number, default_base=12, maximum=120
                     )
                     retry_not_before[provider_key] = time.time() + delay
                     log(
-                        "Rate-limited provider will be reconsidered in a later round "
-                        "after its cooldown:",
-                        provider_name,
-                        "| seconds:",
-                        delay,
+                        "Rate-limit cooldown recorded:", provider_name,
+                        "| seconds:", delay,
                     )
-                elif classification["category"] in {
-                    "model_unavailable",
-                    "authentication",
-                    "quota_or_billing",
-                }:
-                    permanently_skipped.add(provider_key)
 
-        if succeeded:
-            break
+                cursor_index = (index + 1) % attempt_count
+                MODEL_PROGRESS_STATE["cursor_key"] = attempts[cursor_index][1]
+                save_checkpoints(records, metadata, build_policy(), counters)
+
+        if not succeeded:
+            cursor_key = clean(MODEL_PROGRESS_STATE.get("cursor_key"))
+            cursor_index = (
+                provider_keys.index(cursor_key)
+                if cursor_key in provider_keys else cursor_index
+            )
 
     if not succeeded:
         record["status"] = "failed"
-        record["error"] = last_error[:1000]
+        record["error"] = last_error[:1200]
         record.pop("current_provider", None)
-        record.pop("current_attempt", None)
         record.pop("current_round", None)
-
+        record.pop("current_model_index", None)
+        save_checkpoints(records, metadata, build_policy(), counters)
         log(
-            "IMAGE FAILED:",
-            item["scene_id"],
-            "| all",
-            MAX_RETRIES,
-            "rounds exhausted |",
-            last_error[:350],
+            "IMAGE FAILED:", item["scene_id"],
+            "| complete rounds exhausted:", MAX_RETRIES,
+            "| next Scene cursor:", MODEL_PROGRESS_STATE.get("cursor_key"),
         )
 
 
@@ -2054,6 +2082,7 @@ def main():
             "Visual jobs manifest is missing source/config fingerprints."
         )
 
+    load_model_progress(metadata)
     previous = load_previous_records()
     records = []
 
