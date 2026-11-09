@@ -10,6 +10,7 @@ import urllib.error
 from email.message import Message
 from types import SimpleNamespace
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,8 @@ import gemini_api_guard
 import gemini_http
 import generate_tts
 import generate_ai_story
+import select_gemini_model
+import story_quality_validator
 
 
 class GeminiHttpFallbackTests(unittest.TestCase):
@@ -355,6 +358,18 @@ class AIStoryFallbackTests(unittest.TestCase):
                 "validate_generated_part",
                 return_value={"word_count": 130},
             ),
+            patch.object(
+                generate_ai_story,
+                "validate_story_part",
+                side_effect=lambda generated, source, total_parts: {
+                    "version": story_quality_validator.VERSION,
+                    "status": "passed",
+                    "passed": True,
+                    "score": 10,
+                    "issues": [],
+                    "source_part_signature": generate_ai_story.source_part_signature(source),
+                },
+            ),
         )
 
     def test_model_is_retried_three_times_before_switching_provider(self):
@@ -364,7 +379,7 @@ class AIStoryFallbackTests(unittest.TestCase):
         )
         request = [failure, failure, failure, {"text": "ok"}]
         patches = self._patch_generation()
-        with patches[0], patches[1], patches[2], \
+        with patches[0], patches[1], patches[2], patches[3], \
              patch.object(generate_ai_story, "request_selected_model", side_effect=request) as mocked, \
              patch.object(generate_ai_story.time, "sleep") as sleep:
             result = generate_ai_story.generate_part(
@@ -383,7 +398,7 @@ class AIStoryFallbackTests(unittest.TestCase):
     def test_generation_starts_with_persisted_successful_model_position(self):
         models = ["gemini|first", "openai|second", "groq|third"]
         patches = self._patch_generation()
-        with patches[0], patches[1], patches[2], \
+        with patches[0], patches[1], patches[2], patches[3], \
              patch.object(
                  generate_ai_story,
                  "request_selected_model",
@@ -468,6 +483,76 @@ class AIStoryFallbackTests(unittest.TestCase):
             )
         self.assertEqual(request.call_count, 2)
         sleep.assert_not_called()
+
+
+
+class StoryProgressionAndQualityTests(unittest.TestCase):
+    def test_story_cursor_round_trips_only_for_same_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "progress.json"
+            models = ["gemini|gemini-a", "openai|model-b"]
+            with patch.object(select_gemini_model, "STORY_PROGRESSION_FILE", path):
+                self.assertEqual(select_gemini_model.load_story_model_cursor(models), 0)
+                select_gemini_model.save_story_model_cursor(
+                    models, 1, stage="test", part=2,
+                )
+                self.assertEqual(select_gemini_model.load_story_model_cursor(models), 1)
+                self.assertEqual(
+                    select_gemini_model.load_story_model_cursor(
+                        ["openai|model-b", "gemini|gemini-a"]
+                    ),
+                    0,
+                )
+
+    def test_selected_provider_candidates_preserve_ready_order(self):
+        selection = {
+            "enabled": True, "status": "ready",
+            "provider_order": ["groq", "openai"],
+            "providers": [
+                {"provider": "openai", "model": "gpt-test", "ready": True},
+                {"provider": "groq", "model": "llama-test", "ready": True},
+            ],
+        }
+        self.assertEqual(
+            client.selected_story_provider_candidates(selection),
+            ["groq|llama-test", "openai|gpt-test"],
+        )
+
+    def test_story_quality_validator_accepts_locked_unique_scene(self):
+        source = {
+            "part": 1,
+            "scenes": [{
+                "scene": 1, "scene_id": "P01-S01",
+                "story_anchor": "राम जंगल के रास्ते घर लौट रहा था।",
+            }],
+        }
+        generated = {
+            "part": 1, "status": "completed", "story_title": "जंगल का रास्ता",
+            "source_part_signature": "a" * 64,
+            "scenes": [{
+                "scene": 1, "scene_id": "P01-S01",
+                "story_anchor": "राम जंगल के रास्ते घर लौट रहा था।",
+                "narration": "राम जंगल के रास्ते घर लौट रहा था।",
+                "role": "main", "status": "completed",
+                "visual_prompt": "A detailed cinematic forest path at dusk with a lone traveler returning home.",
+                "camera_prompt": "slow push in",
+                "lighting_prompt": "natural dusk lighting",
+            }],
+        }
+        report = story_quality_validator.validate_story_part(
+            generated, source, total_parts=1,
+        )
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["score"], 10)
+
+    def test_generation_failure_classifier_distinguishes_quota(self):
+        error = urllib.error.HTTPError(
+            "https://example.invalid", 429, "quota",
+            Message(), io.BytesIO(b'{"error":{"status":"RESOURCE_EXHAUSTED"}}'),
+        )
+        self.assertEqual(
+            gemini_http.classify_generation_failure(error), "quota_blocked"
+        )
 
 
 def run_tests() -> int:
