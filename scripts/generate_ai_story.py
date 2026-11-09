@@ -1945,6 +1945,13 @@ def main() -> None:
 
     ai_story["title"] = canonical_story_title
     ai_story["story_title"] = canonical_story_title
+    quality_report = validate_story_output(ai_story, source_plan)
+    ai_story["quality_validation"] = quality_report
+    if not quality_report.get("passed"):
+        raise RuntimeError(
+            "Final Story quality validation failed: "
+            + "; ".join(quality_report.get("issues", [])[:20])
+        )
     annotate_audio_direction(ai_story)
     ai_story["status"] = "completed"
     ai_story["total_parts"] = completed_parts
