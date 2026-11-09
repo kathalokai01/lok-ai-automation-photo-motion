@@ -23,7 +23,10 @@ from input_config import (
 from select_gemini_model import (
     configured_fallbacks, load_story_model_cursor, save_story_model_cursor,
 )
-from story_quality_validator import validate_story_part, validate_story_output
+from story_quality_validator import (
+    VERSION as STORY_QUALITY_VERSION,
+    validate_story_part, validate_story_output,
+)
 from llm_provider_client import (
     generate_text as generate_provider_text,
     selected_story_provider_candidates,
@@ -1302,7 +1305,7 @@ def is_completed_part_valid(
         quality = existing.get("quality_validation")
         if (
             not isinstance(quality, dict)
-            or quality.get("version") != "story-quality-validator-v1"
+            or quality.get("version") != STORY_QUALITY_VERSION
             or quality.get("passed") is not True
             or quality.get("status") != "passed"
             or quality.get("source_part_signature") != source_part_signature(source_part)
