@@ -1523,13 +1523,12 @@ def load_model_progress(metadata):
             saved.get("skip_until_scene")
             if isinstance(saved.get("skip_until_scene"), dict) else {}
         ),
-        "disabled_models": (
-            saved.get("disabled_models")
-            if isinstance(saved.get("disabled_models"), list) else []
-        ),
-        "billable_blocked": bool(saved.get("billable_blocked", False)),
+        # Authentication, model availability and billing blocks are run-local.
+        # Re-evaluate them after a restart because credentials/quotas may have changed.
+        "disabled_models": [],
+        "billable_blocked": False,
     }
-    BILLABLE_BLOCKED = MODEL_PROGRESS_STATE["billable_blocked"]
+    BILLABLE_BLOCKED = False
     save_model_progress(metadata)
 
 
