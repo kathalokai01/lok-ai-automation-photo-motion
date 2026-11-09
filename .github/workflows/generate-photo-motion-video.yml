@@ -96,6 +96,8 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
       REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+      CLOUDFLARE_IMAGE_API_TOKEN: ${{ secrets.CLOUDFLARE_IMAGE_API_TOKEN }}
+      CLOUDFLARE_IMAGE_MODEL: ${{ vars.CLOUDFLARE_IMAGE_MODEL }}
 
       POLLINATIONS_FREE_IMAGE_MODELS: "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"
       ALLOW_BILLABLE_PROVIDERS: "true"
