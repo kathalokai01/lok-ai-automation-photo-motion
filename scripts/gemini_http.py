@@ -7,6 +7,7 @@ import datetime
 import email.utils
 import json
 import re
+import urllib.error
 from typing import Any
 
 RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
