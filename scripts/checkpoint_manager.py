@@ -250,6 +250,49 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
     return copied
 
 
+
+def merge_progress_checkpoints(source: Path, output: Path) -> int:
+    roots = (
+        "checkpoints",
+        "story/checkpoints",
+        "narration/checkpoints",
+        "visuals/checkpoints",
+        "photo_motion/checkpoints",
+    )
+    copied = 0
+    for root_name in roots:
+        source_root = source / root_name
+        if not source_root.is_dir():
+            continue
+        for candidate in sorted(source_root.rglob("*.json")):
+            if candidate.is_symlink():
+                continue
+            data = read_json(candidate)
+            if not isinstance(data, dict):
+                continue
+            has_stage_identity = any(
+                data.get(key)
+                for key in (
+                    "config_signature",
+                    "source_fingerprint",
+                    "input_fingerprint",
+                    "job_signature",
+                    "signature",
+                    "fingerprint",
+                )
+            )
+            if not has_stage_identity:
+                continue
+            relative = candidate.relative_to(source)
+            destination = output / relative
+            if destination.exists():
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, destination)
+            copied += 1
+    return copied
+
+
 def get_expected_context() -> dict:
     sys.path.insert(0, str(ROOT))
     from scripts.input_config import (
@@ -319,6 +362,7 @@ def restore(args: argparse.Namespace) -> int:
     restored: dict[str, int] = {}
     examined = 0
     rejected: list[dict] = []
+    progress_checkpoints = 0
 
     with tempfile.TemporaryDirectory(prefix="katha-checkpoint-") as temporary:
         temp = Path(temporary)
@@ -349,6 +393,7 @@ def restore(args: argparse.Namespace) -> int:
                 rejected.append({"run_id": run_id, "reason": "FORMAT/PARTS/SCENES/naming context mismatch"})
                 continue
 
+            progress_checkpoints += merge_progress_checkpoints(saved, output)
             accepted = []
             for stage, _ in STAGES:
                 if stage in restored:
@@ -368,6 +413,7 @@ def restore(args: argparse.Namespace) -> int:
         "run_limit": args.limit,
         "restored_stages": restored,
         "restored_stage_count": len(restored),
+        "progress_checkpoint_files_merged": progress_checkpoints,
         "rejected_candidates": rejected,
         "pipeline_hash_policy": "not used as a global restore gate; stage manifests validate reuse",
     }
@@ -375,6 +421,7 @@ def restore(args: argparse.Namespace) -> int:
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     log("Checkpoint runs examined:", examined)
     log("Independently restored stages:", len(restored), "/", len(STAGES))
+    log("Progress checkpoint files merged:", progress_checkpoints)
     log("Restore report:", report_path)
     return 0
 
