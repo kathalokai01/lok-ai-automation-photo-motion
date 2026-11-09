@@ -1424,6 +1424,19 @@ def make_record(item, status, provider=None, attempts=None):
         integrity = image_integrity(item["destination"], item["size"])
 
     source = item["source_job"]
+    character_ids = (
+        source.get("character_ids")
+        or source.get("character_names")
+        or source.get("characters")
+        or []
+    )
+    if isinstance(character_ids, str):
+        character_ids = [character_ids]
+    elif not isinstance(character_ids, list):
+        character_ids = []
+    character_references = source.get("character_references") or []
+    if not isinstance(character_references, list):
+        character_references = []
 
     return {
         "scene": item["global_scene"],
@@ -1458,8 +1471,8 @@ def make_record(item, status, provider=None, attempts=None):
         ),
         "quality_verification": None,
         "last_successful_model": provider,
-        "character_ids": list(source.get("character_ids") or source.get("characters") or []),
-        "character_references": list(source.get("character_references") or []),
+        "character_ids": character_ids,
+        "character_references": character_references,
         "duration": item["duration"],
         "attempts": list(attempts or []),
     }
