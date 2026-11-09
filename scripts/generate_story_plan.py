@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v23-quoted-sentence-boundaries-aligned"
-MAPPING_VERSION = 23
+VERSION = "story-plan-v24-short-quoted-attribution-aligned"
+MAPPING_VERSION = 24
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -209,9 +209,29 @@ def split_sentences(text: str) -> list[str]:
         else:
             quote_safe.append(pending)
 
+    # Match generate_narration.sentence_units(): a short, complete quoted
+    # utterance belongs with its following speaker/action attribution.
+    attributed: list[str] = []
+    index = 0
+    while index < len(quote_safe):
+        piece = quote_safe[index]
+        quoted_only = bool(
+            re.match(r'^[“"«]', piece)
+            and re.search(r'[”"»]$', piece)
+        )
+        if (
+            quoted_only
+            and len(re.findall(r"\S+", piece)) <= 4
+            and index + 1 < len(quote_safe)
+        ):
+            piece = f"{piece} {quote_safe[index + 1]}"
+            index += 1
+        attributed.append(piece)
+        index += 1
+
     # A countdown fragment such as "9..." is not a complete Scene.
     units: list[str] = []
-    for piece in quote_safe:
+    for piece in attributed:
         countdown = bool(
             re.fullmatch(r"[0-9०-९]{1,3}[.!?！？…।॥]+", piece)
         )
