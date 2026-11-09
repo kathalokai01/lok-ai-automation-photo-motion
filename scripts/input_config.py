@@ -20,7 +20,7 @@ ALL_TTS_PROVIDERS = (
 )
 
 ALL_IMAGE_PROVIDERS = (
-    "huggingface", "pollinations", "gemini", "replicate", "cloudflare",
+    "huggingface", "pollinations", "replicate", "cloudflare",
 )
 
 PROVIDER_ALIASES = {
@@ -54,8 +54,6 @@ IMAGE_PROVIDER_ALIASES = {
     "hugging_face": "huggingface",
     "huggingface": "huggingface",
     "pollinations": "pollinations",
-    "gemini": "gemini",
-    "gemini_image": "gemini",
     "replicate": "replicate",
     "cloudflare": "cloudflare",
     "cloudflare_workers_ai": "cloudflare",
@@ -136,7 +134,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "tongyi-mai/z-image-turbo,"
         "lykon/dreamshaper-8-lcm"
     ),
-    "GEMINI_IMAGE_MODEL": "gemini-2.5-flash-image",
     "REPLICATE_IMAGE_MODEL": "black-forest-labs/flux-schnell",
     "CLOUDFLARE_IMAGE_MODEL": "@cf/black-forest-labs/flux-1-schnell",
 
@@ -1265,13 +1262,6 @@ def get_image_provider_settings(
         )
     )
 
-    gemini_model = str(
-        config.get(
-            "GEMINI_IMAGE_MODEL",
-            DEFAULT_CONFIG["GEMINI_IMAGE_MODEL"],
-        )
-    ).strip()
-
     replicate_model = str(
         config.get(
             "REPLICATE_IMAGE_MODEL",
@@ -1293,8 +1283,6 @@ def get_image_provider_settings(
         raise ValueError(
             "POLLINATIONS_FREE_IMAGE_MODELS cannot be empty."
         )
-    if not gemini_model:
-        raise ValueError("GEMINI_IMAGE_MODEL cannot be empty.")
     if not re.fullmatch(
         r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
         replicate_model,
@@ -1326,7 +1314,6 @@ def get_image_provider_settings(
         "HF_IMAGE_SPACE": hf_spaces[0],
         "FREE_IMAGE_FALLBACK_SPACES": hf_spaces[1:],
         "POLLINATIONS_FREE_IMAGE_MODELS": pollinations_models,
-        "GEMINI_IMAGE_MODEL": gemini_model,
         "REPLICATE_IMAGE_MODEL": replicate_model,
         "CLOUDFLARE_IMAGE_MODEL": cloudflare_model,
     }
@@ -1818,7 +1805,6 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "IMAGE_POLLINATIONS_MODELS": image_settings[
             "POLLINATIONS_FREE_IMAGE_MODELS"
         ],
-        "IMAGE_GEMINI_MODEL": image_settings["GEMINI_IMAGE_MODEL"],
         "IMAGE_REPLICATE_MODEL": image_settings["REPLICATE_IMAGE_MODEL"],
     }
 
