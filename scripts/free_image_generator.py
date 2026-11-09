@@ -229,7 +229,7 @@ def apply_input_settings(config):
     )
     MAX_RETRIES = max(1, min(5, int(get_max_retries(config))))
     IMAGE_QUALITY_VISION_ENABLED = bool(config.get("IMAGE_QUALITY_VISION_ENABLED", True))
-    IMAGE_QUALITY_VISION_MODEL = clean(config.get("IMAGE_QUALITY_VISION_MODEL")) or "gemini-2.5-flash"
+    IMAGE_QUALITY_VISION_MODEL = clean(config.get("IMAGE_QUALITY_VISION_MODEL")) or "gemini-3.8-flash"
     IMAGE_QUALITY_MIN_SCORE = max(1, min(10, int(config.get("IMAGE_QUALITY_MIN_SCORE", 7))))
     IMAGE_QUALITY_MAX_FAILURES_PER_MODEL = max(1, min(10, int(config.get("IMAGE_QUALITY_MAX_FAILURES_PER_MODEL", 2))))
     IMAGE_QUALITY_SKIP_SCENES = max(1, min(50, int(config.get("IMAGE_QUALITY_SKIP_SCENES", 3))))
