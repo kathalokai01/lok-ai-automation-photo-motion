@@ -14,6 +14,7 @@ from scripts import checkpoint_manager
 from scripts import generate_scenes as scenes
 from scripts import generate_narration as narration
 from scripts import generate_story as story
+from scripts import generate_story_plan as story_plan
 
 
 def ai_record(scene_id: str, role: str, narration: str) -> dict:
@@ -167,6 +168,21 @@ class ExtraSceneNarrationTests(unittest.TestCase):
         )
         self.assertNotEqual(record["source_word_count"], expected)
         self.assertFalse(scenes.scene_is_valid(record, extra, "c" * 64))
+
+    def test_countdown_fragments_are_not_separate_scenes(self) -> None:
+        sample = (
+            "अयान ने पैच लिखा। आखिरी 10 सेकंड... 9... 8... "
+            "उसने एंटर दबाया।"
+        )
+        expected = [
+            "अयान ने पैच लिखा।",
+            "आखिरी 10 सेकंड... 9... 8...",
+            "उसने एंटर दबाया।",
+        ]
+        self.assertEqual(story_plan.split_sentences(sample), expected)
+        self.assertEqual(narration.sentence_units(sample), expected)
+        self.assertTrue(all(len(unit.split()) > 1 for unit in expected))
+
 
     def test_extra_scene_rejects_missing_narration(self) -> None:
         expected = {
