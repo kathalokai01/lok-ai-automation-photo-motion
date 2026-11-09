@@ -40,7 +40,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v34-persistent-model-cursor-quality-gate"
+VERSION = "photo-motion-image-generator-v35-provider-scoped-billing-blocks"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -1543,6 +1543,7 @@ def load_model_progress(metadata):
         # Re-evaluate them after a restart because credentials/quotas may have changed.
         "disabled_models": [],
         "billable_blocked": False,
+        "billable_blocked_providers": [],
     }
     BILLABLE_BLOCKED = False
     save_model_progress(metadata)
@@ -1563,6 +1564,9 @@ def build_policy():
         "fallback_enabled": IMAGE_FALLBACK_ENABLED,
         "billable_providers_allowed": ALLOW_BILLABLE,
         "billable_providers_blocked_after_quota_error": BILLABLE_BLOCKED,
+        "billable_provider_groups_blocked": sorted(
+            MODEL_PROGRESS_STATE.get("billable_blocked_providers", [])
+        ),
         "max_complete_rounds": MAX_RETRIES,
         "persistent_model_cursor": True,
         "quality_validation_enabled": IMAGE_QUALITY_VISION_ENABLED,
@@ -1735,6 +1739,20 @@ def save_checkpoints(records, metadata, policy, counters):
     save_model_progress(metadata)
 
 
+def billable_provider_group(provider_key):
+    """Return the account/provider family that shares billing credentials."""
+    value = clean(provider_key).casefold()
+    return value.split(":", 1)[0] if ":" in value else value
+
+
+def billable_provider_is_blocked(provider_key, billable, blocked_groups):
+    """A billing failure blocks only that provider account, not other vendors."""
+    if not billable:
+        return False
+    group = billable_provider_group(provider_key)
+    return bool(group and group in set(blocked_groups or []))
+
+
 def classify_provider_error(exc):
     """Return whether this failure is quota/billing/auth related."""
     status = None
@@ -1904,8 +1922,18 @@ def run_provider_attempts(
             if provider_key in quality_failed_this_scene:
                 log("Skipping this model for this Scene after quality rejection:", provider_name)
                 continue
-            if billable and BILLABLE_BLOCKED:
-                log("Skipping billable provider after billing/authentication block:", provider_name)
+            blocked_groups = MODEL_PROGRESS_STATE.get(
+                "billable_blocked_providers", []
+            )
+            if billable_provider_is_blocked(
+                provider_key, billable, blocked_groups
+            ):
+                log(
+                    "Skipping provider after its own billing/authentication block:",
+                    provider_name,
+                    "| account group:",
+                    billable_provider_group(provider_key),
+                )
                 continue
 
             skip_until = MODEL_PROGRESS_STATE.get("skip_until_scene", {}).get(provider_key)
@@ -2062,9 +2090,22 @@ def run_provider_attempts(
                 )
 
                 if billable and classification.get("stop_billable"):
-                    BILLABLE_BLOCKED = True
-                    MODEL_PROGRESS_STATE["billable_blocked"] = True
-                    log("Further billable image providers are blocked for this run.")
+                    group = billable_provider_group(provider_key)
+                    blocked_groups = set(
+                        MODEL_PROGRESS_STATE.get("billable_blocked_providers", [])
+                    )
+                    if group:
+                        blocked_groups.add(group)
+                    MODEL_PROGRESS_STATE["billable_blocked_providers"] = sorted(
+                        blocked_groups
+                    )
+                    BILLABLE_BLOCKED = bool(blocked_groups)
+                    MODEL_PROGRESS_STATE["billable_blocked"] = BILLABLE_BLOCKED
+                    log(
+                        "Billing/authentication block recorded for provider account:",
+                        group,
+                        "| other providers remain eligible.",
+                    )
                 if category in {
                     "model_unavailable", "authentication", "quota_or_billing"
                 }:
