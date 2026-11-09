@@ -57,6 +57,7 @@ REQUIRED_SCRIPTS = (
     "generate_flow_music.py",
     "generate_visuals.py",
     "free_image_generator.py",
+    "visual_quality_validator.py",
     "prepare_visuals.py",
     "generate_depth_maps.py",
     "depth_parallax.py",
@@ -2542,6 +2543,31 @@ def main() -> int:
 
     for item in input_checks:
         record(item["name"], item["passed"], item["detail"])
+
+    quality_model = str((config or {}).get("IMAGE_QUALITY_VISION_MODEL", "")).strip()
+    quality_score = (config or {}).get("IMAGE_QUALITY_MIN_SCORE")
+    quality_failures = (config or {}).get("IMAGE_QUALITY_MAX_FAILURES_PER_MODEL")
+    quality_skip = (config or {}).get("IMAGE_QUALITY_SKIP_SCENES")
+    quality_enabled = (config or {}).get("IMAGE_QUALITY_VISION_ENABLED")
+    quality_config_ok = (
+        isinstance(quality_enabled, bool)
+        and bool(re.fullmatch(r"[A-Za-z0-9_.-]+", quality_model))
+        and type(quality_score) is int and 1 <= quality_score <= 10
+        and type(quality_failures) is int and 1 <= quality_failures <= 10
+        and type(quality_skip) is int and 1 <= quality_skip <= 50
+    )
+    if quality_enabled and not os.getenv("GEMINI_API_KEY", "").strip():
+        quality_config_ok = False
+    record(
+        "image_quality_validation_configuration",
+        quality_config_ok,
+        (
+            f"Vision={quality_enabled}, model={quality_model}, minimum_score={quality_score}, "
+            f"failure_limit={quality_failures}, skip_scenes={quality_skip}."
+            if quality_config_ok
+            else "Vision quality settings are invalid or GEMINI_API_KEY is missing."
+        ),
+    )
 
     mode = input_details.get("format")
     parts = input_details.get("selected_parts")
