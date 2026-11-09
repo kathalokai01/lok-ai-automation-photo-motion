@@ -804,17 +804,10 @@ def get_story_model_order(api_key: str) -> list[str]:
         order.extend("gemini|" + item for item in get_configured_model_order())
 
     selection = read_json(ROOT / "output" / "config" / "selected_llm_provider.json")
-    if isinstance(selection, dict) and selection.get("enabled") is True:
-        records = selection.get("providers", [])
-        model_map = {
-            clean(item.get("provider")).lower(): clean(item.get("model"))
-            for item in records
-            if isinstance(item, dict) and item.get("ready") is True
-        }
-        for provider in _load_configured_provider_order():
-            model = model_map.get(provider, "")
-            if model:
-                order.append(provider + "|" + model)
+    if isinstance(selection, dict):
+        from llm_provider_client import selected_story_provider_candidates
+        order.extend(selected_story_provider_candidates(selection))
+
 
     return list(dict.fromkeys(order))
 
