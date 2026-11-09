@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v20-countdown-fragments-joined"
-MAPPING_VERSION = 20
+VERSION = "story-plan-v21-quoted-dialogue-units"
+MAPPING_VERSION = 21
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -149,6 +149,12 @@ def write_json(path: Path, data: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _has_unclosed_double_quote(value: str) -> bool:
+    # The story commonly uses straight double quotes around dialogue.
+    # Sentence punctuation inside those quotes must not split the dialogue.
+    return value.count('"') % 2 == 1
+
+
 def split_sentences(text: str) -> list[str]:
     normalized = normalize_text(text)
     pieces = [
@@ -157,11 +163,33 @@ def split_sentences(text: str) -> list[str]:
         if clean_text(piece)
     ]
 
-    # A countdown fragment such as "9..." is not a complete Scene.
-    # Keep it attached to the preceding sentence so the story is never
-    # divided into one-word narration/image jobs.
-    units: list[str] = []
+    # Rejoin sentence fragments split inside quoted dialogue, e.g.
+    # '"बचाओ! कोई है?" विक्रांत दर्द से चीख पड़ा।'
+    quote_safe: list[str] = []
+    pending = ""
     for piece in pieces:
+        if pending:
+            pending = f"{pending} {piece}"
+            if not _has_unclosed_double_quote(pending):
+                quote_safe.append(pending)
+                pending = ""
+            continue
+
+        if _has_unclosed_double_quote(piece):
+            pending = piece
+        else:
+            quote_safe.append(piece)
+
+    if pending:
+        if quote_safe:
+            quote_safe[-1] = f"{quote_safe[-1]} {pending}"
+        else:
+            quote_safe.append(pending)
+
+    # A countdown fragment such as "9..." is not a complete Scene.
+    # Keep it attached to the preceding sentence.
+    units: list[str] = []
+    for piece in quote_safe:
         countdown = bool(
             re.fullmatch(r"[0-9०-९]{1,3}[.!?！？…।॥]+", piece)
         )
