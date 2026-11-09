@@ -535,7 +535,7 @@ class StoryProgressionAndQualityTests(unittest.TestCase):
         }
         generated = {
             "part": 1, "status": "completed", "story_title": "जंगल का रास्ता",
-            "source_part_signature": "a" * 64,
+            "source_part_signature": generate_ai_story.source_part_signature(source),
             "scenes": [{
                 "scene": 1, "scene_id": "P01-S01",
                 "story_anchor": "राम जंगल के रास्ते घर लौट रहा था।",
