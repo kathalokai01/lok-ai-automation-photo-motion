@@ -98,10 +98,12 @@ def validate_context(saved: Path, expected: dict) -> bool:
         return False
     for key in (
         "format", "parts_min", "parts_max",
-        "scenes_min", "scenes_max", "naming_key",
+        "scenes_min", "scenes_max",
     ):
         if context.get(key) != expected.get(key):
             return False
+    if not isinstance(context.get("naming_key"), str) or not context["naming_key"].strip():
+        return False
     actual = context.get("actual_parts")
     if (
         not isinstance(actual, int)
@@ -235,7 +237,6 @@ def get_expected_context() -> dict:
     mode = str(get_format(config)).strip().lower()
     parts_min, parts_max = get_parts_range(config)
     scenes_min, scenes_max = get_scenes_range(config)
-    title = str(config.get("TITLE") or config.get("TOPIC") or "").strip()
     if mode not in {"short", "full"}:
         raise ValueError(f"invalid FORMAT: {mode}")
     return {
@@ -244,10 +245,6 @@ def get_expected_context() -> dict:
         "parts_max": int(parts_max),
         "scenes_min": int(scenes_min),
         "scenes_max": int(scenes_max),
-        "naming_key": re.sub(
-            r"[\s_-]+", "-",
-            re.sub(r"[^\w\s-]", "", title.lower(), flags=re.UNICODE),
-        ).strip("-")[:100],
     }
 
 
