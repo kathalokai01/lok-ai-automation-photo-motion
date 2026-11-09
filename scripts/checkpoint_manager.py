@@ -42,8 +42,9 @@ STAGES = (
 )
 
 
-def log(*values: Any) -> None:
-    print(*values, flush=True)
+def log(*values: Any, **kwargs: Any) -> None:
+    kwargs.setdefault("flush", True)
+    print(*values, **kwargs)
 
 
 def read_json(path: Path) -> dict | None:
@@ -204,15 +205,40 @@ def validate_stage(name: str, directory: Path, expected: dict) -> bool:
 
 
 def copy_stage(source: Path, output: Path, name: str) -> int:
+    copied = 0
+
+    if name == "visuals":
+        src_root = source / "visuals"
+        dst_root = output / "visuals"
+        if not src_root.is_dir() or dst_root.exists():
+            return 0
+        dst_root.mkdir(parents=True, exist_ok=True)
+        for child in sorted(src_root.iterdir()):
+            if child.name == "depth_maps" or child.is_symlink():
+                continue
+            target = dst_root / child.name
+            if child.is_dir():
+                shutil.copytree(child, target, symlinks=False)
+                copied += sum(1 for item in target.rglob("*") if item.is_file())
+            elif child.is_file():
+                shutil.copy2(child, target)
+                copied += 1
+        return copied
+
+    if name == "depth_maps":
+        src = source / "visuals" / "depth_maps"
+        dst = output / "visuals" / "depth_maps"
+        if not src.is_dir() or dst.exists():
+            return 0
+        shutil.copytree(src, dst, symlinks=False)
+        return sum(1 for item in dst.rglob("*") if item.is_file())
+
     files = next(files for stage, files in STAGES if stage == name)
     roots = sorted({Path(item).parts[0] for item in files})
-    copied = 0
     for root_name in roots:
         src = source / root_name
         dst = output / root_name
-        if not src.exists() or dst.exists():
-            continue
-        if src.is_symlink():
+        if not src.exists() or dst.exists() or src.is_symlink():
             continue
         if src.is_file():
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -220,7 +246,7 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
             copied += 1
         elif src.is_dir():
             shutil.copytree(src, dst, symlinks=False)
-            copied += sum(1 for path in dst.rglob("*") if path.is_file())
+            copied += sum(1 for item in dst.rglob("*") if item.is_file())
     return copied
 
 
