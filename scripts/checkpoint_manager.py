@@ -208,12 +208,17 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
     for root_name in roots:
         src = source / root_name
         dst = output / root_name
-        if not src.exists():
+        if not src.exists() or dst.exists():
             continue
-        if dst.exists():
+        if src.is_symlink():
             continue
-        shutil.copytree(src, dst, symlinks=False)
-        copied += sum(1 for path in dst.rglob("*") if path.is_file())
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied += 1
+        elif src.is_dir():
+            shutil.copytree(src, dst, symlinks=False)
+            copied += sum(1 for path in dst.rglob("*") if path.is_file())
     return copied
 
 
