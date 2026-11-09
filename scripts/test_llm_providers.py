@@ -373,7 +373,7 @@ class AIStoryFallbackTests(unittest.TestCase):
             ),
         )
 
-    def test_model_is_retried_three_times_before_switching_provider(self):
+    def test_full_model_list_is_tried_before_next_story_round(self):
         models = ["gemini|gemini-test", "openai|openai-test"]
         failure = client.ProviderError(
             "gemini", "temporary network failure", retryable=True
@@ -388,10 +388,11 @@ class AIStoryFallbackTests(unittest.TestCase):
                 self.config, 1,
             )
         self.assertEqual(mocked.call_count, 4)
-        self.assertEqual([call.args[0] for call in sleep.call_args_list], [30, 30])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [12])
         self.assertEqual(
             [call.args[1] for call in mocked.call_args_list],
-            ["gemini|gemini-test"] * 3 + ["openai|openai-test"],
+            ["gemini|gemini-test", "openai|openai-test",
+             "gemini|gemini-test", "openai|openai-test"],
         )
         self.assertEqual(result["_katha_model_index"], 1)
         self.assertEqual(result["_katha_provider_used"], "openai")
@@ -421,7 +422,8 @@ class AIStoryFallbackTests(unittest.TestCase):
                  generate_ai_story,
                  "request_selected_model",
                  side_effect=failure,
-             ) as mocked:
+             ) as mocked, \
+             patch.object(generate_ai_story.time, "sleep") as sleep:
             with self.assertRaises(generate_ai_story.ModelFallbackError) as caught:
                 generate_ai_story.generate_part(
                     "", models, "topic", "story", self.source_part,
@@ -431,7 +433,7 @@ class AIStoryFallbackTests(unittest.TestCase):
         self.assertEqual(caught.exception.state["model_index"], 0)
         self.assertEqual(caught.exception.state["model"], "gemini|first")
         self.assertEqual(caught.exception.state["last_model_index"], 1)
-        self.assertEqual(caught.exception.state["max_attempts"], 3)
+        self.assertEqual(caught.exception.state["max_attempts"], 1)
         self.assertEqual(caught.exception.state["retry_rounds"], 3)
         self.assertEqual(mocked.call_count, 6)
 
@@ -445,27 +447,45 @@ class AIStoryFallbackTests(unittest.TestCase):
         self.assertTrue(generate_ai_story.is_quota_exhausted(failure))
 
 
-    def test_429_retry_after_is_honored_before_same_model_retry(self):
+    def test_429_retry_after_waits_until_next_complete_round(self):
         headers = Message()
         headers.add_header("Retry-After", "41")
         failure = client.ProviderError(
             "gemini", "temporary rate limit", status_code=429,
             retryable=True, headers=headers,
         )
+        other_failure = client.ProviderError(
+            "openai", "temporary network failure", retryable=True
+        )
         models = ["gemini|first", "openai|second"]
         patches = self._patch_generation()
+        clock = [0.0]
+
+        def fake_monotonic():
+            return clock[0]
+
+        def fake_sleep(delay):
+            clock[0] += delay
+
         with patches[0], patches[1], patches[2], patches[3], \
              patch.object(
                  generate_ai_story,
                  "request_selected_model",
-                 side_effect=[failure, failure, failure, {"text": "ok"}],
-             ), \
-             patch.object(generate_ai_story.time, "sleep") as sleep:
+                 side_effect=[failure, other_failure, {"text": "ok"}],
+             ) as request, \
+             patch.object(generate_ai_story.time, "monotonic", side_effect=fake_monotonic), \
+             patch.object(generate_ai_story.time, "sleep", side_effect=fake_sleep) as sleep:
             generate_ai_story.generate_part(
                 "", models, "topic", "story", self.source_part,
                 self.config, 1,
             )
-        self.assertEqual([call.args[0] for call in sleep.call_args_list], [41, 41])
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(
+            [call.args[1] for call in request.call_args_list],
+            ["gemini|first", "openai|second", "gemini|first"],
+        )
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [41])
+
 
     def test_quota_exhaustion_switches_without_retry_wait(self):
         quota = client.ProviderError(
