@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v24-short-quoted-attribution-aligned"
-MAPPING_VERSION = 24
+VERSION = "story-plan-v25-long-quoted-dialogue-sentence-boundaries"
+MAPPING_VERSION = 25
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -187,27 +187,36 @@ def split_sentences(text: str) -> list[str]:
     if remainder:
         pieces.append(remainder)
 
-    # Rejoin sentence fragments split inside quoted dialogue.
+    # Keep complete sentence boundaries inside long quoted dialogue.
+    # Only collapse a short quoted utterance (four words or fewer).
     quote_safe: list[str] = []
     pending = ""
+    pending_pieces: list[str] = []
+
     for piece in pieces:
         if pending:
+            pending_pieces.append(piece)
             pending = f"{pending} {piece}"
             if not _has_unclosed_double_quote(pending):
-                quote_safe.append(pending)
+                if len(re.findall(r"\\S+", pending)) <= 4:
+                    quote_safe.append(pending)
+                else:
+                    quote_safe.extend(pending_pieces)
                 pending = ""
+                pending_pieces = []
             continue
 
         if _has_unclosed_double_quote(piece):
             pending = piece
+            pending_pieces = [piece]
         else:
             quote_safe.append(piece)
 
     if pending:
-        if quote_safe:
-            quote_safe[-1] = f"{quote_safe[-1]} {pending}"
-        else:
+        if len(re.findall(r"\\S+", pending)) <= 4:
             quote_safe.append(pending)
+        else:
+            quote_safe.extend(pending_pieces)
 
     # Match generate_narration.sentence_units(): a short, complete quoted
     # utterance belongs with its following speaker/action attribution.
