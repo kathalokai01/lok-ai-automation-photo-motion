@@ -32,8 +32,8 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v13-unified-whitespace-word-count"
-PROMPT_VERSION = 11
+VERSION = "photo-motion-scenes-v14-quoted-dialogue-regrouping"
+PROMPT_VERSION = 12
 
 ROLE_ORDER = {
     "hook": 0,
