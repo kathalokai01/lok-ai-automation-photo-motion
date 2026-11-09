@@ -601,7 +601,7 @@ def check_story_progression_quality_integration() -> tuple[bool, str]:
     required = {
         "generate_story.py": (
             "get_story_model_order", "load_story_model_cursor",
-            "save_story_model_cursor", "max_rounds = 3",
+            "save_story_model_cursor", "advance_story_model_after_quality_rejection", "max_rounds = 3",
         ),
         "generate_ai_story.py": (
             "load_story_model_cursor", "save_story_model_cursor",
