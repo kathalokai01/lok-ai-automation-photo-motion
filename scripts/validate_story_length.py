@@ -34,11 +34,15 @@ from story_length_policy import (
     sha256_text,
     verify_revision_evidence,
     word_count,
+    validate_story_quality_report,
 )
+
+from story_quality_validator import validate_story_output
 
 STORY_DIR = ROOT / "output" / "story"
 STORY_FILE = STORY_DIR / "story.json"
 PLAN_FILE = STORY_DIR / "story_plan.json"
+AI_STORY_FILE = STORY_DIR / "ai_story.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 REPORT_FILE = STORY_DIR / "story_length_validation.json"
 
@@ -473,6 +477,17 @@ def verify_plan(
 ) -> list[dict]:
     if not isinstance(plan, dict):
         fail("story_plan.json must contain a JSON object.")
+
+    ai_story = read_json(AI_STORY_FILE, required=False)
+    if (
+        isinstance(ai_story, dict)
+        and ai_story.get("source_story_signature") == fingerprint(story)
+        and ai_story.get("source_plan_signature") == fingerprint(plan)
+    ):
+        quality_report = validate_story_output(ai_story, plan)
+        quality_passed, quality_errors = validate_story_quality_report(quality_report)
+        if not quality_passed:
+            fail("AI Story quality validation failed: " + "; ".join(quality_errors[:12]))
 
     if plan.get("status") != "planned":
         fail("Story Plan status must be planned.")
