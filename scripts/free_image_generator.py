@@ -1447,13 +1447,80 @@ def selected_model_notice():
     log("Actual generation follows Input IMAGE_PROVIDER_ORDER only.")
 
 
+def _model_progress_signature(metadata):
+    return stable_hash({
+        "source_fingerprint": metadata.get("source_fingerprint"),
+        "config_signature": metadata.get("config_signature"),
+        "provider_order": PROVIDER_ORDER,
+        "huggingface_spaces": HF_SPACES,
+        "pollinations_models": POLLINATIONS_MODELS,
+        "replicate_model": REPLICATE_MODEL,
+        "cloudflare_primary": CLOUDFLARE_IMAGE_MODEL,
+        "cloudflare_fallback": CLOUDFLARE_IMAGE_FALLBACK_MODEL,
+    })
+
+
+def load_model_progress(metadata):
+    global MODEL_PROGRESS_STATE, BILLABLE_BLOCKED
+    signature = _model_progress_signature(metadata)
+    saved = read_json(MODEL_PROGRESS_FILE, {})
+    if (
+        not isinstance(saved, dict)
+        or saved.get("progress_signature") != signature
+        or saved.get("source_fingerprint") != metadata.get("source_fingerprint")
+        or saved.get("config_signature") != metadata.get("config_signature")
+    ):
+        saved = {}
+
+    MODEL_PROGRESS_STATE = {
+        "version": 1,
+        "progress_signature": signature,
+        "source_fingerprint": metadata.get("source_fingerprint"),
+        "config_signature": metadata.get("config_signature"),
+        "provider_order": list(PROVIDER_ORDER),
+        "cursor_key": clean(saved.get("cursor_key")),
+        "last_successful_model": saved.get("last_successful_model"),
+        "quality_failure_streaks": (
+            saved.get("quality_failure_streaks")
+            if isinstance(saved.get("quality_failure_streaks"), dict) else {}
+        ),
+        "skip_until_scene": (
+            saved.get("skip_until_scene")
+            if isinstance(saved.get("skip_until_scene"), dict) else {}
+        ),
+        "disabled_models": (
+            saved.get("disabled_models")
+            if isinstance(saved.get("disabled_models"), list) else []
+        ),
+        "billable_blocked": bool(saved.get("billable_blocked", False)),
+    }
+    BILLABLE_BLOCKED = MODEL_PROGRESS_STATE["billable_blocked"]
+    save_model_progress(metadata)
+
+
+def save_model_progress(metadata):
+    if not isinstance(MODEL_PROGRESS_STATE, dict) or not MODEL_PROGRESS_STATE:
+        return
+    MODEL_PROGRESS_STATE["updated_at"] = int(time.time())
+    MODEL_PROGRESS_STATE["source_fingerprint"] = metadata.get("source_fingerprint")
+    MODEL_PROGRESS_STATE["config_signature"] = metadata.get("config_signature")
+    save_json(MODEL_PROGRESS_FILE, MODEL_PROGRESS_STATE)
+
+
 def build_policy():
     return {
         "provider_order": list(PROVIDER_ORDER),
         "fallback_enabled": IMAGE_FALLBACK_ENABLED,
         "billable_providers_allowed": ALLOW_BILLABLE,
         "billable_providers_blocked_after_quota_error": BILLABLE_BLOCKED,
-        "max_retries_per_provider": MAX_RETRIES,
+        "max_complete_rounds": MAX_RETRIES,
+        "persistent_model_cursor": True,
+        "quality_validation_enabled": IMAGE_QUALITY_VISION_ENABLED,
+        "quality_validation_model": IMAGE_QUALITY_VISION_MODEL,
+        "quality_minimum_score": IMAGE_QUALITY_MIN_SCORE,
+        "quality_failure_limit_per_model": IMAGE_QUALITY_MAX_FAILURES_PER_MODEL,
+        "quality_skip_scenes": IMAGE_QUALITY_SKIP_SCENES,
+        "model_cursor_key": MODEL_PROGRESS_STATE.get("cursor_key"),
         "huggingface_spaces": (
             list(HF_SPACES) if "huggingface" in PROVIDER_ORDER else []
         ),
@@ -1504,6 +1571,7 @@ def build_image_manifest(records, metadata, policy):
         "images_failed": failed,
         "images_pending": pending,
         "policy": policy,
+        "model_progression": MODEL_PROGRESS_STATE,
         "scenes": [
             {
                 key: row.get(key)
@@ -1518,7 +1586,8 @@ def build_image_manifest(records, metadata, policy):
                     "negative_prompt_sha256", "reuse_signature",
                     "source_scene_signature", "source_fingerprint",
                     "config_signature", "file_integrity",
-                    "semantic_story_match",
+                    "semantic_story_match", "quality_verification",
+                    "last_successful_model",
                 )
             }
             for row in records
