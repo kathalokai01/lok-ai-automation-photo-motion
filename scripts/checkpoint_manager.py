@@ -283,6 +283,7 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
         "story/checkpoints",
         "narration/checkpoints",
         "visuals/checkpoints",
+        "visuals/depth_maps",
         "photo_motion/checkpoints",
     )
     copied = 0
@@ -306,6 +307,10 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
                     "source_hash",
                     "input_fingerprint",
                     "input_hash",
+                    "input_signature",
+                    "generation_signature",
+                    "cache_signature",
+                    "manifest_signature",
                     "job_signature",
                     "signature",
                     "fingerprint",
