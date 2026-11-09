@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from difflib import SequenceMatcher
 from typing import Any
 
 VERSION = "story-quality-validator-v1"
@@ -57,6 +56,10 @@ def validate_story_part(
 
     narration_hashes: set[str] = set()
     prompt_hashes: set[str] = set()
+    source_anchor_counts: dict[str, int] = {}
+    for source in source_scenes:
+        digest = _sha(_clean(source.get("story_anchor")))
+        source_anchor_counts[digest] = source_anchor_counts.get(digest, 0) + 1
     scene_checks = []
     for index, source in enumerate(source_scenes):
         if index >= len(actual_scenes):
@@ -85,7 +88,7 @@ def validate_story_part(
         )
         if narration:
             digest = _sha(narration)
-            if digest in narration_hashes:
+            if digest in narration_hashes and source_anchor_counts.get(digest, 0) <= 1:
                 valid = False
                 issues.append(f"Repeated narration detected in Part scene {index + 1}.")
             narration_hashes.add(digest)
