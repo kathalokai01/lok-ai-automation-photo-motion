@@ -35,7 +35,7 @@ IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v30-pollinations-json-post"
+VERSION = "photo-motion-image-generator-v31-pollinations-seed-range"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -791,7 +791,13 @@ def response_image(response, destination, size, provider):
 
 def deterministic_seed(item):
     raw = f"{BASE_SEED}:{item['scene_id']}:{item['global_scene']}"
-    return int(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8], 16)
+    # Pollinations validates seed as a signed 32-bit integer:
+    # -1 <= seed <= 2147483647. Keep deterministic values in that range.
+    digest_seed = int(
+        hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8],
+        16,
+    )
+    return digest_seed & 0x7FFFFFFF
 
 
 def hf_parameter_name(parameter):
