@@ -1207,8 +1207,9 @@ def generate_part(
                 + "; advancing through the configured model order.")
 
     state = {
-        "part": int(source_part["part"]), "model_index": last_position,
-        "model": models[last_position], "attempt": last_attempt,
+        "part": int(source_part["part"]), "model_index": start_model_index,
+        "model": models[start_model_index], "last_model_index": last_position,
+        "attempt": last_attempt,
         "max_attempts": MAX_MODEL_ATTEMPTS, "retry_rounds": MAX_RETRY_ROUNDS,
         "errors": errors,
     }
