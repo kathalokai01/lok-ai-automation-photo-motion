@@ -755,10 +755,15 @@ jobs:
           report = validate_story_output(ai_story, plan)
           if report.get("passed") is not True:
               raise SystemExit("AI Story quality gate failed: " + "; ".join(report.get("issues", [])[:12]))
-          if ai_story.get("source_story_signature") != __import__("hashlib").sha256(
-              json.dumps(story, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-          ).hexdigest():
+          digest = lambda value: __import__("hashlib").sha256(
+              json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+          ).hexdigest()
+          if ai_story.get("status") != "completed":
+              raise SystemExit("AI Story status is not completed.")
+          if ai_story.get("source_story_signature") != digest(story):
               raise SystemExit("AI Story source Story signature mismatch.")
+          if ai_story.get("source_plan_signature") != digest(plan):
+              raise SystemExit("AI Story source Plan signature mismatch.")
           print("AI Story quality passed:", report.get("score"), "/10")
           PY
 
