@@ -2550,7 +2550,7 @@ def main() -> int:
     quality_skip = (config or {}).get("IMAGE_QUALITY_SKIP_SCENES")
     quality_enabled = (config or {}).get("IMAGE_QUALITY_VISION_ENABLED")
     quality_config_ok = (
-        isinstance(quality_enabled, bool)
+        quality_enabled is True
         and bool(re.fullmatch(r"[A-Za-z0-9_.-]+", quality_model))
         and type(quality_score) is int and 1 <= quality_score <= 10
         and type(quality_failures) is int and 1 <= quality_failures <= 10
