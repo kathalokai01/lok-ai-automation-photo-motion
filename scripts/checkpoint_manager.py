@@ -156,11 +156,12 @@ def validate_story_stage(directory: Path, expected: dict) -> bool:
         plan_parts = plan.get("parts")
         count = len(parts) if isinstance(parts, list) else 0
         if (
-            story.get("status") in SUCCESS_STATES
+            isinstance(plan_parts, list)
+            and story.get("status") in SUCCESS_STATES
             and plan.get("status") in SUCCESS_STATES
             and str(story.get("format", "")).lower() == expected["format"]
             and count > 0
-            and count == len(plan_parts) if isinstance(plan_parts, list) else False
+            and count == len(plan_parts)
         ):
             if (
                 story.get("story_plan_fingerprint")
@@ -210,13 +211,15 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
     if name == "visuals":
         src_root = source / "visuals"
         dst_root = output / "visuals"
-        if not src_root.is_dir() or dst_root.exists():
+        if not src_root.is_dir():
             return 0
         dst_root.mkdir(parents=True, exist_ok=True)
         for child in sorted(src_root.iterdir()):
             if child.name == "depth_maps" or child.is_symlink():
                 continue
             target = dst_root / child.name
+            if target.exists():
+                continue
             if child.is_dir():
                 shutil.copytree(child, target, symlinks=False)
                 copied += sum(1 for item in target.rglob("*") if item.is_file())
