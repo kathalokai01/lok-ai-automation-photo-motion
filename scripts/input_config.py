@@ -15,8 +15,8 @@ from typing import Any
 
 
 ALL_TTS_PROVIDERS = (
-    "fish_audio", "gemini_tts", "edge_tts", "piper",
-    "elevenlabs", "cartesia", "finevoice", "minimax",
+    "elevenlabs", "fish_audio", "cartesia", "finevoice",
+    "gemini_tts", "edge_tts", "piper", "minimax",
 )
 
 ALL_IMAGE_PROVIDERS = (
@@ -121,7 +121,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TTS_CHUNK_MIN_CHARS": 150,
     "TTS_CHUNK_CHECKPOINT": True,
     "TTS_VALIDATE_AUDIO": True,
-    "TTS_MAX_PROVIDER_ATTEMPTS": 1,
+    "TTS_MAX_PROVIDER_ATTEMPTS": 2,
 
     "IMAGE_PROVIDER_ORDER": ",".join(ALL_IMAGE_PROVIDERS),
     "IMAGE_FALLBACK_ENABLED": True,
