@@ -35,7 +35,7 @@ IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v28-billing-safe-resume-locked-main-visual-only-extras"
+VERSION = "photo-motion-image-generator-v29-narrated-extra-roles"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -405,12 +405,18 @@ def get_jobs():
             if job.get("source_word_count") != len(narration.split()):
                 raise RuntimeError(f"{scene_id}: Main narration word count mismatch.")
         else:
-            if narration:
-                raise RuntimeError(f"{scene_id}: visual-only role narration must be empty.")
-            if job.get("voiceover_enabled") is not False:
-                raise RuntimeError(f"{scene_id}: visual-only voiceover must be disabled.")
-            if job.get("narration_source") != "visual_only" or not story_anchor:
-                raise RuntimeError(f"{scene_id}: visual-only source anchor is missing.")
+            if len(narration.split()) < 8:
+                raise RuntimeError(f"{scene_id}: extra-role narration is missing or too short.")
+            if job.get("voiceover_enabled") is not True:
+                raise RuntimeError(f"{scene_id}: extra-role voiceover must be enabled.")
+            if job.get("narration_source") != "ai_generated_role_narration":
+                raise RuntimeError(f"{scene_id}: extra-role narration source is invalid.")
+            if job.get("source_text_sha256") != sha256_text(narration):
+                raise RuntimeError(f"{scene_id}: extra-role narration hash mismatch.")
+            if job.get("source_word_count") != len(narration.split()):
+                raise RuntimeError(f"{scene_id}: extra-role narration word count mismatch.")
+            if not story_anchor:
+                raise RuntimeError(f"{scene_id}: extra-role story anchor is missing.")
 
         destination = safe_path(
             job.get("output_path") or job.get("image_path"),
@@ -455,11 +461,14 @@ def get_jobs():
             "prompt": prompt,
             "narration": narration,
             "story_anchor": story_anchor,
-            "voiceover_enabled": role == "main",
-            "narration_source": "locked_part_text" if role == "main" else "visual_only",
-            "visual_only": role != "main",
-            "source_text_sha256": sha256_text(narration) if role == "main" else "",
-            "source_word_count": len(narration.split()) if role == "main" else 0,
+            "voiceover_enabled": True,
+            "narration_source": (
+                "locked_part_text" if role == "main"
+                else "ai_generated_role_narration"
+            ),
+            "visual_only": False,
+            "source_text_sha256": sha256_text(narration),
+            "source_word_count": len(narration.split()),
             "negative_prompt": clean(job.get("negative_prompt")),
             "size": size,
             "size_text": f"{size[0]}x{size[1]}",
@@ -573,9 +582,11 @@ def make_prompt(item):
     sections = [
         item["prompt"],
         (
-            "Locked Main Scene narration context: " + item["narration"]
-            if not item.get("visual_only")
-            else "Visual-only story anchor: " + item["story_anchor"]
+            (
+                "Locked Main Scene narration context: " + item["narration"]
+                if item["role"] == "main"
+                else f"Locked {item['role'].title()} narration context: " + item["narration"]
+            )
         ),
         "Photorealistic live-action cinematic still.",
         (
@@ -587,8 +598,6 @@ def make_prompt(item):
         (
             "Locked narration is context only and must not appear as visible text, "
             "subtitles, labels or typography."
-            if not item.get("visual_only")
-            else "Visual-only story anchor is context only; do not add voiceover or visible text."
         ),
         (
             "Create one still image for later zoom, pan and optional 2.5D "
