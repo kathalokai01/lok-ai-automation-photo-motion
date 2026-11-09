@@ -921,6 +921,36 @@ def scene_detail(source: dict, key: str) -> str:
     return clean(value)
 
 
+def compact_world_context(world: dict, maximum: int = 3000) -> dict:
+    """Keep shared world facts without embedding every scene in every prompt."""
+    if not isinstance(world, dict):
+        return {}
+
+    excluded = {"scene_world_map", "continuity_rules"}
+    compact: dict[str, Any] = {}
+    for key, value in world.items():
+        if key in excluded or value is None or value == "" or value == [] or value == {}:
+            continue
+        if isinstance(value, (dict, list)):
+            rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        else:
+            rendered = clean(value)
+        if len(rendered) > 700:
+            rendered = rendered[:697].rstrip() + "..."
+        compact[str(key)] = rendered
+
+    encoded = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    while len(encoded) > maximum and compact:
+        largest = max(compact, key=lambda key: len(str(compact[key])))
+        value = str(compact[largest])
+        if len(value) <= 120:
+            compact.pop(largest)
+        else:
+            compact[largest] = value[:max(120, len(value) - 500)].rstrip() + "..."
+        encoded = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    return compact
+
+
 def build_prompt(
     config: dict,
     source: dict,
