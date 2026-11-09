@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import io
+import hashlib
 import urllib.error
 from email.message import Message
 from types import SimpleNamespace
@@ -506,9 +507,14 @@ class StoryProgressionAndQualityTests(unittest.TestCase):
                 )
 
     def test_selected_provider_candidates_preserve_ready_order(self):
+        candidates = ["groq|llama-test", "openai|gpt-test"]
         selection = {
             "enabled": True, "status": "ready",
             "provider_order": ["groq", "openai"],
+            "story_candidates": candidates,
+            "story_order_signature": hashlib.sha256(
+                "\n".join(candidates).encode("utf-8")
+            ).hexdigest(),
             "providers": [
                 {"provider": "openai", "model": "gpt-test", "ready": True},
                 {"provider": "groq", "model": "llama-test", "ready": True},
