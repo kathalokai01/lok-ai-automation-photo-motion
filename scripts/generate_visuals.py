@@ -1967,20 +1967,74 @@ def main() -> int:
     )
     bible = load_character_bible(config)
 
+    # scenes.json is written by generate_scenes.py. Its canonical
+    # per-Part counts are in part_role_counts; older outputs may also
+    # provide actual_scene_counts. Do not require duplicate metadata.
     raw_counts = source_document.get("actual_scene_counts")
-    if not isinstance(raw_counts, list) or len(raw_counts) != parts_count:
-        raise RuntimeError("scenes.json actual_scene_counts must contain one count per selected Part.")
     scene_counts = {}
-    for part, raw_count in enumerate(raw_counts, 1):
-        count = positive_int(raw_count, f"Part {part} actual Scene count")
+
+    if isinstance(raw_counts, list) and len(raw_counts) == parts_count:
+        for part, raw_count in enumerate(raw_counts, 1):
+            scene_counts[part] = positive_int(
+                raw_count,
+                f"Part {part} actual Scene count",
+            )
+    else:
+        role_counts = source_document.get("part_role_counts")
+        if isinstance(role_counts, dict):
+            for part in range(1, parts_count + 1):
+                part_data = role_counts.get(str(part), role_counts.get(part))
+                if not isinstance(part_data, dict):
+                    raise RuntimeError(
+                        f"scenes.json part_role_counts is missing Part {part}."
+                    )
+                scene_counts[part] = positive_int(
+                    part_data.get("main"),
+                    f"Part {part} Main Scene count",
+                )
+        else:
+            # Last-resort compatibility for scene manifests that contain
+            # complete scene rows but no aggregate count metadata.
+            rows = source_document.get("scenes")
+            if not isinstance(rows, list):
+                raise RuntimeError(
+                    "scenes.json has neither actual_scene_counts, "
+                    "part_role_counts, nor a valid scenes list."
+                )
+            derived = {part: 0 for part in range(1, parts_count + 1)}
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise RuntimeError("scenes.json contains an invalid scene row.")
+                role = normalize_role(row)
+                if role == "main":
+                    part = positive_int(row.get("part"), "Main scene Part")
+                    if part not in derived:
+                        raise RuntimeError(
+                            f"Main scene Part {part} is outside selected PARTS."
+                        )
+                    derived[part] += 1
+            scene_counts = derived
+
+    for part in range(1, parts_count + 1):
+        count = scene_counts.get(part)
+        if count is None:
+            raise RuntimeError(
+                f"scenes.json actual Main Scene count is missing for Part {part}."
+            )
         if not scenes_min <= count <= scenes_max:
             raise RuntimeError(
-                f"Part {part}: actual Scene count {count} is outside configured range {scenes_min}-{scenes_max}."
+                f"Part {part}: actual Scene count {count} is outside "
+                f"configured range {scenes_min}-{scenes_max}."
             )
-        scene_counts[part] = count
 
-    if source_document.get("scenes_min") != scenes_min or source_document.get("scenes_max") != scenes_max:
-        raise RuntimeError("scenes.json SCENES range does not match Input/topic.txt.")
+    # Validate range metadata when present, but accept the canonical
+    # generate_scenes.py schema where these fields are omitted.
+    declared_min = source_document.get("scenes_min")
+    declared_max = source_document.get("scenes_max")
+    if declared_min is not None and int(declared_min) != scenes_min:
+        raise RuntimeError("scenes.json SCENES minimum does not match Input/topic.txt.")
+    if declared_max is not None and int(declared_max) != scenes_max:
+        raise RuntimeError("scenes.json SCENES maximum does not match Input/topic.txt.")
 
     scenes = normalize_scene_rows(
         source_document,
