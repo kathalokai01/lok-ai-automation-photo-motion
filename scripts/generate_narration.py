@@ -340,7 +340,7 @@ def sentence_units(value: str) -> list[str]:
             pending_pieces.append(piece)
             pending = f"{pending} {piece}"
             if not _has_unclosed_double_quote(pending):
-                if len(re.findall(r"\\S+", pending)) <= 4:
+                if len(re.findall(r"\S+", pending)) <= 4:
                     quote_safe.append(pending)
                 else:
                     quote_safe.extend(pending_pieces)
@@ -355,7 +355,7 @@ def sentence_units(value: str) -> list[str]:
             quote_safe.append(piece)
 
     if pending:
-        if len(re.findall(r"\\S+", pending)) <= 4:
+        if len(re.findall(r"\S+", pending)) <= 4:
             quote_safe.append(pending)
         else:
             quote_safe.extend(pending_pieces)
