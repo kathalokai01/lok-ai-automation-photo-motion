@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v70-persistent-image-model-quality-gate"
+VERSION = "photo-motion-preflight-v71-story-model-progression-quality-gate"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -46,6 +46,7 @@ REQUIRED_SCRIPTS = (
     "verify_story.py",
     "generate_story_plan.py",
     "generate_ai_story.py",
+    "story_quality_validator.py",
     "generate_character_bible.py",
     "generate_scenes.py",
     "generate_narration.py",
@@ -592,6 +593,49 @@ def check_prepare_visuals_order(commands: list[dict]) -> tuple[bool, str]:
     return True, (
         "prepare_visuals.py runs after image generation and before depth maps "
         "and photo motion."
+    )
+
+
+
+def check_story_progression_quality_integration() -> tuple[bool, str]:
+    required = {
+        "generate_story.py": (
+            "get_story_model_order", "load_story_model_cursor",
+            "save_story_model_cursor", "max_rounds = 3",
+        ),
+        "generate_ai_story.py": (
+            "load_story_model_cursor", "save_story_model_cursor",
+            "MAX_RETRY_ROUNDS = 3", "validate_story_part",
+            "validate_story_output",
+        ),
+        "select_gemini_model.py": (
+            "STORY_PROGRESSION_FILE", "model_order_signature",
+            "load_story_model_cursor", "save_story_model_cursor",
+        ),
+        "story_quality_validator.py": (
+            "def validate_story_part", "def validate_story_output",
+            "source_part_signature", "quality_validation",
+        ),
+    }
+    missing = []
+    for filename, markers in required.items():
+        path = SCRIPTS / filename
+        if not path.is_file():
+            missing.append(filename + " (missing file)")
+            continue
+        try:
+            source = path.read_text(encoding="utf-8-sig")
+        except Exception as exc:
+            missing.append(filename + " (read error: " + type(exc).__name__ + ")")
+            continue
+        missing.extend(
+            filename + ": " + marker
+            for marker in markers if marker not in source
+        )
+    return (
+        not missing,
+        "Story model cursor, complete retry rounds and deterministic quality gates are wired."
+        if not missing else "Missing Story progression/quality integration: " + "; ".join(missing),
     )
 
 
@@ -2593,6 +2637,13 @@ def main() -> int:
         "story_length_policy_integration",
         policy_ok,
         policy_detail,
+    )
+
+    progression_ok, progression_detail = check_story_progression_quality_integration()
+    record(
+        "story_model_progression_quality_integration",
+        progression_ok,
+        progression_detail,
     )
 
     workflow = ""
