@@ -1837,9 +1837,15 @@ def main() -> None:
             log(f"Part {number}: valid checkpoint reused.")
             continue
 
-        preferred_index = ai_story.get("preferred_model_index", 0)
+        preferred_index = ai_story.get("preferred_model_index")
         if not isinstance(preferred_index, int) or isinstance(preferred_index, bool):
             preferred_index = 0
+            previous_provider = clean(ai_story.get("last_successful_provider")).lower()
+            previous_model = clean(ai_story.get("last_successful_model"))
+            if previous_provider and previous_model:
+                previous_key = f"{previous_provider}|{previous_model}"
+                if previous_key in models:
+                    preferred_index = models.index(previous_key)
 
         failure_state = ai_story.get("model_fallback_state")
         if (
