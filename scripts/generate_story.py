@@ -815,6 +815,28 @@ def get_story_model_order(api_key: str) -> list[str]:
     return list(dict.fromkeys(order))
 
 
+
+def advance_story_model_after_quality_rejection(
+    api_key: str,
+    *,
+    stage: str,
+    detail: str,
+) -> None:
+    """Move Story-only progression to the next configured model after a rejected result."""
+    order = get_story_model_order(api_key)
+    if not order:
+        return
+    current = load_story_model_cursor(order)
+    next_index = (current + 1) % len(order)
+    save_story_model_cursor(
+        order, next_index, stage=stage,
+        status="quality_rejected",
+        detail=detail,
+    )
+    log("Story quality rejection; next model cursor: " + order[next_index])
+
+
+
 def call_model(
     prompt: str,
     model: str,
@@ -1070,6 +1092,11 @@ def generate_complete_story(
         )
 
         if not source_verification.get("passed"):
+            advance_story_model_after_quality_rejection(
+                api_key,
+                stage="story_proofreading",
+                detail="Semantic preservation verifier rejected the corrected story.",
+            )
             raise RuntimeError(
                 "Corrected full story failed event/chronology "
                 "preservation verification: "
@@ -1306,6 +1333,11 @@ RULES:
             record["semantic_verification"] = semantic
 
             if not semantic["passed"]:
+                advance_story_model_after_quality_rejection(
+                    api_key,
+                    stage="short_part_revision",
+                    detail=f"Semantic preservation rejected revised Part {part_number}.",
+                )
                 record["outcome"] = "semantic_preservation_failed"
                 records.append(record)
                 continue
