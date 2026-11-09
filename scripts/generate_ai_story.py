@@ -51,7 +51,7 @@ SHORT_TARGET_MAX = 150
 SHORT_HARD_MAX = 180
 SHORT_FINAL_MERGED_MAX = 239
 
-MAX_MODEL_ATTEMPTS = 3
+MAX_MODEL_ATTEMPTS = 1
 MAX_RETRY_ROUNDS = 3
 
 
@@ -1103,12 +1103,17 @@ def generate_part(
     last_position = start_model_index
     last_attempt = 0
     blocked_models: set[str] = set()
+    cooldowns: dict[str, float] = {}
 
     for retry_round in range(1, MAX_RETRY_ROUNDS + 1):
         log("Part " + str(source_part["part"]) + ": model progression round "
             + str(retry_round) + "/" + str(MAX_RETRY_ROUNDS) + ".")
         for original_index, selected_model in ordered:
             if selected_model in blocked_models:
+                continue
+            cooldown_until = cooldowns.get(selected_model, 0.0)
+            if cooldown_until > time.monotonic():
+                log("Skipping rate-limited model until cooldown expires: " + selected_model)
                 continue
             last_position = original_index
             model_errors: list[str] = []
@@ -1158,20 +1163,15 @@ def generate_part(
                         (isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError))
                          or getattr(exc, "retryable", False) is True)
                     )
-                    if retryable and attempt < MAX_MODEL_ATTEMPTS:
-                        delay = (retry_after_seconds(exc, attempt, default_base=60, maximum=120)
-                                 if status == 429 else 30)
-                        log("Temporary failure; retrying same model in " + str(delay) + "s.")
-                        time.sleep(delay)
-                        continue
-                    if isinstance(exc, (ValueError, TypeError, KeyError)) and attempt < MAX_MODEL_ATTEMPTS:
-                        if last_generated is not None:
-                            prompt = build_revision_prompt(
-                                original_prompt, last_generated, source_part,
-                                config, total_parts,
-                            )
-                        time.sleep(30)
-                        continue
+                    if status == 429 and not is_quota_exhausted(exc):
+                        delay = retry_after_seconds(
+                            exc, retry_round, default_base=60, maximum=120
+                        )
+                        cooldowns[selected_model] = time.monotonic() + delay
+                        log("Rate limit recorded for " + selected_model
+                            + "; other models will be tried before retry.")
+                    elif retryable:
+                        log("Transient failure; model will be retried in the next full round.")
                     break
 
             if last_generated is not None:
@@ -1208,6 +1208,16 @@ def generate_part(
             })
             log("Provider/model exhausted: " + selected_model
                 + "; advancing through the configured model order.")
+
+        if len(blocked_models) >= len(models):
+            break
+        if retry_round < MAX_RETRY_ROUNDS:
+            remaining = max(cooldowns.values(), default=0.0) - time.monotonic()
+            delay = max(remaining, min(12 * retry_round, 30))
+            if delay > 0:
+                log("Waiting " + str(round(delay, 1))
+                    + "s before the next complete model round.")
+                time.sleep(delay)
 
     state = {
         "part": int(source_part["part"]), "model_index": start_model_index,
