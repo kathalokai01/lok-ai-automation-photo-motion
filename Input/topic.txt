@@ -131,13 +131,15 @@ SPEED = "+0%"                      # -10% slow | +0% normal | +10% fast
 # तीन प्राथमिक मॉडल इसी क्रम में चलेंगे।
 # इनके बाद configured fallback list के शेष मॉडल चलेंगे।
 # Primary में चुना गया मॉडल fallback में दोबारा नहीं चलेगा।
-# प्राथमिकता: Fish Audio → Gemini TTS → Edge TTS → Piper
+# हर कहानी के लिए नीचे दिए गए तीन प्राथमिक मॉडल पहले चलेंगे।
+# तीनों असफल होने पर fallback सूची के शेष मॉडल इसी क्रम में चलेंगे।
+# प्राथमिक मॉडल fallback सूची में दोबारा नहीं चलेंगे।
 TTS_MAIN_1 = "fish_audio"
 TTS_MAIN_2 = "gemini_tts"
 TTS_MAIN_3 = "edge_tts"
 
 TTS_FALLBACK_ENABLED = true
-TTS_FALLBACK_ORDER = "fish_audio,gemini_tts,edge_tts,piper,elevenlabs,cartesia,finevoice,minimax"
+TTS_FALLBACK_ORDER = "elevenlabs,fish_audio,cartesia,finevoice,gemini_tts,edge_tts,piper,minimax"
 
 # उपलब्ध मॉडल:
 # fish_audio, gemini_tts, edge_tts, piper,
