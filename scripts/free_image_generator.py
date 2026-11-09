@@ -63,6 +63,7 @@ HF_SPACES = []
 POLLINATIONS_MODELS = []
 REPLICATE_MODEL = ""
 CLOUDFLARE_IMAGE_MODEL = ""
+CLOUDFLARE_IMAGE_FALLBACK_MODEL = ""
 ALLOW_BILLABLE = False
 IMAGE_FALLBACK_ENABLED = True
 MAX_RETRIES = 1
@@ -175,6 +176,7 @@ def parse_input_settings():
 def apply_input_settings(config):
     global PROVIDER_ORDER, HF_SPACES, POLLINATIONS_MODELS
     global REPLICATE_MODEL, CLOUDFLARE_IMAGE_MODEL
+    global CLOUDFLARE_IMAGE_FALLBACK_MODEL
     global ALLOW_BILLABLE, IMAGE_FALLBACK_ENABLED, MAX_RETRIES
 
     from input_config import (
@@ -196,6 +198,9 @@ def apply_input_settings(config):
     )
     REPLICATE_MODEL = clean(settings["REPLICATE_IMAGE_MODEL"])
     CLOUDFLARE_IMAGE_MODEL = clean(settings["CLOUDFLARE_IMAGE_MODEL"])
+    CLOUDFLARE_IMAGE_FALLBACK_MODEL = clean(
+        settings["CLOUDFLARE_IMAGE_FALLBACK_MODEL"]
+    )
 
     # Both the input setting and workflow environment must allow billing.
     ALLOW_BILLABLE = bool(settings["IMAGE_ALLOW_BILLABLE"])
@@ -1127,8 +1132,8 @@ def generate_replicate(prompt, destination, size, seed):
 
 
 
-def generate_cloudflare(prompt, destination, size, seed):
-    """Generate an image through the Cloudflare Workers AI REST API."""
+def generate_cloudflare(prompt, destination, size, seed, model):
+    """Generate with a selected Cloudflare Workers AI image model."""
     if not ALLOW_BILLABLE:
         raise RuntimeError("Cloudflare Workers AI blocked by billing permission.")
     if not CLOUDFLARE_IMAGE_API_TOKEN:
@@ -1136,9 +1141,10 @@ def generate_cloudflare(prompt, destination, size, seed):
     if not CLOUDFLARE_ACCOUNT_ID:
         raise RuntimeError("CLOUDFLARE_ACCOUNT_ID is not configured.")
 
-    # FLUX.1 schnell accepts prompts up to 2048 characters and does not
-    # accept requested width/height. The shared image saver pads its output
-    # to the pipeline's required SHORT/FULL dimensions.
+    model = clean(model)
+    if not model:
+        raise RuntimeError("Cloudflare image model is empty.")
+
     cloudflare_prompt = clean(prompt)
     if len(cloudflare_prompt) > 2048:
         cloudflare_prompt = cloudflare_prompt[:2045].rsplit(" ", 1)[0].rstrip()
@@ -1148,21 +1154,34 @@ def generate_cloudflare(prompt, destination, size, seed):
         "https://api.cloudflare.com/client/v4/accounts/"
         + quote(CLOUDFLARE_ACCOUNT_ID, safe="")
         + "/ai/run/"
-        + quote(CLOUDFLARE_IMAGE_MODEL, safe="/@.-")
+        + quote(model, safe="/@.-")
     )
-    response = SESSION.post(
-        endpoint,
-        headers={
-            "Authorization": f"Bearer {CLOUDFLARE_IMAGE_API_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "prompt": cloudflare_prompt,
-            "seed": seed,
-            "steps": 8,
-        },
-        timeout=TIMEOUT,
-    )
+
+    if model.endswith("/flux-2-klein-4b"):
+        width, height = parse_size(size)
+        multipart_fields = [
+            ("prompt", (None, cloudflare_prompt)),
+            ("width", (None, str(width))),
+            ("height", (None, str(height))),
+            ("seed", (None, str(seed))),
+        ]
+        response = SESSION.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {CLOUDFLARE_IMAGE_API_TOKEN}"},
+            files=multipart_fields,
+            timeout=TIMEOUT,
+        )
+    else:
+        response = SESSION.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {CLOUDFLARE_IMAGE_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={"prompt": cloudflare_prompt, "seed": seed, "steps": 8},
+            timeout=TIMEOUT,
+        )
+
     try:
         response.raise_for_status()
     except requests.HTTPError as exc:
@@ -1178,8 +1197,8 @@ def generate_cloudflare(prompt, destination, size, seed):
         except (ValueError, AttributeError):
             detail = clean(response.text[:1000])
         raise requests.HTTPError(
-            f"Cloudflare Workers AI ({CLOUDFLARE_IMAGE_MODEL}) "
-            f"HTTP {response.status_code}: {detail or 'image generation failed'}",
+            f"Cloudflare Workers AI ({model}) HTTP {response.status_code}: "
+            f"{detail or 'image generation failed'}",
             response=response,
         ) from exc
 
@@ -1192,17 +1211,17 @@ def generate_cloudflare(prompt, destination, size, seed):
     image_data = result.get("image") if isinstance(result, dict) else None
     if not image_data:
         raise RuntimeError(
-            "Cloudflare Workers AI response contains no result.image data."
+            f"Cloudflare Workers AI ({model}) response contains no result.image data."
         )
     try:
         image_bytes = base64.b64decode(image_data, validate=True)
     except (ValueError, TypeError) as exc:
         raise RuntimeError(
-            "Cloudflare Workers AI returned invalid base64 image data."
+            f"Cloudflare Workers AI ({model}) returned invalid base64 image data."
         ) from exc
     if not image_bytes or len(image_bytes) > MAX_IMAGE_BYTES:
         raise RuntimeError(
-            "Cloudflare Workers AI returned an empty or oversized image."
+            f"Cloudflare Workers AI ({model}) returned an empty or oversized image."
         )
     save_image_bytes(image_bytes, destination, size)
 
@@ -1263,14 +1282,23 @@ def build_provider_attempts(prompt, destination, size, seed, negative):
             elif not CLOUDFLARE_ACCOUNT_ID:
                 log("Skipping Cloudflare Workers AI: CLOUDFLARE_ACCOUNT_ID missing.")
             else:
-                attempts.append((
-                    f"Cloudflare Workers AI: {CLOUDFLARE_IMAGE_MODEL}",
-                    f"cloudflare:{CLOUDFLARE_IMAGE_MODEL}",
-                    True,
-                    lambda: generate_cloudflare(
-                        prompt, destination, size, seed
-                    ),
-                ))
+                cloudflare_models = [CLOUDFLARE_IMAGE_MODEL]
+                if (
+                    IMAGE_FALLBACK_ENABLED
+                    and CLOUDFLARE_IMAGE_FALLBACK_MODEL
+                    and CLOUDFLARE_IMAGE_FALLBACK_MODEL not in cloudflare_models
+                ):
+                    cloudflare_models.append(CLOUDFLARE_IMAGE_FALLBACK_MODEL)
+
+                for model in cloudflare_models:
+                    attempts.append((
+                        f"Cloudflare Workers AI: {model}",
+                        f"cloudflare:{model}",
+                        True,
+                        lambda model=model: generate_cloudflare(
+                            prompt, destination, size, seed, model
+                        ),
+                    ))
 
         if not IMAGE_FALLBACK_ENABLED:
             break
@@ -1437,6 +1465,10 @@ def build_policy():
         ),
         "cloudflare_image_model": (
             CLOUDFLARE_IMAGE_MODEL if "cloudflare" in PROVIDER_ORDER else None
+        ),
+        "cloudflare_image_fallback_model": (
+            CLOUDFLARE_IMAGE_FALLBACK_MODEL
+            if "cloudflare" in PROVIDER_ORDER else None
         ),
         "provider_credentials_logged": False,
     }
