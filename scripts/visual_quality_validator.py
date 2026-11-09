@@ -120,9 +120,15 @@ def _vision_check(
         )
         response.raise_for_status()
         payload = response.json()
-    except (requests.RequestException, ValueError) as exc:
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        detail = f"HTTP {status}" if status else type(exc).__name__
         raise VisionVerificationUnavailable(
-            f"Gemini vision verification request failed: {type(exc).__name__}: {exc}"
+            f"Gemini vision verification request failed: {detail}."
+        ) from exc
+    except ValueError as exc:
+        raise VisionVerificationUnavailable(
+            "Gemini vision verification returned invalid JSON."
         ) from exc
 
     candidates = payload.get("candidates") if isinstance(payload, dict) else None
