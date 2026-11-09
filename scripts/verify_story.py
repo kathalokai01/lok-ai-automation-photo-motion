@@ -1600,7 +1600,7 @@ def main() -> int:
 
     report = verify_story(story, plan, input_data)
 
-    ai_story = read_json(AI_STORY_FILE, required=False)
+    ai_story = read_json(AI_STORY_FILE) if AI_STORY_FILE.is_file() else None
     if (
         isinstance(ai_story, dict)
         and ai_story.get("source_story_signature") == sha256_json(story)
