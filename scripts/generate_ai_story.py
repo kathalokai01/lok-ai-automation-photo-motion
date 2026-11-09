@@ -1797,12 +1797,12 @@ def main() -> None:
             continue
 
         preferred_index = load_story_model_cursor(models)
+        if preferred_index == 0:
             previous_provider = clean(ai_story.get("last_successful_provider")).lower()
             previous_model = clean(ai_story.get("last_successful_model"))
-            if previous_provider and previous_model:
-                previous_key = f"{previous_provider}|{previous_model}"
-                if previous_key in models:
-                    preferred_index = models.index(previous_key)
+            previous_key = previous_provider + "|" + previous_model
+            if previous_provider and previous_model and previous_key in models:
+                preferred_index = models.index(previous_key)
 
         failure_state = ai_story.get("model_fallback_state")
         if (
