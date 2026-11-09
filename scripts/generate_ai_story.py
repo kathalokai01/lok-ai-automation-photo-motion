@@ -20,7 +20,10 @@ from input_config import (
     get_topic,
     get_story_text,
 )
-from select_gemini_model import configured_fallbacks
+from select_gemini_model import (
+    configured_fallbacks, load_story_model_cursor, save_story_model_cursor,
+)
+from story_quality_validator import validate_story_part, validate_story_output
 from llm_provider_client import generate_text as generate_provider_text
 from gemini_api_guard import require_gemini_generation
 from gemini_http import http_error_body, http_status, is_retryable_http_status, retry_after_seconds
@@ -43,6 +46,7 @@ SHORT_HARD_MAX = 180
 SHORT_FINAL_MERGED_MAX = 239
 
 MAX_MODEL_ATTEMPTS = 3
+MAX_RETRY_ROUNDS = 3
 
 
 class ModelFallbackError(RuntimeError):
@@ -1112,53 +1116,41 @@ def request_selected_model(
 
 
 def generate_part(
-    api_key: str,
-    models: list[str],
-    topic: str,
-    story_text: str,
-    source_part: dict,
-    config: dict,
-    total_parts: int,
-    start_model_index: int = 0,
+    api_key: str, models: list[str], topic: str, story_text: str,
+    source_part: dict, config: dict, total_parts: int,
+    start_model_index: int = 0, story_title: str = "",
 ) -> dict:
-    original_prompt = build_part_prompt(
-        topic, story_text, source_part, config, total_parts
-    )
+    """Try every configured model in complete rounds; retain the accepted model."""
+    original_prompt = build_part_prompt(topic, story_text, source_part, config, total_parts)
     schema = build_response_schema(source_part)
-    errors = []
     if not models:
         raise RuntimeError("No configured models are available.")
-
     start_model_index = max(0, min(int(start_model_index), len(models) - 1))
-    ordered_models = models[start_model_index:] + models[:start_model_index]
+    ordered = [
+        ((start_model_index + offset) % len(models), models[(start_model_index + offset) % len(models)])
+        for offset in range(len(models))
+    ]
+    errors: list[dict] = []
     last_position = start_model_index
     last_attempt = 0
 
-    for position, selected_model in enumerate(ordered_models):
-        original_index = (start_model_index + position) % len(models)
-        prompt = original_prompt
-        model_errors = []
-        last_generated = None
-
-        log(
-            f"Part {source_part['part']}/{total_parts}: "
-            f"provider/model {original_index + 1}/{len(models)}: {selected_model}"
-        )
-
-        for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
+    for retry_round in range(1, MAX_RETRY_ROUNDS + 1):
+        log("Part " + str(source_part["part"]) + ": model progression round "
+            + str(retry_round) + "/" + str(MAX_RETRY_ROUNDS) + ".")
+        for original_index, selected_model in ordered:
             last_position = original_index
-            last_attempt = attempt
-            try:
-                log(
-                    f"Part {source_part['part']}; model={selected_model}; "
-                    f"attempt {attempt}/{MAX_MODEL_ATTEMPTS}"
-                )
-                generated = request_selected_model(
-                    api_key, selected_model, prompt, schema
-                )
-                last_generated = generated
+            model_errors: list[str] = []
+            prompt = original_prompt
+            last_generated = None
+            log("Part " + str(source_part["part"]) + "/" + str(total_parts)
+                + ": provider/model " + str(original_index + 1) + "/"
+                + str(len(models)) + ": " + selected_model)
 
+            for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
+                last_attempt = attempt
                 try:
+                    generated = request_selected_model(api_key, selected_model, prompt, schema)
+                    last_generated = generated
                     completed = validate_generated_part(
                         generated, source_part, config, total_parts,
                         allow_soft_overage=False,
@@ -1167,104 +1159,90 @@ def generate_part(
                     completed["_katha_provider_used"] = provider
                     completed["_katha_model_used"] = actual_model
                     completed["_katha_model_index"] = original_index
-                    log(
-                        f"Part {source_part['part']}: {completed['word_count']} "
-                        f"words accepted on {selected_model}."
+                    completed["story_title"] = clean(story_title or topic)
+                    completed["source_part_signature"] = source_part_signature(source_part)
+                    quality = validate_story_part(
+                        completed, source_part, total_parts=total_parts
                     )
+                    completed["quality_validation"] = quality
+                    if not quality.get("passed"):
+                        raise ValueError("Story quality gate failed: "
+                            + "; ".join(quality.get("issues", [])[:8]))
+                    log("Part " + str(source_part["part"]) + ": "
+                        + str(completed["word_count"]) + " words accepted on "
+                        + selected_model + "; quality " + str(quality["score"]) + "/10.")
                     return completed
-                except (ValueError, TypeError, KeyError) as exc:
-                    message = f"Validation attempt {attempt}: {exc}"
+                except Exception as exc:
+                    message = type(exc).__name__ + ": " + str(exc)
                     model_errors.append(message)
-                    log(f"Part {source_part['part']} {selected_model}: {message}")
-                    prompt = build_revision_prompt(
-                        original_prompt, generated, source_part, config, total_parts
+                    log("Model " + selected_model + ": " + message)
+                    status = http_status(exc)
+                    if is_quota_exhausted(exc) or status in {400, 401, 403, 404}:
+                        log("Permanent/quota failure; advancing to the next model.")
+                        break
+                    retryable = (
+                        retryable_http_error(status) if status is not None else
+                        (isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError))
+                         or getattr(exc, "retryable", False) is True)
                     )
-
-            except Exception as exc:
-                message = f"{type(exc).__name__}: {exc}"
-                model_errors.append(message)
-                log(f"Model {selected_model}: {message}")
-                status = http_status(exc)
-
-                if is_quota_exhausted(exc) or status in {400, 401, 403, 404}:
-                    log(
-                        f"Permanent/quota failure on {selected_model}; "
-                        "switching immediately to the next configured model."
-                    )
+                    if retryable and attempt < MAX_MODEL_ATTEMPTS:
+                        delay = (retry_after_seconds(exc, attempt, default_base=60, maximum=120)
+                                 if status == 429 else 30)
+                        log("Temporary failure; retrying same model in " + str(delay) + "s.")
+                        time.sleep(delay)
+                        continue
+                    if isinstance(exc, (ValueError, TypeError, KeyError)) and attempt < MAX_MODEL_ATTEMPTS:
+                        time.sleep(30)
+                        continue
                     break
 
-                retryable = (
-                    retryable_http_error(status)
-                    if status is not None
-                    else (
-                        isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError))
-                        or getattr(exc, "retryable", False) is True
+            if last_generated is not None:
+                try:
+                    completed = validate_generated_part(
+                        last_generated, source_part, config, total_parts,
+                        allow_soft_overage=True,
                     )
-                )
-                if retryable and attempt < MAX_MODEL_ATTEMPTS:
-                    delay = (
-                        retry_after_seconds(exc, attempt, default_base=60, maximum=120)
-                        if status == 429 else 30
-                    )
-                    log(f"Temporary failure; retrying same model in {delay}s.")
-                    time.sleep(delay)
-                    continue
+                    if (config["format"] == "short"
+                        and source_part["part"] < total_parts
+                        and SHORT_TARGET_MAX < completed["word_count"] <= SHORT_HARD_MAX):
+                        provider, actual_model = selected_model.split("|", 1)
+                        completed["_katha_provider_used"] = provider
+                        completed["_katha_model_used"] = actual_model
+                        completed["_katha_model_index"] = original_index
+                        completed["story_title"] = clean(story_title or topic)
+                        completed["source_part_signature"] = source_part_signature(source_part)
+                        quality = validate_story_part(
+                            completed, source_part, total_parts=total_parts
+                        )
+                        completed["quality_validation"] = quality
+                        if quality.get("passed"):
+                            return completed
+                        model_errors.append("Soft-overage quality gate failed: "
+                            + "; ".join(quality.get("issues", [])[:8]))
+                except (ValueError, TypeError, KeyError) as exc:
+                    model_errors.append("Final validation: " + str(exc))
 
-                if isinstance(exc, (ValueError, TypeError, KeyError)) and attempt < MAX_MODEL_ATTEMPTS:
-                    log(f"Retrying invalid response from {selected_model} in 30s.")
-                    time.sleep(30)
-                    continue
-                break
-
-        if last_generated is not None:
-            try:
-                completed = validate_generated_part(
-                    last_generated, source_part, config, total_parts,
-                    allow_soft_overage=True,
-                )
-                if (
-                    config["format"] == "short"
-                    and source_part["part"] < total_parts
-                    and SHORT_TARGET_MAX < completed["word_count"] <= SHORT_HARD_MAX
-                ):
-                    provider, actual_model = selected_model.split("|", 1)
-                    completed["_katha_provider_used"] = provider
-                    completed["_katha_model_used"] = actual_model
-                    completed["_katha_model_index"] = original_index
-                    log(
-                        f"Part {source_part['part']}: accepting "
-                        f"{completed['word_count']} words after retries."
-                    )
-                    return completed
-            except (ValueError, TypeError, KeyError) as exc:
-                model_errors.append(f"Final validation: {exc}")
-
-        errors.append({
-            "model": selected_model,
-            "model_index": original_index,
-            "attempts": min(MAX_MODEL_ATTEMPTS, max(1, last_attempt)),
-            "errors": model_errors[-MAX_MODEL_ATTEMPTS:],
-        })
-        log(
-            f"Provider/model exhausted: {selected_model}. "
-            "Moving to the next configured LLM option."
-        )
+            errors.append({
+                "round": retry_round, "model": selected_model,
+                "model_index": original_index,
+                "attempts": min(MAX_MODEL_ATTEMPTS, max(1, last_attempt)),
+                "errors": model_errors[-MAX_MODEL_ATTEMPTS:],
+            })
+            log("Provider/model exhausted: " + selected_model
+                + "; advancing through the configured model order.")
 
     state = {
-        "part": int(source_part["part"]),
-        "model_index": last_position,
-        "model": models[last_position],
-        "attempt": last_attempt,
-        "max_attempts": MAX_MODEL_ATTEMPTS,
+        "part": int(source_part["part"]), "model_index": last_position,
+        "model": models[last_position], "attempt": last_attempt,
+        "max_attempts": MAX_MODEL_ATTEMPTS, "retry_rounds": MAX_RETRY_ROUNDS,
         "errors": errors,
     }
     summary = json.dumps(errors, ensure_ascii=False)
     raise ModelFallbackError(
-        f"Part {source_part['part']} failed: all configured LLM "
-        f"models were exhausted. Details: {summary[:5000]}",
-        state,
+        "Part " + str(source_part["part"]) + " failed: all configured LLM "
+        + "models were exhausted in " + str(MAX_RETRY_ROUNDS)
+        + " complete rounds. Details: " + summary[:5000], state,
     )
-
 
 
 def source_part_signature(part: dict) -> str:
@@ -1343,6 +1321,12 @@ def is_completed_part_valid(
         )
 
         if minimum is not None and not minimum <= count <= maximum:
+            return False
+
+        quality = existing.get("quality_validation")
+        if not isinstance(quality, dict) or quality.get("passed") is not True:
+            return False
+        if quality.get("source_part_signature") != source_part_signature(source_part):
             return False
 
         final = source_part["part"] == total_parts
@@ -1839,7 +1823,7 @@ def main() -> None:
 
         preferred_index = ai_story.get("preferred_model_index")
         if not isinstance(preferred_index, int) or isinstance(preferred_index, bool):
-            preferred_index = 0
+            preferred_index = load_story_model_cursor(models)
             previous_provider = clean(ai_story.get("last_successful_provider")).lower()
             previous_model = clean(ai_story.get("last_successful_model"))
             if previous_provider and previous_model:
@@ -1860,10 +1844,16 @@ def main() -> None:
             completed = generate_part(
                 api_key, models, topic, story_text, source_part, config,
                 total_parts, start_model_index=preferred_index,
+                story_title=canonical_story_title,
             )
         except ModelFallbackError as exc:
             ai_story["model_fallback_state"] = exc.state
             ai_story["preferred_model_index"] = exc.state["model_index"]
+            save_story_model_cursor(
+                models, exc.state["model_index"], stage="ai_story",
+                part=number, status="all_models_failed",
+                detail="All configured models exhausted in complete retry rounds.",
+            )
             ai_story["status"] = "in_progress"
             write_json(OUTPUT_FILE, ai_story)
             log(
@@ -1918,6 +1908,12 @@ def main() -> None:
         ai_story["last_successful_model"] = used_model
         ai_story["preferred_model_index"] = used_model_index
         ai_story.pop("model_fallback_state", None)
+        save_story_model_cursor(
+            models, used_model_index, stage="ai_story",
+            part=number, status="succeeded",
+            detail="Accepted quality score "
+                + str(completed.get("quality_validation", {}).get("score", "unknown")) + "/10.",
+        )
 
         write_json(OUTPUT_FILE, ai_story)
 
