@@ -14,6 +14,10 @@ from io import BytesIO
 from pathlib import Path
 
 from gemini_http import retry_after_seconds
+from visual_quality_validator import (
+    VisionVerificationUnavailable,
+    validate_scene_image,
+)
 from urllib.parse import quote, urlparse
 
 import requests
@@ -35,7 +39,7 @@ IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v33-cloudflare-workers-ai-image-fallback"
+VERSION = "photo-motion-image-generator-v34-persistent-model-cursor-quality-gate"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -69,6 +73,17 @@ IMAGE_FALLBACK_ENABLED = True
 MAX_RETRIES = 1
 
 BILLABLE_BLOCKED = False
+MODEL_PROGRESS_STATE = {}
+IMAGE_QUALITY_VISION_ENABLED = True
+IMAGE_QUALITY_VISION_MODEL = "gemini-2.5-flash"
+IMAGE_QUALITY_MIN_SCORE = 7
+IMAGE_QUALITY_MAX_FAILURES_PER_MODEL = 2
+IMAGE_QUALITY_SKIP_SCENES = 3
+
+
+class ImageQualityRejected(RuntimeError):
+    """A generated image failed semantic or visual quality acceptance."""
+
 
 PROVIDER_ALIASES = {
     "hf": "huggingface",
@@ -178,6 +193,9 @@ def apply_input_settings(config):
     global REPLICATE_MODEL, CLOUDFLARE_IMAGE_MODEL
     global CLOUDFLARE_IMAGE_FALLBACK_MODEL
     global ALLOW_BILLABLE, IMAGE_FALLBACK_ENABLED, MAX_RETRIES
+    global IMAGE_QUALITY_VISION_ENABLED, IMAGE_QUALITY_VISION_MODEL
+    global IMAGE_QUALITY_MIN_SCORE, IMAGE_QUALITY_MAX_FAILURES_PER_MODEL
+    global IMAGE_QUALITY_SKIP_SCENES
 
     from input_config import (
         get_image_provider_settings,
@@ -209,6 +227,11 @@ def apply_input_settings(config):
         settings["IMAGE_FALLBACK_ENABLED"]
     )
     MAX_RETRIES = max(1, min(5, int(get_max_retries(config))))
+    IMAGE_QUALITY_VISION_ENABLED = bool(config.get("IMAGE_QUALITY_VISION_ENABLED", True))
+    IMAGE_QUALITY_VISION_MODEL = clean(config.get("IMAGE_QUALITY_VISION_MODEL")) or "gemini-2.5-flash"
+    IMAGE_QUALITY_MIN_SCORE = max(1, min(10, int(config.get("IMAGE_QUALITY_MIN_SCORE", 7))))
+    IMAGE_QUALITY_MAX_FAILURES_PER_MODEL = max(1, min(10, int(config.get("IMAGE_QUALITY_MAX_FAILURES_PER_MODEL", 2))))
+    IMAGE_QUALITY_SKIP_SCENES = max(1, min(50, int(config.get("IMAGE_QUALITY_SKIP_SCENES", 3))))
 
     supported = {"huggingface", "pollinations", "replicate", "cloudflare"}
 
@@ -254,7 +277,10 @@ def apply_input_settings(config):
     log("Configured image provider order:", " -> ".join(PROVIDER_ORDER))
     log("Billable image providers allowed:", ALLOW_BILLABLE)
     log("Provider fallback enabled:", IMAGE_FALLBACK_ENABLED)
-    log("Maximum retries per provider/model:", MAX_RETRIES)
+    log("Maximum complete fallback rounds:", MAX_RETRIES)
+    log("Gemini vision quality validation:", IMAGE_QUALITY_VISION_ENABLED)
+    log("Vision model:", IMAGE_QUALITY_VISION_MODEL)
+    log("Minimum image quality score:", IMAGE_QUALITY_MIN_SCORE, "/ 10")
 
 
 def safe_path(value, label):
@@ -1381,6 +1407,13 @@ def can_reuse_image(item, old):
     except (OSError, RuntimeError, ValueError):
         return False
 
+    quality = old.get("quality_verification")
+    if not isinstance(quality, dict) or quality.get("status") != "passed":
+        return False
+    vision = quality.get("vision")
+    if not isinstance(vision, dict) or vision.get("prompt_match") is not True or vision.get("character_consistency") is not True:
+        return False
+
     return integrity["sha256"].casefold() == expected_hash.casefold()
 
 def make_record(item, status, provider=None, attempts=None):
@@ -1422,6 +1455,8 @@ def make_record(item, status, provider=None, attempts=None):
         "semantic_story_match": (
             integrity["semantic_story_match"] if integrity else "not_verified"
         ),
+        "quality_verification": None,
+        "last_successful_model": provider,
         "duration": item["duration"],
         "attempts": list(attempts or []),
     }
@@ -1681,6 +1716,7 @@ def save_checkpoints(records, metadata, policy, counters):
 
     save_json(GENERATION_MANIFEST, generation)
     save_json(IMAGE_MANIFEST, images)
+    save_model_progress(metadata)
 
 
 def classify_provider_error(exc):
