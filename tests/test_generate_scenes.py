@@ -224,6 +224,39 @@ class ExtraSceneNarrationTests(unittest.TestCase):
         self.assertEqual(" ".join(expected), sample)
 
 
+    def test_long_quoted_dialogue_keeps_complete_sentence_boundaries(self) -> None:
+        base = "राम सुबह पुराने शहर की शांत सड़क पर धीरे धीरे आगे बढ़ता रहा।"
+        dialogue = (
+            '"पहला संवाद वाक्य अयान ने शांत कमरे में धीरे अपना संदेश पूरा किया। '
+            'दूसरा संवाद वाक्य उसने अपने परिवार को सुरक्षित रखने का संकल्प दोहराया था। '
+            'तीसरा संवाद वाक्य अयान ने कठिन समय में जिम्मेदारी निभाने की बात कही।" '
+            "अयान ने शांत स्वर में कहा।"
+        )
+        complete_story = " ".join([base] * 9 + [dialogue] + [base] * 90)
+
+        plan_units = story_plan.split_sentences(complete_story)
+        narration_units = narration.sentence_units(complete_story)
+        self.assertEqual(plan_units, narration_units)
+        self.assertTrue(
+            any("दूसरा संवाद वाक्य" in unit for unit in plan_units)
+        )
+        self.assertEqual(" ".join(plan_units), complete_story)
+
+        parts, selected_count, merged = story._partition_short_story(
+            complete_story,
+            preferred_count=10,
+            minimum_parts=7,
+            maximum_parts=11,
+            scenes_range=(7, 15),
+        )
+        self.assertEqual(selected_count, 10)
+        self.assertEqual(len(parts), 10)
+        self.assertFalse(merged)
+        self.assertEqual(" ".join(parts), complete_story)
+        self.assertTrue(
+            all(120 <= story.word_count(part) <= 150 for part in parts)
+        )
+
     def test_extra_scene_rejects_missing_narration(self) -> None:
         expected = {
             "part": 1,
