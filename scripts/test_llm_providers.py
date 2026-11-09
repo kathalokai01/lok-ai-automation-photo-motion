@@ -428,8 +428,9 @@ class AIStoryFallbackTests(unittest.TestCase):
                     self.config, 1,
                 )
         self.assertEqual(caught.exception.state["part"], 1)
-        self.assertEqual(caught.exception.state["model_index"], 1)
-        self.assertEqual(caught.exception.state["model"], "openai|second")
+        self.assertEqual(caught.exception.state["model_index"], 0)
+        self.assertEqual(caught.exception.state["model"], "gemini|first")
+        self.assertEqual(caught.exception.state["last_model_index"], 1)
         self.assertEqual(caught.exception.state["max_attempts"], 3)
         self.assertEqual(caught.exception.state["retry_rounds"], 3)
 
