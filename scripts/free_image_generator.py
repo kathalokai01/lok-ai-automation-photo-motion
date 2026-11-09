@@ -1458,6 +1458,8 @@ def make_record(item, status, provider=None, attempts=None):
         ),
         "quality_verification": None,
         "last_successful_model": provider,
+        "character_ids": list(source.get("character_ids") or source.get("characters") or []),
+        "character_references": list(source.get("character_references") or []),
         "duration": item["duration"],
         "attempts": list(attempts or []),
     }
@@ -1623,6 +1625,7 @@ def build_image_manifest(records, metadata, policy):
                     "config_signature", "file_integrity",
                     "semantic_story_match", "quality_verification",
                     "last_successful_model",
+                    "character_ids", "character_references",
                 )
             }
             for row in records
@@ -1777,6 +1780,60 @@ def classify_provider_error(exc):
     }
 
 
+def find_character_reference_images(item, records):
+    source = item.get("source_job") or {}
+    raw_ids = (
+        source.get("character_ids")
+        or source.get("character_names")
+        or source.get("characters")
+        or []
+    )
+    if isinstance(raw_ids, str):
+        raw_ids = [raw_ids]
+    wanted = {
+        clean(value).casefold()
+        for value in raw_ids
+        if clean(value)
+    }
+    if not wanted:
+        return []
+
+    references = []
+    for row in reversed(records):
+        if row.get("status") not in {"generated", "existing"}:
+            continue
+        if clean(row.get("scene_id")) == item["scene_id"]:
+            continue
+        row_ids = row.get("character_ids") or row.get("characters") or []
+        if isinstance(row_ids, str):
+            row_ids = [row_ids]
+        available = {
+            clean(value).casefold()
+            for value in row_ids
+            if clean(value)
+        }
+        if not wanted.intersection(available):
+            continue
+        try:
+            candidate = safe_path(
+                row.get("image_path") or row.get("image"),
+                f"character reference {row.get('scene_id')}",
+            )
+            expected_hash = clean(row.get("image_sha256"))
+            if (
+                candidate.is_file()
+                and not candidate.is_symlink()
+                and re.fullmatch(r"[a-fA-F0-9]{64}", expected_hash)
+                and sha256_file(candidate).casefold() == expected_hash.casefold()
+            ):
+                references.append(candidate)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if len(references) >= 2:
+            break
+    return references
+
+
 def run_provider_attempts(
     item,
     record,
@@ -1888,6 +1945,7 @@ def run_provider_attempts(
                     minimum_score=IMAGE_QUALITY_MIN_SCORE,
                     model=IMAGE_QUALITY_VISION_MODEL,
                     timeout=min(TIMEOUT, 120),
+                    reference_image_paths=find_character_reference_images(item, records),
                 )
                 if not quality.get("accepted"):
                     raise ImageQualityRejected(
