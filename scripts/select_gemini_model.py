@@ -14,7 +14,7 @@ from typing import Any
 
 
 OUTPUT_FILE = Path("output/config/selected_model.json")
-SELECTOR_VERSION = 8
+SELECTOR_VERSION = 9
 
 DEFAULT_PRIMARY_MODEL = "gemini-3.8-flash"
 
