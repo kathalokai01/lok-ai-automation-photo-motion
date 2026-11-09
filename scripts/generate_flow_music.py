@@ -1424,7 +1424,7 @@ def main():
             raise RuntimeError("ffmpeg and ffprobe are required.")
 
         title, story_text, summary = read_story()
-        rows = read_narration_jobs()
+        rows = read_narration_jobs(config)
         role_summary = validate_role_structure(rows, config)
 
         narration_duration = sum(
