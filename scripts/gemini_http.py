@@ -125,6 +125,26 @@ def retry_after_seconds(
     return int(min(maximum, max(1.0, delay)))
 
 
+
+def classify_generation_failure(error: BaseException) -> str:
+    """Classify provider failures for Story progression without exposing credentials."""
+    status = http_status(error)
+    if status in {401, 403}:
+        return "auth_blocked"
+    if status in {400, 404}:
+        return "model_or_request_unavailable"
+    if status == 429:
+        body = http_error_body(error).lower()
+        if any(token in body for token in ("quota", "billing", "resource_exhausted")):
+            return "quota_blocked"
+        return "rate_limited"
+    if status in RETRYABLE_HTTP_STATUSES:
+        return "transient"
+    if isinstance(error, (TimeoutError, OSError, urllib.error.URLError)):
+        return "transient"
+    return "permanent"
+
+
 def is_retryable_http_status(status: int | None) -> bool:
     return status in RETRYABLE_HTTP_STATUSES
 
