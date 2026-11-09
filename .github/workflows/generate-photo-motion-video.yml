@@ -756,11 +756,11 @@ jobs:
       - name: Prepare narration jobs
         run: python scripts/generate_narration.py
 
-      - name: Prepare caption source
-        run: python scripts/prepare_captions.py
-
       - name: Generate narration audio
         run: python scripts/generate_tts.py
+
+      - name: Prepare caption source
+        run: python scripts/prepare_captions.py
 
       - name: Generate background music
         shell: bash
