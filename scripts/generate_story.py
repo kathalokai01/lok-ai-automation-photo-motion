@@ -33,7 +33,10 @@ from story_length_policy import (
     SHORT_PREFERRED_MAX_WORDS_PER_PART, SHORT_HARD_MAX_WORDS_PER_PART,
     SHORT_FINAL_MERGED_MAX_WORDS,
 )
-from gemini_http import (\n    http_status, http_error_body, retry_after_seconds,\n    classify_generation_failure,\n)
+from gemini_http import (
+    http_status, http_error_body, retry_after_seconds,
+    classify_generation_failure,
+)
 from generate_story_plan import (
     build_plan as build_story_plan,
     validate_plan as validate_story_plan,
