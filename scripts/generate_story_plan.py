@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v22-part-boundary-quote-safe"
-MAPPING_VERSION = 22
+VERSION = "story-plan-v23-quoted-sentence-boundaries-aligned"
+MAPPING_VERSION = 23
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -169,14 +169,25 @@ def _has_unclosed_double_quote(value: str) -> bool:
 
 def split_sentences(text: str) -> list[str]:
     normalized = normalize_text(text)
-    pieces = [
-        clean_text(piece)
-        for piece in SENTENCE_SPLIT.split(normalized)
-        if clean_text(piece)
-    ]
+    # Keep terminal punctuation and its closing quote/bracket in the
+    # preceding sentence. This matches generate_narration.sentence_units().
+    sentence_end = re.compile(
+        r"""[।॥.!?！？…]+["'”’)}\]]*(?=\s|$)"""
+    )
+    pieces: list[str] = []
+    start = 0
 
-    # Rejoin sentence fragments split inside quoted dialogue, e.g.
-    # '"बचाओ! कोई है?" विक्रांत दर्द से चीख पड़ा।'
+    for match in sentence_end.finditer(normalized):
+        piece = clean_text(normalized[start:match.end()])
+        if piece:
+            pieces.append(piece)
+        start = match.end()
+
+    remainder = clean_text(normalized[start:])
+    if remainder:
+        pieces.append(remainder)
+
+    # Rejoin sentence fragments split inside quoted dialogue.
     quote_safe: list[str] = []
     pending = ""
     for piece in pieces:
@@ -199,7 +210,6 @@ def split_sentences(text: str) -> list[str]:
             quote_safe.append(pending)
 
     # A countdown fragment such as "9..." is not a complete Scene.
-    # Keep it attached to the preceding sentence.
     units: list[str] = []
     for piece in quote_safe:
         countdown = bool(
@@ -211,7 +221,6 @@ def split_sentences(text: str) -> list[str]:
             units.append(piece)
 
     return units
-
 
 def split_clauses(sentence: str) -> list[str]:
     sentence = clean_text(sentence)
