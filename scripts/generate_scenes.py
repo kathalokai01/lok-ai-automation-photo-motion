@@ -32,7 +32,7 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v11-extra-role-narration-fix"
+VERSION = "photo-motion-scenes-v12-narration-word-count-consistency"
 PROMPT_VERSION = 11
 
 ROLE_ORDER = {
@@ -68,6 +68,11 @@ def clean(value: Any) -> str:
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return ""
     return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def count_narration_words(value: Any) -> int:
+    """Use the same Unicode word-count rule as narration preparation."""
+    return len(re.findall(r"\b[\w\'-]+\b", clean(value), flags=re.UNICODE))
 
 
 def as_bool(value: Any, default: bool = False) -> bool:
@@ -1010,7 +1015,7 @@ def build_scene_record(
         "voiceover_enabled": True,
         "narration_source": "locked_part_text" if item["role"] == "main" else "ai_generated_role_narration",
         "source_text_sha256": text_sha256(item["narration"]),
-        "source_word_count": len(item["narration"].split()),
+        "source_word_count": count_narration_words(item["narration"]),
         "dialogue": clean(source.get("dialogue")),
         "story_anchor": clean(source.get("story_anchor")),
         "beat": clean(source.get("beat")),
@@ -1130,6 +1135,7 @@ def scene_is_valid(
         and scene.get("voiceover_enabled") is True
         and scene.get("narration_source") == "ai_generated_role_narration"
         and scene.get("source_text_sha256") == text_sha256(clean(scene.get("narration")))
+        and scene.get("source_word_count") == count_narration_words(scene.get("narration"))
     )
 
 
