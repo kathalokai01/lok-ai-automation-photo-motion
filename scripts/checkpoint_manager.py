@@ -284,6 +284,7 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
         "visuals/checkpoints",
         "visuals/depth_maps",
         "photo_motion/checkpoints",
+        "scenes",
     )
     copied = 0
     for root_name in roots:
@@ -311,6 +312,7 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
                     "cache_signature",
                     "manifest_signature",
                     "job_signature",
+                    "generation_signature",
                     "signature",
                     "fingerprint",
                 )
