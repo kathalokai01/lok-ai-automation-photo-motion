@@ -1299,9 +1299,22 @@ def is_completed_part_valid(
             return False
 
         quality = existing.get("quality_validation")
-        if not isinstance(quality, dict) or quality.get("passed") is not True:
+        if (
+            not isinstance(quality, dict)
+            or quality.get("version") != "story-quality-validator-v1"
+            or quality.get("passed") is not True
+            or quality.get("status") != "passed"
+            or quality.get("source_part_signature") != source_part_signature(source_part)
+        ):
             return False
-        if quality.get("source_part_signature") != source_part_signature(source_part):
+        rechecked_quality = validate_story_part(
+            existing, source_part, total_parts=total_parts
+        )
+        if (
+            rechecked_quality.get("passed") is not True
+            or quality.get("score") != rechecked_quality.get("score")
+            or quality.get("narration_sha256") != rechecked_quality.get("narration_sha256")
+        ):
             return False
 
         final = source_part["part"] == total_parts
