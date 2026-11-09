@@ -3,8 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import re
+import tempfile
 import unittest
+from pathlib import Path
+
+from scripts import checkpoint_manager
 
 from scripts import generate_scenes as scenes
 
@@ -73,6 +78,38 @@ class ExtraSceneNarrationTests(unittest.TestCase):
         self.assertEqual(
             by_id["part_01_resolution"]["narration"], resolution_text
         )
+
+
+    def test_scene_progress_checkpoint_is_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            output = root / "output"
+            checkpoint = source / "checkpoints" / "scenes_progress.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text(
+                json.dumps({
+                    "version": "photo-motion-scenes-v11-extra-role-narration-fix",
+                    "status": "in_progress",
+                    "generation_signature": "b" * 64,
+                    "completed_scene_ids": ["part_01_scene_01"],
+                }),
+                encoding="utf-8",
+            )
+
+            copied = checkpoint_manager.merge_progress_checkpoints(
+                source, output
+            )
+
+            restored = output / "checkpoints" / "scenes_progress.json"
+            self.assertEqual(copied, 1)
+            self.assertTrue(restored.is_file())
+            self.assertEqual(
+                json.loads(restored.read_text(encoding="utf-8"))[
+                    "generation_signature"
+                ],
+                "b" * 64,
+            )
 
     def test_extra_scene_rejects_missing_narration(self) -> None:
         expected = {
