@@ -183,6 +183,22 @@ class ExtraSceneNarrationTests(unittest.TestCase):
         self.assertEqual(narration.sentence_units(sample), expected)
         self.assertTrue(all(len(unit.split()) > 1 for unit in expected))
 
+    def test_quoted_dialogue_and_attribution_are_one_scene_unit(self) -> None:
+        sample = (
+            "स्लैब विक्रांत के पैरों पर आ गिरा। "
+            '"बचाओ! कोई है?" विक्रांत दर्द से चीख पड़ा। '
+            "लेकिन वहां सिर्फ तूफान की आवाज थी।"
+        )
+        expected = [
+            "स्लैब विक्रांत के पैरों पर आ गिरा।",
+            '"बचाओ! कोई है?" विक्रांत दर्द से चीख पड़ा।',
+            "लेकिन वहां सिर्फ तूफान की आवाज थी।",
+        ]
+        self.assertEqual(story_plan.split_sentences(sample), expected)
+        self.assertEqual(narration.sentence_units(sample), expected)
+        self.assertTrue(all(len(unit.split()) > 3 for unit in expected))
+        self.assertEqual(" ".join(expected), sample)
+
 
     def test_extra_scene_rejects_missing_narration(self) -> None:
         expected = {
