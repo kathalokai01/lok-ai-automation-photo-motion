@@ -940,7 +940,7 @@ def call_model(
             time.sleep(round_delay)
 
     save_story_model_cursor(
-        model_order, ordered[-1][0], stage="story_correction",
+        model_order, start_index, stage="story_correction",
         status="all_models_failed",
         detail=json.dumps(failures, ensure_ascii=False)[:900],
     )
