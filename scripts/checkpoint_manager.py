@@ -312,7 +312,6 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
                     "cache_signature",
                     "manifest_signature",
                     "job_signature",
-                    "generation_signature",
                     "signature",
                     "fingerprint",
                 )
