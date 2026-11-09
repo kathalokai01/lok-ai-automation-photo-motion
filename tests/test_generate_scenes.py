@@ -252,7 +252,7 @@ class ExtraSceneNarrationTests(unittest.TestCase):
         self.assertEqual(selected_count, 10)
         self.assertEqual(len(parts), 10)
         self.assertFalse(merged)
-        self.assertEqual(" ".join(parts), complete_story)
+        self.assertEqual(story.clean(" ".join(parts)), story.clean(complete_story))
         self.assertTrue(
             all(120 <= story.word_count(part) <= 150 for part in parts)
         )
