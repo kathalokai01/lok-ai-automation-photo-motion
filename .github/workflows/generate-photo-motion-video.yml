@@ -281,7 +281,7 @@ jobs:
           echo "pipeline_hash=$PIPELINE_HASH" >> "$GITHUB_OUTPUT"
           echo "story_code_hash=$STORY_CODE_HASH" >> "$GITHUB_OUTPUT"
 
-      - name: Restore stage-validated checkpoints from recent runs
+      - name: Restore matching resumable checkpoint
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
