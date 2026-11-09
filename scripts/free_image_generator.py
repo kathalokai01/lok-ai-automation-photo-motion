@@ -35,7 +35,7 @@ IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v29-narrated-extra-roles"
+VERSION = "photo-motion-image-generator-v30-pollinations-json-post"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -49,7 +49,7 @@ POLL_INTERVAL = 2
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "KathaLokAI-PhotoMotion/28.0",
+    "User-Agent": "KathaLokAI-PhotoMotion/30.0",
 })
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -922,26 +922,96 @@ def generate_huggingface(prompt, destination, size, seed, space, negative):
 
 
 def generate_pollinations(prompt, destination, size, seed, model):
+    """
+    Use Pollinations' OpenAI-compatible JSON endpoint.
+
+    The legacy GET /image/{prompt} route puts the entire prompt in the URL
+    path. Our story-specific prompts can be very long, causing HTTP 400
+    responses before image generation starts. POST keeps the full prompt in
+    the JSON body and preserves the configured model, dimensions and seed.
+    """
     width, height = size
-    url = "https://gen.pollinations.ai/image/" + quote(prompt, safe="")
-    headers = {}
+    headers = {"Content-Type": "application/json"}
 
     if POLLINATIONS_KEY:
         headers["Authorization"] = f"Bearer {POLLINATIONS_KEY}"
 
-    response = SESSION.get(
-        url,
-        params={
+    response = SESSION.post(
+        "https://gen.pollinations.ai/v1/images/generations",
+        json={
             "model": model,
-            "width": width,
-            "height": height,
+            "prompt": prompt,
+            "size": f"{width}x{height}",
             "seed": seed,
-            "nologo": "true",
+            "n": 1,
+            "quality": "medium",
+            "response_format": "b64_json",
         },
         headers=headers,
         timeout=TIMEOUT,
     )
-    response_image(response, destination, size, f"Pollinations ({model})")
+
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            payload = response.json()
+            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            detail = clean(error.get("message") or error.get("code"))
+        except (ValueError, AttributeError):
+            detail = clean(response.text[:1000])
+        raise requests.HTTPError(
+            f"Pollinations ({model}) HTTP {response.status_code}: "
+            f"{detail or 'image generation request failed'}",
+            response=response,
+        ) from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Pollinations ({model}) returned invalid JSON."
+        ) from exc
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        raise RuntimeError(
+            f"Pollinations ({model}) response has no image data."
+        )
+
+    image_data = data[0].get("b64_json")
+    image_url = data[0].get("url")
+
+    if image_data:
+        try:
+            image_bytes = base64.b64decode(image_data, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"Pollinations ({model}) returned invalid base64 image data."
+            ) from exc
+
+        if not image_bytes or len(image_bytes) > MAX_IMAGE_BYTES:
+            raise RuntimeError(
+                f"Pollinations ({model}) returned an empty or oversized image."
+            )
+        save_image_bytes(image_bytes, destination, size)
+        return
+
+    if image_url:
+        image_response = SESSION.get(
+            image_url,
+            headers=headers,
+            timeout=TIMEOUT,
+        )
+        response_image(
+            image_response, destination, size, f"Pollinations ({model})"
+        )
+        return
+
+    raise RuntimeError(
+        f"Pollinations ({model}) response contains neither b64_json nor url."
+    )
 
 
 def generate_gemini(prompt, destination, size):
