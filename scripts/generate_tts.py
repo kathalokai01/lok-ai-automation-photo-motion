@@ -2157,6 +2157,16 @@ def write_back_narration_audio(
             + ", ".join(missing[:20])
         )
 
+    # Mark narration as TTS-complete only after every narration record
+    # has a verified audio record and the completed TTS manifest is saved.
+    manifest_data = load_json(MANIFEST_FILE)
+    if not isinstance(manifest_data, dict) or manifest_data.get("status") != "completed":
+        raise RuntimeError(
+            "Cannot mark narration TTS-complete: TTS audio manifest is not completed."
+        )
+
+    narration_data["tts_status"] = "completed"
+    narration_data["tts_completed_at"] = utc_now()
     narration_data["tts_source_sha256"] = source_hash
     narration_data["tts_audio_manifest"] = (
         MANIFEST_FILE.relative_to(ROOT).as_posix()
@@ -2658,6 +2668,11 @@ def main() -> int:
     if not isinstance(saved_narration, dict):
         raise RuntimeError(
             "Narration audio write-back verification failed."
+        )
+
+    if saved_narration.get("tts_status") != "completed":
+        raise RuntimeError(
+            "Narration TTS completion status write-back verification failed."
         )
 
     for record in scene_records:
