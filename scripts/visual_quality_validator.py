@@ -211,7 +211,7 @@ def validate_scene_image(
     *,
     enabled: bool = True,
     minimum_score: int = 7,
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-3.8-flash",
     api_key: str | None = None,
     timeout: int = 90,
 ) -> dict:
