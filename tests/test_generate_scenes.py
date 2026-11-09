@@ -119,7 +119,7 @@ class ExtraSceneNarrationTests(unittest.TestCase):
         # An isolated em dash is a whitespace token in Story partitioning.
         # Regex word-boundary counting previously discarded it in narration.
         sample = "राजू ने कहा — ‘रुको!’ फिर वह लौट आया।"
-        expected = len(re.findall(r"\\S+", re.sub(r"\\s+", " ", sample).strip()))
+        expected = len(re.findall(r"\S+", re.sub(r"\s+", " ", sample).strip()))
         self.assertEqual(story.word_count(sample), expected)
         self.assertEqual(scenes.count_narration_words(sample), expected)
         self.assertEqual(narration.count_words(sample), expected)
