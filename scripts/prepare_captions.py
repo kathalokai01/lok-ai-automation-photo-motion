@@ -456,10 +456,28 @@ def validate_audio_manifest(
             raise RuntimeError(f"{sid}: TTS fingerprint is missing.")
 
         text_hash = sha256(source_text)
-        if job.get("text_sha256") != text_hash:
-            raise RuntimeError(f"{sid}: TTS locked source-text hash mismatch.")
-        if clean_text(job.get("text")) != source_text:
+        declared_text_hash = clean_text(
+            job.get("text_sha256") or job.get("source_text_sha256")
+        )
+        job_text = clean_text(job.get("text"))
+        if job_text != source_text:
             raise RuntimeError(f"{sid}: TTS text differs from locked narration.")
+        if declared_text_hash and declared_text_hash != text_hash:
+            raise RuntimeError(f"{sid}: TTS locked source-text hash mismatch.")
+        if not declared_text_hash:
+            chunk_records = job.get("chunks")
+            if not isinstance(chunk_records, list) or not chunk_records:
+                raise RuntimeError(f"{sid}: TTS source-text integrity record is missing.")
+            chunk_hashes = [
+                clean_text(item.get("text_sha256"))
+                for item in chunk_records
+                if isinstance(item, dict)
+            ]
+            if len(chunk_hashes) != len(chunk_records) or any(
+                not re.fullmatch(r"[a-f0-9]{64}", value)
+                for value in chunk_hashes
+            ):
+                raise RuntimeError(f"{sid}: TTS chunk source-text hashes are invalid.")
 
         audio_map[sid] = {
             "path": audio_path.relative_to(ROOT).as_posix(),
