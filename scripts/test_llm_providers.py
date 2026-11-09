@@ -23,6 +23,7 @@ import select_llm_provider as selector
 import gemini_api_guard
 import gemini_http
 import generate_tts
+import generate_ai_story
 
 
 class GeminiHttpFallbackTests(unittest.TestCase):
@@ -276,6 +277,49 @@ class ProviderConfigurationTests(unittest.TestCase):
 
 
 class ProviderResponseTests(unittest.TestCase):
+    def test_main_scene_hash_uses_text_sha256(self):
+        narration = "Locked source sentence."
+        source_part = {
+            "part": 1,
+            "narration": narration,
+            "scenes": [{
+                "scene": 1,
+                "scene_id": "part_01_scene_01",
+                "story_anchor": narration,
+                "narration": narration,
+            }],
+        }
+        generated = [{
+            "scene": 1,
+            "scene_id": "part_01_scene_01",
+            "role": "main",
+            "narration": "Model narration must not replace locked source text.",
+            "dialogue": "",
+            "visual_prompt": "A cinematic scene.",
+            "negative_prompt": "",
+            "camera_prompt": "Slow camera movement.",
+            "lighting_prompt": "Soft cinematic lighting.",
+            "sfx_prompt": "",
+            "music_prompt": "",
+        }]
+
+        records = generate_ai_story.validate_generated_scenes(
+            generated,
+            source_part,
+            {"format": "full"},
+            1,
+        )
+
+        self.assertEqual(records[0]["narration"], narration)
+        self.assertEqual(
+            records[0]["source_text_sha256"],
+            generate_ai_story.text_sha256(narration),
+        )
+        self.assertNotEqual(
+            records[0]["source_text_sha256"],
+            generate_ai_story.stable_hash(narration),
+        )
+
     def test_openai_response_text_is_extracted(self):
         response = {"choices": [{"message": {"content": "Generated test story"}}]}
         self.assertEqual(client._extract_openai_text(response, "groq"), "Generated test story")
