@@ -20,7 +20,7 @@ ALL_TTS_PROVIDERS = (
 )
 
 ALL_IMAGE_PROVIDERS = (
-    "huggingface", "pollinations", "gemini", "replicate",
+    "huggingface", "pollinations", "gemini", "replicate", "cloudflare",
 )
 
 PROVIDER_ALIASES = {
@@ -57,6 +57,8 @@ IMAGE_PROVIDER_ALIASES = {
     "gemini": "gemini",
     "gemini_image": "gemini",
     "replicate": "replicate",
+    "cloudflare": "cloudflare",
+    "cloudflare_workers_ai": "cloudflare",
 }
 
 CAPTION_FONTS = {
@@ -136,6 +138,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ),
     "GEMINI_IMAGE_MODEL": "gemini-2.5-flash-image",
     "REPLICATE_IMAGE_MODEL": "black-forest-labs/flux-schnell",
+    "CLOUDFLARE_IMAGE_MODEL": "@cf/black-forest-labs/flux-1-schnell",
 
     "PART_HOOK": True,
     "PART_SUSPENSE": True,
@@ -1275,6 +1278,12 @@ def get_image_provider_settings(
             DEFAULT_CONFIG["REPLICATE_IMAGE_MODEL"],
         )
     ).strip()
+    cloudflare_model = str(
+        config.get(
+            "CLOUDFLARE_IMAGE_MODEL",
+            DEFAULT_CONFIG["CLOUDFLARE_IMAGE_MODEL"],
+        )
+    ).strip()
 
     if not hf_spaces:
         raise ValueError(
@@ -1292,6 +1301,13 @@ def get_image_provider_settings(
     ):
         raise ValueError(
             "REPLICATE_IMAGE_MODEL must use owner/model-name format."
+        )
+    if not re.fullmatch(
+        r"@cf/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        cloudflare_model,
+    ):
+        raise ValueError(
+            "CLOUDFLARE_IMAGE_MODEL must use @cf/owner/model format."
         )
 
     global_billable = get_global_billable_permission(config)
@@ -1312,6 +1328,7 @@ def get_image_provider_settings(
         "POLLINATIONS_FREE_IMAGE_MODELS": pollinations_models,
         "GEMINI_IMAGE_MODEL": gemini_model,
         "REPLICATE_IMAGE_MODEL": replicate_model,
+        "CLOUDFLARE_IMAGE_MODEL": cloudflare_model,
     }
 
 
