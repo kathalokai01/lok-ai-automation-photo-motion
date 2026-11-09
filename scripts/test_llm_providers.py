@@ -494,7 +494,7 @@ class AIStoryFallbackTests(unittest.TestCase):
         )
         models = ["gemini|first", "openai|second"]
         patches = self._patch_generation()
-        with patches[0], patches[1], patches[2], \
+        with patches[0], patches[1], patches[2], patches[3], \
              patch.object(
                  generate_ai_story,
                  "request_selected_model",
