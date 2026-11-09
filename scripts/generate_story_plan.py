@@ -31,8 +31,8 @@ INPUT_FILE = ROOT / "Input" / "topic.txt"
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 OUTPUT_FILE = ROOT / "output" / "story" / "story_plan.json"
 
-VERSION = "story-plan-v19-extra-role-narration-pending-ai-generation"
-MAPPING_VERSION = 19
+VERSION = "story-plan-v20-countdown-fragments-joined"
+MAPPING_VERSION = 20
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -151,11 +151,26 @@ def write_json(path: Path, data: dict) -> None:
 
 def split_sentences(text: str) -> list[str]:
     normalized = normalize_text(text)
-    return [
+    pieces = [
         clean_text(piece)
         for piece in SENTENCE_SPLIT.split(normalized)
         if clean_text(piece)
     ]
+
+    # A countdown fragment such as "9..." is not a complete Scene.
+    # Keep it attached to the preceding sentence so the story is never
+    # divided into one-word narration/image jobs.
+    units: list[str] = []
+    for piece in pieces:
+        countdown = bool(
+            re.fullmatch(r"[0-9०-९]{1,3}[.!?！？…।॥]+", piece)
+        )
+        if countdown and units:
+            units[-1] = f"{units[-1]} {piece}"
+        else:
+            units.append(piece)
+
+    return units
 
 
 def split_clauses(sentence: str) -> list[str]:
