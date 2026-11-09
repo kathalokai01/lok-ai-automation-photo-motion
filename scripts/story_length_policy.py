@@ -521,6 +521,51 @@ def build_length_policy(
         ),
     }
 
+
+def validate_story_quality_report(report: Any, minimum_score: int = 8) -> tuple[bool, list[str]]:
+    """Validate the persisted deterministic Story quality report."""
+    errors: list[str] = []
+    if not isinstance(report, dict):
+        return False, ["Story quality report is missing or invalid."]
+    if report.get("passed") is not True or report.get("status") != "passed":
+        errors.extend(
+            str(item) for item in report.get("issues", [])
+            if str(item).strip()
+        )
+        if not errors:
+            errors.append("Story quality report did not pass.")
+    try:
+        score = float(report.get("score"))
+    except (TypeError, ValueError):
+        score = 0.0
+    if score < minimum_score:
+        errors.append(
+            f"Story quality score {score:g} is below required {minimum_score}."
+        )
+    parts = report.get("parts")
+    expected = report.get("part_count")
+    validated = report.get("validated_part_count")
+    if (
+        not isinstance(parts, list)
+        or not isinstance(expected, int)
+        or isinstance(expected, bool)
+        or not isinstance(validated, int)
+        or isinstance(validated, bool)
+        or expected < 1
+        or validated != expected
+        or len(parts) != expected
+    ):
+        errors.append("Story quality report Part counts are inconsistent.")
+    elif any(
+        not isinstance(item, dict)
+        or item.get("passed") is not True
+        or item.get("status") != "passed"
+        for item in parts
+    ):
+        errors.append("One or more Story Parts failed quality validation.")
+    return not errors, errors
+
+
 def validate_story_length(
     narration_text: Any,
     policy: dict[str, Any],
