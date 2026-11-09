@@ -32,8 +32,8 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v14-quoted-dialogue-regrouping"
-PROMPT_VERSION = 12
+VERSION = "photo-motion-scenes-v15-bounded-world-context"
+PROMPT_VERSION = 13
 
 ROLE_ORDER = {
     "hook": 0,
@@ -879,7 +879,7 @@ def build_visual_prompt(
             "WORLD CONTINUITY LOCK. Preserve story era, location, "
             "architecture and environment. Apply only relevant details: "
             + json.dumps(
-                world,
+                compact_world_context(world),
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
