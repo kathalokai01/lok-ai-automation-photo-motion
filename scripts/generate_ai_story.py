@@ -41,7 +41,7 @@ LLM_PROVIDER_FILE = ROOT / "output/config/selected_llm_provider.json"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT = 180
 MAX_RESPONSE_CHARS = 160000
-VERSION = "ai-story-v25-locked-main-with-narrated-extra-roles"
+VERSION = "ai-story-v26-model-progression-quality-gate"
 
 SHORT_MIN_WORDS = 120
 SHORT_TARGET_MAX = 150
