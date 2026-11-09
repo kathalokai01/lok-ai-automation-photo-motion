@@ -296,7 +296,7 @@ def build_selection(
 
 
 STORY_PROGRESSION_FILE = Path("output/story/story_model_progression.json")
-STORY_PROGRESSION_VERSION = "story-model-progression-v1"
+STORY_PROGRESSION_VERSION = "story-model-progression-v2"
 
 
 def story_model_signature(models: list[str]) -> str:
@@ -326,7 +326,7 @@ def load_story_model_cursor(models: list[str]) -> int:
         or data.get("model_order") != list(models)
     ):
         return 0
-    index = data.get("successful_model_index")
+    index = data.get("cursor_index", data.get("successful_model_index"))
     if isinstance(index, bool) or not isinstance(index, int):
         return 0
     return index if 0 <= index < len(models) else 0
@@ -351,8 +351,10 @@ def save_story_model_cursor(
         "version": STORY_PROGRESSION_VERSION,
         "model_order": list(models),
         "model_order_signature": story_model_signature(models),
-        "successful_model_index": index,
-        "successful_model": models[index],
+        "cursor_index": index,
+        "cursor_model": models[index],
+        "successful_model_index": index if status == "succeeded" else None,
+        "successful_model": models[index] if status == "succeeded" else None,
         "stage": str(stage),
         "part": part,
         "status": str(status),
