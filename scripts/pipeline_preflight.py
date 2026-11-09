@@ -605,7 +605,7 @@ def check_story_progression_quality_integration() -> tuple[bool, str]:
         ),
         "generate_ai_story.py": (
             "load_story_model_cursor", "save_story_model_cursor",
-            "MAX_RETRY_ROUNDS = 3", "validate_story_part",
+            "MAX_RETRY_ROUNDS = 3", "MAX_MODEL_ATTEMPTS = 1", "validate_story_part",
             "validate_story_output", "quality_validation",
         ),
         "select_gemini_model.py": (
