@@ -14,7 +14,7 @@ import urllib.request
 from typing import Any
 
 
-VERSION = "llm-provider-client-v1"
+VERSION = "llm-provider-client-v2-story-order-validation"
 
 SUPPORTED_PROVIDERS = (
     "openai",
