@@ -606,7 +606,7 @@ def check_story_progression_quality_integration() -> tuple[bool, str]:
         "generate_ai_story.py": (
             "load_story_model_cursor", "save_story_model_cursor",
             "MAX_RETRY_ROUNDS = 3", "validate_story_part",
-            "validate_story_output",
+            "validate_story_output", "quality_validation",
         ),
         "select_gemini_model.py": (
             "STORY_PROGRESSION_FILE", "model_order_signature",
@@ -614,7 +614,7 @@ def check_story_progression_quality_integration() -> tuple[bool, str]:
         ),
         "story_quality_validator.py": (
             "def validate_story_part", "def validate_story_output",
-            "source_part_signature", "quality_validation",
+            "source_part_signature",
         ),
     }
     missing = []
