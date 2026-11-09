@@ -33,7 +33,7 @@ from story_length_policy import (
     SHORT_PREFERRED_MAX_WORDS_PER_PART, SHORT_HARD_MAX_WORDS_PER_PART,
     SHORT_FINAL_MERGED_MAX_WORDS,
 )
-from gemini_http import http_status, http_error_body, retry_after_seconds
+from gemini_http import (\n    http_status, http_error_body, retry_after_seconds,\n    classify_generation_failure,\n)
 from generate_story_plan import (
     build_plan as build_story_plan,
     validate_plan as validate_story_plan,
@@ -840,6 +840,7 @@ def call_model(
         },
     }
     failures = []
+    blocked_models = set()
     max_rounds = 3
     gemini_key = api_key
     if any(item.startswith("gemini|") for item in model_order):
@@ -849,7 +850,10 @@ def call_model(
     from llm_provider_client import generate_text
     for retry_round in range(1, max_rounds + 1):
         log("Story model progression round " + str(retry_round) + "/" + str(max_rounds))
+        round_delay = min(12 * retry_round, 30)
         for model_index, selected in ordered:
+            if selected in blocked_models:
+                continue
             provider, candidate_model = selected.split("|", 1)
             try:
                 if provider == "gemini":
@@ -910,6 +914,14 @@ def call_model(
 
             except Exception as exc:
                 status = http_status(exc)
+                failure_class = classify_generation_failure(exc)
+                if failure_class in {"auth_blocked", "model_or_request_unavailable", "quota_blocked"}:
+                    blocked_models.add(selected)
+                if status == 429:
+                    round_delay = max(
+                        round_delay,
+                        retry_after_seconds(exc, retry_round, default_base=12, maximum=120),
+                    )
                 failures.append({
                     "round": retry_round, "model": selected,
                     "error_type": type(exc).__name__,
@@ -918,9 +930,11 @@ def call_model(
                 })
                 log("Story model failed: " + selected + " (" + type(exc).__name__ + ")")
 
+        if len(blocked_models) >= len(model_order):
+            break
         if retry_round < max_rounds:
             # Retry the entire configured list in the same priority rotation.
-            time.sleep(min(12 * retry_round, 30))
+            time.sleep(round_delay)
 
     save_story_model_cursor(
         model_order, ordered[-1][0], stage="story_correction",
