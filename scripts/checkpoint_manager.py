@@ -23,7 +23,7 @@ DEFAULT_OUTPUT = ROOT / "output"
 SUCCESS_STATES = {"completed", "complete", "success", "done", "valid", "planned"}
 
 STAGES = (
-    ("story", ("story/story.json", "story/story_plan.json")),
+    ("story", ("story/story.json", "story/story_plan.json", "story/story_model_progression.json")),
     ("narration", ("narration/narration.json", "narration/audio_jobs.json")),
     ("flow_music", ("music/flow_music_manifest.json",)),
     ("visuals", (
