@@ -32,7 +32,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 13
+SCRIPT_VERSION = 14
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -232,13 +232,9 @@ def normalize_text(value: Any) -> str:
 
 
 def count_words(value: str) -> int:
-    return len(
-        re.findall(
-            r"\b[\w'-]+\b",
-            value,
-            flags=re.UNICODE,
-        )
-    )
+    """Match Story partitioning: count normalized whitespace-separated tokens."""
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    return len(re.findall(r"\S+", normalized))
 
 
 def clean_narration(value: Any, label: str) -> str:
