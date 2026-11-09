@@ -459,7 +459,7 @@ def restore_partial_visual_images(source: Path, output: Path) -> int:
                 header = stream.read(24)
             if (
                 len(header) < 24
-                or header[:8] != b"\\x89PNG\\r\\n\\x1a\\n"
+                or header[:8] != b"\x89PNG\r\n\x1a\n"
                 or _sha256_file(source_file).lower() != str(image_row["image_sha256"]).lower()
             ):
                 continue
@@ -499,7 +499,7 @@ def restore_partial_visual_images(source: Path, output: Path) -> int:
         (generation_doc, destination_generation_manifest),
     ):
         path.write_text(
-            json.dumps(document, ensure_ascii=False, indent=2) + "\\n",
+            json.dumps(document, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
     log(f"Restored {verified} individually verified partial scene images from checkpoint.")
