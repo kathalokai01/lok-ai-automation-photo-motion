@@ -377,6 +377,43 @@ def _make_request(
         ) from None
 
 
+
+def selected_story_provider_candidates(selection: dict) -> list[str]:
+    """Read the validated Story provider order without changing global provider priority."""
+    if not isinstance(selection, dict):
+        return []
+    if selection.get("enabled") is not True or selection.get("status") != "ready":
+        return []
+    order = selection.get("provider_order")
+    records = selection.get("providers")
+    if not isinstance(order, list) or not isinstance(records, list):
+        raise ProviderError("configuration", "Invalid selected Story provider schema.")
+    ready = {}
+    for item in records:
+        if not isinstance(item, dict):
+            raise ProviderError("configuration", "Invalid Story provider record.")
+        name = _clean(item.get("provider")).lower()
+        if name not in SUPPORTED_PROVIDERS:
+            raise ProviderError("configuration", "Unsupported Story provider record.")
+        if item.get("ready") is True:
+            if name in ready:
+                raise ProviderError("configuration", "Duplicate ready Story provider.")
+            model = _clean(item.get("model"))
+            if not model or len(model) > 200 or any(ch.isspace() for ch in model):
+                raise ProviderError("configuration", "Invalid selected Story model.")
+            if name == "cloudflare" and not model.startswith("@cf/"):
+                raise ProviderError("configuration", "Invalid Cloudflare Story model namespace.")
+            ready[name] = model
+    result = []
+    for value in order:
+        name = _clean(value).lower()
+        if name not in SUPPORTED_PROVIDERS:
+            raise ProviderError("configuration", "Invalid Story provider order entry.")
+        if name in ready and name not in [item.split("|", 1)[0] for item in result]:
+            result.append(name + "|" + ready[name])
+    return result
+
+
 def generate_text(
     provider: str,
     prompt: str,
