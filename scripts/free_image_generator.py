@@ -37,6 +37,7 @@ JOBS_FILE = VISUAL_DIR / "visual_jobs.json"
 JOBS_MANIFEST = VISUAL_DIR / "visual_jobs_manifest.json"
 IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
+MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
 VERSION = "photo-motion-image-generator-v34-persistent-model-cursor-quality-gate"
