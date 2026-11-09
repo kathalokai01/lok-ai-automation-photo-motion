@@ -32,7 +32,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 18
+SCRIPT_VERSION = 19
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -329,28 +329,36 @@ def sentence_units(value: str) -> list[str]:
     if remainder:
         raw_units.append(remainder)
 
-    # Rejoin punctuation fragments while a straight double-quoted
-    # dialogue is still open.
+    # Keep complete sentence boundaries inside long quoted dialogue.
+    # Only collapse a short quoted utterance (four words or fewer).
     quote_safe: list[str] = []
     pending = ""
+    pending_pieces: list[str] = []
+
     for piece in raw_units:
         if pending:
+            pending_pieces.append(piece)
             pending = f"{pending} {piece}"
             if not _has_unclosed_double_quote(pending):
-                quote_safe.append(pending)
+                if len(re.findall(r"\\S+", pending)) <= 4:
+                    quote_safe.append(pending)
+                else:
+                    quote_safe.extend(pending_pieces)
                 pending = ""
+                pending_pieces = []
             continue
 
         if _has_unclosed_double_quote(piece):
             pending = piece
+            pending_pieces = [piece]
         else:
             quote_safe.append(piece)
 
     if pending:
-        if quote_safe:
-            quote_safe[-1] = f"{quote_safe[-1]} {pending}"
-        else:
+        if len(re.findall(r"\\S+", pending)) <= 4:
             quote_safe.append(pending)
+        else:
+            quote_safe.extend(pending_pieces)
 
     # Keep a short, complete quoted utterance with its speaker/action
     # attribution instead of creating a dialogue-only micro-scene.
