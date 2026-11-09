@@ -340,6 +340,91 @@ class ProviderResponseTests(unittest.TestCase):
                 client._cloudflare_url("@cf/test-model")
 
 
+
+class AIStoryFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.source_part = {"part": 1, "scenes": []}
+        self.config = {"format": "full"}
+
+    def _patch_generation(self):
+        return (
+            patch.object(generate_ai_story, "build_part_prompt", return_value="prompt"),
+            patch.object(generate_ai_story, "build_response_schema", return_value={}),
+            patch.object(
+                generate_ai_story,
+                "validate_generated_part",
+                return_value={"word_count": 130},
+            ),
+        )
+
+    def test_model_is_retried_three_times_before_switching_provider(self):
+        models = ["gemini|gemini-test", "openai|openai-test"]
+        failure = client.ProviderError(
+            "gemini", "temporary network failure", retryable=True
+        )
+        request = [failure, failure, failure, {"text": "ok"}]
+        patches = self._patch_generation()
+        with patches[0], patches[1], patches[2], \
+             patch.object(generate_ai_story, "request_selected_model", side_effect=request) as mocked, \
+             patch.object(generate_ai_story.time, "sleep"):
+            result = generate_ai_story.generate_part(
+                "", models, "topic", "story", self.source_part,
+                self.config, 1,
+            )
+        self.assertEqual(mocked.call_count, 4)
+        self.assertEqual(
+            [call.args[1] for call in mocked.call_args_list],
+            ["gemini|gemini-test"] * 3 + ["openai|openai-test"],
+        )
+        self.assertEqual(result["_katha_model_index"], 1)
+        self.assertEqual(result["_katha_provider_used"], "openai")
+
+    def test_generation_starts_with_persisted_successful_model_position(self):
+        models = ["gemini|first", "openai|second", "groq|third"]
+        patches = self._patch_generation()
+        with patches[0], patches[1], patches[2], \
+             patch.object(
+                 generate_ai_story,
+                 "request_selected_model",
+                 return_value={"text": "ok"},
+             ) as mocked:
+            result = generate_ai_story.generate_part(
+                "", models, "topic", "story", self.source_part,
+                self.config, 1, start_model_index=1,
+            )
+        self.assertEqual(mocked.call_args.args[1], "openai|second")
+        self.assertEqual(result["_katha_model_index"], 1)
+
+    def test_all_model_failures_return_resumable_model_position(self):
+        models = ["gemini|first", "openai|second"]
+        failure = client.ProviderError("test", "permanent failure")
+        patches = self._patch_generation()
+        with patches[0], patches[1], patches[2], \
+             patch.object(
+                 generate_ai_story,
+                 "request_selected_model",
+                 side_effect=failure,
+             ):
+            with self.assertRaises(generate_ai_story.ModelFallbackError) as caught:
+                generate_ai_story.generate_part(
+                    "", models, "topic", "story", self.source_part,
+                    self.config, 1,
+                )
+        self.assertEqual(caught.exception.state["part"], 1)
+        self.assertEqual(caught.exception.state["model_index"], 1)
+        self.assertEqual(caught.exception.state["model"], "openai|second")
+        self.assertEqual(caught.exception.state["max_attempts"], 3)
+
+    def test_quota_exhaustion_is_classified_for_immediate_provider_switch(self):
+        failure = client.ProviderError(
+            "gemini",
+            "RESOURCE_EXHAUSTED: daily quota exceeded",
+            status_code=429,
+            retryable=True,
+        )
+        self.assertTrue(generate_ai_story.is_quota_exhausted(failure))
+
+
 def run_tests() -> int:
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
