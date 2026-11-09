@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import struct
 import json
 import os
 import re
@@ -276,6 +278,234 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
 
 
 
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _negative_prompt_sha256(job: dict) -> str:
+    values = [
+        "wrong story event", "unrelated characters", "unrelated props",
+        "wrong location", "wrong time period", "distorted face",
+        "unrealistic anatomy", "extra fingers", "missing fingers",
+        "fused limbs", "duplicated people", "plastic skin", "waxy face",
+        "floating objects", "captions", "subtitles", "unintended text",
+        "logo", "watermark", "low resolution", "blurry main subject",
+        "cartoon", "anime", "comic-book illustration", "2D drawing",
+        "3D animated character", "body animation", "face animation",
+        "character animation", "motion blur",
+    ]
+    extra = job.get("negative_prompt")
+    if extra:
+        values.append(str(extra))
+    text = ", ".join(dict.fromkeys(values))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _image_reuse_signature(row: dict, negative_hash: str) -> str:
+    scene_number = row.get("global_scene", row.get("global_scene_number", row.get("scene")))
+    try:
+        part = int(row.get("part"))
+        global_scene = int(scene_number)
+    except (TypeError, ValueError):
+        return ""
+    identity = {
+        "scene_id": str(row.get("scene_id") or "").strip(),
+        "part": part,
+        "global_scene": global_scene,
+        "role": str(row.get("role") or "").strip(),
+        "prompt_sha256": str(row.get("prompt_sha256") or "").strip(),
+        "negative_prompt_sha256": negative_hash,
+        "size": str(row.get("image_size") or "").strip(),
+        "config_signature": str(row.get("config_signature") or "").strip(),
+        "image_path": str(row.get("image_path") or row.get("image") or row.get("file") or "").strip(),
+    }
+    raw = json.dumps(
+        identity, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def restore_partial_visual_images(source: Path, output: Path) -> int:
+    """Restore only individually verified images from an incomplete visual stage."""
+    visual_root = source / "visuals"
+    jobs_path = visual_root / "visual_jobs.json"
+    jobs_manifest = read_json(visual_root / "visual_jobs_manifest.json")
+    image_path = visual_root / "image_manifest.json"
+    generation_path = visual_root / "image_generation_manifest.json"
+    image_doc = read_json(image_path)
+    generation_doc = read_json(generation_path)
+
+    if not all((jobs_path.is_file(), jobs_manifest, image_doc, generation_doc)):
+        return 0
+    if jobs_manifest.get("status") not in SUCCESS_STATES:
+        return 0
+
+    source_fingerprint = str(jobs_manifest.get("source_fingerprint") or "").strip()
+    config_signature = str(jobs_manifest.get("config_signature") or "").strip()
+    format_name = str(jobs_manifest.get("format") or "").strip().lower()
+    expected_size = "720x1280" if format_name == "short" else (
+        "1280x720" if format_name == "full" else ""
+    )
+    if (
+        not re.fullmatch(r"[0-9a-fA-F]{64}", source_fingerprint)
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", config_signature)
+        or not expected_size
+    ):
+        return 0
+
+    for document in (image_doc, generation_doc):
+        if (
+            document.get("source_fingerprint") != source_fingerprint
+            or document.get("config_signature") != config_signature
+            or str(document.get("format") or "").lower() != format_name
+            or str(document.get("image_size") or "") != expected_size
+            or not isinstance(document.get("scenes"), list)
+        ):
+            return 0
+
+    try:
+        jobs_document = json.loads(jobs_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return 0
+    jobs = (
+        jobs_document if isinstance(jobs_document, list)
+        else jobs_document.get("jobs", []) if isinstance(jobs_document, dict)
+        else []
+    )
+    if not isinstance(jobs, list) or not jobs:
+        return 0
+    jobs_by_id = {
+        str(row.get("scene_id") or "").strip(): row
+        for row in jobs if isinstance(row, dict) and row.get("scene_id")
+    }
+    image_rows = {
+        str(row.get("scene_id") or "").strip(): row
+        for row in image_doc["scenes"] if isinstance(row, dict) and row.get("scene_id")
+    }
+    generation_rows = {
+        str(row.get("scene_id") or "").strip(): row
+        for row in generation_doc["scenes"] if isinstance(row, dict) and row.get("scene_id")
+    }
+    if (
+        not image_rows or set(image_rows) != set(generation_rows)
+        or set(image_rows) != set(jobs_by_id)
+    ):
+        return 0
+
+    # Do not mix a second candidate into a different already-restored manifest.
+    destination_visuals = output / "visuals"
+    destination_image_manifest = destination_visuals / "image_manifest.json"
+    destination_generation_manifest = destination_visuals / "image_generation_manifest.json"
+    if destination_image_manifest.exists() or destination_generation_manifest.exists():
+        existing_image = read_json(destination_image_manifest)
+        existing_generation = read_json(destination_generation_manifest)
+        if not existing_image or not existing_generation:
+            return 0
+        if (
+            existing_image.get("source_fingerprint") != source_fingerprint
+            or existing_generation.get("source_fingerprint") != source_fingerprint
+            or existing_image.get("config_signature") != config_signature
+            or existing_generation.get("config_signature") != config_signature
+        ):
+            return 0
+        return 0
+
+    ready_statuses = {"generated", "existing", "completed"}
+    verified = 0
+    for scene_id, image_row in image_rows.items():
+        generation_row = generation_rows[scene_id]
+        if (
+            str(image_row.get("status") or "").lower() not in ready_statuses
+            or str(generation_row.get("status") or "").lower() not in ready_statuses
+        ):
+            continue
+        identity_fields = (
+            "image_path", "image_sha256", "prompt_sha256",
+            "prompt_signature", "job_signature", "config_signature",
+            "source_fingerprint",
+        )
+        if any(image_row.get(key) != generation_row.get(key) for key in identity_fields):
+            continue
+        if (
+            image_row.get("source_fingerprint") != source_fingerprint
+            or image_row.get("config_signature") != config_signature
+            or str(image_row.get("image_size") or "") != expected_size
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", str(image_row.get("image_sha256") or ""))
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", str(image_row.get("prompt_sha256") or ""))
+        ):
+            continue
+
+        relative = str(
+            image_row.get("image_path") or image_row.get("image") or image_row.get("file") or ""
+        ).replace("\\", "/")
+        parts = PurePosixPath(relative).parts
+        if (
+            len(parts) < 4 or parts[:3] != ("output", "visuals", "images")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            continue
+        source_file = source.joinpath(*parts[1:])
+        destination_file = output.joinpath(*parts[1:])
+        if source_file.is_symlink() or not source_file.is_file():
+            continue
+        try:
+            with source_file.open("rb") as stream:
+                header = stream.read(24)
+            if (
+                len(header) < 24
+                or header[:8] != b"\\x89PNG\\r\\n\\x1a\\n"
+                or _sha256_file(source_file).lower() != str(image_row["image_sha256"]).lower()
+            ):
+                continue
+            width, height = struct.unpack(">II", header[16:24])
+            if (
+                f"{width}x{height}" != expected_size
+                or int(image_row.get("width", 0)) != width
+                or int(image_row.get("height", 0)) != height
+            ):
+                continue
+        except (OSError, TypeError, ValueError, struct.error):
+            continue
+
+        job = jobs_by_id[scene_id]
+        negative_hash = _negative_prompt_sha256(job)
+        reuse_signature = _image_reuse_signature(image_row, negative_hash)
+        if not reuse_signature:
+            continue
+        destination_file.parent.mkdir(parents=True, exist_ok=True)
+        if destination_file.exists():
+            if destination_file.is_symlink() or _sha256_file(destination_file).lower() != str(image_row["image_sha256"]).lower():
+                continue
+        else:
+            shutil.copy2(source_file, destination_file)
+
+        for row in (image_row, generation_row):
+            row["negative_prompt_sha256"] = negative_hash
+            row["reuse_signature"] = reuse_signature
+        verified += 1
+
+    if not verified:
+        return 0
+
+    destination_visuals.mkdir(parents=True, exist_ok=True)
+    for document, path in (
+        (image_doc, destination_image_manifest),
+        (generation_doc, destination_generation_manifest),
+    ):
+        path.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2) + "\\n",
+            encoding="utf-8",
+        )
+    log(f"Restored {verified} individually verified partial scene images from checkpoint.")
+    return verified
+
+
 def merge_progress_checkpoints(source: Path, output: Path) -> int:
     roots = (
         "checkpoints",
@@ -404,6 +634,7 @@ def restore(args: argparse.Namespace) -> int:
     examined = 0
     rejected: list[dict] = []
     progress_checkpoints = 0
+    restored_partial_images = 0
 
     with tempfile.TemporaryDirectory(prefix="katha-checkpoint-") as temporary:
         temp = Path(temporary)
@@ -434,6 +665,7 @@ def restore(args: argparse.Namespace) -> int:
                 rejected.append({"run_id": run_id, "reason": "FORMAT/PARTS/SCENES/naming context mismatch"})
                 continue
 
+            restored_partial_images += restore_partial_visual_images(saved, output)
             progress_checkpoints += merge_progress_checkpoints(saved, output)
             accepted = []
             for stage, _ in STAGES:
@@ -457,6 +689,7 @@ def restore(args: argparse.Namespace) -> int:
         "restored_stages": restored,
         "restored_stage_count": len(restored),
         "progress_checkpoint_files_merged": progress_checkpoints,
+        "restored_partial_visual_images": restored_partial_images,
         "rejected_candidates": rejected,
         "pipeline_hash_policy": "not used as a global restore gate; stage manifests validate reuse",
     }
