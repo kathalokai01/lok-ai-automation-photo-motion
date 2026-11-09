@@ -161,7 +161,11 @@ class ExtraSceneNarrationTests(unittest.TestCase):
             "source_word_count": expected,
         }
         self.assertTrue(scenes.scene_is_valid(record, extra, "c" * 64))
-        record["source_word_count"] = len(sample.split())
+        # Reproduce the old Unicode word-boundary counter, which drops the isolated em dash token.
+        record["source_word_count"] = len(
+            re.findall(r"\b[\w'-]+\b", sample, flags=re.UNICODE)
+        )
+        self.assertNotEqual(record["source_word_count"], expected)
         self.assertFalse(scenes.scene_is_valid(record, extra, "c" * 64))
 
     def test_extra_scene_rejects_missing_narration(self) -> None:
