@@ -30,6 +30,7 @@ VERSION = "photo-motion-preflight-v68-stage-aware-resume-policy"
 REQUIRED_SCRIPTS = (
     "input_config.py",
     "pipeline_preflight.py",
+    "checkpoint_manager.py",
     "check_gemini_guard.py",
     "gemini_api_guard.py",
     "gemini_http.py",
