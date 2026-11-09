@@ -62,6 +62,7 @@ def _vision_check(
     model: str,
     api_key: str,
     timeout: int,
+    reference_image_paths: list[Path] | None = None,
 ) -> dict:
     try:
         image_bytes = image_path.read_bytes()
@@ -74,40 +75,56 @@ def _vision_check(
         + model
         + ":generateContent"
     )
+    instruction = (
+        "Evaluate the candidate generated still image against the exact scene prompt. "
+        "This is a photo-motion project: the image must be a coherent still photograph, "
+        "not an animation or video. Check the visible event, objects, location and time "
+        "against the prompt. Check character identity, face, hair, skin tone, body "
+        "proportions and any locked clothing against the prompt. If reference images are "
+        "provided, they show the same named character(s) in earlier scenes: compare only "
+        "the identity-defining visual traits across those reference images and the candidate; "
+        "do not require the same pose, expression, camera angle, lighting or scene clothing "
+        "unless clothing is explicitly locked in the prompt. Do not invent invisible details. "
+        "If no character is described, character_consistency must be true. If a described "
+        "character cannot be judged, set character_consistency false and explain uncertainty. "
+        "Score overall technical/visual quality from 1 to 10. Reject malformed anatomy, "
+        "duplicate limbs/people, severe blur, unintended text/watermarks, unrelated scenes "
+        "or major prompt mismatch. Return ONLY JSON with keys: prompt_match (boolean), "
+        "character_consistency (boolean), quality_score (integer 1-10), "
+        "issues (array of short strings), reason (short string).\n"
+        "Scene prompt follows:\n" + prompt
+    )
+    parts = [{"text": instruction}]
+    reference_count = 0
+    for reference_path in reference_image_paths or []:
+        try:
+            reference_bytes = Path(reference_path).read_bytes()
+        except OSError:
+            continue
+        if not reference_bytes or len(reference_bytes) > 80 * 1024 * 1024:
+            continue
+        reference_count += 1
+        parts.append({
+            "text": f"Earlier scene character reference image {reference_count}:"
+        })
+        parts.append({
+            "inlineData": {
+                "mimeType": "image/png",
+                "data": base64.b64encode(reference_bytes).decode("ascii"),
+            }
+        })
+    parts.append({
+        "text": "Candidate image to accept or reject:"
+    })
+    parts.append({
+        "inlineData": {
+            "mimeType": "image/png",
+            "data": encoded,
+        }
+    })
+
     request_body = {
-        "contents": [{
-            "role": "user",
-            "parts": [
-                {
-                    "text": (
-                        "Evaluate this generated still image against the exact scene prompt. "
-                        "This is a photo-motion project: the image itself must be a coherent "
-                        "still photograph, not an animation or video. Check whether the main "
-                        "visible event, objects, location and time implied by the prompt match. "
-                        "Check whether described character identity, gender evidence, face, "
-                        "hair, body proportions and clothing are consistent with the prompt. "
-                        "Do not invent details that are not visible. If no character is "
-                        "described in the prompt, character_consistency must be true because "
-                        "there is no character requirement to contradict. If a described "
-                        "character detail cannot be judged, set character_consistency false "
-                        "and explain uncertainty. "
-                        "Score overall technical/visual quality from 1 to 10. Reject obvious "
-                        "distortion, malformed anatomy, duplicate limbs/people, severe blur, "
-                        "unintended text/watermarks, unrelated scenes or major prompt mismatch. "
-                        "Return ONLY JSON with keys: prompt_match (boolean), "
-                        "character_consistency (boolean), quality_score (integer 1-10), "
-                        "issues (array of short strings), reason (short string). "
-                        "Scene prompt follows:\n" + prompt
-                    )
-                },
-                {
-                    "inlineData": {
-                        "mimeType": "image/png",
-                        "data": encoded,
-                    }
-                },
-            ],
-        }],
+        "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
             "temperature": 0.1,
             "responseMimeType": "application/json",
@@ -141,12 +158,12 @@ def _vision_check(
         )
     candidate = candidates[0]
     candidate_content = candidate.get("content") if isinstance(candidate, dict) else None
-    parts = (
+    response_parts = (
         candidate_content.get("parts", [])
         if isinstance(candidate_content, dict) else []
     )
     response_text = next(
-        (_clean(part.get("text")) for part in parts
+        (_clean(part.get("text")) for part in response_parts
          if isinstance(part, dict) and part.get("text")),
         "",
     )
@@ -201,6 +218,7 @@ def _vision_check(
         "issues": [_clean(item)[:240] for item in issues if _clean(item)][:12],
         "reason": _clean(result.get("reason"))[:800],
         "vision_model": model,
+        "reference_images_used": reference_count,
     }
 
 
@@ -214,6 +232,7 @@ def validate_scene_image(
     model: str = "gemini-3.8-flash",
     api_key: str | None = None,
     timeout: int = 90,
+    reference_image_paths: list[str | Path] | None = None,
 ) -> dict:
     """Return accepted quality evidence; never claim semantic success without vision."""
     path = Path(image_path)
@@ -236,7 +255,10 @@ def validate_scene_image(
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", model):
         raise ValueError("IMAGE_QUALITY_VISION_MODEL contains invalid characters.")
 
-    vision = _vision_check(path, prompt, model, key, max(15, min(180, int(timeout))))
+    vision = _vision_check(
+        path, prompt, model, key, max(15, min(180, int(timeout))),
+        [Path(value) for value in (reference_image_paths or [])[:2]],
+    )
     accepted = (
         vision["prompt_match"] is True
         and vision["character_consistency"] is True
