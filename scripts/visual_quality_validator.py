@@ -86,8 +86,11 @@ def _vision_check(
                         "visible event, objects, location and time implied by the prompt match. "
                         "Check whether described character identity, gender evidence, face, "
                         "hair, body proportions and clothing are consistent with the prompt. "
-                        "Do not invent details that are not visible. If a required detail cannot "
-                        "be judged, set the relevant boolean to false and explain uncertainty. "
+                        "Do not invent details that are not visible. If no character is "
+                        "described in the prompt, character_consistency must be true because "
+                        "there is no character requirement to contradict. If a described "
+                        "character detail cannot be judged, set character_consistency false "
+                        "and explain uncertainty. "
                         "Score overall technical/visual quality from 1 to 10. Reject obvious "
                         "distortion, malformed anatomy, duplicate limbs/people, severe blur, "
                         "unintended text/watermarks, unrelated scenes or major prompt mismatch. "
@@ -136,7 +139,12 @@ def _vision_check(
         raise VisionVerificationUnavailable(
             "Gemini vision verification returned no candidate."
         )
-    parts = candidates[0].get("content", {}).get("parts", [])
+    candidate = candidates[0]
+    candidate_content = candidate.get("content") if isinstance(candidate, dict) else None
+    parts = (
+        candidate_content.get("parts", [])
+        if isinstance(candidate_content, dict) else []
+    )
     response_text = next(
         (_clean(part.get("text")) for part in parts
          if isinstance(part, dict) and part.get("text")),
