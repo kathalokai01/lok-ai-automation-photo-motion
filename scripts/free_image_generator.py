@@ -40,7 +40,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v35-provider-scoped-billing-blocks"
+VERSION = "photo-motion-image-generator-v36-pollinations-billing-and-provider-scoped-blocks"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -1280,7 +1280,7 @@ def build_provider_attempts(prompt, destination, size, seed, negative):
                 attempts.append((
                     f"Pollinations: {model}",
                     f"pollinations:{model}",
-                    False,
+                    True,
                     lambda model=model: generate_pollinations(
                         prompt, destination, size, seed, model
                     ),
