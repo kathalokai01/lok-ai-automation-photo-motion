@@ -135,7 +135,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "lykon/dreamshaper-8-lcm"
     ),
     "REPLICATE_IMAGE_MODEL": "black-forest-labs/flux-schnell",
-    "CLOUDFLARE_IMAGE_MODEL": "@cf/black-forest-labs/flux-1-schnell",
+    "CLOUDFLARE_IMAGE_MODEL": "@cf/black-forest-labs/flux-2-klein-4b",
+    "CLOUDFLARE_IMAGE_FALLBACK_MODEL": "@cf/black-forest-labs/flux-1-schnell",
 
     "PART_HOOK": True,
     "PART_SUSPENSE": True,
@@ -1275,6 +1276,13 @@ def get_image_provider_settings(
             DEFAULT_CONFIG["CLOUDFLARE_IMAGE_MODEL"],
         )
     ).strip()
+    cloudflare_fallback_model = str(
+        os.getenv("CLOUDFLARE_IMAGE_FALLBACK_MODEL", "").strip()
+        or config.get(
+            "CLOUDFLARE_IMAGE_FALLBACK_MODEL",
+            DEFAULT_CONFIG["CLOUDFLARE_IMAGE_FALLBACK_MODEL"],
+        )
+    ).strip()
 
     if not hf_spaces:
         raise ValueError(
@@ -1298,6 +1306,17 @@ def get_image_provider_settings(
         raise ValueError(
             "CLOUDFLARE_IMAGE_MODEL must use @cf/owner/model format."
         )
+    if cloudflare_fallback_model and not re.fullmatch(
+        r"@cf/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        cloudflare_fallback_model,
+    ):
+        raise ValueError(
+            "CLOUDFLARE_IMAGE_FALLBACK_MODEL must use @cf/owner/model format."
+        )
+    if cloudflare_fallback_model == cloudflare_model:
+        raise ValueError(
+            "CLOUDFLARE_IMAGE_FALLBACK_MODEL must differ from the primary model."
+        )
 
     global_billable = get_global_billable_permission(config)
     input_image_billable = parse_bool(
@@ -1317,6 +1336,7 @@ def get_image_provider_settings(
         "POLLINATIONS_FREE_IMAGE_MODELS": pollinations_models,
         "REPLICATE_IMAGE_MODEL": replicate_model,
         "CLOUDFLARE_IMAGE_MODEL": cloudflare_model,
+        "CLOUDFLARE_IMAGE_FALLBACK_MODEL": cloudflare_fallback_model,
     }
 
 
