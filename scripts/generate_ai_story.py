@@ -23,7 +23,7 @@ from input_config import (
 from select_gemini_model import configured_fallbacks
 from llm_provider_client import generate_text as generate_provider_text
 from gemini_api_guard import require_gemini_generation
-from gemini_http import http_status, is_retryable_http_status, retry_after_seconds
+from gemini_http import http_error_body, http_status, is_retryable_http_status, retry_after_seconds
 
 ROOT = Path(__file__).resolve().parent.parent
 STORY_FILE = ROOT / "output/story/story.json"
