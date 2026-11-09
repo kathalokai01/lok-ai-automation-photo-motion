@@ -170,6 +170,7 @@ jobs:
             scripts/generate_flow_music.py
             scripts/generate_visuals.py
             scripts/free_image_generator.py
+            scripts/visual_quality_validator.py
             scripts/prepare_visuals.py
             scripts/generate_depth_maps.py
             scripts/depth_parallax.py
