@@ -38,6 +38,9 @@ STAGES = (
     )),
     ("captions", ("captions/captions.json",)),
     ("scene_renders", ("scene_renders/render_manifest.json",)),
+    ("scenes", ("scenes/scenes.json",)),
+    ("thumbnail", ("thumbnail/thumbnail_manifest.json", "thumbnail.jpg")),
+    ("metadata", ("publish/youtube_metadata.json", "youtube_metadata.txt")),
     ("package", ("package_manifest.json",)),
 )
 
@@ -238,6 +241,8 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
 
     files = next(files for stage, files in STAGES if stage == name)
     roots = sorted({Path(item).parts[0] for item in files})
+    if name == "sound_design":
+        roots = ["sound_design", "sfx", "sound"]
     for root_name in roots:
         src = source / root_name
         dst = output / root_name
@@ -277,8 +282,12 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
                 data.get(key)
                 for key in (
                     "config_signature",
+                    "config_hash",
                     "source_fingerprint",
+                    "source_signature",
+                    "source_hash",
                     "input_fingerprint",
+                    "input_hash",
                     "job_signature",
                     "signature",
                     "fingerprint",
