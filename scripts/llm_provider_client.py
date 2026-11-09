@@ -70,10 +70,12 @@ class ProviderError(RuntimeError):
         *,
         status_code: int | None = None,
         retryable: bool = False,
+        headers: Any = None,
     ):
         self.provider = provider
         self.status_code = status_code
         self.retryable = retryable
+        self.headers = headers
 
         prefix = f"[{provider}]"
         if status_code is not None:
@@ -355,6 +357,7 @@ def _make_request(
             message,
             status_code=status,
             retryable=status in RETRYABLE_STATUS_CODES,
+            headers=exc.headers,
         ) from None
 
     except urllib.error.URLError as exc:
