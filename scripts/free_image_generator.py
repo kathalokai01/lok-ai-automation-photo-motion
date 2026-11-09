@@ -52,7 +52,6 @@ SESSION.headers.update({
     "User-Agent": "KathaLokAI-PhotoMotion/33.0",
 })
 
-GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 REPLICATE_KEY = os.getenv("REPLICATE_API_TOKEN", "").strip()
 POLLINATIONS_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
@@ -62,7 +61,6 @@ CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
 PROVIDER_ORDER = []
 HF_SPACES = []
 POLLINATIONS_MODELS = []
-GEMINI_MODEL = ""
 REPLICATE_MODEL = ""
 CLOUDFLARE_IMAGE_MODEL = ""
 ALLOW_BILLABLE = False
@@ -77,8 +75,6 @@ PROVIDER_ALIASES = {
     "hugging_face": "huggingface",
     "huggingface": "huggingface",
     "pollinations": "pollinations",
-    "gemini": "gemini",
-    "gemini_image": "gemini",
     "replicate": "replicate",
     "cloudflare": "cloudflare",
     "cloudflare_workers_ai": "cloudflare",
@@ -178,7 +174,7 @@ def parse_input_settings():
 
 def apply_input_settings(config):
     global PROVIDER_ORDER, HF_SPACES, POLLINATIONS_MODELS
-    global GEMINI_MODEL, REPLICATE_MODEL, CLOUDFLARE_IMAGE_MODEL
+    global REPLICATE_MODEL, CLOUDFLARE_IMAGE_MODEL
     global ALLOW_BILLABLE, IMAGE_FALLBACK_ENABLED, MAX_RETRIES
 
     from input_config import (
@@ -198,7 +194,6 @@ def apply_input_settings(config):
     POLLINATIONS_MODELS = list(
         settings["POLLINATIONS_FREE_IMAGE_MODELS"]
     )
-    GEMINI_MODEL = clean(settings["GEMINI_IMAGE_MODEL"])
     REPLICATE_MODEL = clean(settings["REPLICATE_IMAGE_MODEL"])
     CLOUDFLARE_IMAGE_MODEL = clean(settings["CLOUDFLARE_IMAGE_MODEL"])
 
@@ -210,7 +205,7 @@ def apply_input_settings(config):
     )
     MAX_RETRIES = max(1, min(5, int(get_max_retries(config))))
 
-    supported = {"huggingface", "pollinations", "gemini", "replicate", "cloudflare"}
+    supported = {"huggingface", "pollinations", "replicate", "cloudflare"}
 
     if not PROVIDER_ORDER:
         raise RuntimeError("IMAGE_PROVIDER_ORDER is empty.")
@@ -229,9 +224,6 @@ def apply_input_settings(config):
 
     if "pollinations" in PROVIDER_ORDER and not POLLINATIONS_MODELS:
         raise RuntimeError("Pollinations model list is empty.")
-
-    if "gemini" in PROVIDER_ORDER and not GEMINI_MODEL:
-        raise RuntimeError("GEMINI_IMAGE_MODEL is empty.")
 
     if (
         "replicate" in PROVIDER_ORDER
@@ -1054,50 +1046,6 @@ def generate_pollinations(prompt, destination, size, seed, model):
     )
 
 
-def generate_gemini(prompt, destination, size):
-    if not ALLOW_BILLABLE:
-        raise RuntimeError("Gemini image generation blocked by billing permission.")
-    if not GEMINI_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
-
-    width, height = size
-    aspect = "9:16" if height > width else "16:9"
-    endpoint = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + quote(GEMINI_MODEL, safe="")
-        + ":generateContent"
-    )
-
-    response = SESSION.post(
-        endpoint,
-        headers={
-            "x-goog-api-key": GEMINI_KEY,
-            "Content-Type": "application/json",
-        },
-        json={
-            "contents": [{
-                "parts": [{
-                    "text": prompt + f"\nGenerate one image with {aspect} composition."
-                }]
-            }],
-            "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
-        },
-        timeout=TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    for candidate in data.get("candidates", []):
-        for part in candidate.get("content", {}).get("parts", []):
-            inline = part.get("inlineData") or part.get("inline_data")
-            if isinstance(inline, dict) and inline.get("data"):
-                raw = base64.b64decode(inline["data"], validate=True)
-                save_image_bytes(raw, destination, size)
-                return
-
-    raise RuntimeError("Gemini response contains no image data.")
-
-
 def generate_replicate(prompt, destination, size, seed):
     if not ALLOW_BILLABLE:
         raise RuntimeError("Replicate image generation blocked by billing permission.")
@@ -1292,19 +1240,6 @@ def build_provider_attempts(prompt, destination, size, seed, negative):
                     ),
                 ))
 
-        elif provider == "gemini":
-            if not ALLOW_BILLABLE:
-                log("Skipping Gemini: billable permission disabled.")
-            elif not GEMINI_KEY:
-                log("Skipping Gemini: GEMINI_API_KEY missing.")
-            else:
-                attempts.append((
-                    f"Gemini Image: {GEMINI_MODEL}",
-                    f"gemini:{GEMINI_MODEL}",
-                    True,
-                    lambda: generate_gemini(prompt, destination, size),
-                ))
-
         elif provider == "replicate":
             if not ALLOW_BILLABLE:
                 log("Skipping Replicate: billable permission disabled.")
@@ -1497,7 +1432,6 @@ def build_policy():
         "pollinations_models": (
             list(POLLINATIONS_MODELS) if "pollinations" in PROVIDER_ORDER else []
         ),
-        "gemini_model": GEMINI_MODEL if "gemini" in PROVIDER_ORDER else None,
         "replicate_model": (
             REPLICATE_MODEL if "replicate" in PROVIDER_ORDER else None
         ),
