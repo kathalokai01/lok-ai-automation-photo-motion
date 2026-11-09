@@ -32,7 +32,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 14
+SCRIPT_VERSION = 15
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -1832,16 +1832,25 @@ def make_output_document(
         (int(row["part"]), str(row["role"])): row
         for row in extra_records
     }
+    # Progress checkpoints are written after each individual record.
+    # Build a partial timeline from records that exist; requiring future
+    # Hook/Suspense/Resolution records here aborts the first checkpoint.
     narration_order = []
 
     for part in range(1, settings["parts"] + 1):
-        narration_order.append(extra_by_key[(part, "hook")]["scene_id"])
+        hook = extra_by_key.get((part, "hook"))
+        if hook is not None:
+            narration_order.append(hook["scene_id"])
+
         for scene_number in range(1, actual_counts[part - 1] + 1):
             main = main_by_key.get((part, scene_number))
             if main is not None:
                 narration_order.append(main["scene_id"])
+
         ending_role = "resolution" if part == settings["parts"] else "suspense"
-        narration_order.append(extra_by_key[(part, ending_role)]["scene_id"])
+        ending = extra_by_key.get((part, ending_role))
+        if ending is not None:
+            narration_order.append(ending["scene_id"])
 
     document = {
         "status": status,
