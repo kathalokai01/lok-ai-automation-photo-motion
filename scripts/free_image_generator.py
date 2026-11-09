@@ -35,7 +35,7 @@ IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v32-content-addressed-reuse"
+VERSION = "photo-motion-image-generator-v33-cloudflare-workers-ai-image-fallback"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -49,19 +49,22 @@ POLL_INTERVAL = 2
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "KathaLokAI-PhotoMotion/32.0",
+    "User-Agent": "KathaLokAI-PhotoMotion/33.0",
 })
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 REPLICATE_KEY = os.getenv("REPLICATE_API_TOKEN", "").strip()
 POLLINATIONS_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+CLOUDFLARE_IMAGE_API_TOKEN = os.getenv("CLOUDFLARE_IMAGE_API_TOKEN", "").strip()
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
 
 PROVIDER_ORDER = []
 HF_SPACES = []
 POLLINATIONS_MODELS = []
 GEMINI_MODEL = ""
 REPLICATE_MODEL = ""
+CLOUDFLARE_IMAGE_MODEL = ""
 ALLOW_BILLABLE = False
 IMAGE_FALLBACK_ENABLED = True
 MAX_RETRIES = 1
@@ -77,6 +80,8 @@ PROVIDER_ALIASES = {
     "gemini": "gemini",
     "gemini_image": "gemini",
     "replicate": "replicate",
+    "cloudflare": "cloudflare",
+    "cloudflare_workers_ai": "cloudflare",
 }
 
 
@@ -173,7 +178,7 @@ def parse_input_settings():
 
 def apply_input_settings(config):
     global PROVIDER_ORDER, HF_SPACES, POLLINATIONS_MODELS
-    global GEMINI_MODEL, REPLICATE_MODEL
+    global GEMINI_MODEL, REPLICATE_MODEL, CLOUDFLARE_IMAGE_MODEL
     global ALLOW_BILLABLE, IMAGE_FALLBACK_ENABLED, MAX_RETRIES
 
     from input_config import (
@@ -195,6 +200,7 @@ def apply_input_settings(config):
     )
     GEMINI_MODEL = clean(settings["GEMINI_IMAGE_MODEL"])
     REPLICATE_MODEL = clean(settings["REPLICATE_IMAGE_MODEL"])
+    CLOUDFLARE_IMAGE_MODEL = clean(settings["CLOUDFLARE_IMAGE_MODEL"])
 
     # Both the input setting and workflow environment must allow billing.
     ALLOW_BILLABLE = bool(settings["IMAGE_ALLOW_BILLABLE"])
@@ -204,7 +210,7 @@ def apply_input_settings(config):
     )
     MAX_RETRIES = max(1, min(5, int(get_max_retries(config))))
 
-    supported = {"huggingface", "pollinations", "gemini", "replicate"}
+    supported = {"huggingface", "pollinations", "gemini", "replicate", "cloudflare"}
 
     if not PROVIDER_ORDER:
         raise RuntimeError("IMAGE_PROVIDER_ORDER is empty.")
@@ -236,6 +242,16 @@ def apply_input_settings(config):
     ):
         raise RuntimeError(
             "REPLICATE_IMAGE_MODEL must use owner/model format."
+        )
+    if (
+        "cloudflare" in PROVIDER_ORDER
+        and not re.fullmatch(
+            r"@cf/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+            CLOUDFLARE_IMAGE_MODEL,
+        )
+    ):
+        raise RuntimeError(
+            "CLOUDFLARE_IMAGE_MODEL must use @cf/owner/model format."
         )
 
     log("Configured image provider order:", " -> ".join(PROVIDER_ORDER))
@@ -1161,6 +1177,88 @@ def generate_replicate(prompt, destination, size, seed):
     image_response = SESSION.get(image_url, timeout=TIMEOUT)
     response_image(image_response, destination, size, "Replicate")
 
+
+
+def generate_cloudflare(prompt, destination, size, seed):
+    """Generate an image through the Cloudflare Workers AI REST API."""
+    if not ALLOW_BILLABLE:
+        raise RuntimeError("Cloudflare Workers AI blocked by billing permission.")
+    if not CLOUDFLARE_IMAGE_API_TOKEN:
+        raise RuntimeError("CLOUDFLARE_IMAGE_API_TOKEN is not configured.")
+    if not CLOUDFLARE_ACCOUNT_ID:
+        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID is not configured.")
+
+    # FLUX.1 schnell accepts prompts up to 2048 characters and does not
+    # accept requested width/height. The shared image saver pads its output
+    # to the pipeline's required SHORT/FULL dimensions.
+    cloudflare_prompt = clean(prompt)
+    if len(cloudflare_prompt) > 2048:
+        cloudflare_prompt = cloudflare_prompt[:2045].rsplit(" ", 1)[0].rstrip()
+        cloudflare_prompt += "..."
+
+    endpoint = (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        + quote(CLOUDFLARE_ACCOUNT_ID, safe="")
+        + "/ai/run/"
+        + quote(CLOUDFLARE_IMAGE_MODEL, safe="/@.-")
+    )
+    response = SESSION.post(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {CLOUDFLARE_IMAGE_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "prompt": cloudflare_prompt,
+            "seed": seed,
+            "steps": 8,
+        },
+        timeout=TIMEOUT,
+    )
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            payload = response.json()
+            errors = payload.get("errors", []) if isinstance(payload, dict) else []
+            if isinstance(errors, list):
+                detail = "; ".join(
+                    clean(row.get("message") or row.get("code"))
+                    for row in errors if isinstance(row, dict)
+                )
+        except (ValueError, AttributeError):
+            detail = clean(response.text[:1000])
+        raise requests.HTTPError(
+            f"Cloudflare Workers AI ({CLOUDFLARE_IMAGE_MODEL}) "
+            f"HTTP {response.status_code}: {detail or 'image generation failed'}",
+            response=response,
+        ) from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Cloudflare Workers AI returned invalid JSON.") from exc
+
+    result = payload.get("result") if isinstance(payload, dict) else None
+    image_data = result.get("image") if isinstance(result, dict) else None
+    if not image_data:
+        raise RuntimeError(
+            "Cloudflare Workers AI response contains no result.image data."
+        )
+    try:
+        image_bytes = base64.b64decode(image_data, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(
+            "Cloudflare Workers AI returned invalid base64 image data."
+        ) from exc
+    if not image_bytes or len(image_bytes) > MAX_IMAGE_BYTES:
+        raise RuntimeError(
+            "Cloudflare Workers AI returned an empty or oversized image."
+        )
+    save_image_bytes(image_bytes, destination, size)
+
+
 def build_provider_attempts(prompt, destination, size, seed, negative):
     """Create attempts in the exact configured provider order."""
     attempts = []
@@ -1218,6 +1316,23 @@ def build_provider_attempts(prompt, destination, size, seed, negative):
                     f"replicate:{REPLICATE_MODEL}",
                     True,
                     lambda: generate_replicate(
+                        prompt, destination, size, seed
+                    ),
+                ))
+
+        elif provider == "cloudflare":
+            if not ALLOW_BILLABLE:
+                log("Skipping Cloudflare Workers AI: billable permission disabled.")
+            elif not CLOUDFLARE_IMAGE_API_TOKEN:
+                log("Skipping Cloudflare Workers AI: CLOUDFLARE_IMAGE_API_TOKEN missing.")
+            elif not CLOUDFLARE_ACCOUNT_ID:
+                log("Skipping Cloudflare Workers AI: CLOUDFLARE_ACCOUNT_ID missing.")
+            else:
+                attempts.append((
+                    f"Cloudflare Workers AI: {CLOUDFLARE_IMAGE_MODEL}",
+                    f"cloudflare:{CLOUDFLARE_IMAGE_MODEL}",
+                    True,
+                    lambda: generate_cloudflare(
                         prompt, destination, size, seed
                     ),
                 ))
@@ -1385,6 +1500,9 @@ def build_policy():
         "gemini_model": GEMINI_MODEL if "gemini" in PROVIDER_ORDER else None,
         "replicate_model": (
             REPLICATE_MODEL if "replicate" in PROVIDER_ORDER else None
+        ),
+        "cloudflare_image_model": (
+            CLOUDFLARE_IMAGE_MODEL if "cloudflare" in PROVIDER_ORDER else None
         ),
         "provider_credentials_logged": False,
     }
