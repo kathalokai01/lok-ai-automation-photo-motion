@@ -32,7 +32,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 15
+SCRIPT_VERSION = 16
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -304,7 +304,13 @@ def sentence_units(value: str) -> list[str]:
         if candidate.split()[-1] in abbreviations:
             continue
 
-        units.append(candidate)
+        countdown = bool(
+            re.fullmatch(r"[0-9०-९]{1,3}[.!?।॥…]+", candidate)
+        )
+        if countdown and units:
+            units[-1] = f"{units[-1]} {candidate}"
+        else:
+            units.append(candidate)
         start = match.end()
 
     remainder = value[start:].strip()
