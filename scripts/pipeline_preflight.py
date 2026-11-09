@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v69-tts-before-caption-source"
+VERSION = "photo-motion-preflight-v70-persistent-image-model-quality-gate"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
