@@ -135,7 +135,7 @@ def classify_generation_failure(error: BaseException) -> str:
     if status in {400, 404}:
         return "model_or_request_unavailable"
     if status == 429:
-        body = http_error_body(error).lower()
+        body = (http_error_body(error) + " " + str(error)).lower()
         if any(token in body for token in ("quota", "billing", "resource_exhausted")):
             return "quota_blocked"
         return "rate_limited"
