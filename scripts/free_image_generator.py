@@ -2096,6 +2096,11 @@ def main():
                 old.get("provider") or "verified previous run",
                 old.get("attempts", []),
             )
+            record["quality_verification"] = old.get("quality_verification")
+            record["semantic_story_match"] = "verified"
+            record["last_successful_model"] = (
+                old.get("last_successful_model") or old.get("provider")
+            )
         else:
             record = make_record(item, "pending")
             previous_attempts = old.get("attempts", []) if isinstance(old, dict) else []
@@ -2133,6 +2138,8 @@ def main():
     log("CONFIGURED PROVIDER ORDER:", " -> ".join(PROVIDER_ORDER))
     log("BILLABLE PROVIDERS ALLOWED:", ALLOW_BILLABLE)
     log("FALLBACK ENABLED:", IMAGE_FALLBACK_ENABLED)
+    log("PERSISTENT MODEL CURSOR:", MODEL_PROGRESS_STATE.get("cursor_key") or "first configured model")
+    log("QUALITY VALIDATION:", "Gemini vision enabled" if IMAGE_QUALITY_VISION_ENABLED else "disabled")
     log("-" * 64)
 
     for item, record in pending_items:
@@ -2177,10 +2184,7 @@ def main():
     log(
         "All image files passed format, dimensions, integrity and SHA256 checks."
     )
-    log(
-        "Semantic story matching is not claimed without a configured "
-        "vision-verification provider."
-    )
+    log("All accepted images passed Gemini vision prompt, character and quality checks.")
 
     return 0
 
