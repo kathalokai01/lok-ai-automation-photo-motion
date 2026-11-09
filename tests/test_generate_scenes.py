@@ -15,6 +15,7 @@ from scripts import generate_scenes as scenes
 from scripts import generate_narration as narration
 from scripts import generate_story as story
 from scripts import generate_story_plan as story_plan
+from scripts import free_image_generator as image_generator
 
 
 def ai_record(scene_id: str, role: str, narration: str) -> dict:
@@ -32,6 +33,66 @@ def ai_record(scene_id: str, role: str, narration: str) -> dict:
         record["voiceover_enabled"] = True
         record["narration_source"] = "ai_generated_role_narration"
     return record
+
+
+class ImageBillingScopeTests(unittest.TestCase):
+    def test_pollinations_billing_block_is_scoped_to_pollinations_account(self) -> None:
+        blocked = {"pollinations"}
+        self.assertTrue(
+            image_generator.billable_provider_is_blocked(
+                "pollinations:flux.1-schnell", True, blocked
+            )
+        )
+        self.assertTrue(
+            image_generator.billable_provider_is_blocked(
+                "pollinations:tongyi-mai/z-image-turbo", True, blocked
+            )
+        )
+        self.assertFalse(
+            image_generator.billable_provider_is_blocked(
+                "replicate:black-forest-labs/flux-schnell", True, blocked
+            )
+        )
+        self.assertFalse(
+            image_generator.billable_provider_is_blocked(
+                "cloudflare:@cf/black-forest-labs/flux-2-klein-4b",
+                True,
+                blocked,
+            )
+        )
+
+    def test_cloudflare_primary_and_fallback_share_only_cloudflare_block(self) -> None:
+        blocked = {"cloudflare"}
+        self.assertTrue(
+            image_generator.billable_provider_is_blocked(
+                "cloudflare:@cf/black-forest-labs/flux-2-klein-4b",
+                True,
+                blocked,
+            )
+        )
+        self.assertTrue(
+            image_generator.billable_provider_is_blocked(
+                "cloudflare:@cf/black-forest-labs/flux-1-schnell",
+                True,
+                blocked,
+            )
+        )
+        self.assertFalse(
+            image_generator.billable_provider_is_blocked(
+                "replicate:black-forest-labs/flux-schnell",
+                True,
+                blocked,
+            )
+        )
+
+    def test_free_provider_is_not_blocked_by_billable_provider_failure(self) -> None:
+        self.assertFalse(
+            image_generator.billable_provider_is_blocked(
+                "huggingface:mrfakename/Z-Image-Turbo",
+                False,
+                {"pollinations", "replicate"},
+            )
+        )
 
 
 class ExtraSceneNarrationTests(unittest.TestCase):
