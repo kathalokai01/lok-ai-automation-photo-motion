@@ -24,7 +24,7 @@ from select_gemini_model import (
     configured_fallbacks, load_story_model_cursor, save_story_model_cursor,
 )
 from story_quality_validator import validate_story_part, validate_story_output
-from llm_provider_client import generate_text as generate_provider_text
+from llm_provider_client import (\n    generate_text as generate_provider_text,\n    selected_story_provider_candidates,\n)
 from gemini_api_guard import require_gemini_generation
 from gemini_http import http_error_body, http_status, is_retryable_http_status, retry_after_seconds
 
@@ -193,50 +193,13 @@ def load_configured_provider_order() -> list[str]:
     if not isinstance(data, dict):
         log("No configured LLM provider selection file was found.")
         return []
-
-    if (
-        data.get("enabled") is not True
-        or data.get("status") != "ready"
-    ):
-        log("LLM provider selector reports no ready fallback.")
-        return []
-
-    order = data.get("provider_order")
-    records = data.get("providers")
-
-    if not isinstance(order, list) or not isinstance(records, list):
-        raise RuntimeError("Invalid LLM provider selection schema.")
-
-    model_by_provider = {}
-    for item in records:
-        if not isinstance(item, dict):
-            raise RuntimeError("Invalid provider record in LLM selector.")
-        name = clean(item.get("provider")).lower()
-        if name not in {"openai", "groq", "openrouter", "cloudflare"}:
-            raise RuntimeError(f"Unsupported provider record: {name!r}.")
-        if item.get("ready") is True:
-            if name in model_by_provider:
-                raise RuntimeError(f"Duplicate ready provider record: {name}.")
-            model_by_provider[name] = validate_provider_model(
-                name, item.get("model")
-            )
-
-    result = []
-    seen = set()
-    for provider in order:
-        name = clean(provider).lower()
-        if name not in {"openai", "groq", "openrouter", "cloudflare"}:
-            raise RuntimeError(f"Invalid provider order entry: {name!r}.")
-        if name in seen:
-            continue
-        seen.add(name)
-        model = model_by_provider.get(name)
-        if model:
-            result.append(f"{name}|{model}")
-
-    if data.get("status") == "ready" and not result:
-        log("LLM provider selector has no ready providers.")
-    return result
+    try:
+        return selected_story_provider_candidates(data)
+    except Exception as exc:
+        raise RuntimeError(
+            "Invalid configured Story provider order: "
+            + type(exc).__name__ + ": " + str(exc)
+        ) from exc
 
 
 def load_model_order() -> list[str]:
@@ -1821,9 +1784,7 @@ def main() -> None:
             log(f"Part {number}: valid checkpoint reused.")
             continue
 
-        preferred_index = ai_story.get("preferred_model_index")
-        if not isinstance(preferred_index, int) or isinstance(preferred_index, bool):
-            preferred_index = load_story_model_cursor(models)
+        preferred_index = load_story_model_cursor(models)
             previous_provider = clean(ai_story.get("last_successful_provider")).lower()
             previous_model = clean(ai_story.get("last_successful_model"))
             if previous_provider and previous_model:
