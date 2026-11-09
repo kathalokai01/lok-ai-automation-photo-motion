@@ -66,6 +66,13 @@ def provider_model(provider, settings):
             "fallback_models": [],
         }
 
+    if provider == "cloudflare":
+        return {
+            "provider": provider,
+            "model": settings["CLOUDFLARE_IMAGE_MODEL"],
+            "fallback_models": [],
+        }
+
     raise ValueError(f"Unsupported visual provider: {provider}")
 
 
