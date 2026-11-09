@@ -421,7 +421,7 @@ class AIStoryFallbackTests(unittest.TestCase):
                  generate_ai_story,
                  "request_selected_model",
                  side_effect=failure,
-             ):
+             ) as mocked:
             with self.assertRaises(generate_ai_story.ModelFallbackError) as caught:
                 generate_ai_story.generate_part(
                     "", models, "topic", "story", self.source_part,
@@ -433,6 +433,7 @@ class AIStoryFallbackTests(unittest.TestCase):
         self.assertEqual(caught.exception.state["last_model_index"], 1)
         self.assertEqual(caught.exception.state["max_attempts"], 3)
         self.assertEqual(caught.exception.state["retry_rounds"], 3)
+        self.assertEqual(mocked.call_count, 6)
 
     def test_quota_exhaustion_is_classified_for_immediate_provider_switch(self):
         failure = client.ProviderError(
