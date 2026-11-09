@@ -39,8 +39,8 @@ STAGES = (
     ("captions", ("captions/captions.json",)),
     ("scene_renders", ("scene_renders/render_manifest.json",)),
     ("scenes", ("scenes/scenes.json",)),
-    ("thumbnail", ("thumbnail/thumbnail_manifest.json", "thumbnail.jpg")),
-    ("metadata", ("publish/youtube_metadata.json", "youtube_metadata.txt")),
+    ("thumbnail", ("thumbnail/thumbnail_manifest.json",)),
+    ("metadata", ("publish/youtube_metadata.json",)),
     ("package", ("package_manifest.json",)),
 )
 
@@ -243,6 +243,10 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
     roots = sorted({Path(item).parts[0] for item in files})
     if name == "sound_design":
         roots = ["sound_design", "sfx", "sound"]
+    elif name == "thumbnail":
+        roots = ["thumbnail", "thumbnail.jpg"]
+    elif name == "metadata":
+        roots = ["publish", "youtube_metadata.txt"]
     for root_name in roots:
         src = source / root_name
         dst = output / root_name
