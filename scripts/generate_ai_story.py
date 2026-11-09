@@ -813,7 +813,7 @@ def validate_generated_scenes(
             )
         fields["narration"] = locked_narration
         row.update(fields)
-        row["source_text_sha256"] = stable_hash(locked_narration)
+        row["source_text_sha256"] = text_sha256(locked_narration)
         row["source_word_count"] = word_count(locked_narration)
         result.append(row)
 
