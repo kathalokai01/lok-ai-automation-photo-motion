@@ -24,6 +24,22 @@ def _sha(value: str) -> str:
     return hashlib.sha256(_clean(value).encode("utf-8")).hexdigest()
 
 
+def _source_part_signature(part: dict) -> str:
+    payload = {
+        "part": part.get("part"),
+        "scenes": part.get("scenes"),
+        "hook_scene": part.get("hook_scene"),
+        "suspense_scene": part.get("suspense_scene"),
+        "resolution_scene": part.get("resolution_scene"),
+        "final_part_merged": bool(part.get("final_part_merged")),
+    }
+    raw = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def validate_story_part(
     generated: dict,
     source_part: dict,
@@ -107,8 +123,10 @@ def validate_story_part(
         issues.append("No valid main scenes were available for quality checks.")
 
     expected_signature = generated.get("source_part_signature")
-    checks["source_signature"] = bool(
-        isinstance(expected_signature, str) and re.fullmatch(r"[0-9a-f]{64}", expected_signature)
+    checks["source_signature"] = (
+        isinstance(expected_signature, str)
+        and re.fullmatch(r"[0-9a-f]{64}", expected_signature) is not None
+        and expected_signature == _source_part_signature(source_part)
     )
     if not checks["source_signature"]:
         issues.append("Source Part signature is missing or invalid.")
