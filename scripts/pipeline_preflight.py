@@ -105,7 +105,7 @@ TTS_ALLOWED = {
     "fish_audio", "gemini_tts", "edge_tts", "piper",
     "elevenlabs", "cartesia", "finevoice", "minimax",
 }
-IMAGE_ALLOWED = {"huggingface", "pollinations", "gemini", "replicate"}
+IMAGE_ALLOWED = {"huggingface", "pollinations", "replicate", "cloudflare"}
 
 PYTHON_MODULES = (
     "requests", "PIL", "cv2", "numpy", "imageio",
@@ -1753,8 +1753,8 @@ def check_provider_credentials(
     image_credentials = {
         "huggingface": ("HF_TOKEN",),
         "pollinations": ("POLLINATIONS_API_KEY",),
-        "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
         "replicate": ("REPLICATE_API_TOKEN",),
+        "cloudflare": ("CLOUDFLARE_IMAGE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"),
     }
 
     def tts_available(provider: str) -> tuple[bool, list[str]]:
@@ -1807,7 +1807,10 @@ def check_provider_credentials(
             if os.environ.get(key, "").strip()
         ]
 
-        ready = bool(present) or provider in {"huggingface", "pollinations"}
+        if provider == "cloudflare":
+            ready = len(present) == len(names)
+        else:
+            ready = bool(present) or provider in {"huggingface", "pollinations"}
 
         credentials[f"image:{provider}"] = {
             "available": ready,
