@@ -484,6 +484,13 @@ jobs:
 
           python -m compileall -q scripts
 
+      - name: Test scene role narration and final scene validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m unittest discover -s tests -p 'test_*.py' -v
+
       - name: Test configured paid and free LLM provider fallback
         shell: bash
         run: |
