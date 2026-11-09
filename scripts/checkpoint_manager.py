@@ -363,8 +363,13 @@ def list_runs(repository: str, workflow: str, branch: str, limit: int) -> list[i
     ]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode:
-        raise RuntimeError(f"gh run list failed: {result.stderr.strip()}")
-    records = json.loads(result.stdout or "[]")
+        log("Checkpoint search unavailable; continuing without cross-run restore:", result.stderr.strip())
+        return []
+    try:
+        records = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        log("Checkpoint run list was invalid; continuing without cross-run restore:", exc)
+        return []
     return [
         int(row["databaseId"])
         for row in records
