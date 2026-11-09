@@ -125,8 +125,7 @@ class ExtraSceneNarrationTests(unittest.TestCase):
         self.assertEqual(narration.count_words(sample), expected)
 
     def test_extra_scene_word_count_uses_narration_validator_rule(self) -> None:
-        # Whitespace splitting and the narration regex differ on punctuation-
-        # only tokens and apostrophe/hyphen forms. Both stages must agree.
+        # All pipeline stages now use whitespace-token counting.
         sample = "राजू ने कहा — ‘रुको!’ फिर वह लौट आया।"
         expected = narration.count_words(sample)
         self.assertEqual(scenes.count_narration_words(sample), expected)
