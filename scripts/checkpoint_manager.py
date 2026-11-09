@@ -157,7 +157,19 @@ def validate_story_stage(directory: Path, expected: dict) -> bool:
     if story and plan:
         parts = story.get("parts")
         plan_parts = plan.get("parts")
+        context = read_json(directory / ".resume-context.json") or {}
         count = len(parts) if isinstance(parts, list) else 0
+        title = str(
+            story.get("final_title")
+            or story.get("generated_title")
+            or story.get("story_title")
+            or story.get("title")
+            or ""
+        ).strip()
+        title_slug = re.sub(
+            r"[\\s_-]+", "-",
+            re.sub(r"[^\\w\\s-]", "", title.lower(), flags=re.UNICODE),
+        ).strip("-")[:100]
         if (
             isinstance(plan_parts, list)
             and story.get("status") in SUCCESS_STATES
@@ -165,6 +177,8 @@ def validate_story_stage(directory: Path, expected: dict) -> bool:
             and str(story.get("format", "")).lower() == expected["format"]
             and count > 0
             and count == len(plan_parts)
+            and count == context.get("actual_parts")
+            and title_slug == context.get("naming_key")
         ):
             if (
                 story.get("story_plan_fingerprint")
