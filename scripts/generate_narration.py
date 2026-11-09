@@ -32,7 +32,7 @@ AI_STORY_FILE = ROOT / "output/story/ai_story.json"
 OUTPUT_FILE = ROOT / "output/narration/narration.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/narration_progress.json"
 
-SCRIPT_VERSION = 16
+SCRIPT_VERSION = 17
 MIN_DURATION = 0.5
 MAX_DURATION = 3600.0
 MIN_AUDIO_BYTES = 1000
@@ -267,6 +267,10 @@ def clean_narration(value: Any, label: str) -> str:
     return value
 
 
+def _has_unclosed_double_quote(value: str) -> bool:
+    return value.count('"') % 2 == 1
+
+
 def sentence_units(value: str) -> list[str]:
     value = re.sub(r"\s+", " ", value).strip()
 
@@ -288,10 +292,10 @@ def sentence_units(value: str) -> list[str]:
     }
 
     pattern = re.compile(
-        r"""[.!?।॥]+["'”’)\]}»]*(?=\s|$)"""
+        r"""[.!?।॥]+["'”’)}\]]*(?=\s|$)"""
     )
 
-    units: list[str] = []
+    raw_units: list[str] = []
     start = 0
 
     for match in pattern.finditer(value):
@@ -304,19 +308,62 @@ def sentence_units(value: str) -> list[str]:
         if candidate.split()[-1] in abbreviations:
             continue
 
-        countdown = bool(
-            re.fullmatch(r"[0-9०-९]{1,3}[.!?।॥…]+", candidate)
-        )
-        if countdown and units:
-            units[-1] = f"{units[-1]} {candidate}"
-        else:
-            units.append(candidate)
+        raw_units.append(candidate)
         start = match.end()
 
     remainder = value[start:].strip()
-
     if remainder:
-        units.append(remainder)
+        raw_units.append(remainder)
+
+    # Rejoin punctuation fragments while a straight double-quoted
+    # dialogue is still open.
+    quote_safe: list[str] = []
+    pending = ""
+    for piece in raw_units:
+        if pending:
+            pending = f"{pending} {piece}"
+            if not _has_unclosed_double_quote(pending):
+                quote_safe.append(pending)
+                pending = ""
+            continue
+
+        if _has_unclosed_double_quote(piece):
+            pending = piece
+        else:
+            quote_safe.append(piece)
+
+    if pending:
+        if quote_safe:
+            quote_safe[-1] = f"{quote_safe[-1]} {pending}"
+        else:
+            quote_safe.append(pending)
+
+    # Keep a short, complete quoted utterance with its speaker/action
+    # attribution instead of creating a dialogue-only micro-scene.
+    units: list[str] = []
+    index = 0
+    while index < len(quote_safe):
+        piece = quote_safe[index]
+        quoted_only = bool(
+            re.match(r'^[“"«]', piece)
+            and re.search(r'[”"»]$', piece)
+        )
+        if (
+            quoted_only
+            and len(re.findall(r"\S+", piece)) <= 4
+            and index + 1 < len(quote_safe)
+        ):
+            piece = f"{piece} {quote_safe[index + 1]}"
+            index += 1
+
+        countdown = bool(
+            re.fullmatch(r"[0-9०-९]{1,3}[.!?।॥…]+", piece)
+        )
+        if countdown and units:
+            units[-1] = f"{units[-1]} {piece}"
+        else:
+            units.append(piece)
+        index += 1
 
     return units or [value]
 
