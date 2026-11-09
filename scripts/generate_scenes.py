@@ -32,7 +32,7 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v10-narrated-extra-role-scenes"
+VERSION = "photo-motion-scenes-v11-extra-role-narration-fix"
 PROMPT_VERSION = 11
 
 ROLE_ORDER = {
@@ -501,7 +501,9 @@ def validate_story(
                 "role": role,
                 "part_data": part,
                 "source": source,
-                "narration": "",
+                # Hook/Suspense/Resolution have their own locked AI narration.
+                # Keeping this empty made every extra scene fail final validation.
+                "narration": clean(source.get("narration")),
                 "global_scene_number": None,
             })
 
