@@ -52,13 +52,6 @@ def provider_model(provider, settings):
             "fallback_models": models[1:],
         }
 
-    if provider == "gemini":
-        return {
-            "provider": provider,
-            "model": settings["GEMINI_IMAGE_MODEL"],
-            "fallback_models": [],
-        }
-
     if provider == "replicate":
         return {
             "provider": provider,
