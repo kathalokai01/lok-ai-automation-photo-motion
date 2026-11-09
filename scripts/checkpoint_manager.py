@@ -180,6 +180,11 @@ def valid_ai_story(directory: Path) -> bool:
         return False
     if report.get("status") != "passed":
         return False
+    try:
+        if float(report.get("score")) < 8:
+            return False
+    except (TypeError, ValueError):
+        return False
     parts = ai_story.get("parts")
     quality_parts = report.get("parts")
     if not isinstance(parts, list) or not isinstance(quality_parts, list):
