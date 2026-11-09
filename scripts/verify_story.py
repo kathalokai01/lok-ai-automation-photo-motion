@@ -36,8 +36,11 @@ from story_length_policy import (
 )
 
 INPUT_FILE = ROOT / "Input" / "topic.txt"
+from story_quality_validator import validate_story_output
+
 STORY_FILE = ROOT / "output" / "story" / "story.json"
 PLAN_FILE = ROOT / "output" / "story" / "story_plan.json"
+AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 REPORT_FILE = ROOT / "output" / "story" / "story_verification.json"
 
@@ -1596,6 +1599,20 @@ def main() -> int:
     plan = read_json(PLAN_FILE)
 
     report = verify_story(story, plan, input_data)
+
+    ai_story = read_json(AI_STORY_FILE, required=False)
+    if (
+        isinstance(ai_story, dict)
+        and ai_story.get("source_story_signature") == sha256_json(story)
+        and ai_story.get("source_plan_signature") == sha256_json(plan)
+    ):
+        quality_report = validate_story_output(ai_story, plan)
+        report["ai_story_quality"] = quality_report
+        if quality_report.get("passed") is not True:
+            raise RuntimeError(
+                "AI Story quality validation failed: "
+                + "; ".join(quality_report.get("issues", [])[:12])
+            )
 
     # Only the verification report is written. Story and Plan are read-only.
     write_json(REPORT_FILE, report)
