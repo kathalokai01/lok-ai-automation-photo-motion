@@ -363,9 +363,9 @@ def save_story_model_cursor(
         STORY_PROGRESSION_FILE.name + ".tmp"
     )
     try:
-        with temporary.open("w", encoding="utf-8", newline="\\n") as handle:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\\n")
+            handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, STORY_PROGRESSION_FILE)
