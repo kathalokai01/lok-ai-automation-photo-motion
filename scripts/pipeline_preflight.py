@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v67-flow-music-and-complete-asset-audit"
+VERSION = "photo-motion-preflight-v68-stage-aware-resume-policy"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -1625,6 +1625,12 @@ def check_resume_state(
     input_fingerprint: str,
     pipeline_fingerprint: str,
 ) -> tuple[bool, str, dict]:
+    """Accept same-input checkpoints across code revisions.
+
+    Pipeline-wide hashes are diagnostic only. Individual stage scripts remain
+    responsible for validating their own configuration signatures, source
+    fingerprints, output hashes and completion manifests before reuse.
+    """
     checkpoint_dirs = (
         OUT / "checkpoints",
         OUT / "story" / "checkpoints",
@@ -1634,7 +1640,6 @@ def check_resume_state(
     )
 
     found = []
-
     for directory in checkpoint_dirs:
         if directory.is_dir():
             found.extend(
@@ -1649,11 +1654,14 @@ def check_resume_state(
             "available": False,
             "matching": 0,
             "stale": [],
+            "pipeline_changed": [],
             "files": 0,
+            "fingerprint_policy": "input_sha256_required; stage_signatures_validate_reuse",
         }
 
     matching = 0
     stale = []
+    pipeline_changed = []
     invalid = []
 
     for path in found:
@@ -1670,8 +1678,6 @@ def check_resume_state(
             data.get("input_fingerprint")
             or data.get("input_sha256")
             or data.get("input_hash")
-
-
         )
         saved_pipeline = (
             data.get("pipeline_fingerprint")
@@ -1682,32 +1688,40 @@ def check_resume_state(
         if not saved_input and not saved_pipeline:
             continue
 
+        relative = safe_relative(path)
+        if str(saved_input or "").lower() != input_fingerprint:
+            stale.append(relative)
+            continue
+
+        matching += 1
         if (
-            str(saved_input or "").lower() == input_fingerprint
-            and str(saved_pipeline or "").lower() == pipeline_fingerprint
+            saved_pipeline
+            and str(saved_pipeline).lower() != pipeline_fingerprint
         ):
-            matching += 1
-        else:
-            stale.append(safe_relative(path))
+            pipeline_changed.append(relative)
 
     if invalid:
         return False, "Corrupt checkpoint JSON: " + "; ".join(invalid[:10]), {
             "available": True,
             "matching": matching,
             "stale": stale,
+            "pipeline_changed": pipeline_changed,
             "invalid": invalid[:20],
             "files": len(found),
+            "fingerprint_policy": "input_sha256_required; stage_signatures_validate_reuse",
         }
 
     return True, (
-        f"Checkpoint JSON files={len(found)}; matching={matching}; "
-        f"stale manifests rejected={len(stale)}."
+        f"Checkpoint JSON files={len(found)}; same-input candidates={matching}; "
+        f"input-mismatched={len(stale)}; pipeline-revision differences "
+        f"are deferred to per-stage signature validation={len(pipeline_changed)}."
     ), {
         "available": True,
         "matching": matching,
         "stale": stale,
+        "pipeline_changed": pipeline_changed,
         "files": len(found),
-        "fingerprint_policy": "input_and_pipeline_sha256_must_both_match",
+        "fingerprint_policy": "input_sha256_required; stage_signatures_validate_reuse",
     }
 
 
@@ -2924,7 +2938,7 @@ def main() -> int:
             "SCENES is validated as an inclusive per-Part minimum-maximum range.",
             "Actual scene counts are checked from available scene records; missing future-stage artifacts are allowed.",
             "Existing artifacts are checked for readable manifests, safe output paths and declared SHA256 values.",
-            "Checkpoint reuse requires matching input and pipeline fingerprints.",
+            "Checkpoint candidates may cross pipeline revisions only when input SHA256 matches; each stage must independently validate its configuration signature, source fingerprint and artifact hashes.",
             "Audio duration is measured by generation/final-validation stages, not by preflight.",
             "Only generated-image zoom, pan and 2.5D parallax are permitted.",
         ],
