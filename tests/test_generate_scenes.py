@@ -13,6 +13,7 @@ from scripts import checkpoint_manager
 
 from scripts import generate_scenes as scenes
 from scripts import generate_narration as narration
+from scripts import generate_story as story
 
 
 def ai_record(scene_id: str, role: str, narration: str) -> dict:
@@ -112,6 +113,16 @@ class ExtraSceneNarrationTests(unittest.TestCase):
                 "b" * 64,
             )
 
+
+
+    def test_story_scene_and_narration_use_identical_word_count(self) -> None:
+        # An isolated em dash is a whitespace token in Story partitioning.
+        # Regex word-boundary counting previously discarded it in narration.
+        sample = "राजू ने कहा — ‘रुको!’ फिर वह लौट आया।"
+        expected = len(re.findall(r"\\S+", re.sub(r"\\s+", " ", sample).strip()))
+        self.assertEqual(story.word_count(sample), expected)
+        self.assertEqual(scenes.count_narration_words(sample), expected)
+        self.assertEqual(narration.count_words(sample), expected)
 
     def test_extra_scene_word_count_uses_narration_validator_rule(self) -> None:
         # Whitespace splitting and the narration regex differ on punctuation-
