@@ -24,7 +24,10 @@ from select_gemini_model import (
     configured_fallbacks, load_story_model_cursor, save_story_model_cursor,
 )
 from story_quality_validator import validate_story_part, validate_story_output
-from llm_provider_client import (\n    generate_text as generate_provider_text,\n    selected_story_provider_candidates,\n)
+from llm_provider_client import (
+    generate_text as generate_provider_text,
+    selected_story_provider_candidates,
+)
 from gemini_api_guard import require_gemini_generation
 from gemini_http import http_error_body, http_status, is_retryable_http_status, retry_after_seconds
 
