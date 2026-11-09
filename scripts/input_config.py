@@ -1269,7 +1269,8 @@ def get_image_provider_settings(
         )
     ).strip()
     cloudflare_model = str(
-        config.get(
+        os.getenv("CLOUDFLARE_IMAGE_MODEL", "").strip()
+        or config.get(
             "CLOUDFLARE_IMAGE_MODEL",
             DEFAULT_CONFIG["CLOUDFLARE_IMAGE_MODEL"],
         )
