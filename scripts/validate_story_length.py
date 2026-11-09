@@ -46,7 +46,7 @@ AI_STORY_FILE = STORY_DIR / "ai_story.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 REPORT_FILE = STORY_DIR / "story_length_validation.json"
 
-REPORT_VERSION = "story-length-validation-v15-locked-text-fingerprints"
+REPORT_VERSION = "story-length-validation-v16-ai-story-quality-gate"
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
