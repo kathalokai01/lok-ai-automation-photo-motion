@@ -112,7 +112,7 @@ def build_selection() -> dict:
         for provider in ready_order
     ]
     story_order_signature = hashlib.sha256(
-        "\\n".join(story_candidates).encode("utf-8")
+        "\n".join(story_candidates).encode("utf-8")
     ).hexdigest()
 
     return {
