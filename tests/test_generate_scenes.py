@@ -85,6 +85,35 @@ class ImageBillingScopeTests(unittest.TestCase):
             )
         )
 
+    def test_pollinations_attempts_are_counted_as_billable(self) -> None:
+        original = (
+            image_generator.PROVIDER_ORDER,
+            image_generator.POLLINATIONS_MODELS,
+            image_generator.IMAGE_FALLBACK_ENABLED,
+        )
+        try:
+            image_generator.PROVIDER_ORDER = ["pollinations"]
+            image_generator.POLLINATIONS_MODELS = [
+                "black-forest-labs/flux.1-schnell",
+                "tongyi-mai/z-image-turbo",
+            ]
+            image_generator.IMAGE_FALLBACK_ENABLED = True
+            attempts = image_generator.build_provider_attempts(
+                "test prompt",
+                Path("image.png"),
+                (720, 1280),
+                123,
+                "blurry",
+            )
+            self.assertEqual(len(attempts), 2)
+            self.assertTrue(all(row[2] is True for row in attempts))
+        finally:
+            (
+                image_generator.PROVIDER_ORDER,
+                image_generator.POLLINATIONS_MODELS,
+                image_generator.IMAGE_FALLBACK_ENABLED,
+            ) = original
+
     def test_free_provider_is_not_blocked_by_billable_provider_failure(self) -> None:
         self.assertFalse(
             image_generator.billable_provider_is_blocked(
