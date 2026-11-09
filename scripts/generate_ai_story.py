@@ -42,6 +42,14 @@ SHORT_TARGET_MAX = 150
 SHORT_HARD_MAX = 180
 SHORT_FINAL_MERGED_MAX = 239
 
+MAX_MODEL_ATTEMPTS = 3
+
+
+class ModelFallbackError(RuntimeError):
+    def __init__(self, message: str, state: dict):
+        super().__init__(message)
+        self.state = state
+
 ROLE_KEYS = {
     "hook_scene": "hook",
     "suspense_scene": "suspense",
@@ -1028,6 +1036,20 @@ def retryable_http_error(code: int) -> bool:
     return is_retryable_http_status(code)
 
 
+def is_quota_exhausted(error: BaseException) -> bool:
+    message = clean(error).lower()
+    body = ""
+    if isinstance(error, urllib.error.HTTPError):
+        body = clean(http_error_body(error)).lower()
+    combined = f"{message} {body}"
+    markers = (
+        "quota_exceeded", "quota exceeded", "daily quota", "per-day quota",
+        "resource_exhausted", "insufficient_quota", "billing hard limit",
+        "billing limit", "exceeded your current quota",
+    )
+    return any(marker in combined for marker in markers)
+
+
 def retry_delay(error: BaseException, attempt: int) -> int:
     return retry_after_seconds(error, attempt, default_base=12, maximum=120)
 
@@ -1097,32 +1119,40 @@ def generate_part(
     source_part: dict,
     config: dict,
     total_parts: int,
+    start_model_index: int = 0,
 ) -> dict:
     original_prompt = build_part_prompt(
         topic, story_text, source_part, config, total_parts
     )
     schema = build_response_schema(source_part)
     errors = []
+    if not models:
+        raise RuntimeError("No configured models are available.")
 
-    for model_index, selected_model in enumerate(models, 1):
+    start_model_index = max(0, min(int(start_model_index), len(models) - 1))
+    ordered_models = models[start_model_index:] + models[:start_model_index]
+    last_position = start_model_index
+    last_attempt = 0
+
+    for position, selected_model in enumerate(ordered_models):
+        original_index = (start_model_index + position) % len(models)
         prompt = original_prompt
         model_errors = []
         last_generated = None
-        max_attempts = max(1, int(config["max_retries"]))
 
         log(
             f"Part {source_part['part']}/{total_parts}: "
-            f"provider/model {model_index}/{len(models)}: {selected_model}"
+            f"provider/model {original_index + 1}/{len(models)}: {selected_model}"
         )
 
-        for attempt in range(1, max_attempts + 1):
+        for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
+            last_position = original_index
+            last_attempt = attempt
             try:
                 log(
-                    f"Part {source_part['part']}; "
-                    f"model={selected_model}; "
-                    f"attempt {attempt}/{max_attempts}"
+                    f"Part {source_part['part']}; model={selected_model}; "
+                    f"attempt {attempt}/{MAX_MODEL_ATTEMPTS}"
                 )
-
                 generated = request_selected_model(
                     api_key, selected_model, prompt, schema
                 )
@@ -1130,88 +1160,68 @@ def generate_part(
 
                 try:
                     completed = validate_generated_part(
-                        generated,
-                        source_part,
-                        config,
-                        total_parts,
+                        generated, source_part, config, total_parts,
                         allow_soft_overage=False,
                     )
-
                     provider, actual_model = selected_model.split("|", 1)
                     completed["_katha_provider_used"] = provider
                     completed["_katha_model_used"] = actual_model
-
+                    completed["_katha_model_index"] = original_index
                     log(
-                        f"Part {source_part['part']}: "
-                        f"{completed['word_count']} words accepted "
-                        f"on {selected_model}."
+                        f"Part {source_part['part']}: {completed['word_count']} "
+                        f"words accepted on {selected_model}."
                     )
                     return completed
-
                 except (ValueError, TypeError, KeyError) as exc:
                     message = f"Validation attempt {attempt}: {exc}"
                     model_errors.append(message)
                     log(f"Part {source_part['part']} {selected_model}: {message}")
-
                     prompt = build_revision_prompt(
-                        original_prompt,
-                        generated,
-                        source_part,
-                        config,
-                        total_parts,
+                        original_prompt, generated, source_part, config, total_parts
                     )
 
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
                 model_errors.append(message)
                 log(f"Model {selected_model}: {message}")
+                status = http_status(exc)
 
-                if isinstance(exc, urllib.error.HTTPError):
-                    # HTTP 404/400 are permanent model/request errors.
-                    # Do not repeat a request for an unavailable model.
-                    retryable = retryable_http_error(int(exc.code))
-                else:
-                    retryable = (
-                        isinstance(exc, (TimeoutError, ConnectionError))
-                        or isinstance(exc, urllib.error.URLError)
+                if is_quota_exhausted(exc) or status in {400, 401, 403, 404}:
+                    log(
+                        f"Permanent/quota failure on {selected_model}; "
+                        "switching immediately to the next configured model."
+                    )
+                    break
+
+                retryable = (
+                    retryable_http_error(status)
+                    if status is not None
+                    else (
+                        isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError))
                         or getattr(exc, "retryable", False) is True
                     )
-
-                if retryable and attempt < max_attempts:
-                    status = http_status(exc)
+                )
+                if retryable and attempt < MAX_MODEL_ATTEMPTS:
                     delay = (
-                        retry_delay(exc, attempt)
-                        if status == 429
-                        else min(30, 5 * (2 ** (attempt - 1)))
+                        retry_after_seconds(exc, attempt, default_base=60, maximum=120)
+                        if status == 429 else 30
                     )
-                    log(
-                        f"Temporary failure; retrying same model "
-                        f"in {delay}s."
-                    )
+                    log(f"Temporary failure; retrying same model in {delay}s.")
                     time.sleep(delay)
                     continue
 
-                if isinstance(exc, (ValueError, TypeError, KeyError)):
-                    if attempt < max_attempts:
-                        delay = min(30, 3 * (2 ** (attempt - 1)))
-                        log(f"Retrying {selected_model} in {delay}s.")
-                        time.sleep(delay)
-                        continue
-
+                if isinstance(exc, (ValueError, TypeError, KeyError)) and attempt < MAX_MODEL_ATTEMPTS:
+                    log(f"Retrying invalid response from {selected_model} in 30s.")
+                    time.sleep(30)
+                    continue
                 break
 
-        # A non-final SHORT part may use 151–180 words only after
-        # all normal validation/revision attempts for this model.
         if last_generated is not None:
             try:
                 completed = validate_generated_part(
-                    last_generated,
-                    source_part,
-                    config,
-                    total_parts,
+                    last_generated, source_part, config, total_parts,
                     allow_soft_overage=True,
                 )
-
                 if (
                     config["format"] == "short"
                     and source_part["part"] < total_parts
@@ -1220,32 +1230,42 @@ def generate_part(
                     provider, actual_model = selected_model.split("|", 1)
                     completed["_katha_provider_used"] = provider
                     completed["_katha_model_used"] = actual_model
-
+                    completed["_katha_model_index"] = original_index
                     log(
                         f"Part {source_part['part']}: accepting "
                         f"{completed['word_count']} words after retries."
                     )
                     return completed
-
             except (ValueError, TypeError, KeyError) as exc:
                 model_errors.append(f"Final validation: {exc}")
 
         errors.append({
             "model": selected_model,
-            "errors": model_errors[-max_attempts:],
+            "model_index": original_index,
+            "attempts": min(MAX_MODEL_ATTEMPTS, max(1, last_attempt)),
+            "errors": model_errors[-MAX_MODEL_ATTEMPTS:],
         })
-
         log(
             f"Provider/model exhausted: {selected_model}. "
             "Moving to the next configured LLM option."
         )
 
+    state = {
+        "part": int(source_part["part"]),
+        "model_index": last_position,
+        "model": models[last_position],
+        "attempt": last_attempt,
+        "max_attempts": MAX_MODEL_ATTEMPTS,
+        "errors": errors,
+    }
     summary = json.dumps(errors, ensure_ascii=False)
-    raise RuntimeError(
+    raise ModelFallbackError(
         f"Part {source_part['part']} failed: all configured LLM "
-        f"models were exhausted. "
-        f"Details: {summary[:5000]}"
+        f"models were exhausted. Details: {summary[:5000]}",
+        state,
     )
+
+
 
 def source_part_signature(part: dict) -> str:
     return stable_hash({
@@ -1817,15 +1837,35 @@ def main() -> None:
             log(f"Part {number}: valid checkpoint reused.")
             continue
 
-        completed = generate_part(
-            api_key,
-            models,
-            topic,
-            story_text,
-            source_part,
-            config,
-            total_parts,
-        )
+        preferred_index = ai_story.get("preferred_model_index", 0)
+        if not isinstance(preferred_index, int) or isinstance(preferred_index, bool):
+            preferred_index = 0
+
+        failure_state = ai_story.get("model_fallback_state")
+        if (
+            isinstance(failure_state, dict)
+            and failure_state.get("part") == number
+            and isinstance(failure_state.get("model_index"), int)
+        ):
+            preferred_index = failure_state["model_index"]
+        preferred_index = max(0, min(preferred_index, len(models) - 1))
+
+        try:
+            completed = generate_part(
+                api_key, models, topic, story_text, source_part, config,
+                total_parts, start_model_index=preferred_index,
+            )
+        except ModelFallbackError as exc:
+            ai_story["model_fallback_state"] = exc.state
+            ai_story["preferred_model_index"] = exc.state["model_index"]
+            ai_story["status"] = "in_progress"
+            write_json(OUTPUT_FILE, ai_story)
+            log(
+                "Model fallback position checkpoint saved: "
+                f"Part {number}, model index {exc.state['model_index']}, "
+                f"attempt {exc.state['attempt']}/{MAX_MODEL_ATTEMPTS}."
+            )
+            raise
 
         if not isinstance(completed, dict):
             raise RuntimeError(
@@ -1838,8 +1878,13 @@ def main() -> None:
 
         used_provider = completed.pop("_katha_provider_used", None)
         used_model = completed.pop("_katha_model_used", None)
+        used_model_index = completed.pop("_katha_model_index", None)
 
-        if not used_provider or not used_model:
+        if (
+            not used_provider
+            or not used_model
+            or not isinstance(used_model_index, int)
+        ):
             raise RuntimeError(
                 f"Part {number}: generated provider/model identity is missing."
             )
@@ -1865,6 +1910,8 @@ def main() -> None:
         ai_story["status"] = "in_progress"
         ai_story["last_successful_provider"] = used_provider
         ai_story["last_successful_model"] = used_model
+        ai_story["preferred_model_index"] = used_model_index
+        ai_story.pop("model_fallback_state", None)
 
         write_json(OUTPUT_FILE, ai_story)
 
