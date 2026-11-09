@@ -150,6 +150,53 @@ def valid_corrected_story(directory: Path) -> bool:
     )
 
 
+
+def _story_fingerprint(value: Any) -> str:
+    raw = json.dumps(
+        value, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def valid_ai_story(directory: Path) -> bool:
+    """Reject cached AI Story output unless its source and quality proofs match."""
+    path = directory / "story/ai_story.json"
+    if not path.is_file():
+        return True
+    ai_story = read_json(path)
+    story = read_json(directory / "story/story.json")
+    plan = read_json(directory / "story/story_plan.json")
+    if not ai_story or not story or not plan:
+        return False
+    if ai_story.get("status") != "completed":
+        return False
+    if ai_story.get("source_story_signature") != _story_fingerprint(story):
+        return False
+    if ai_story.get("source_plan_signature") != _story_fingerprint(plan):
+        return False
+    report = ai_story.get("quality_validation")
+    if not isinstance(report, dict) or report.get("passed") is not True:
+        return False
+    if report.get("status") != "passed":
+        return False
+    parts = ai_story.get("parts")
+    quality_parts = report.get("parts")
+    if not isinstance(parts, list) or not isinstance(quality_parts, list):
+        return False
+    if not parts or len(parts) != len(quality_parts):
+        return False
+    if any(
+        not isinstance(part, dict)
+        or part.get("status") != "completed"
+        or not isinstance(part.get("quality_validation"), dict)
+        or part["quality_validation"].get("passed") is not True
+        for part in parts
+    ):
+        return False
+    return True
+
+
 def validate_story_stage(directory: Path, expected: dict) -> bool:
     story_path = directory / "story/story.json"
     plan_path = directory / "story/story_plan.json"
@@ -184,6 +231,7 @@ def validate_story_stage(directory: Path, expected: dict) -> bool:
             if (
                 story.get("story_plan_fingerprint")
                 and story.get("story_plan_fingerprint") == plan.get("source_fingerprint")
+                and valid_ai_story(directory)
             ):
                 return True
     return valid_corrected_story(directory)
