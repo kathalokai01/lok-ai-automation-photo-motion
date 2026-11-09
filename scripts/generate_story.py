@@ -23,7 +23,9 @@ from input_config import (
     get_scenes_range, set_selected_parts, load_and_validate,
     get_title_source,
 )
-from select_gemini_model import (\n    configured_fallbacks, load_story_model_cursor, save_story_model_cursor,\n)
+from select_gemini_model import (
+    configured_fallbacks, load_story_model_cursor, save_story_model_cursor,
+)
 from story_length_policy import (
     parse_parts_range, build_length_policy, select_final_part_count,
     update_policy_with_corrected_story, validate_all_parts,
