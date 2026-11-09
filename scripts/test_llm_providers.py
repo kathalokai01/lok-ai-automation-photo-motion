@@ -366,12 +366,13 @@ class AIStoryFallbackTests(unittest.TestCase):
         patches = self._patch_generation()
         with patches[0], patches[1], patches[2], \
              patch.object(generate_ai_story, "request_selected_model", side_effect=request) as mocked, \
-             patch.object(generate_ai_story.time, "sleep"):
+             patch.object(generate_ai_story.time, "sleep") as sleep:
             result = generate_ai_story.generate_part(
                 "", models, "topic", "story", self.source_part,
                 self.config, 1,
             )
         self.assertEqual(mocked.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [30, 30])
         self.assertEqual(
             [call.args[1] for call in mocked.call_args_list],
             ["gemini|gemini-test"] * 3 + ["openai|openai-test"],
