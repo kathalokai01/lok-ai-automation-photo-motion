@@ -183,6 +183,30 @@ class ExtraSceneNarrationTests(unittest.TestCase):
         self.assertEqual(narration.sentence_units(sample), expected)
         self.assertTrue(all(len(unit.split()) > 1 for unit in expected))
 
+    def test_part_starting_inside_dialogue_does_not_merge_remaining_sentences(self) -> None:
+        # This Part starts inside dialogue opened in the previous Part.
+        # Its first quote is therefore a closing quote, not an opening quote.
+        sample = (
+            'अयान सर, बचा लीजिए उन्हें, आपके अलावा कोई इस सिस्टम को '
+            'रीबूट नहीं कर सकता!" अयान के पैरों तले जमीन खिसक गई। '
+            "जिस भूल को उसने पैसों के लिए छिपाया था, वही भूल अब उसकी "
+            "अपनी दुनिया को तबाह करने जा रही थी। "
+            "विक्रांत उसे धोखा देकर भाग चुका था। "
+            "वह पागलों की तरह सीढ़ियों की तरफ भागा। "
+            "45वीं मंजिल से नीचे की तरफ दौड़ते हुए उसका दम फूल रहा था। "
+            "हर कदम के साथ उसे विक्रांत के वे 5 मिलियन डॉलर याद आ रहे थे, "
+            "जो अब उसे कागज के टुकड़ों से ज्यादा कुछ नहीं लग रहे थे। "
+            "वह हांफते हुए 42वें फ्लोर के सर्वर रूम में पहुंचा।"
+        )
+        plan_units = story_plan.split_sentences(sample)
+        narration_units = narration.sentence_units(sample)
+
+        self.assertEqual(plan_units, narration_units)
+        self.assertGreaterEqual(len(plan_units), 7)
+        self.assertIn("वह हांफते हुए 42वें फ्लोर", plan_units[-1])
+        self.assertEqual(" ".join(plan_units), sample)
+
+
     def test_quoted_dialogue_and_attribution_are_one_scene_unit(self) -> None:
         sample = (
             "स्लैब विक्रांत के पैरों पर आ गिरा। "
