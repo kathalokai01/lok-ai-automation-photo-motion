@@ -35,8 +35,8 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v12-narrated-extra-roles"
-PROMPT_VERSION = 12
+VERSION = "photo-motion-visual-jobs-v13-bounded-world-context"
+PROMPT_VERSION = 13
 
 ROLE_ORDER = {
     "hook": 0,
@@ -1073,7 +1073,7 @@ def build_prompt(
                 "architecture, locations and environment. Apply only "
                 "details relevant to this scene: "
                 + json.dumps(
-                    world,
+                    compact_world_context(world),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
