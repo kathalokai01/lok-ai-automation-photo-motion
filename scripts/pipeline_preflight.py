@@ -958,6 +958,12 @@ def validate_existing_manifest(
             )
 
         for field in ("format", "mode"):
+            # captions.json uses "mode" for caption language
+            # (hindi/english/hinglish), not video FORMAT.
+            # Its separate "format" field remains strictly validated.
+            if name == "captions" and field == "mode":
+                continue
+
             declared = data.get(field)
 
             if declared is None:
