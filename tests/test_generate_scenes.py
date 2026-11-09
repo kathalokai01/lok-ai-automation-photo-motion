@@ -12,6 +12,7 @@ from pathlib import Path
 from scripts import checkpoint_manager
 
 from scripts import generate_scenes as scenes
+from scripts import generate_narration as narration
 
 
 def ai_record(scene_id: str, role: str, narration: str) -> dict:
@@ -110,6 +111,48 @@ class ExtraSceneNarrationTests(unittest.TestCase):
                 ],
                 "b" * 64,
             )
+
+
+    def test_extra_scene_word_count_uses_narration_validator_rule(self) -> None:
+        # Whitespace splitting and the narration regex differ on punctuation-
+        # only tokens and apostrophe/hyphen forms. Both stages must agree.
+        sample = "राजू ने कहा — ‘रुको!’ फिर वह लौट आया।"
+        expected = narration.count_words(sample)
+        self.assertEqual(scenes.count_narration_words(sample), expected)
+
+        extra = {
+            "part": 1,
+            "scene": None,
+            "scene_id": "part_01_hook",
+            "role": "hook",
+            "narration": sample,
+            "source": {"story_anchor": "रात का रहस्य"},
+        }
+        record = {
+            "status": "completed",
+            "part": 1,
+            "scene": None,
+            "scene_id": "part_01_hook",
+            "role": "hook",
+            "narration": sample,
+            "source_scene_id": "part_01_hook",
+            "source_role": "hook",
+            "source_scene_signature": scenes.expected_source_signature(extra),
+            "generation_signature": "c" * 64,
+            "scene_prompt_version": scenes.PROMPT_VERSION,
+            "is_extra_scene": True,
+            "visual_prompt": "A dark house at night.",
+            "negative_prompt": "blurry, distorted",
+            "camera_prompt": "slow push in",
+            "lighting_prompt": "moonlight",
+            "voiceover_enabled": True,
+            "narration_source": "ai_generated_role_narration",
+            "source_text_sha256": scenes.text_sha256(sample),
+            "source_word_count": expected,
+        }
+        self.assertTrue(scenes.scene_is_valid(record, extra, "c" * 64))
+        record["source_word_count"] = len(sample.split())
+        self.assertFalse(scenes.scene_is_valid(record, extra, "c" * 64))
 
     def test_extra_scene_rejects_missing_narration(self) -> None:
         expected = {
