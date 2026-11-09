@@ -35,7 +35,7 @@ IMAGE_MANIFEST = VISUAL_DIR / "image_manifest.json"
 GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v31-pollinations-seed-range"
+VERSION = "photo-motion-image-generator-v32-content-addressed-reuse"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -49,7 +49,7 @@ POLL_INTERVAL = 2
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "KathaLokAI-PhotoMotion/30.0",
+    "User-Agent": "KathaLokAI-PhotoMotion/32.0",
 })
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -696,6 +696,24 @@ def job_signature(item):
         "source_fingerprint": source.get("source_fingerprint"),
     })
 
+def negative_prompt_sha256(item):
+    return sha256_text(build_negative_prompt(item))
+
+
+def image_reuse_signature(item):
+    source = item["source_job"]
+    return stable_hash({
+        "scene_id": item["scene_id"],
+        "part": item["part"],
+        "global_scene": item["global_scene"],
+        "role": item["role"],
+        "prompt_sha256": prompt_hash(item),
+        "negative_prompt_sha256": negative_prompt_sha256(item),
+        "size": item["size_text"],
+        "config_signature": source.get("config_signature"),
+        "image_path": item["relative_path"],
+    })
+
 
 def valid_image(path, size):
     try:
@@ -1241,27 +1259,39 @@ def can_reuse_image(item, old):
     if clean(old.get("scene_id")) != item["scene_id"]:
         return False
 
-    if clean(old.get("job_signature")) != job_signature(item):
-        return False
-
-    if clean(old.get("prompt_sha256")) != prompt_hash(item):
-        return False
-
-    source = item["source_job"]
-
-    for field in (
-        "prompt_signature",
-        "source_scene_signature",
-        "source_fingerprint",
-        "config_signature",
-    ):
-        if clean(old.get(field)) != clean(source.get(field)):
+    saved_reuse_signature = clean(old.get("reuse_signature"))
+    if saved_reuse_signature:
+        # Reuse is tied to exact positive/negative prompts, scene identity,
+        # output dimensions/path and image configuration—not generator version
+        # or unrelated source metadata fingerprints.
+        if saved_reuse_signature != image_reuse_signature(item):
             return False
+    else:
+        # Backward-compatible strict path for manifests not yet upgraded by
+        # checkpoint_manager.py.
+        if clean(old.get("job_signature")) != job_signature(item):
+            return False
+        source = item["source_job"]
+        for field in (
+            "prompt_signature",
+            "source_scene_signature",
+            "source_fingerprint",
+            "config_signature",
+        ):
+            if clean(old.get(field)) != clean(source.get(field)):
+                return False
 
     old_path = clean(
         old.get("image_path") or old.get("image") or old.get("file")
     )
     if old_path != item["relative_path"]:
+        return False
+
+    if (
+        clean(old.get("image_size")) != item["size_text"]
+        or int(old.get("width") or 0) != item["size"][0]
+        or int(old.get("height") or 0) != item["size"][1]
+    ):
         return False
 
     expected_hash = clean(old.get("image_sha256"))
@@ -1274,7 +1304,6 @@ def can_reuse_image(item, old):
         return False
 
     return integrity["sha256"].casefold() == expected_hash.casefold()
-
 
 def make_record(item, status, provider=None, attempts=None):
     integrity = None
@@ -1303,6 +1332,8 @@ def make_record(item, status, provider=None, attempts=None):
         "status": status,
         "provider": provider,
         "prompt_sha256": prompt_hash(item),
+        "negative_prompt_sha256": negative_prompt_sha256(item),
+        "reuse_signature": image_reuse_signature(item),
         "prompt_signature": source.get("prompt_signature"),
         "job_signature": job_signature(item),
         "source_scene_signature": source.get("source_scene_signature"),
@@ -1400,6 +1431,7 @@ def build_image_manifest(records, metadata, policy):
                     "width", "height", "image_size", "duration",
                     "status", "provider", "prompt_sha256",
                     "prompt_signature", "job_signature",
+                    "negative_prompt_sha256", "reuse_signature",
                     "source_scene_signature", "source_fingerprint",
                     "config_signature", "file_integrity",
                     "semantic_story_match",
