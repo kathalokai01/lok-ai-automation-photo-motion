@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -22,7 +23,7 @@ from llm_provider_client import (
 
 
 OUTPUT_FILE = Path("output/config/selected_llm_provider.json")
-VERSION = "llm-provider-selector-v2"
+VERSION = "llm-provider-selector-v3-story-order-signature"
 
 
 def log(message: str) -> None:
@@ -103,7 +104,20 @@ def build_selection() -> dict:
         if ready:
             ready_order.append(provider)
 
+    story_candidates = [
+        provider + "|" + next(
+            item["model"] for item in provider_records
+            if item["provider"] == provider and item["ready"] is True
+        )
+        for provider in ready_order
+    ]
+    story_order_signature = hashlib.sha256(
+        "\\n".join(story_candidates).encode("utf-8")
+    ).hexdigest()
+
     return {
+        "story_candidates": story_candidates,
+        "story_order_signature": story_order_signature,
         "status": "ready" if ready_order else "no_provider_ready",
         "enabled": bool(ready_order),
         "reason": (
