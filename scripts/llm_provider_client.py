@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -411,6 +412,17 @@ def selected_story_provider_candidates(selection: dict) -> list[str]:
             raise ProviderError("configuration", "Invalid Story provider order entry.")
         if name in ready and name not in [item.split("|", 1)[0] for item in result]:
             result.append(name + "|" + ready[name])
+    stored_candidates = selection.get("story_candidates")
+    stored_signature = selection.get("story_order_signature")
+    if stored_candidates is not None or stored_signature is not None:
+        signature = hashlib.sha256(
+            "\n".join(result).encode("utf-8")
+        ).hexdigest()
+        if stored_candidates != result or stored_signature != signature:
+            raise ProviderError(
+                "configuration",
+                "Saved Story provider order signature does not match ready providers.",
+            )
     return result
 
 
