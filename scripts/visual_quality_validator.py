@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -270,4 +271,6 @@ def validate_scene_image(
         "technical": technical,
         "vision": vision,
         "semantic_story_match": "verified" if accepted else "failed",
+        "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "verification_contract": "technical_integrity+gemini_prompt_and_character_review",
     }
