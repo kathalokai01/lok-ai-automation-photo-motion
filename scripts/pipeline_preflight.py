@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v71-story-model-progression-quality-gate"
+VERSION = "photo-motion-preflight-v72-provider-adapters-and-production-review"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -58,6 +58,10 @@ REQUIRED_SCRIPTS = (
     "generate_flow_music.py",
     "generate_visuals.py",
     "free_image_generator.py",
+    "image_provider_adapters.py",
+    "build_visual_storyboard.py",
+    "production_report.py",
+    "render_quality_validator.py",
     "visual_quality_validator.py",
     "prepare_visuals.py",
     "generate_depth_maps.py",
@@ -107,7 +111,7 @@ TTS_ALLOWED = {
     "fish_audio", "gemini_tts", "edge_tts", "piper",
     "elevenlabs", "cartesia", "finevoice", "minimax",
 }
-IMAGE_ALLOWED = {"huggingface", "pollinations", "replicate", "cloudflare"}
+IMAGE_ALLOWED = {"huggingface", "pollinations", "replicate", "cloudflare", "cloudflare_schnell", "cloudflare_klein", "ovhcloud", "aihorde"}
 
 PYTHON_MODULES = (
     "requests", "PIL", "cv2", "numpy", "imageio",
@@ -1809,6 +1813,10 @@ def check_provider_credentials(
         "pollinations": ("POLLINATIONS_API_KEY",),
         "replicate": ("REPLICATE_API_TOKEN",),
         "cloudflare": ("CLOUDFLARE_IMAGE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"),
+        "cloudflare_schnell": ("CLOUDFLARE_IMAGE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"),
+        "cloudflare_klein": ("CLOUDFLARE_IMAGE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"),
+        "ovhcloud": ("OVHCLOUD_AI_ENDPOINTS_API_KEY",),
+        "aihorde": (),
     }
 
     def tts_available(provider: str) -> tuple[bool, list[str]]:
@@ -1861,10 +1869,10 @@ def check_provider_credentials(
             if os.environ.get(key, "").strip()
         ]
 
-        if provider == "cloudflare":
+        if provider.startswith("cloudflare"):
             ready = len(present) == len(names)
         else:
-            ready = bool(present) or provider in {"huggingface", "pollinations"}
+            ready = bool(present) or provider in {"huggingface", "pollinations", "aihorde"}
 
         credentials[f"image:{provider}"] = {
             "available": ready,
