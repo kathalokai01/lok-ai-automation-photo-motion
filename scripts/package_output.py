@@ -2072,6 +2072,31 @@ def main() -> int:
     return 0
 
 
+
+
+# _PHOTO_MOTION_EVENT_WRAPPED: preserve original stage behavior and record factual outcomes.
+_photo_motion_original_main = main
+def main():
+    import time as _pm_time
+    _pm_started = _pm_time.monotonic()
+    try:
+        try:
+            from production_events import record_event as _pm_record
+        except ImportError:
+            from scripts.production_events import record_event as _pm_record
+        _pm_record("package_output", "running")
+    except Exception:
+        _pm_record = None
+    try:
+        _pm_result = _photo_motion_original_main()
+        if _pm_record:
+            _pm_record("package_output", "completed" if _pm_result in (None, 0) else "failed", metadata={"return_code": _pm_result}, started_at=_pm_started)
+        return _pm_result
+    except BaseException as _pm_exc:
+        if _pm_record:
+            _pm_record("package_output", "failed", error=f"{type(_pm_exc).__name__}: {_pm_exc}", started_at=_pm_started)
+        raise
+
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
