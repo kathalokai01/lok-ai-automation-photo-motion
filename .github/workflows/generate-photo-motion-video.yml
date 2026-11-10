@@ -99,6 +99,11 @@ jobs:
       CLOUDFLARE_IMAGE_API_TOKEN: ${{ secrets.CLOUDFLARE_IMAGE_API_TOKEN }}
       CLOUDFLARE_IMAGE_MODEL: ${{ vars.CLOUDFLARE_IMAGE_MODEL }}
       CLOUDFLARE_IMAGE_FALLBACK_MODEL: ${{ vars.CLOUDFLARE_IMAGE_FALLBACK_MODEL }}
+      OVHCLOUD_AI_ENDPOINTS_API_KEY: ${{ secrets.OVHCLOUD_AI_ENDPOINTS_API_KEY }}
+      OVHCLOUD_IMAGE_MODEL: ${{ vars.OVHCLOUD_IMAGE_MODEL }}
+      AIHORDE_API_KEY: ${{ secrets.AIHORDE_API_KEY }}
+      AIHORDE_IMAGE_MODEL: ${{ vars.AIHORDE_IMAGE_MODEL }}
+      AIHORDE_CLIENT_AGENT: "katha-lok-photo-motion:1.0:github"
 
       POLLINATIONS_FREE_IMAGE_MODELS: "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"
       ALLOW_BILLABLE_PROVIDERS: "true"
@@ -171,6 +176,10 @@ jobs:
             scripts/generate_flow_music.py
             scripts/generate_visuals.py
             scripts/free_image_generator.py
+            scripts/image_provider_adapters.py
+            scripts/build_visual_storyboard.py
+            scripts/render_quality_validator.py
+            scripts/production_report.py
             scripts/visual_quality_validator.py
             scripts/prepare_visuals.py
             scripts/generate_depth_maps.py
@@ -813,6 +822,9 @@ jobs:
       - name: Generate scene images
         run: python scripts/free_image_generator.py
 
+      - name: Build visual storyboard contact sheet
+        run: python scripts/build_visual_storyboard.py
+
       - name: Validate images and prepare Photo Motion jobs
         run: python scripts/prepare_visuals.py
 
@@ -833,6 +845,12 @@ jobs:
 
       - name: Burn captions into Part videos
         run: python scripts/burn_captions.py
+
+      - name: Validate final render quality
+        run: python scripts/render_quality_validator.py
+
+      - name: Build production report
+        run: python scripts/production_report.py
 
       - name: Generate story-specific thumbnail
         run: python scripts/generate_thumbnail.py
