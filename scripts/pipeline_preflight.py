@@ -1818,7 +1818,7 @@ def check_provider_credentials(
         "cloudflare": ("CLOUDFLARE_IMAGE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"),
         "cloudflare_schnell": ("CLOUDFLARE_IMAGE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"),
         "cloudflare_klein": ("CLOUDFLARE_IMAGE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"),
-        "ovhcloud": ("OVHCLOUD_AI_ENDPOINTS_API_KEY",),
+        "ovhcloud": (),
         "aihorde": (),
     }
 
@@ -1875,7 +1875,7 @@ def check_provider_credentials(
         if provider.startswith("cloudflare"):
             ready = len(present) == len(names)
         else:
-            ready = bool(present) or provider in {"huggingface", "pollinations", "aihorde"}
+            ready = bool(present) or provider in {"huggingface", "pollinations", "aihorde", "ovhcloud"}
 
         credentials[f"image:{provider}"] = {
             "available": ready,
