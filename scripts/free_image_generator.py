@@ -1672,11 +1672,11 @@ def build_policy():
             REPLICATE_MODEL if "replicate" in PROVIDER_ORDER else None
         ),
         "cloudflare_image_model": (
-            CLOUDFLARE_IMAGE_MODEL if "cloudflare" in PROVIDER_ORDER else None
+            CLOUDFLARE_IMAGE_MODEL if any(value.startswith("cloudflare") for value in PROVIDER_ORDER) else None
         ),
         "cloudflare_image_fallback_model": (
             CLOUDFLARE_IMAGE_FALLBACK_MODEL
-            if "cloudflare" in PROVIDER_ORDER else None
+            if any(value.startswith("cloudflare") for value in PROVIDER_ORDER) else None
         ),
         "ovhcloud_image_model": (
             OVHCLOUD_IMAGE_MODEL if "ovhcloud" in PROVIDER_ORDER else None
