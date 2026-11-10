@@ -34,7 +34,7 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-multi-provider-music-v19-inline-comments-and-reliable-paid-gating"
+VERSION = "photo-motion-multi-provider-music-v20-inline-comments-paid-call-accounting"
 
 REQUEST_TIMEOUT = (30, 900)
 RETRY_DELAYS = (8, 20)
@@ -58,6 +58,7 @@ SEGMENT_ROLES = ("hook", "main", "suspense", "resolution")
 AUDIO_PATH_KEYS = ("output", "audio_path", "audio_file", "path", "file", "audio")
 
 API_CALLS = 0
+PAID_PROVIDER_CALLS = 0
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "KathaLokAI-PhotoMotion/16.0"})
 
@@ -884,7 +885,8 @@ def save_composition_checkpoint(signature, compositions, status="in_progress", r
             item.get("scene_id") for item in saved_segments if isinstance(item, dict)
         ],
         "api_calls": API_CALLS,
-        "paid_services_used": API_CALLS > 0,
+        "paid_services_used": PAID_PROVIDER_CALLS > 0,
+        "paid_provider_api_calls": PAID_PROVIDER_CALLS,
         "updated_at": time.time(),
     }
     if reason:
@@ -909,7 +911,7 @@ def music_provider_order(config):
 
 
 def build_role_compositions(api_key, model, prompts, role_durations, role_rows, signature, config):
-    global API_CALLS
+    global API_CALLS, PAID_PROVIDER_CALLS
     checkpoint = read_json(CHECKPOINT)
     manifest = read_json(MANIFEST)
     previous = checkpoint if checkpoint.get("source_fingerprint") == signature else manifest
@@ -977,6 +979,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                     )
                     source_duration = probe_audio(source, MIN_AUDIO_DURATION)
                     API_CALLS += 1
+                    PAID_PROVIDER_CALLS += 1
 
                 elif provider == "lyria":
                     if not api_key:
@@ -1456,7 +1459,7 @@ def write_disabled():
 
 
 def main():
-    global API_CALLS
+    global API_CALLS, PAID_PROVIDER_CALLS
 
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     SOURCE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1686,7 +1689,8 @@ def main():
             },
             "timeline": timeline,
             "external_api_calls": API_CALLS,
-            "paid_services_used": API_CALLS > 0,
+            "paid_services_used": PAID_PROVIDER_CALLS > 0,
+            "paid_provider_api_calls": PAID_PROVIDER_CALLS,
             "size_bytes": master["size_bytes"],
             "version": VERSION,
             "completed_at": time.time(),
