@@ -1,13 +1,15 @@
 import json
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import requests
 from PIL import Image
 
-from scripts import visual_quality_validator as validator
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import visual_quality_validator as validator
 
 
 def response(status, payload=None):
