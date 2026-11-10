@@ -42,7 +42,7 @@ PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 ALIGNMENT_CACHE = CAPTION_DIR / "word_alignment_cache.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v62-all-role-voiceover-captions"
+VERSION = "burn-captions-v63-transparent-bottom-caption-style"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 1000
 FPS_TOLERANCE = 0.03
@@ -1411,8 +1411,8 @@ def caption_filter(srt_path, font_path, family, size, style):
         f"FontSize={int(size * style['length_factor'])},"
         f"PrimaryColour={style['primary']},"
         f"OutlineColour={style['outline']},"
-        "BackColour=&H90000000,"
-        "BorderStyle=3,"
+        "BackColour=&HFF000000,"
+        "BorderStyle=1,"
         f"Outline={style['outline_width']},"
         f"Shadow={style['shadow']},"
         f"Alignment={style['alignment']},"
