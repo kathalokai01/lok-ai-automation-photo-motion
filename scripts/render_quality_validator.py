@@ -52,4 +52,29 @@ def main():
  report={"status":"completed","version":"render-quality-v1","format":mode,"expected_dimensions":list(expected),"expected_fps":fps,"part_count":len(rows),"parts":rows}
  REPORT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
  print("RENDER QUALITY VALIDATION PASSED:",len(rows),"parts")
+
+
+# _PHOTO_MOTION_EVENT_WRAPPED: preserve original stage behavior and record factual outcomes.
+_photo_motion_original_main = main
+def main():
+    import time as _pm_time
+    _pm_started = _pm_time.monotonic()
+    try:
+        try:
+            from production_events import record_event as _pm_record
+        except ImportError:
+            from scripts.production_events import record_event as _pm_record
+        _pm_record("render_quality_validator", "running")
+    except Exception:
+        _pm_record = None
+    try:
+        _pm_result = _photo_motion_original_main()
+        if _pm_record:
+            _pm_record("render_quality_validator", "completed" if _pm_result in (None, 0) else "failed", metadata={"return_code": _pm_result}, started_at=_pm_started)
+        return _pm_result
+    except BaseException as _pm_exc:
+        if _pm_record:
+            _pm_record("render_quality_validator", "failed", error=f"{type(_pm_exc).__name__}: {_pm_exc}", started_at=_pm_started)
+        raise
+
 if __name__=="__main__": main()
