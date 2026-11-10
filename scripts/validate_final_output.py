@@ -2079,7 +2079,7 @@ def validate_package(
     }
 
 
-def validate_production_artifacts(mode: str, title: str) -> dict:
+def validate_production_artifacts(mode: str, title: str, part_numbers: list[int]) -> dict:
     storyboard = read_json(STORYBOARD_MANIFEST)
     render_quality = read_json(RENDER_QUALITY_REPORT)
     production = read_json(PRODUCTION_REPORT)
@@ -2108,12 +2108,14 @@ def validate_production_artifacts(mode: str, title: str) -> dict:
         fail("Storyboard source image manifest SHA-256 mismatch")
 
     quality_parts = render_quality.get("parts")
-    if not isinstance(quality_parts, list) or not quality_parts:
-        fail("Render quality report contains no Part videos")
+    if not isinstance(quality_parts, list) or len(quality_parts) != len(part_numbers):
+        fail("Render quality report Part count differs from selected PARTS")
     checked_parts = []
+    quality_part_numbers = []
     for row in quality_parts:
         if not isinstance(row, dict):
             fail("Invalid render quality Part record")
+        quality_part_numbers.append(positive_int(row.get("part"), "Render quality Part"))
         path = safe_output(row.get("path"), "Render quality Part video", MIN_VIDEO_BYTES)
         if digest_file(path) != row.get("sha256"):
             fail(f"Render quality video SHA-256 mismatch: {relative(path)}")
@@ -2121,6 +2123,8 @@ def validate_production_artifacts(mode: str, title: str) -> dict:
         if not info.get("has_video") or not info.get("has_audio"):
             fail(f"Render quality Part lacks audio/video: {relative(path)}")
         checked_parts.append(relative(path))
+    if sorted(quality_part_numbers) != sorted(part_numbers) or len(set(quality_part_numbers)) != len(part_numbers):
+        fail("Render quality report does not cover each selected Part exactly once")
 
     return {
         "storyboard": {
@@ -2202,7 +2206,7 @@ def main() -> int:
         part_numbers, mode, story_check["title"]
     )
     production_check = validate_production_artifacts(
-        mode, story_check["title"]
+        mode, story_check["title"], part_numbers
     )
 
     checks = {
