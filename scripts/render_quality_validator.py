@@ -13,11 +13,12 @@ def sha(p):
   for b in iter(lambda:f.read(1024*1024),b""):h.update(b)
  return h.hexdigest()
 def main():
- from scripts.input_config import load_and_validate,get_format,get_fps
- cfg=load_and_validate(INPUT); mode=get_format(cfg); fps=float(get_fps(cfg)); expected=(720,1280) if mode=="short" else (1280,720)
+ from scripts.input_config import load_and_validate,get_format,get_fps,get_selected_parts
+ cfg=load_and_validate(INPUT); mode=get_format(cfg); fps=float(get_fps(cfg)); selected=int(get_selected_parts(cfg,required=True)); expected=(720,1280) if mode=="short" else (1280,720)
  if not RENDER.is_file(): raise RuntimeError("Render manifest is missing")
  doc=json.loads(RENDER.read_text(encoding="utf-8")); parts=doc.get("parts")
  if not isinstance(parts,list) or not parts: raise RuntimeError("Render manifest has no Part outputs")
+ if len(parts)!=selected: raise RuntimeError(f"Render Part count {len(parts)} does not match selected PARTS {selected}")
  rows=[]
  for row in parts:
   if not isinstance(row,dict): raise RuntimeError("Invalid render Part record")
