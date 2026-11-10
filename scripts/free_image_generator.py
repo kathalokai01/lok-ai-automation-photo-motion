@@ -1992,6 +1992,7 @@ def run_provider_attempts(
     candidate_hash = clean(record.get("unverified_candidate_sha256"))
     candidate_prompt_hash = clean(record.get("unverified_candidate_prompt_sha256"))
     candidate_provider = clean(record.get("unverified_candidate_provider"))
+    candidate_provider_key = clean(record.get("unverified_candidate_provider_key")) or candidate_provider
     if (
         candidate_hash
         and candidate_prompt_hash == sha256_text(prompt)
@@ -2017,14 +2018,16 @@ def run_provider_attempts(
                 ))
                 record["quality_verification"] = candidate_quality
                 record["semantic_story_match"] = "verified"
-                record["last_successful_model"] = candidate_provider
+                record["last_successful_model"] = candidate_provider_key
                 record["image_sha256"] = integrity["sha256"]
                 record["file_integrity"] = "verified"
                 record["unverified_candidate_sha256"] = None
                 record["unverified_candidate_prompt_sha256"] = None
                 record["unverified_candidate_provider"] = None
-                MODEL_PROGRESS_STATE["cursor_key"] = candidate_provider or MODEL_PROGRESS_STATE.get("cursor_key")
-                MODEL_PROGRESS_STATE["last_successful_model"] = candidate_provider or MODEL_PROGRESS_STATE.get("last_successful_model")
+        record["unverified_candidate_provider_key"] = None
+                record["unverified_candidate_provider_key"] = None
+                MODEL_PROGRESS_STATE["cursor_key"] = candidate_provider_key or MODEL_PROGRESS_STATE.get("cursor_key")
+                MODEL_PROGRESS_STATE["last_successful_model"] = candidate_provider_key or MODEL_PROGRESS_STATE.get("last_successful_model")
                 save_checkpoints(records, metadata, policy, counters)
                 log("SAVED IMAGE VERIFIED WITHOUT REGENERATION:", item["scene_id"])
                 return
@@ -2206,7 +2209,8 @@ def run_provider_attempts(
                         candidate_integrity = image_integrity(destination, item["size"])
                         record["unverified_candidate_sha256"] = candidate_integrity["sha256"]
                         record["unverified_candidate_prompt_sha256"] = sha256_text(prompt)
-                        record["unverified_candidate_provider"] = provider_key
+                        record["unverified_candidate_provider"] = provider_name
+                        record["unverified_candidate_provider_key"] = provider_key
                         record["unverified_candidate_path"] = item["relative_path"]
                     except Exception:
                         destination.unlink(missing_ok=True)
@@ -2394,6 +2398,7 @@ def main():
                 "unverified_candidate_sha256",
                 "unverified_candidate_prompt_sha256",
                 "unverified_candidate_provider",
+                "unverified_candidate_provider_key",
                 "unverified_candidate_path",
             ):
                 candidate_value = old.get(candidate_key) if isinstance(old, dict) else None
