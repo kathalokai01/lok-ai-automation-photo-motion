@@ -74,7 +74,7 @@ TEMP_SUFFIXES = {
 REQUIRED_CHECKS = (
     "story", "photo_motion", "narration", "sound_design",
     "render", "captions", "thumbnail", "metadata",
-    "unique_output_files", "mode_separation",
+    "unique_output_files", "mode_separation", "production_artifacts",
 )
 STORY_VERIFICATION = OUT / "story" / "story_verification.json"
 PROJECT_FILES = (
@@ -94,6 +94,10 @@ PROJECT_FILES = (
     OUT / "visuals" / "image_generation_manifest.json",
     OUT / "visuals" / "photo_motion_jobs.json",
     OUT / "visuals" / "depth_maps" / "depth_manifest.json",
+    OUT / "visuals" / "storyboard.jpg",
+    OUT / "visuals" / "storyboard_manifest.json",
+    OUT / "quality" / "render_quality_report.json",
+    OUT / "production_report.json",
     SFX_CUES,
 )
 REQUIRED_FILES = (
