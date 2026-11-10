@@ -25,7 +25,7 @@ from image_provider_adapters import (
 from urllib.parse import quote, urlparse
 
 import requests
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageEnhance
 
 try:
     from gradio_client import Client
@@ -86,6 +86,7 @@ IMAGE_QUALITY_VISION_MODEL = "gemini-3.8-flash"
 IMAGE_QUALITY_MIN_SCORE = 7
 IMAGE_QUALITY_MAX_FAILURES_PER_MODEL = 2
 IMAGE_QUALITY_SKIP_SCENES = 3
+IMAGE_PROCESSING_PROFILE = "none"
 
 
 class ImageQualityRejected(RuntimeError):
@@ -203,13 +204,16 @@ def apply_input_settings(config):
     global ALLOW_BILLABLE, IMAGE_FALLBACK_ENABLED, MAX_RETRIES
     global IMAGE_QUALITY_VISION_ENABLED, IMAGE_QUALITY_VISION_MODEL
     global IMAGE_QUALITY_MIN_SCORE, IMAGE_QUALITY_MAX_FAILURES_PER_MODEL
-    global IMAGE_QUALITY_SKIP_SCENES
+    global IMAGE_QUALITY_SKIP_SCENES, IMAGE_PROCESSING_PROFILE
 
     from input_config import (
         get_image_provider_settings,
         get_max_retries,
     )
 
+    from input_config import get_production_settings
+    production_settings = get_production_settings(config)
+    IMAGE_PROCESSING_PROFILE = production_settings["image_profile"]
     settings = get_image_provider_settings(config)
 
     # Keep the exact order defined by Input/topic.txt.
@@ -826,6 +830,16 @@ def save_image(image, destination, size):
             color=(18, 18, 18),
             centering=(0.5, 0.5),
         )
+        # Apply optional finishing before hashing and Gemini Vision validation.
+        if IMAGE_PROCESSING_PROFILE != "none":
+            profiles = {"natural": (1.04, 1.02, 0.15), "cinematic": (1.08, 1.06, 0.25), "soft": (1.02, 0.98, 0.0)}
+            if IMAGE_PROCESSING_PROFILE not in profiles:
+                raise RuntimeError(f"Unsupported IMAGE_PROCESSING_PROFILE: {IMAGE_PROCESSING_PROFILE}")
+            contrast, color, sharpness = profiles[IMAGE_PROCESSING_PROFILE]
+            image = ImageEnhance.Contrast(image).enhance(contrast)
+            image = ImageEnhance.Color(image).enhance(color)
+            if sharpness:
+                image = ImageEnhance.Sharpness(image).enhance(1.0 + sharpness)
         image.save(temporary, "PNG", optimize=True)
         image_integrity(temporary, size)
         os.replace(temporary, destination)
