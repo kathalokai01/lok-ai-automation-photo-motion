@@ -17,6 +17,8 @@ from scripts import generate_story as story
 from scripts import generate_story_plan as story_plan
 from scripts import free_image_generator as image_generator
 from scripts import generate_tts as tts
+from scripts import generate_flow_music as flow_music
+from unittest.mock import patch
 
 
 def ai_record(scene_id: str, role: str, narration: str) -> dict:
@@ -122,6 +124,38 @@ class ImageBillingScopeTests(unittest.TestCase):
                 False,
                 {"pollinations", "replicate"},
             )
+        )
+
+
+class ElevenLabsPriorityTests(unittest.TestCase):
+    def test_tts_primary_order_starts_with_elevenlabs(self) -> None:
+        self.assertEqual(
+            tts.PRIMARY_ORDER,
+            ["elevenlabs", "fish_audio", "cartesia"],
+        )
+
+    def test_elevenlabs_is_available_with_profile_voice_id(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "ELEVENLABS_API_KEY": "test-key",
+                "ELEVENLABS_VOICE_ID_MALE_STORYTELLER": "test-voice",
+            },
+            clear=True,
+        ):
+            available, reason = tts.provider_available(
+                "elevenlabs", {}, True
+            )
+        self.assertTrue(available, reason)
+
+    def test_music_provider_order_starts_with_elevenlabs(self) -> None:
+        self.assertEqual(
+            flow_music.music_provider_order({
+                "MUSIC_PROVIDER_ORDER": (
+                    "eleven_music,lyria,stable_audio,local"
+                )
+            }),
+            ["eleven_music", "lyria", "stable_audio", "local"],
         )
 
 
