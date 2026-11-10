@@ -36,13 +36,15 @@ def main():
     accepted=[]
     for row in records:
         if not isinstance(row,dict): continue
-        if str(row.get("status","")).lower() not in {"completed","complete","success","reused","valid"}: continue
+        if str(row.get("status","")).lower() not in {"generated","existing","completed","complete","success","reused","valid"}: continue
         raw=row.get("path") or row.get("image_path") or row.get("output_path")
         if not raw: continue
         p=Path(raw); p=p if p.is_absolute() else ROOT/p
+        try: p.resolve().relative_to(ROOT.resolve())
+        except ValueError: raise RuntimeError(f"Storyboard image escapes repository: {p}")
         if not p.is_file() or p.is_symlink(): continue
         digest=sha(p)
-        declared=row.get("sha256") or row.get("image_sha256")
+        declared=row.get("image_sha256") or row.get("sha256") or row.get("image_sha256")
         if declared and declared != digest: raise RuntimeError(f"Storyboard image hash mismatch: {p}")
         with Image.open(p) as im:
             im.verify()
