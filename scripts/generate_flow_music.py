@@ -970,7 +970,15 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                             "paid music permission disabled; set MUSIC_ALLOW_PAID=true"
                         )
                     os.environ["MUSIC_ALLOW_PAID"] = "true"
-
+                    required_key = (
+                        "ELEVENLABS_API_KEY"
+                        if provider == "eleven_music"
+                        else "STABILITY_API_KEY"
+                    )
+                    if not os.getenv(required_key, "").strip():
+                        raise MusicProviderError(f"{required_key} is missing.")
+                    # Count the paid request attempt even when the provider returns HTTP error.
+                    PAID_PROVIDER_CALLS += 1
                     generate_music(
                         provider,
                         prompts[role],
@@ -979,7 +987,6 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                     )
                     source_duration = probe_audio(source, MIN_AUDIO_DURATION)
                     API_CALLS += 1
-                    PAID_PROVIDER_CALLS += 1
 
                 elif provider == "lyria":
                     if not api_key:
