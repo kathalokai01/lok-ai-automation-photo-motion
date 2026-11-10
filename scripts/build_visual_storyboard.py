@@ -25,12 +25,11 @@ def rows(doc):
     return []
 
 def main():
-    if not MANIFEST.is_file() or not JOBS.is_file():
-        raise RuntimeError("Image manifest or visual jobs are missing")
+    if not MANIFEST.is_file():
+        raise RuntimeError("Image manifest is missing")
     manifest=json.loads(MANIFEST.read_text(encoding="utf-8"))
-    jobs=json.loads(JOBS.read_text(encoding="utf-8"))
-    if not isinstance(manifest,dict) or not isinstance(jobs,dict):
-        raise RuntimeError("Storyboard source manifests must be JSON objects")
+    if not isinstance(manifest,dict):
+        raise RuntimeError("Storyboard image manifest must be a JSON object")
     records=rows(manifest)
     if not records: raise RuntimeError("Image manifest contains no scene records")
     accepted=[]
@@ -70,7 +69,7 @@ def main():
         draw.text((x,y+thumb_h+5),f"{i+1:03d}  {role}  {scene_id[:34]}",font=font,fill=(245,245,245))
     TARGET.parent.mkdir(parents=True,exist_ok=True)
     tmp=TARGET.with_suffix(".tmp.jpg"); canvas.save(tmp,"JPEG",quality=88,optimize=True); tmp.replace(TARGET)
-    report={"status":"completed","version":"storyboard-v1","format":jobs.get("format"),"image_count":len(accepted),"path":TARGET.relative_to(ROOT).as_posix(),"bytes":TARGET.stat().st_size,"sha256":sha(TARGET),"source_image_manifest_sha256":sha(MANIFEST),"images":[{"scene_id":str(r.get("scene_id") or p.stem),"path":p.relative_to(ROOT).as_posix(),"sha256":d} for r,p,d in accepted]}
+    report={"status":"completed","version":"storyboard-v1","format":manifest.get("format"),"image_count":len(accepted),"path":TARGET.relative_to(ROOT).as_posix(),"bytes":TARGET.stat().st_size,"sha256":sha(TARGET),"source_image_manifest_sha256":sha(MANIFEST),"images":[{"scene_id":str(r.get("scene_id") or p.stem),"path":p.relative_to(ROOT).as_posix(),"sha256":d} for r,p,d in accepted]}
     REPORT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     print("STORYBOARD:",TARGET,"IMAGES:",len(accepted))
 if __name__=="__main__": main()
