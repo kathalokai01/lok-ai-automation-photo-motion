@@ -76,4 +76,29 @@ def main():
     report={"status":"completed","version":"storyboard-v1","format":manifest.get("format"),"image_count":len(accepted),"path":TARGET.relative_to(ROOT).as_posix(),"bytes":TARGET.stat().st_size,"sha256":sha(TARGET),"source_image_manifest_sha256":sha(MANIFEST),"images":[{"scene_id":str(r.get("scene_id") or p.stem),"path":p.relative_to(ROOT).as_posix(),"sha256":d} for r,p,d in accepted]}
     REPORT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     print("STORYBOARD:",TARGET,"IMAGES:",len(accepted))
+
+
+# _PHOTO_MOTION_EVENT_WRAPPED: preserve original stage behavior and record factual outcomes.
+_photo_motion_original_main = main
+def main():
+    import time as _pm_time
+    _pm_started = _pm_time.monotonic()
+    try:
+        try:
+            from production_events import record_event as _pm_record
+        except ImportError:
+            from scripts.production_events import record_event as _pm_record
+        _pm_record("build_visual_storyboard", "running")
+    except Exception:
+        _pm_record = None
+    try:
+        _pm_result = _photo_motion_original_main()
+        if _pm_record:
+            _pm_record("build_visual_storyboard", "completed" if _pm_result in (None, 0) else "failed", metadata={"return_code": _pm_result}, started_at=_pm_started)
+        return _pm_result
+    except BaseException as _pm_exc:
+        if _pm_record:
+            _pm_record("build_visual_storyboard", "failed", error=f"{type(_pm_exc).__name__}: {_pm_exc}", started_at=_pm_started)
+        raise
+
 if __name__=="__main__": main()
