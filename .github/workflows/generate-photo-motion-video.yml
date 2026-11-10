@@ -197,6 +197,15 @@ jobs:
             scripts/package_output.py
             scripts/pipeline_preflight.py
             scripts/checkpoint_manager.py
+scripts/production_events.py
+scripts/production_dashboard.py
+scripts/asset_approval.py
+scripts/production_cost_tracker.py
+scripts/render_preview.py
+scripts/render_templates.py
+scripts/image_processing_profiles.py
+scripts/production_batch.py
+scripts/production_presets.py
           )
 
           for file in "${required_files[@]}"; do
@@ -825,6 +834,9 @@ jobs:
       - name: Build visual storyboard contact sheet
         run: python scripts/build_visual_storyboard.py
 
+      - name: Create explicit asset review ledger
+        run: python scripts/asset_approval.py
+
       - name: Validate images and prepare Photo Motion jobs
         run: python scripts/prepare_visuals.py
 
@@ -851,6 +863,13 @@ jobs:
 
       - name: Build production report
         run: python scripts/production_report.py
+
+      - name: Generate static production dashboard and cost report
+        run: |
+          python scripts/production_cost_tracker.py
+          python scripts/production_presets.py
+          python scripts/production_dashboard.py
+          python scripts/render_preview.py
 
       - name: Generate story-specific thumbnail
         run: python scripts/generate_thumbnail.py
@@ -1364,3 +1383,16 @@ jobs:
           if-no-files-found: warn
           compression-level: 0
           retention-days: 7
+
+      - name: Upload production review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo-motion-production-review
+          if-no-files-found: ignore
+          path: |
+            output/production/
+            output/visuals/storyboard.jpg
+            output/visuals/storyboard_manifest.json
+            output/visuals/asset_approval.json
+            output/production_report.json
