@@ -34,7 +34,7 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-multi-provider-music-v18-elevenlabs-first-role-compositions"
+VERSION = "photo-motion-multi-provider-music-v19-inline-comments-and-reliable-paid-gating"
 
 REQUEST_TIMEOUT = (30, 900)
 RETRY_DELAYS = (8, 20)
@@ -91,6 +91,32 @@ def read_settings():
             continue
         key, value = line.split("=", 1)
         value = value.strip()
+        # Match Input/topic.txt semantics: ignore comments only outside quoted strings.
+        quote = None
+        escaped = False
+        cleaned = []
+        for char in value:
+            if escaped:
+                cleaned.append(char)
+                escaped = False
+                continue
+            if char == "\\" and quote:
+                cleaned.append(char)
+                escaped = True
+                continue
+            if quote:
+                cleaned.append(char)
+                if char == quote:
+                    quote = None
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                cleaned.append(char)
+                continue
+            if char == "#":
+                break
+            cleaned.append(char)
+        value = "".join(cleaned).strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
         result[key.strip().upper()] = value.strip()
