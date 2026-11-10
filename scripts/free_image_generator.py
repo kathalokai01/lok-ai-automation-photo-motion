@@ -1577,6 +1577,8 @@ def _model_progress_signature(metadata):
         "replicate_model": REPLICATE_MODEL,
         "cloudflare_primary": CLOUDFLARE_IMAGE_MODEL,
         "cloudflare_fallback": CLOUDFLARE_IMAGE_FALLBACK_MODEL,
+        "ovhcloud_model": OVHCLOUD_IMAGE_MODEL,
+        "aihorde_model": AIHORDE_IMAGE_MODEL,
     })
 
 
@@ -1659,6 +1661,12 @@ def build_policy():
         "cloudflare_image_fallback_model": (
             CLOUDFLARE_IMAGE_FALLBACK_MODEL
             if "cloudflare" in PROVIDER_ORDER else None
+        ),
+        "ovhcloud_image_model": (
+            OVHCLOUD_IMAGE_MODEL if "ovhcloud" in PROVIDER_ORDER else None
+        ),
+        "aihorde_image_model": (
+            AIHORDE_IMAGE_MODEL if "aihorde" in PROVIDER_ORDER else None
         ),
         "provider_credentials_logged": False,
     }
