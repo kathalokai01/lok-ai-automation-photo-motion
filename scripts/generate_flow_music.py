@@ -34,7 +34,7 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-lyria-role-segment-checkpoint-v17-all-role-narration-timeline"
+VERSION = "photo-motion-multi-provider-music-v18-elevenlabs-first-role-compositions"
 
 REQUEST_TIMEOUT = (30, 900)
 RETRY_DELAYS = (8, 20)
@@ -864,6 +864,24 @@ def save_composition_checkpoint(signature, compositions, status="in_progress", r
     if reason:
         record["last_error"] = str(reason)[:2000]
     write_json(CHECKPOINT, record)
+def music_provider_order(config):
+    raw = config.get(
+        "MUSIC_PROVIDER_ORDER",
+        "eleven_music,lyria,stable_audio,local",
+    )
+    if isinstance(raw, str):
+        raw = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    allowed = {"eleven_music", "lyria", "stable_audio", "local"}
+    ordered = []
+    for item in raw:
+        provider = str(item).strip().lower()
+        if provider in allowed and provider not in ordered:
+            ordered.append(provider)
+    if not ordered:
+        raise RuntimeError("MUSIC_PROVIDER_ORDER contains no supported providers.")
+    return ordered
+
+
 def build_role_compositions(api_key, model, prompts, role_durations, role_rows, signature, config):
     global API_CALLS
     checkpoint = read_json(CHECKPOINT)
@@ -902,29 +920,29 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
         source = SOURCE_DIR / f"{role}_source.audio"
         prepared = SOURCE_DIR / f"{role}_composition.mp3"
 
-        selected_provider = "lyria"
-        try:
-            source_duration = request_music(api_key, model, prompts[role], source)
-        except Exception as lyria_error:
-            if not truthy(config.get("MUSIC_FALLBACK_ENABLED", True), True):
-                raise
-            provider_order = config.get(
-                "MUSIC_PROVIDER_ORDER",
-                "lyria,eleven_music,stable_audio,local",
-            )
-            if isinstance(provider_order, str):
-                provider_order = [item.strip().lower() for item in provider_order.split(",") if item.strip()]
-            fallback_errors = []
-            recovered = False
-            for provider in provider_order:
-                if provider in {"lyria", "local"}:
-                    continue
-                if not truthy(config.get("MUSIC_ALLOW_PAID", False), False):
-                    fallback_errors.append(f"{provider}: paid music permission disabled")
-                    continue
-                try:
-                    if truthy(config.get("MUSIC_ALLOW_PAID", False), False):
-                        os.environ["MUSIC_ALLOW_PAID"] = "true"
+        selected_provider = None
+        source_duration = None
+        provider_errors = []
+        provider_order = music_provider_order(config)
+        fallback_enabled = truthy(
+            config.get("MUSIC_FALLBACK_ENABLED", True), True
+        )
+
+        for provider_index, provider in enumerate(provider_order):
+            if provider == "local":
+                provider_errors.append(
+                    "local: handled by the separate local sound-design fallback"
+                )
+                continue
+
+            try:
+                if provider in {"eleven_music", "stable_audio"}:
+                    if not truthy(config.get("MUSIC_ALLOW_PAID", False), False):
+                        raise RuntimeError(
+                            "paid music permission disabled; set MUSIC_ALLOW_PAID=true"
+                        )
+                    os.environ["MUSIC_ALLOW_PAID"] = "true"
+
                     generate_music(
                         provider,
                         prompts[role],
@@ -932,19 +950,34 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                         source,
                     )
                     source_duration = probe_audio(source, MIN_AUDIO_DURATION)
-                    selected_provider = provider
                     API_CALLS += 1
-                    recovered = True
-                    log("MUSIC FALLBACK SUCCESS:", provider, role)
+
+                elif provider == "lyria":
+                    if not api_key:
+                        raise RuntimeError(
+                            "GEMINI_API_KEY/GOOGLE_API_KEY is missing for Lyria"
+                        )
+                    source_duration = request_music(
+                        api_key, model, prompts[role], source
+                    )
+
+                selected_provider = provider
+                log("MUSIC PROVIDER SUCCESS:", provider, role)
+                break
+
+            except Exception as provider_error:
+                provider_errors.append(
+                    f"{provider}: {str(provider_error)[:300]}"
+                )
+                log("MUSIC PROVIDER FAILED:", provider, role, str(provider_error)[:180])
+                if not fallback_enabled:
                     break
-                except Exception as provider_error:
-                    fallback_errors.append(f"{provider}: {str(provider_error)[:300]}")
-            if not recovered:
-                raise RuntimeError(
-                    "Lyria failed and no configured music fallback succeeded. "
-                    f"Lyria: {str(lyria_error)[:500]}; "
-                    + " | ".join(fallback_errors)
-                ) from lyria_error
+
+        if selected_provider is None:
+            raise RuntimeError(
+                "No configured music provider succeeded for role "
+                f"{role}. " + " | ".join(provider_errors)
+            )
         info = prepare_composition(source, prepared, max(MIN_AUDIO_DURATION, duration))
         compositions[role] = {
             "role": role,
@@ -1479,13 +1512,10 @@ def main():
             return 0
 
         api_key = get_api_key()
-        if not api_key:
-            write_unavailable(
-                "GEMINI_API_KEY and GOOGLE_API_KEY are not configured.",
-                model, target_duration, source_sig,
-            )
-            log("LYRIA UNAVAILABLE: local sound-design fallback remains available.")
-            return 0
+        configured_music_order = music_provider_order(config)
+        log("CONFIGURED MUSIC PROVIDER ORDER:", configured_music_order)
+        if not api_key and "lyria" in configured_music_order:
+            log("LYRIA will be skipped if reached: Google API key is missing.")
 
         checkpoint = read_json(CHECKPOINT)
         if checkpoint.get("source_fingerprint") != source_sig:
