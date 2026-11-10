@@ -27,9 +27,9 @@ TTS_EMOTION_STRENGTH = 0.65
 # ============================================================
 # MUSIC PROVIDERS AND MIXING
 # ============================================================
-MUSIC_PROVIDER_ORDER = "lyria,eleven_music,stable_audio,local"
+MUSIC_PROVIDER_ORDER = "eleven_music,lyria,stable_audio,local"
 MUSIC_FALLBACK_ENABLED = true
-MUSIC_ALLOW_PAID = false             # paid music only after explicit opt-in
+MUSIC_ALLOW_PAID = true              # ElevenLabs Music first; paid fallbacks enabled
 MUSIC_GENRE = "original cinematic score"
 MUSIC_INTENSITY = "evolving"
 MUSIC_GAIN = 0.35
