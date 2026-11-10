@@ -10,10 +10,11 @@ from scripts import image_provider_adapters as adapters
 
 
 class FakeResponse:
-    def __init__(self, payload=None, content=b"", status_code=200):
+    def __init__(self, payload=None, content=b"", status_code=200, headers=None):
         self._payload = payload
         self.content = content
         self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -44,10 +45,19 @@ class ImageProviderAdapterTests(unittest.TestCase):
                 {"data": [{"b64_json": "%%%"}]}, "test"
             )
 
-    def test_ovh_requires_explicit_api_key(self):
+    def test_ovh_supports_anonymous_raw_image_response(self):
+        fake = FakeResponse(
+            content=b"raw-image-bytes",
+            headers={"content-type": "application/octet-stream"},
+        )
         with patch.dict("os.environ", {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "OVHCLOUD_AI_ENDPOINTS_API_KEY"):
-                adapters.generate_ovhcloud_image("a detailed scene prompt", (720, 1280), 1)
+            with patch.object(adapters.SESSION, "post", return_value=fake) as post:
+                result = adapters.generate_ovhcloud_image(
+                    "a detailed scene prompt", (720, 1280), 1, "blurry"
+                )
+        self.assertEqual(result, b"raw-image-bytes")
+        self.assertNotIn("Authorization", post.call_args.kwargs["headers"])
+        self.assertIn("negative_prompt", post.call_args.kwargs["json"])
 
     def test_horde_default_model_is_stable_sdxl(self):
         with patch.dict("os.environ", {}, clear=True):
