@@ -3,6 +3,7 @@
 from __future__ import annotations
 import hashlib,json,os
 from collections import Counter
+from input_config import load_and_validate, get_image_provider_order
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]; OUT=ROOT/"output"
 TARGET=OUT/"production_report.json"
@@ -30,6 +31,8 @@ def rows(doc):
   if isinstance(doc.get(k),list): return doc[k]
  return []
 def main():
+ config_data=load_and_validate(ROOT/"Input"/"topic.txt")
+ configured_provider_order=get_image_provider_order(config_data)
  docs={k:read(p) for k,p in SOURCES.items()}
  if docs["story"] is None: raise RuntimeError("Story manifest missing; cannot report production")
  image_rows=rows(docs["images"]); counts=Counter(); providers=Counter(); attempt_counts=Counter(); attempt_status=Counter(); reused=0; failed=0
@@ -51,7 +54,7 @@ def main():
   d=docs[name]
   stages[name]={"status":str(d.get("status","missing")) if d else "missing","path":path.relative_to(ROOT).as_posix() if path.exists() else None,"sha256":digest(path) if path.is_file() else None}
  config=ROOT/"Input"/"topic.txt"
- report={"status":"completed","version":"production-report-v1","story_title":docs["story"].get("title") or docs["story"].get("story_title"),"format":docs["visual_jobs"].get("format") if docs["visual_jobs"] else None,"configured_image_provider_order":os.getenv("IMAGE_PROVIDER_ORDER","see Input/topic.txt"),"image_records":sum(counts.values()),"image_status_counts":dict(counts),"provider_record_counts":dict(providers),"provider_attempt_counts":dict(attempt_counts),"provider_attempt_status_counts":dict(attempt_status),"external_image_api_calls":docs["image_generation"].get("external_api_calls") if docs["image_generation"] else None,"billable_image_api_calls":docs["image_generation"].get("billable_api_calls") if docs["image_generation"] else None,"verified_reused_images":reused,"failed_image_records":failed,"costs":{"status":"not_reported_by_all_providers","amount":None,"currency":None},"stages":stages,"input_sha256":digest(config) if config.is_file() else None}
+ report={"status":"completed","version":"production-report-v1","story_title":docs["story"].get("title") or docs["story"].get("story_title"),"format":docs["visual_jobs"].get("format") if docs["visual_jobs"] else None,"configured_image_provider_order":configured_provider_order,"image_records":sum(counts.values()),"image_status_counts":dict(counts),"provider_record_counts":dict(providers),"provider_attempt_counts":dict(attempt_counts),"provider_attempt_status_counts":dict(attempt_status),"external_image_api_calls":docs["image_generation"].get("external_api_calls") if docs["image_generation"] else None,"billable_image_api_calls":docs["image_generation"].get("billable_api_calls") if docs["image_generation"] else None,"verified_reused_images":reused,"failed_image_records":failed,"costs":{"status":"not_reported_by_all_providers","amount":None,"currency":None},"stages":stages,"input_sha256":digest(config) if config.is_file() else None}
  TARGET.parent.mkdir(parents=True,exist_ok=True); TARGET.write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
  print("PRODUCTION REPORT:",TARGET)
 if __name__=="__main__": main()
