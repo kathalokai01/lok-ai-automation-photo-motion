@@ -20,7 +20,8 @@ ALL_TTS_PROVIDERS = (
 )
 
 ALL_IMAGE_PROVIDERS = (
-    "huggingface", "pollinations", "replicate", "cloudflare",
+    "huggingface", "cloudflare_schnell", "ovhcloud", "aihorde",
+    "pollinations", "cloudflare_klein", "replicate", "cloudflare",
 )
 
 PROVIDER_ALIASES = {
@@ -57,6 +58,12 @@ IMAGE_PROVIDER_ALIASES = {
     "replicate": "replicate",
     "cloudflare": "cloudflare",
     "cloudflare_workers_ai": "cloudflare",
+    "cloudflare_schnell": "cloudflare_schnell",
+    "cloudflare_klein": "cloudflare_klein",
+    "ovh": "ovhcloud",
+    "ovhcloud": "ovhcloud",
+    "ai_horde": "aihorde",
+    "aihorde": "aihorde",
 }
 
 CAPTION_FONTS = {
@@ -137,6 +144,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "REPLICATE_IMAGE_MODEL": "black-forest-labs/flux-schnell",
     "CLOUDFLARE_IMAGE_MODEL": "@cf/black-forest-labs/flux-2-klein-4b",
     "CLOUDFLARE_IMAGE_FALLBACK_MODEL": "@cf/black-forest-labs/flux-1-schnell",
+    "OVHCLOUD_IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0",
+    "AIHORDE_IMAGE_MODEL": "stable_diffusion_xl",
     "IMAGE_QUALITY_VISION_ENABLED": True,
     "IMAGE_QUALITY_VISION_MODEL": "gemini-3.8-flash",
     "IMAGE_QUALITY_MIN_SCORE": 7,
@@ -1323,6 +1332,11 @@ def get_image_provider_settings(
             "CLOUDFLARE_IMAGE_FALLBACK_MODEL must differ from the primary model."
         )
 
+    ovh_model = str(os.getenv("OVHCLOUD_IMAGE_MODEL", "").strip() or config.get("OVHCLOUD_IMAGE_MODEL", DEFAULT_CONFIG["OVHCLOUD_IMAGE_MODEL"])).strip()
+    horde_model = str(os.getenv("AIHORDE_IMAGE_MODEL", "").strip() or config.get("AIHORDE_IMAGE_MODEL", DEFAULT_CONFIG["AIHORDE_IMAGE_MODEL"])).strip()
+    if not ovh_model or not horde_model:
+        raise ValueError("OVHCLOUD_IMAGE_MODEL and AIHORDE_IMAGE_MODEL cannot be empty.")
+
     global_billable = get_global_billable_permission(config)
     input_image_billable = parse_bool(
         config.get("IMAGE_ALLOW_BILLABLE", True),
@@ -1342,6 +1356,8 @@ def get_image_provider_settings(
         "REPLICATE_IMAGE_MODEL": replicate_model,
         "CLOUDFLARE_IMAGE_MODEL": cloudflare_model,
         "CLOUDFLARE_IMAGE_FALLBACK_MODEL": cloudflare_fallback_model,
+        "OVHCLOUD_IMAGE_MODEL": ovh_model,
+        "AIHORDE_IMAGE_MODEL": horde_model,
     }
 
 
