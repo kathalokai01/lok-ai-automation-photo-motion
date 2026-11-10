@@ -102,6 +102,8 @@ WORKFLOW_ORDER = (
     "validate_sfx_timing.py",
     "render_video.py",
     "burn_captions.py",
+    "render_quality_validator.py",
+    "production_report.py",
     "generate_thumbnail.py",
     "generate_youtube_metadata.py",
     "validate_final_output.py",
