@@ -862,9 +862,11 @@ jobs:
         run: python scripts/render_quality_validator.py
 
       - name: Build production report
+        if: always()
         run: python scripts/production_report.py
 
       - name: Generate static production dashboard and cost report
+        if: always()
         run: |
           python scripts/production_cost_tracker.py
           python scripts/production_presets.py
