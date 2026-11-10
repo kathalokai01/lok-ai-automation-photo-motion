@@ -16,6 +16,7 @@ from scripts import generate_narration as narration
 from scripts import generate_story as story
 from scripts import generate_story_plan as story_plan
 from scripts import free_image_generator as image_generator
+from scripts import generate_tts as tts
 
 
 def ai_record(scene_id: str, role: str, narration: str) -> dict:
@@ -121,6 +122,28 @@ class ImageBillingScopeTests(unittest.TestCase):
                 False,
                 {"pollinations", "replicate"},
             )
+        )
+
+
+class TTSRoleMetadataTests(unittest.TestCase):
+    def test_extra_roles_receive_required_tts_metadata(self) -> None:
+        for role in ("hook", "suspense", "resolution"):
+            with self.subTest(role=role):
+                self.assertEqual(
+                    tts.role_narration_metadata({"role": role}),
+                    {
+                        "voiceover_enabled": True,
+                        "narration_source": "ai_generated_role_narration",
+                    },
+                )
+
+    def test_main_role_keeps_locked_part_metadata(self) -> None:
+        self.assertEqual(
+            tts.role_narration_metadata({"role": "main"}),
+            {
+                "voiceover_enabled": True,
+                "narration_source": "locked_part_text",
+            },
         )
 
 
