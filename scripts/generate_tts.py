@@ -40,7 +40,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 15
+VERSION = 16
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -1995,6 +1995,20 @@ def combine_part_audio(
     }
 
 
+def role_narration_metadata(job: dict) -> dict:
+    """Return the canonical voiceover metadata for one narration role."""
+    role = str(job.get("role") or "").strip().lower()
+    if role not in ROLE_ORDER:
+        raise RuntimeError(f"Unsupported TTS narration role: {role or 'missing'}")
+    return {
+        "voiceover_enabled": True,
+        "narration_source": (
+            "locked_part_text" if role == "main"
+            else "ai_generated_role_narration"
+        ),
+    }
+
+
 def stable_source_signature(
     narration_data: dict,
     jobs: list[dict],
@@ -2007,11 +2021,7 @@ def stable_source_signature(
             "role": job["role"],
             "text": job["text"],
             "text_sha256": job["text_sha256"],
-            "voiceover_enabled": True,
-            "narration_source": (
-                "locked_part_text" if job["role"] == "main"
-                else "ai_generated_role_narration"
-            ),
+            **role_narration_metadata(job),
             "source_text_sha256": job["text_sha256"],
             "source_word_count": len(job["text"].split()),
             "voice": job["voice"],
@@ -2126,6 +2136,7 @@ def write_back_narration_audio(
             duration = audio["actual_audio_duration_seconds"]
 
             row.update({
+                **role_narration_metadata(audio),
                 "audio": audio_path,
                 "audio_path": audio_path,
                 "audio_file": audio_path,
@@ -2386,6 +2397,7 @@ def main() -> int:
 
         if reused_scene is not None:
             reused_scene.update({
+                **role_narration_metadata(job),
                 "part": job["part"],
                 "scene": job["scene"],
                 "scene_id": job["scene_id"],
@@ -2563,6 +2575,7 @@ def main() -> int:
         )
 
         scene_record = {
+            **role_narration_metadata(job),
             "part": job["part"],
             "scene": job["scene"],
             "scene_id": job["scene_id"],
