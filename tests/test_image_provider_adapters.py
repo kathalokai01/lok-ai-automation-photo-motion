@@ -50,7 +50,8 @@ class ImageProviderAdapterTests(unittest.TestCase):
                 adapters.generate_ovhcloud_image("a detailed scene prompt", (720, 1280), 1)
 
     def test_horde_default_model_is_stable_sdxl(self):
-        self.assertEqual(adapters.os.getenv("AIHORDE_IMAGE_MODEL", "stable_diffusion_xl"), "stable_diffusion_xl")
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(adapters.os.getenv("AIHORDE_IMAGE_MODEL", "stable_diffusion_xl"), "stable_diffusion_xl")
 
 
 if __name__ == "__main__":
