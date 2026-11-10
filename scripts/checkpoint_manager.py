@@ -773,9 +773,9 @@ def parse_args() -> argparse.Namespace:
 
 
 
-# _PHOTO_MOTION_EVENT_WRAPPED: preserve original stage behavior and record factual outcomes.
-_photo_motion_original_main = main
-def main():
+# Record checkpoint restore activity without changing restore semantics.
+_photo_motion_original_restore = restore
+def restore(arguments):
     import time as _pm_time
     _pm_started = _pm_time.monotonic()
     try:
@@ -783,17 +783,15 @@ def main():
             from production_events import record_event as _pm_record
         except ImportError:
             from scripts.production_events import record_event as _pm_record
-        _pm_record("checkpoint_manager", "running")
+        _pm_record("checkpoint_restore", "running")
     except Exception:
         _pm_record = None
     try:
-        _pm_result = _photo_motion_original_main()
-        if _pm_record:
-            _pm_record("checkpoint_manager", "completed" if _pm_result in (None, 0) else "failed", metadata={"return_code": _pm_result}, started_at=_pm_started)
+        _pm_result = _photo_motion_original_restore(arguments)
+        if _pm_record: _pm_record("checkpoint_restore", "completed", started_at=_pm_started)
         return _pm_result
     except BaseException as _pm_exc:
-        if _pm_record:
-            _pm_record("checkpoint_manager", "failed", error=f"{type(_pm_exc).__name__}: {_pm_exc}", started_at=_pm_started)
+        if _pm_record: _pm_record("checkpoint_restore", "failed", error=f"{type(_pm_exc).__name__}: {_pm_exc}", started_at=_pm_started)
         raise
 
 if __name__ == "__main__":
