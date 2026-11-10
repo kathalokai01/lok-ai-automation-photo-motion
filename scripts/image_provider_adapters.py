@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import requests
 
 SESSION = requests.Session()
-OVH_BASE_URL = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
+OVH_IMAGE_URL = "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image"
 OVH_DEFAULT_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
 HORDE_BASE_URL = "https://aihorde.net/api/v2"
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
@@ -57,34 +57,43 @@ def _image_from_payload(payload, label):
     raise RuntimeError(f"{label} response contains no usable image")
 
 
-def generate_ovhcloud_image(prompt, size, seed):
-    """Call the OVHcloud OpenAI-compatible SDXL image endpoint."""
+def generate_ovhcloud_image(prompt, size, seed, negative_prompt=""):
+    """Call OVHcloud's documented SDXL raw-image endpoint (anonymous or keyed)."""
     api_key = os.getenv("OVHCLOUD_AI_ENDPOINTS_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("OVHCLOUD_AI_ENDPOINTS_API_KEY is not configured")
-    model = os.getenv("OVHCLOUD_IMAGE_MODEL", OVH_DEFAULT_MODEL).strip()
-    if not model:
-        raise RuntimeError("OVHCLOUD_IMAGE_MODEL is empty")
-    width, height = size
-    # SDXL endpoint output is square-oriented; request supported dimensions and
-    # let the existing image normalizer pad/crop to the project aspect ratio.
-    width = max(512, min(1024, int(width)))
-    height = max(512, min(1024, int(height)))
-    width = max(64, (width // 64) * 64)
-    height = max(64, (height // 64) * 64)
+    headers = {
+        "Accept": "application/octet-stream",
+        "Content-Type": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     response = SESSION.post(
-        OVH_BASE_URL + "/images/generations",
-        headers={"Authorization": f"Bearer {api_key}"},
+        OVH_IMAGE_URL,
+        headers=headers,
         json={
-            "model": model,
             "prompt": prompt[:12000],
-            "size": f"{width}x{height}",
-            "response_format": "b64_json",
-            "seed": int(seed),
+            "negative_prompt": negative_prompt[:4000],
         },
         timeout=(30, 240),
     )
-    return _image_from_payload(_json(response, "OVHcloud AI Endpoints"), "OVHcloud")
+    response.raise_for_status()
+    content_type = str(response.headers.get("content-type", "")).lower()
+    if (
+        content_type.startswith("image/")
+        or "octet-stream" in content_type
+    ):
+        raw = response.content
+        if raw and len(raw) <= MAX_IMAGE_BYTES:
+            return raw
+        raise RuntimeError("OVHcloud returned an empty or oversized image")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"OVHcloud returned unexpected content type: {content_type or 'unknown'}"
+        ) from exc
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    detail = "; ".join(str(item)[:200] for item in errors) if isinstance(errors, list) else "image generation failed"
+    raise RuntimeError(f"OVHcloud SDXL request failed: {detail}")
 
 
 def generate_ai_horde_image(prompt, size, seed, negative_prompt=""):
