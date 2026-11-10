@@ -57,4 +57,29 @@ def main():
  report={"status":"completed","version":"production-report-v1","story_title":docs["story"].get("title") or docs["story"].get("story_title"),"format":docs["visual_jobs"].get("format") if docs["visual_jobs"] else None,"configured_image_provider_order":configured_provider_order,"image_records":sum(counts.values()),"image_status_counts":dict(counts),"provider_record_counts":dict(providers),"provider_attempt_counts":dict(attempt_counts),"provider_attempt_status_counts":dict(attempt_status),"external_image_api_calls":docs["image_generation"].get("external_api_calls") if docs["image_generation"] else None,"billable_image_api_calls":docs["image_generation"].get("billable_api_calls") if docs["image_generation"] else None,"verified_reused_images":reused,"failed_image_records":failed,"costs":{"status":"not_reported_by_all_providers","amount":None,"currency":None},"stages":stages,"input_sha256":digest(config) if config.is_file() else None}
  TARGET.parent.mkdir(parents=True,exist_ok=True); TARGET.write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
  print("PRODUCTION REPORT:",TARGET)
+
+
+# _PHOTO_MOTION_EVENT_WRAPPED: preserve original stage behavior and record factual outcomes.
+_photo_motion_original_main = main
+def main():
+    import time as _pm_time
+    _pm_started = _pm_time.monotonic()
+    try:
+        try:
+            from production_events import record_event as _pm_record
+        except ImportError:
+            from scripts.production_events import record_event as _pm_record
+        _pm_record("production_report", "running")
+    except Exception:
+        _pm_record = None
+    try:
+        _pm_result = _photo_motion_original_main()
+        if _pm_record:
+            _pm_record("production_report", "completed" if _pm_result in (None, 0) else "failed", metadata={"return_code": _pm_result}, started_at=_pm_started)
+        return _pm_result
+    except BaseException as _pm_exc:
+        if _pm_record:
+            _pm_record("production_report", "failed", error=f"{type(_pm_exc).__name__}: {_pm_exc}", started_at=_pm_started)
+        raise
+
 if __name__=="__main__": main()
