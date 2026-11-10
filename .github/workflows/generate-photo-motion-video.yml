@@ -197,15 +197,15 @@ jobs:
             scripts/package_output.py
             scripts/pipeline_preflight.py
             scripts/checkpoint_manager.py
-scripts/production_events.py
-scripts/production_dashboard.py
-scripts/asset_approval.py
-scripts/production_cost_tracker.py
-scripts/render_preview.py
-scripts/render_templates.py
-scripts/image_processing_profiles.py
-scripts/production_batch.py
-scripts/production_presets.py
+            scripts/production_events.py
+            scripts/production_dashboard.py
+            scripts/asset_approval.py
+            scripts/production_cost_tracker.py
+            scripts/render_preview.py
+            scripts/render_templates.py
+            scripts/image_processing_profiles.py
+            scripts/production_batch.py
+            scripts/production_presets.py
           )
 
           for file in "${required_files[@]}"; do
