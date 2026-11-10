@@ -3152,6 +3152,34 @@ def main() -> int:
     return 0
 
 
+
+
+# _PHOTO_MOTION_EVENT_WRAPPED: preserve original stage behavior and record factual outcomes.
+_photo_motion_original_main = main
+def main():
+    import time as _pm_time
+    _pm_started = _pm_time.monotonic()
+    try:
+        try:
+            from production_events import record_event as _pm_record
+        except ImportError:
+            from scripts.production_events import record_event as _pm_record
+        _pm_record("pipeline_preflight", "running")
+    except Exception:
+        _pm_record = None
+    try:
+        from input_config import load_and_validate, get_production_settings
+        get_production_settings(load_and_validate(Path(__file__).resolve().parents[1] / "Input" / "topic.txt"))
+
+        _pm_result = _photo_motion_original_main()
+        if _pm_record:
+            _pm_record("pipeline_preflight", "completed" if _pm_result in (None, 0) else "failed", metadata={"return_code": _pm_result}, started_at=_pm_started)
+        return _pm_result
+    except BaseException as _pm_exc:
+        if _pm_record:
+            _pm_record("pipeline_preflight", "failed", error=f"{type(_pm_exc).__name__}: {_pm_exc}", started_at=_pm_started)
+        raise
+
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
