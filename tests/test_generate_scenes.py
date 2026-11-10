@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from scripts import checkpoint_manager
+from scripts import input_config
 
 from scripts import generate_scenes as scenes
 from scripts import generate_narration as narration
@@ -437,6 +438,32 @@ class ExtraSceneNarrationTests(unittest.TestCase):
 
         self.assertFalse(
             scenes.scene_is_valid(invalid_scene, expected, "a" * 64)
+        )
+
+
+class FreeFirstImageProviderOrderTests(unittest.TestCase):
+    def test_configured_provider_order_is_exact_and_complete(self):
+        config = input_config.load_and_validate(
+            Path(__file__).resolve().parents[1] / "Input" / "topic.txt"
+        )
+        self.assertEqual(
+            input_config.get_image_provider_order(config),
+            [
+                "huggingface",
+                "cloudflare_schnell",
+                "ovhcloud",
+                "aihorde",
+                "pollinations",
+                "cloudflare_klein",
+                "replicate",
+            ],
+        )
+
+    def test_provider_aliases_resolve_without_reordering(self):
+        config = {"IMAGE_PROVIDER_ORDER": "hf,ovh,ai_horde,cloudflare_schnell"}
+        self.assertEqual(
+            input_config.get_image_provider_order(config),
+            ["huggingface", "ovhcloud", "aihorde", "cloudflare_schnell"],
         )
 
 
