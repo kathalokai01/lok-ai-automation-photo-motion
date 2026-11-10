@@ -2024,7 +2024,6 @@ def run_provider_attempts(
                 record["unverified_candidate_sha256"] = None
                 record["unverified_candidate_prompt_sha256"] = None
                 record["unverified_candidate_provider"] = None
-        record["unverified_candidate_provider_key"] = None
                 record["unverified_candidate_provider_key"] = None
                 MODEL_PROGRESS_STATE["cursor_key"] = candidate_provider_key or MODEL_PROGRESS_STATE.get("cursor_key")
                 MODEL_PROGRESS_STATE["last_successful_model"] = candidate_provider_key or MODEL_PROGRESS_STATE.get("last_successful_model")
@@ -2043,6 +2042,7 @@ def run_provider_attempts(
         record["unverified_candidate_sha256"] = None
         record["unverified_candidate_prompt_sha256"] = None
         record["unverified_candidate_provider"] = None
+        record["unverified_candidate_provider_key"] = None
 
     attempts = build_provider_attempts(
         prompt, destination, item["size"], seed, negative
