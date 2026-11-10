@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INPUT_FILE = ROOT / "Input" / "topic.txt"
 OUTPUT_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "configured-visual-provider-selector-v3"
+VERSION = "configured-visual-provider-selector-v4-free-first-adapters"
 
 
 def log(*items):
@@ -56,6 +56,34 @@ def provider_model(provider, settings):
         return {
             "provider": provider,
             "model": settings["REPLICATE_IMAGE_MODEL"],
+            "fallback_models": [],
+        }
+
+    if provider == "cloudflare_schnell":
+        return {
+            "provider": provider,
+            "model": settings["CLOUDFLARE_IMAGE_FALLBACK_MODEL"],
+            "fallback_models": [],
+        }
+
+    if provider == "cloudflare_klein":
+        return {
+            "provider": provider,
+            "model": settings["CLOUDFLARE_IMAGE_MODEL"],
+            "fallback_models": [],
+        }
+
+    if provider == "ovhcloud":
+        return {
+            "provider": provider,
+            "model": settings["OVHCLOUD_IMAGE_MODEL"],
+            "fallback_models": [],
+        }
+
+    if provider == "aihorde":
+        return {
+            "provider": provider,
+            "model": settings["AIHORDE_IMAGE_MODEL"],
             "fallback_models": [],
         }
 
