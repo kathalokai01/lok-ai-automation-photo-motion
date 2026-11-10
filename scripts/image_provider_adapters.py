@@ -176,3 +176,10 @@ def generate_ai_horde_image(prompt, size, seed, negative_prompt=""):
             raise RuntimeError("AI Horde finished without a generated image")
         time.sleep(3)
     raise TimeoutError("AI Horde image generation exceeded the 9-minute wait limit")
+
+
+
+def apply_optional_image_profile(source, destination, profile="none"):
+    """Apply an explicit local finishing profile; provider generation remains unchanged."""
+    from image_processing_profiles import apply_profile
+    return apply_profile(source, destination, profile)
