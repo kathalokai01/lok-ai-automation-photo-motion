@@ -1866,6 +1866,11 @@ def main():
     except Exception:
         _pm_record = None
     try:
+        from input_config import load_and_validate, get_production_settings
+        from render_templates import get_template
+        _pm_config = load_and_validate(__import__("pathlib").Path(__file__).resolve().parents[1] / "Input" / "topic.txt")
+        _pm_settings = get_production_settings(_pm_config)
+        get_template(_pm_settings["render_template"])
         _pm_result = _photo_motion_original_main()
         if _pm_record:
             _pm_record("render_video", "completed" if _pm_result in (None, 0) else "failed", metadata={"return_code": _pm_result}, started_at=_pm_started)
