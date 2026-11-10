@@ -44,7 +44,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v37-ovhcloud-aihorde-free-first"
+VERSION = "photo-motion-image-generator-v38-vision-retry-and-unverified-candidate-resume"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -1986,6 +1986,61 @@ def run_provider_attempts(
     negative = build_negative_prompt(item)
     seed = deterministic_seed(item)
     destination = item["destination"]
+
+    # A previous run may have generated the image but lost Gemini Vision availability.
+    # Re-verify that exact file before spending another image-generation API call.
+    candidate_hash = clean(record.get("unverified_candidate_sha256"))
+    candidate_prompt_hash = clean(record.get("unverified_candidate_prompt_sha256"))
+    candidate_provider = clean(record.get("unverified_candidate_provider"))
+    if (
+        candidate_hash
+        and candidate_prompt_hash == sha256_text(prompt)
+        and destination.is_file()
+        and not destination.is_symlink()
+        and sha256_file(destination).casefold() == candidate_hash.casefold()
+    ):
+        log("REVERIFYING SAVED UNVERIFIED IMAGE:", item["scene_id"], "| provider:", candidate_provider)
+        try:
+            candidate_quality = validate_scene_image(
+                destination, prompt, item["size"],
+                enabled=IMAGE_QUALITY_VISION_ENABLED,
+                minimum_score=IMAGE_QUALITY_MIN_SCORE,
+                model=IMAGE_QUALITY_VISION_MODEL,
+                timeout=min(TIMEOUT, 120),
+                reference_image_paths=find_character_reference_images(item, records),
+            )
+            if candidate_quality.get("accepted"):
+                integrity = image_integrity(destination, item["size"])
+                record.update(make_record(
+                    item, "generated", candidate_provider or "verified previous candidate",
+                    record.get("attempts", []),
+                ))
+                record["quality_verification"] = candidate_quality
+                record["semantic_story_match"] = "verified"
+                record["last_successful_model"] = candidate_provider
+                record["image_sha256"] = integrity["sha256"]
+                record["file_integrity"] = "verified"
+                record["unverified_candidate_sha256"] = None
+                record["unverified_candidate_prompt_sha256"] = None
+                record["unverified_candidate_provider"] = None
+                MODEL_PROGRESS_STATE["cursor_key"] = candidate_provider or MODEL_PROGRESS_STATE.get("cursor_key")
+                MODEL_PROGRESS_STATE["last_successful_model"] = candidate_provider or MODEL_PROGRESS_STATE.get("last_successful_model")
+                save_checkpoints(records, metadata, policy, counters)
+                log("SAVED IMAGE VERIFIED WITHOUT REGENERATION:", item["scene_id"])
+                return
+            log("Saved candidate failed vision quality; generating a replacement:", item["scene_id"])
+            destination.unlink(missing_ok=True)
+        except VisionVerificationUnavailable:
+            record["status"] = "pending"
+            save_checkpoints(records, metadata, policy, counters)
+            raise
+        except Exception as candidate_error:
+            log("Saved candidate is invalid; replacing:", item["scene_id"], type(candidate_error).__name__)
+            destination.unlink(missing_ok=True)
+        record["unverified_candidate_sha256"] = None
+        record["unverified_candidate_prompt_sha256"] = None
+        record["unverified_candidate_provider"] = None
+
     attempts = build_provider_attempts(
         prompt, destination, item["size"], seed, negative
     )
@@ -2142,10 +2197,19 @@ def run_provider_attempts(
 
             except VisionVerificationUnavailable as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                if destination.is_file():
-                    destination.unlink(missing_ok=True)
                 record["status"] = "pending"
                 record["quality_verification_error"] = last_error[:1000]
+                # Keep the generated file, hash and prompt signature. A later run can
+                # re-verify it without paying for another image generation.
+                if destination.is_file() and not destination.is_symlink():
+                    try:
+                        candidate_integrity = image_integrity(destination, item["size"])
+                        record["unverified_candidate_sha256"] = candidate_integrity["sha256"]
+                        record["unverified_candidate_prompt_sha256"] = sha256_text(prompt)
+                        record["unverified_candidate_provider"] = provider_key
+                        record["unverified_candidate_path"] = item["relative_path"]
+                    except Exception:
+                        destination.unlink(missing_ok=True)
                 record.pop("current_provider", None)
                 record.pop("current_round", None)
                 record.pop("current_model_index", None)
