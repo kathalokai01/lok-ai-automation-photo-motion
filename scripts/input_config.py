@@ -1896,3 +1896,17 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"INPUT CONFIG VALIDATION: FAILED: {exc}")
         raise
+
+# Optional production features. Defaults do not alter the current renderer or provider order.
+def get_production_settings(config: dict[str, Any]) -> dict[str, Any]:
+    def flag(key: str, default: bool) -> bool:
+        value = config.get(key, default)
+        if isinstance(value, bool): return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    template = str(config.get("PRODUCTION_RENDER_TEMPLATE", "documentary")).strip().lower()
+    profile = str(config.get("IMAGE_PROCESSING_PROFILE", "none")).strip().lower()
+    preset = str(config.get("PRODUCTION_PRESET", "default")).strip().lower()
+    if template not in {"documentary", "cinematic", "minimal"}: raise ValueError("Invalid PRODUCTION_RENDER_TEMPLATE")
+    if profile not in {"none", "natural", "cinematic", "soft"}: raise ValueError("Invalid IMAGE_PROCESSING_PROFILE")
+    if preset not in {"default", "cinematic", "natural", "review"}: raise ValueError("Invalid PRODUCTION_PRESET")
+    return {"dashboard_enabled":flag("PRODUCTION_DASHBOARD_ENABLED",True),"preview_enabled":flag("PRODUCTION_PREVIEW_ENABLED",True),"event_journal_enabled":flag("PRODUCTION_EVENT_JOURNAL_ENABLED",True),"render_template":template,"image_profile":profile,"comfyui_optional":flag("COMFYUI_OPTIONAL",False),"asset_approval_required":flag("ASSET_APPROVAL_REQUIRED",False),"preset":preset}
