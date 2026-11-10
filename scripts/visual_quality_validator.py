@@ -274,3 +274,10 @@ def validate_scene_image(
         "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "verification_contract": "technical_integrity+gemini_prompt_and_character_review",
     }
+
+
+
+def processing_profile_is_optional() -> bool:
+    """ComfyUI/profile processing is optional and must not gate image validation."""
+    import os
+    return not bool(os.getenv("COMFYUI_API_URL", "").strip())
