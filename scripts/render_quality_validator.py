@@ -19,12 +19,18 @@ def main():
  doc=json.loads(RENDER.read_text(encoding="utf-8")); parts=doc.get("parts")
  if not isinstance(parts,list) or not parts: raise RuntimeError("Render manifest has no Part outputs")
  if len(parts)!=selected: raise RuntimeError(f"Render Part count {len(parts)} does not match selected PARTS {selected}")
+ part_numbers=[]
  rows=[]
  for row in parts:
   if not isinstance(row,dict): raise RuntimeError("Invalid render Part record")
+  part_number=int(row.get("part",0))
+  if part_number<1: raise RuntimeError("Render Part number is missing or invalid")
+  part_numbers.append(part_number)
   raw=row.get("path") or row.get("video_path") or row.get("output_path")
   if not raw: raise RuntimeError("Render Part has no video path")
   p=Path(raw); p=p if p.is_absolute() else ROOT/p
+  try: p.resolve().relative_to(ROOT.resolve())
+  except ValueError: raise RuntimeError(f"Rendered video escapes repository: {p}")
   if not p.is_file() or p.is_symlink() or p.stat().st_size<1000: raise RuntimeError(f"Missing/unsafe rendered video: {p}")
   cmd=["ffprobe","-v","error","-show_entries","format=duration:stream=codec_type,width,height,avg_frame_rate,r_frame_rate","-of","json",str(p)]
   result=subprocess.run(cmd,capture_output=True,text=True,timeout=120,check=False)
@@ -40,6 +46,8 @@ def main():
   duration=float(data["format"]["duration"])
   if not math.isfinite(duration) or duration<=0: raise RuntimeError(f"Invalid duration for {p}")
   rows.append({"part":row.get("part"),"path":p.relative_to(ROOT).as_posix(),"sha256":sha(p),"bytes":p.stat().st_size,"dimensions":list(dims),"fps":actual,"duration":round(duration,4),"audio_stream":True})
+ if sorted(part_numbers)!=list(range(1,selected+1)) or len(set(part_numbers))!=selected:
+  raise RuntimeError("Render manifest does not cover each selected Part exactly once")
  REPORT.parent.mkdir(parents=True,exist_ok=True)
  report={"status":"completed","version":"render-quality-v1","format":mode,"expected_dimensions":list(expected),"expected_fps":fps,"part_count":len(rows),"parts":rows}
  REPORT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
