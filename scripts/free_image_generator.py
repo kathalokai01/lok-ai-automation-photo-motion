@@ -2389,6 +2389,16 @@ def main():
             previous_attempts = old.get("attempts", []) if isinstance(old, dict) else []
             if isinstance(previous_attempts, list) and previous_attempts:
                 record["attempts"] = list(previous_attempts)
+            # Carry only hash-bound unverified candidates across runs for re-verification.
+            for candidate_key in (
+                "unverified_candidate_sha256",
+                "unverified_candidate_prompt_sha256",
+                "unverified_candidate_provider",
+                "unverified_candidate_path",
+            ):
+                candidate_value = old.get(candidate_key) if isinstance(old, dict) else None
+                if candidate_value:
+                    record[candidate_key] = candidate_value
 
         records.append(record)
 
