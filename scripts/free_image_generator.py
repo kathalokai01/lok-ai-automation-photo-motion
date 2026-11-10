@@ -841,6 +841,21 @@ def save_image_bytes(raw, destination, size):
         image.load()
         save_image(image, destination, size)
 
+def save_image_bytes_fit(raw, destination, size):
+    """Crop square-provider output to the requested aspect ratio without bars."""
+    if not raw:
+        raise RuntimeError("Provider returned empty image data.")
+    with Image.open(BytesIO(raw)) as image:
+        image.load()
+        fitted = ImageOps.fit(
+            ImageOps.exif_transpose(image).convert("RGB"),
+            tuple(size),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+        save_image(fitted, destination, size)
+
+
 
 def response_image(response, destination, size, provider):
     response.raise_for_status()
@@ -1343,18 +1358,17 @@ def build_provider_attempts(prompt, destination, size, seed, negative):
                 ))
 
         elif provider == "ovhcloud":
-            if not os.getenv("OVHCLOUD_AI_ENDPOINTS_API_KEY", "").strip():
-                log("Skipping OVHcloud: OVHCLOUD_AI_ENDPOINTS_API_KEY missing.")
-            else:
-                attempts.append((
-                    f"OVHcloud AI Endpoints: {OVHCLOUD_IMAGE_MODEL}",
-                    f"ovhcloud:{OVHCLOUD_IMAGE_MODEL}",
-                    False,
-                    lambda: save_image_bytes(
-                        adapter_generate_ovhcloud(prompt, size, seed),
-                        destination, size,
+            attempts.append((
+                f"OVHcloud SDXL: {OVHCLOUD_IMAGE_MODEL}",
+                f"ovhcloud:{OVHCLOUD_IMAGE_MODEL}",
+                False,
+                lambda: save_image_bytes_fit(
+                    adapter_generate_ovhcloud(
+                        prompt, size, seed, negative
                     ),
-                ))
+                    destination, size,
+                ),
+            ))
 
         elif provider == "aihorde":
             if os.getenv("AIHORDE_DISABLED", "").strip().lower() in {"1", "true", "yes"}:
