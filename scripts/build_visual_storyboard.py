@@ -30,6 +30,10 @@ def main():
     manifest=json.loads(MANIFEST.read_text(encoding="utf-8"))
     if not isinstance(manifest,dict):
         raise RuntimeError("Storyboard image manifest must be a JSON object")
+    if str(manifest.get("status", "")).lower() != "completed":
+        raise RuntimeError("Image manifest is not fully completed")
+    if str(manifest.get("format", "")).lower() not in {"short", "full"}:
+        raise RuntimeError("Image manifest FORMAT is invalid")
     records=rows(manifest)
     if not records: raise RuntimeError("Image manifest contains no scene records")
     accepted=[]
@@ -43,7 +47,7 @@ def main():
         except ValueError: raise RuntimeError(f"Storyboard image escapes repository: {p}")
         if not p.is_file() or p.is_symlink(): continue
         digest=sha(p)
-        declared=row.get("image_sha256") or row.get("sha256") or row.get("image_sha256")
+        declared=row.get("image_sha256") or row.get("sha256")
         if declared and declared != digest: raise RuntimeError(f"Storyboard image hash mismatch: {p}")
         with Image.open(p) as im:
             im.verify()
