@@ -8,10 +8,13 @@ import json
 import os
 import re
 import hashlib
+import time
 from pathlib import Path
 from typing import Any
 
 import requests
+
+from gemini_http import retry_after_seconds
 from PIL import Image, ImageStat
 
 
@@ -55,6 +58,10 @@ def _technical_checks(image_path: Path, expected_size: tuple[int, int]) -> dict:
             }
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Image decode/integrity check failed: {exc}") from exc
+
+
+VISION_HTTP_MAX_ATTEMPTS = 4
+VISION_RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 def _vision_check(
@@ -132,25 +139,43 @@ def _vision_check(
         },
     }
 
-    try:
-        response = requests.post(
-            endpoint,
-            params={"key": api_key},
-            json=request_body,
-            timeout=timeout,
+    payload = None
+    last_http_error = None
+    for attempt in range(1, VISION_HTTP_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.post(
+                endpoint,
+                params={"key": api_key},
+                json=request_body,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except requests.RequestException as exc:
+            last_http_error = exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status not in VISION_RETRYABLE_STATUSES or attempt >= VISION_HTTP_MAX_ATTEMPTS:
+                detail = f"HTTP {status}" if status else type(exc).__name__
+                raise VisionVerificationUnavailable(
+                    f"Gemini vision verification request failed after {attempt} attempt(s): {detail}."
+                ) from exc
+            delay = retry_after_seconds(exc, attempt, default_base=4, maximum=30)
+            print(
+                f"Gemini Vision transient HTTP {status}; retry {attempt + 1}/"
+                f"{VISION_HTTP_MAX_ATTEMPTS} in {delay}s.",
+                flush=True,
+            )
+            time.sleep(delay)
+        except ValueError as exc:
+            raise VisionVerificationUnavailable(
+                "Gemini vision verification returned invalid JSON."
+            ) from exc
+    if payload is None:
+        detail = type(last_http_error).__name__ if last_http_error else "empty response"
+        raise VisionVerificationUnavailable(
+            f"Gemini vision verification unavailable: {detail}."
         )
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-        detail = f"HTTP {status}" if status else type(exc).__name__
-        raise VisionVerificationUnavailable(
-            f"Gemini vision verification request failed: {detail}."
-        ) from exc
-    except ValueError as exc:
-        raise VisionVerificationUnavailable(
-            "Gemini vision verification returned invalid JSON."
-        ) from exc
 
     candidates = payload.get("candidates") if isinstance(payload, dict) else None
     if not isinstance(candidates, list) or not candidates:
