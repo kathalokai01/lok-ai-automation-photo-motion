@@ -40,16 +40,14 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 16
+VERSION = 17
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
 MAX_AUDIO_SECONDS = 3600.0
 
-PRIMARY_ORDER = ["fish_audio", "gemini_tts", "edge_tts"]
-FALLBACK_ORDER = [
-    "piper", "elevenlabs", "cartesia", "finevoice", "minimax"
-]
+PRIMARY_ORDER = ["elevenlabs", "fish_audio", "cartesia"]
+FALLBACK_ORDER = ["finevoice", "gemini_tts", "edge_tts", "piper", "minimax"]
 ALLOWED_PROVIDERS = PRIMARY_ORDER + FALLBACK_ORDER
 
 BILLABLE_PROVIDERS = {
@@ -578,9 +576,18 @@ def provider_available(
         )
 
     elif provider == "elevenlabs":
+        profile_voice_ids = (
+            os.getenv("ELEVENLABS_VOICE_ID_CHILD_FRIENDLY"),
+            os.getenv("ELEVENLABS_VOICE_ID_FEMALE_STORYTELLER"),
+            os.getenv("ELEVENLABS_VOICE_ID_MALE_STORYTELLER"),
+            os.getenv("ELEVENLABS_VOICE_ID_CHARACTER"),
+        )
         ok = bool(
             os.getenv("ELEVENLABS_API_KEY")
-            and os.getenv("ELEVENLABS_VOICE_ID")
+            and (
+                os.getenv("ELEVENLABS_VOICE_ID")
+                or any(profile_voice_ids)
+            )
         )
 
     elif provider == "cartesia":
