@@ -56,8 +56,11 @@ METADATA_TAGS = OUT / "publish" / "youtube_tags.txt"
 REPORT = OUT / "validation_report.json"
 PACKAGE_REPORT = OUT / "package_manifest.json"
 PACKAGE_NAME = OUT / "package_archive_name.txt"
+STORYBOARD_MANIFEST = OUT / "visuals" / "storyboard_manifest.json"
+RENDER_QUALITY_REPORT = OUT / "quality" / "render_quality_report.json"
+PRODUCTION_REPORT = OUT / "production_report.json"
 
-VERSION = "final-validator-v103-all-role-narration-captions"
+VERSION = "final-validator-v104-production-and-render-quality-contract"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -2076,6 +2079,71 @@ def validate_package(
     }
 
 
+def validate_production_artifacts(mode: str, title: str) -> dict:
+    storyboard = read_json(STORYBOARD_MANIFEST)
+    render_quality = read_json(RENDER_QUALITY_REPORT)
+    production = read_json(PRODUCTION_REPORT)
+
+    if storyboard.get("status") != "completed":
+        fail("Visual storyboard is not completed")
+    if render_quality.get("status") != "completed":
+        fail("Technical render quality report is not completed")
+    if production.get("status") != "completed":
+        fail("Production report is not completed")
+    if clean(storyboard.get("format")).lower() != mode:
+        fail("Storyboard FORMAT mismatch")
+    if clean(render_quality.get("format")).lower() != mode:
+        fail("Render quality FORMAT mismatch")
+    if clean(production.get("story_title")) != title:
+        fail("Production report story title mismatch")
+
+    storyboard_path = safe_output(
+        storyboard.get("path"), "Storyboard image", MIN_IMAGE_BYTES
+    )
+    if digest_file(storyboard_path) != storyboard.get("sha256"):
+        fail("Storyboard image SHA-256 mismatch")
+    if storyboard.get("source_image_manifest_sha256") != digest_file(
+        OUT / "visuals" / "image_manifest.json"
+    ):
+        fail("Storyboard source image manifest SHA-256 mismatch")
+
+    quality_parts = render_quality.get("parts")
+    if not isinstance(quality_parts, list) or not quality_parts:
+        fail("Render quality report contains no Part videos")
+    checked_parts = []
+    for row in quality_parts:
+        if not isinstance(row, dict):
+            fail("Invalid render quality Part record")
+        path = safe_output(row.get("path"), "Render quality Part video", MIN_VIDEO_BYTES)
+        if digest_file(path) != row.get("sha256"):
+            fail(f"Render quality video SHA-256 mismatch: {relative(path)}")
+        info = media_info(path)
+        if not info.get("has_video") or not info.get("has_audio"):
+            fail(f"Render quality Part lacks audio/video: {relative(path)}")
+        checked_parts.append(relative(path))
+
+    return {
+        "storyboard": {
+            "status": "valid",
+            "path": relative(storyboard_path),
+            "sha256": digest_file(storyboard_path),
+            "image_count": storyboard.get("image_count"),
+        },
+        "render_quality": {
+            "status": "valid",
+            "parts_checked": len(checked_parts),
+            "paths": checked_parts,
+            "report_sha256": digest_file(RENDER_QUALITY_REPORT),
+        },
+        "production_report": {
+            "status": "valid",
+            "sha256": digest_file(PRODUCTION_REPORT),
+            "image_records": production.get("image_records"),
+            "costs": production.get("costs"),
+        },
+    }
+
+
 def main() -> int:
     if not shutil.which("ffprobe"):
         fail("ffprobe is required")
@@ -2133,6 +2201,9 @@ def main() -> int:
     package_check = validate_package(
         part_numbers, mode, story_check["title"]
     )
+    production_check = validate_production_artifacts(
+        mode, story_check["title"]
+    )
 
     checks = {
         "story": {"status": "valid", **story_check},
@@ -2147,6 +2218,7 @@ def main() -> int:
         "metadata": {"status": "valid", **metadata_check},
         "mode_separation": {"status": "valid", **mode_check},
         "unique_output_files": {"status": "valid", **unique_check},
+        "production_artifacts": {"status": "valid", **production_check},
     }
 
     report = {
