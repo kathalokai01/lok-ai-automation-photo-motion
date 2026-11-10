@@ -286,3 +286,13 @@ SKIP_COMPLETED_SCENES = true
 
 FAILURE_POLICY = "retry_then_checkpoint"
 # retry_then_checkpoint | skip | stop
+
+# Optional static production dashboard, preview, presets and image finishing.
+PRODUCTION_DASHBOARD_ENABLED=true
+PRODUCTION_PREVIEW_ENABLED=true
+PRODUCTION_EVENT_JOURNAL_ENABLED=true
+PRODUCTION_RENDER_TEMPLATE="documentary"
+IMAGE_PROCESSING_PROFILE="none"
+COMFYUI_OPTIONAL=false
+ASSET_APPROVAL_REQUIRED=false
+PRODUCTION_PRESET="default"
