@@ -36,14 +36,14 @@ def main():
   if not isinstance(r,dict): continue
   status=str(r.get("status","unknown")).lower(); counts[status]+=1
   provider=str(r.get("provider") or "not_recorded"); providers[provider]+=1
-  if status=="reused": reused+=1
+  if status in {"existing","reused"}: reused+=1
   if status in {"failed","error"}: failed+=1
  stages={}
  for name,path in SOURCES.items():
   d=docs[name]
   stages[name]={"status":str(d.get("status","missing")) if d else "missing","path":path.relative_to(ROOT).as_posix() if path.exists() else None,"sha256":digest(path) if path.is_file() else None}
  config=ROOT/"Input"/"topic.txt"
- report={"status":"completed","version":"production-report-v1","story_title":docs["story"].get("title") or docs["story"].get("story_title"),"format":docs["visual_jobs"].get("format") if docs["visual_jobs"] else None,"configured_image_provider_order":os.getenv("IMAGE_PROVIDER_ORDER","see Input/topic.txt"),"image_records":sum(counts.values()),"image_status_counts":dict(counts),"provider_attempt_success_records":dict(providers),"verified_reused_images":reused,"failed_image_records":failed,"costs":{"status":"not_reported_by_all_providers","amount":None,"currency":None},"stages":stages,"input_sha256":digest(config) if config.is_file() else None}
+ report={"status":"completed","version":"production-report-v1","story_title":docs["story"].get("title") or docs["story"].get("story_title"),"format":docs["visual_jobs"].get("format") if docs["visual_jobs"] else None,"configured_image_provider_order":os.getenv("IMAGE_PROVIDER_ORDER","see Input/topic.txt"),"image_records":sum(counts.values()),"image_status_counts":dict(counts),"provider_record_counts":dict(providers),"verified_reused_images":reused,"failed_image_records":failed,"costs":{"status":"not_reported_by_all_providers","amount":None,"currency":None},"stages":stages,"input_sha256":digest(config) if config.is_file() else None}
  TARGET.parent.mkdir(parents=True,exist_ok=True); TARGET.write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
  print("PRODUCTION REPORT:",TARGET)
 if __name__=="__main__": main()
