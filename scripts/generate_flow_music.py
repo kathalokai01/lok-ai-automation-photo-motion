@@ -1167,7 +1167,8 @@ def build_role_segments(compositions, timeline, signature):
             "role_segments": segments,
             "completed_role_segments": [entry["scene_id"] for entry in segments],
             "api_calls": API_CALLS,
-            "paid_services_used": API_CALLS > 0,
+            "paid_services_used": PAID_PROVIDER_CALLS > 0,
+        "paid_provider_api_calls": PAID_PROVIDER_CALLS,
             "updated_at": time.time(),
         })
 
@@ -1414,7 +1415,8 @@ def write_unavailable(reason, model=None, duration=None, signature=None):
         "model": model or DEFAULT_MODEL,
         "reason": str(reason)[:2000],
         "fallback": "sound_design_local_fallback",
-        "paid_services_used": API_CALLS > 0,
+        "paid_services_used": PAID_PROVIDER_CALLS > 0,
+        "paid_provider_api_calls": PAID_PROVIDER_CALLS,
         "external_api_calls": API_CALLS,
         "version": VERSION,
     }
@@ -1438,7 +1440,8 @@ def write_unavailable(reason, model=None, duration=None, signature=None):
         "role_segments": checkpoint.get("role_segments", []) if isinstance(checkpoint.get("role_segments"), list) else [],
         "completed_role_segments": checkpoint.get("completed_role_segments", []) if isinstance(checkpoint.get("completed_role_segments"), list) else [],
         "api_calls": API_CALLS,
-        "paid_services_used": API_CALLS > 0,
+        "paid_services_used": PAID_PROVIDER_CALLS > 0,
+        "paid_provider_api_calls": PAID_PROVIDER_CALLS,
         "updated_at": time.time(),
     })
 
@@ -1461,6 +1464,8 @@ def write_disabled():
 def main():
     global API_CALLS, PAID_PROVIDER_CALLS
 
+    API_CALLS = 0
+    PAID_PROVIDER_CALLS = 0
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     SOURCE_DIR.mkdir(parents=True, exist_ok=True)
     SEGMENT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1721,7 +1726,8 @@ def main():
                 for item in published["role_segments"]
             },
             "api_calls": API_CALLS,
-            "paid_services_used": API_CALLS > 0,
+            "paid_services_used": PAID_PROVIDER_CALLS > 0,
+        "paid_provider_api_calls": PAID_PROVIDER_CALLS,
             "updated_at": time.time(),
         })
 
