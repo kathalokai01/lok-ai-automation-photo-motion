@@ -18,6 +18,10 @@ from visual_quality_validator import (
     VisionVerificationUnavailable,
     validate_scene_image,
 )
+from image_provider_adapters import (
+    generate_ai_horde_image as adapter_generate_ai_horde,
+    generate_ovhcloud_image as adapter_generate_ovhcloud,
+)
 from urllib.parse import quote, urlparse
 
 import requests
@@ -40,7 +44,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v36-pollinations-billing-and-provider-scoped-blocks"
+VERSION = "photo-motion-image-generator-v37-ovhcloud-aihorde-free-first"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -193,6 +197,7 @@ def apply_input_settings(config):
     global PROVIDER_ORDER, HF_SPACES, POLLINATIONS_MODELS
     global REPLICATE_MODEL, CLOUDFLARE_IMAGE_MODEL
     global CLOUDFLARE_IMAGE_FALLBACK_MODEL
+    global OVHCLOUD_IMAGE_MODEL, AIHORDE_IMAGE_MODEL
     global ALLOW_BILLABLE, IMAGE_FALLBACK_ENABLED, MAX_RETRIES
     global IMAGE_QUALITY_VISION_ENABLED, IMAGE_QUALITY_VISION_MODEL
     global IMAGE_QUALITY_MIN_SCORE, IMAGE_QUALITY_MAX_FAILURES_PER_MODEL
@@ -220,6 +225,8 @@ def apply_input_settings(config):
     CLOUDFLARE_IMAGE_FALLBACK_MODEL = clean(
         settings["CLOUDFLARE_IMAGE_FALLBACK_MODEL"]
     )
+    OVHCLOUD_IMAGE_MODEL = clean(settings["OVHCLOUD_IMAGE_MODEL"])
+    AIHORDE_IMAGE_MODEL = clean(settings["AIHORDE_IMAGE_MODEL"])
 
     # Both the input setting and workflow environment must allow billing.
     ALLOW_BILLABLE = bool(settings["IMAGE_ALLOW_BILLABLE"])
@@ -234,7 +241,7 @@ def apply_input_settings(config):
     IMAGE_QUALITY_MAX_FAILURES_PER_MODEL = max(1, min(10, int(config.get("IMAGE_QUALITY_MAX_FAILURES_PER_MODEL", 2))))
     IMAGE_QUALITY_SKIP_SCENES = max(1, min(50, int(config.get("IMAGE_QUALITY_SKIP_SCENES", 3))))
 
-    supported = {"huggingface", "pollinations", "replicate", "cloudflare"}
+    supported = {"huggingface", "pollinations", "replicate", "cloudflare", "cloudflare_schnell", "cloudflare_klein", "ovhcloud", "aihorde"}
 
     if not PROVIDER_ORDER:
         raise RuntimeError("IMAGE_PROVIDER_ORDER is empty.")
@@ -1298,6 +1305,68 @@ def build_provider_attempts(prompt, destination, size, seed, negative):
                     True,
                     lambda: generate_replicate(
                         prompt, destination, size, seed
+                    ),
+                ))
+
+        elif provider == "cloudflare_schnell":
+            model = CLOUDFLARE_IMAGE_FALLBACK_MODEL
+            if not ALLOW_BILLABLE:
+                log("Skipping Cloudflare Schnell: billable permission disabled.")
+            elif not model or not CLOUDFLARE_IMAGE_API_TOKEN or not CLOUDFLARE_ACCOUNT_ID:
+                log("Skipping Cloudflare Schnell: model/token/account ID missing.")
+            else:
+                attempts.append((
+                    f"Cloudflare Workers AI Schnell: {model}",
+                    f"cloudflare:{model}",
+                    True,
+                    lambda model=model: generate_cloudflare(
+                        prompt, destination, size, seed, model
+                    ),
+                ))
+
+        elif provider == "cloudflare_klein":
+            model = CLOUDFLARE_IMAGE_MODEL
+            if not ALLOW_BILLABLE:
+                log("Skipping Cloudflare Klein: billable permission disabled.")
+            elif not model or not CLOUDFLARE_IMAGE_API_TOKEN or not CLOUDFLARE_ACCOUNT_ID:
+                log("Skipping Cloudflare Klein: model/token/account ID missing.")
+            else:
+                attempts.append((
+                    f"Cloudflare Workers AI Klein: {model}",
+                    f"cloudflare:{model}",
+                    True,
+                    lambda model=model: generate_cloudflare(
+                        prompt, destination, size, seed, model
+                    ),
+                ))
+
+        elif provider == "ovhcloud":
+            if not os.getenv("OVHCLOUD_AI_ENDPOINTS_API_KEY", "").strip():
+                log("Skipping OVHcloud: OVHCLOUD_AI_ENDPOINTS_API_KEY missing.")
+            else:
+                attempts.append((
+                    f"OVHcloud AI Endpoints: {OVHCLOUD_IMAGE_MODEL}",
+                    f"ovhcloud:{OVHCLOUD_IMAGE_MODEL}",
+                    False,
+                    lambda: save_image_bytes(
+                        adapter_generate_ovhcloud(prompt, size, seed),
+                        destination, size,
+                    ),
+                ))
+
+        elif provider == "aihorde":
+            if os.getenv("AIHORDE_DISABLED", "").strip().lower() in {"1", "true", "yes"}:
+                log("Skipping AI Horde: explicitly disabled.")
+            else:
+                attempts.append((
+                    f"AI Horde: {AIHORDE_IMAGE_MODEL}",
+                    f"aihorde:{AIHORDE_IMAGE_MODEL}",
+                    False,
+                    lambda: save_image_bytes(
+                        adapter_generate_ai_horde(
+                            prompt, size, seed, negative
+                        ),
+                        destination, size,
                     ),
                 ))
 
