@@ -73,7 +73,10 @@ def generate_music(provider: str, prompt: str, duration_seconds: float, destinat
             raise MusicProviderError("STABILITY_API_KEY is missing.")
         response = requests.post(
             STABILITY_URL,
-            headers={"Authorization": f"Bearer {key}"},
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Accept": "audio/*",
+            },
             files={"none": ""},
             data={
                 "model": os.getenv("STABLE_AUDIO_MODEL", "stable-audio-3"),
