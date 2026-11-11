@@ -35,8 +35,8 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v13-bounded-world-context"
-PROMPT_VERSION = 13
+VERSION = "photo-motion-visual-jobs-v14-explicit-event-text-control"
+PROMPT_VERSION = 14
 
 ROLE_ORDER = {
     "hook": 0,
@@ -843,7 +843,15 @@ def build_negative_prompt(
         "floating objects",
         "captions",
         "subtitles",
-        "unintended written text",
+        "unwanted text overlay",
+        "random letters",
+        "random numbers",
+        "gibberish writing",
+        "pseudo-text",
+        "illegible typography",
+        "decorative typography",
+        "speech bubbles",
+        "interface elements",
         "logo",
         "watermark",
         "low resolution",
@@ -990,6 +998,34 @@ def build_prompt(
         "EXACT STORY EVENT — PRIMARY VISUAL INSTRUCTION:",
         visual,
         (
+            "NON-NEGOTIABLE SCENE MATCH: The image must depict this exact scene, "
+            "not merely its topic, mood, genre or a loosely related illustration. "
+            "Use the scene-specific action and physical details from the visual instruction "
+            "as the source of truth. Do not replace the event with a generic portrait, "
+            "landscape, building shot or symbolic image."
+        ),
+        (
+            "VISIBLE KEY-EVENT REQUIREMENT: Make the single most important action, "
+            "failure, discovery, decision, danger or consequence of THIS scene clearly "
+            "visible in the frame. Show the cause and its visible physical result when "
+            "the narration describes both. The key event must be readable at a glance; "
+            "do not hide it behind characters, crop it out, imply it only through mood, "
+            "or substitute an unrelated dramatic moment. Do not invent an event that "
+            "the narration and scene prompt do not establish."
+        ),
+        (
+            "ONE SCENE ONLY: Create one coherent continuous cinematic frame at the "
+            "exact moment described. No collage, split screen, storyboard panels, "
+            "before-and-after layout, montage or multiple alternative moments."
+        ),
+        (
+            "TEXT CONTROL: The image must contain no added words, captions, subtitles, "
+            "labels, title cards, speech bubbles, logos, watermarks, random letters, "
+            "numbers or pseudo-writing. Do not render the narration or prompt as text. "
+            "Only include readable text when the scene explicitly requires a specific "
+            "written object; if so, show only the exact text supplied in the scene data."
+        ),
+        (
             "LOCKED SPOKEN NARRATION CONTEXT — DO NOT PRINT THESE WORDS IN THE IMAGE:"
         ),
         narration,
@@ -1054,6 +1090,14 @@ def build_prompt(
         )
 
     for key, label in (
+        ("key_event", "PRIMARY KEY EVENT THAT MUST BE VISIBLE"),
+        ("critical_event", "Critical story event"),
+        ("fatal_bug", "Exact fatal bug or failure, if present in this story scene"),
+        ("visible_consequence", "Visible consequence of the event"),
+        ("cause", "Story-established cause"),
+        ("effect", "Story-established effect"),
+        ("must_show", "Mandatory visible scene details"),
+        ("required_visible_text", "Exact readable text permitted only if story-required"),
         ("action", "Visible action"),
         ("objects", "Story-specific objects and props"),
         ("animals", "Exact story animals and their actions"),
