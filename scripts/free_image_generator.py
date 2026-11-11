@@ -25,7 +25,7 @@ from image_provider_adapters import (
 from urllib.parse import quote, urlparse
 
 import requests
-from PIL import Image, ImageOps, ImageEnhance
+from PIL import Image, ImageOps, ImageEnhance, ImageStat
 
 try:
     from gradio_client import Client
@@ -801,9 +801,10 @@ def image_integrity(path, size):
         width, height = image.size
         image.load()
         extrema = image.convert("RGB").getextrema()
+        grayscale_variance = float(ImageStat.Stat(image.convert("L")).var[0])
 
-    if all(low == high for low, high in extrema):
-        raise RuntimeError(f"Image is a single flat colour: {path}")
+    if all(low == high for low, high in extrema) or grayscale_variance < 2.0:
+        raise RuntimeError(f"Image has insufficient visual variation: {path}")
 
     return {
         "format": image_format,
