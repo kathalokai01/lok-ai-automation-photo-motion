@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   generate-video:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     env:
@@ -368,8 +368,19 @@ jobs:
             mapfile -t unique_packages < <(
               printf '%s\n' "${missing_packages[@]}" | sort -u
             )
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends \
+            # Bound package-manager network retries. A temporary DNS outage must
+            # not consume most of the six-hour job before failing.
+            timeout 240s sudo apt-get \
+              -o Acquire::Retries=1 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              update
+
+            timeout 300s sudo apt-get \
+              -o Acquire::Retries=1 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              install -y --no-install-recommends \
               "${unique_packages[@]}"
           else
             echo "SYSTEM TOOLS ALREADY AVAILABLE"
