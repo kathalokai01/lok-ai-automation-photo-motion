@@ -1821,7 +1821,11 @@ def check_provider_credentials(
         "piper": (),
         "elevenlabs": ("ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"),
         "cartesia": ("CARTESIA_API_KEY",),
-        "finevoice": ("FINEVOICE_API_KEY",),
+        "finevoice": (
+            "FINEVOICE_API_KEY",
+            "FINEVOICE_TTS_URL",
+            "FINEVOICE_VOICE_ID",
+        ),
         "minimax": ("MINIMAX_API_KEY",),
     }
 
@@ -1839,12 +1843,12 @@ def check_provider_credentials(
     def tts_available(provider: str) -> tuple[bool, list[str]]:
         names = tts_credentials[provider]
 
-        if provider == "elevenlabs":
+        if provider in {"elevenlabs", "finevoice"}:
             present = [
                 key for key in names
                 if os.environ.get(key, "").strip()
             ]
-            return len(present) == 2, present
+            return len(present) == len(names), present
 
         if provider == "piper":
             executable = shutil.which("piper")
