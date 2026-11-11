@@ -1677,6 +1677,8 @@ def build_policy():
         "max_complete_rounds": MAX_RETRIES,
         "persistent_model_cursor": True,
         "quality_validation_enabled": IMAGE_QUALITY_VISION_ENABLED,
+        "quality_validation_mode": "advisory",
+        "technical_image_integrity_required": True,
         "quality_validation_model": IMAGE_QUALITY_VISION_MODEL,
         "quality_minimum_score": IMAGE_QUALITY_MIN_SCORE,
         "quality_failure_limit_per_model": IMAGE_QUALITY_MAX_FAILURES_PER_MODEL,
@@ -2451,7 +2453,8 @@ def main():
     log("BILLABLE PROVIDERS ALLOWED:", ALLOW_BILLABLE)
     log("FALLBACK ENABLED:", IMAGE_FALLBACK_ENABLED)
     log("PERSISTENT MODEL CURSOR:", MODEL_PROGRESS_STATE.get("cursor_key") or "first configured model")
-    log("QUALITY VALIDATION:", "Gemini vision enabled" if IMAGE_QUALITY_VISION_ENABLED else "disabled")
+    log("QUALITY VALIDATION:", "Gemini Vision advisory" if IMAGE_QUALITY_VISION_ENABLED else "technical integrity only")
+    log("MANDATORY IMAGE CHECKS: decode, format, dimensions, file size and SHA256")
     log("-" * 64)
 
     for item, record in pending_items:
