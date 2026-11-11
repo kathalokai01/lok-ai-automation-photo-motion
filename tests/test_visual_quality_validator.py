@@ -97,6 +97,56 @@ class VisionRetryTests(unittest.TestCase):
                     )
             self.assertEqual(post.call_count, validator.VISION_HTTP_MAX_ATTEMPTS)
 
+    def test_vision_rejection_is_advisory_for_technically_valid_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            rejected = {
+                "prompt_match": False,
+                "character_consistency": False,
+                "quality_score": 3,
+                "issues": ["possible prompt mismatch"],
+                "reason": "low confidence",
+            }
+            with patch.object(validator, "_vision_check", return_value=rejected):
+                result = validator.validate_scene_image(
+                    image_path, "A sufficiently detailed complete scene prompt.",
+                    (256, 256), enabled=True, minimum_score=5,
+                    api_key="test-key",
+                )
+            self.assertTrue(result["accepted"])
+            self.assertFalse(result["vision_accepted"])
+            self.assertEqual(result["status"], "accepted_with_warning")
+            self.assertEqual(result["semantic_story_match"], "not_verified")
+
+    def test_vision_timeout_is_advisory_for_technically_valid_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            with patch.object(
+                validator, "_vision_check",
+                side_effect=validator.VisionVerificationUnavailable("timeout"),
+            ):
+                result = validator.validate_scene_image(
+                    image_path, "A sufficiently detailed complete scene prompt.",
+                    (256, 256), enabled=True, minimum_score=5,
+                    api_key="test-key",
+                )
+            self.assertTrue(result["accepted"])
+            self.assertIsNone(result["vision"])
+            self.assertEqual(result["status"], "accepted_with_warning")
+            self.assertIn("timeout", result["verification_warning"])
+
+    def test_missing_or_corrupt_image_still_fails_technical_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            image_path.write_bytes(b"not an image")
+            with self.assertRaises(RuntimeError):
+                validator.validate_scene_image(
+                    image_path, "A sufficiently detailed complete scene prompt.",
+                    (256, 256), enabled=False,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
