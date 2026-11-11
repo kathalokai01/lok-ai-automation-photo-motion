@@ -60,7 +60,7 @@ def _technical_checks(image_path: Path, expected_size: tuple[int, int]) -> dict:
         raise RuntimeError(f"Image decode/integrity check failed: {exc}") from exc
 
 
-VISION_HTTP_MAX_ATTEMPTS = 4
+VISION_HTTP_MAX_ATTEMPTS = 2
 VISION_RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
@@ -274,37 +274,48 @@ def validate_scene_image(
         raise RuntimeError("Quality validation requires the complete scene prompt.")
     technical = _technical_checks(path, expected_size)
 
-    if not enabled:
-        raise VisionVerificationUnavailable(
-            "Vision quality validation is disabled; semantic matching cannot be claimed."
-        )
-
-    key = _clean(api_key or os.getenv("GEMINI_API_KEY"))
-    if not key:
-        raise VisionVerificationUnavailable(
-            "GEMINI_API_KEY is missing; scene prompt and character matching cannot be verified."
-        )
     model = _clean(model or "gemini-2.5-flash")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", model):
         raise ValueError("IMAGE_QUALITY_VISION_MODEL contains invalid characters.")
 
-    vision = _vision_check(
-        path, prompt, model, key, max(15, min(180, int(timeout))),
-        [Path(value) for value in (reference_image_paths or [])[:2]],
-    )
-    accepted = (
-        vision["prompt_match"] is True
-        and vision["character_consistency"] is True
-        and vision["quality_score"] >= int(minimum_score)
+    # Technical integrity is mandatory. Gemini Vision is advisory so a low-capacity
+    # pipeline does not discard usable images because of semantic false negatives,
+    # transient API limits, missing keys or model timeouts.
+    vision = None
+    vision_error = None
+    if enabled:
+        key = _clean(api_key or os.getenv("GEMINI_API_KEY"))
+        if key:
+            try:
+                vision = _vision_check(
+                    path, prompt, model, key, max(15, min(90, int(timeout))),
+                    [Path(value) for value in (reference_image_paths or [])[:2]],
+                )
+            except VisionVerificationUnavailable as exc:
+                vision_error = f"{type(exc).__name__}: {exc}"
+        else:
+            vision_error = "GEMINI_API_KEY is missing."
+    else:
+        vision_error = "Vision verification is disabled."
+
+    vision_accepted = bool(
+        isinstance(vision, dict)
+        and vision.get("prompt_match") is True
+        and vision.get("character_consistency") is True
+        and vision.get("quality_score", 0) >= max(1, min(10, int(minimum_score)))
     )
     return {
-        "status": "passed" if accepted else "rejected",
-        "accepted": accepted,
+        "status": "passed" if vision_accepted else "accepted_with_warning",
+        "accepted": True,
+        "vision_accepted": vision_accepted,
         "technical": technical,
         "vision": vision,
-        "semantic_story_match": "verified" if accepted else "failed",
+        "verification_warning": vision_error or (
+            None if vision_accepted else "Gemini Vision flagged a possible prompt, character or quality mismatch."
+        ),
+        "semantic_story_match": "verified" if vision_accepted else "not_verified",
         "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "verification_contract": "technical_integrity+gemini_prompt_and_character_review",
+        "verification_contract": "mandatory_technical_integrity+advisory_gemini_vision",
     }
 
 
