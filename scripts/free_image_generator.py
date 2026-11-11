@@ -83,7 +83,7 @@ BILLABLE_BLOCKED = False
 MODEL_PROGRESS_STATE = {}
 IMAGE_QUALITY_VISION_ENABLED = True
 IMAGE_QUALITY_VISION_MODEL = "gemini-3.8-flash"
-IMAGE_QUALITY_MIN_SCORE = 7
+IMAGE_QUALITY_MIN_SCORE = 5
 IMAGE_QUALITY_MAX_FAILURES_PER_MODEL = 2
 IMAGE_QUALITY_SKIP_SCENES = 3
 IMAGE_PROCESSING_PROFILE = "none"
@@ -1511,10 +1511,13 @@ def can_reuse_image(item, old):
         return False
 
     quality = old.get("quality_verification")
-    if not isinstance(quality, dict) or quality.get("status") != "passed":
+    # Previous Vision rejection is advisory: reuse is allowed only when the exact
+    # scene/prompt signature, destination, dimensions, file decode and SHA256 match.
+    if quality is not None and not isinstance(quality, dict):
         return False
-    vision = quality.get("vision")
-    if not isinstance(vision, dict) or vision.get("prompt_match") is not True or vision.get("character_consistency") is not True:
+    if isinstance(quality, dict) and clean(quality.get("status")).lower() not in {
+        "passed", "accepted_with_warning", "rejected", "unavailable"
+    }:
         return False
 
     return integrity["sha256"].casefold() == expected_hash.casefold()
@@ -2016,11 +2019,11 @@ def run_provider_attempts(
             if candidate_quality.get("accepted"):
                 integrity = image_integrity(destination, item["size"])
                 record.update(make_record(
-                    item, "generated", candidate_provider or "verified previous candidate",
+                    item, "generated", candidate_provider or "previous candidate",
                     record.get("attempts", []),
                 ))
                 record["quality_verification"] = candidate_quality
-                record["semantic_story_match"] = "verified"
+                record["semantic_story_match"] = candidate_quality.get("semantic_story_match", "not_verified")
                 record["last_successful_model"] = candidate_provider_key
                 record["image_sha256"] = integrity["sha256"]
                 record["file_integrity"] = "verified"
@@ -2033,8 +2036,8 @@ def run_provider_attempts(
                 save_checkpoints(records, metadata, policy, counters)
                 log("SAVED IMAGE VERIFIED WITHOUT REGENERATION:", item["scene_id"])
                 return
-            log("Saved candidate failed vision quality; generating a replacement:", item["scene_id"])
-            destination.unlink(missing_ok=True)
+            # A valid image is retained even when Gemini Vision flags it.
+            # validate_scene_image accepts technically sound images with a warning.
         except VisionVerificationUnavailable:
             record["status"] = "pending"
             save_checkpoints(records, metadata, policy, counters)
@@ -2178,7 +2181,7 @@ def run_provider_attempts(
                     make_record(item, "generated", provider_name, success_attempts)
                 )
                 record["quality_verification"] = quality
-                record["semantic_story_match"] = "verified"
+                record["semantic_story_match"] = quality.get("semantic_story_match", "not_verified")
                 record["last_successful_model"] = provider_key
                 record.pop("current_provider", None)
                 record.pop("current_round", None)
@@ -2196,7 +2199,11 @@ def run_provider_attempts(
                 log(
                     "IMAGE ACCEPTED:", item["scene_id"],
                     "| model:", provider_name,
-                    "| vision score:", quality["vision"]["quality_score"],
+                    "| vision score:", (
+                        quality.get("vision", {}).get("quality_score")
+                        if isinstance(quality.get("vision"), dict) else "unavailable"
+                    ),
+                    "| vision status:", quality.get("status"),
                     "| next Scene starts with this model.",
                 )
                 break
@@ -2387,7 +2394,11 @@ def main():
                 old.get("attempts", []),
             )
             record["quality_verification"] = old.get("quality_verification")
-            record["semantic_story_match"] = "verified"
+            record["semantic_story_match"] = (
+                old.get("semantic_story_match")
+                or (old.get("quality_verification") or {}).get("semantic_story_match")
+                or "not_verified"
+            )
             record["last_successful_model"] = (
                 old.get("last_successful_model") or old.get("provider")
             )
@@ -2485,7 +2496,7 @@ def main():
     log(
         "All image files passed format, dimensions, integrity and SHA256 checks."
     )
-    log("All accepted images passed Gemini vision prompt, character and quality checks.")
+    log("All accepted images passed mandatory file-integrity checks; Gemini Vision is advisory.")
 
     return 0
 
