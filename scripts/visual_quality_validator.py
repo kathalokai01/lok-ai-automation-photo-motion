@@ -155,15 +155,22 @@ def _vision_check(
         except requests.RequestException as exc:
             last_http_error = exc
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status not in VISION_RETRYABLE_STATUSES or attempt >= VISION_HTTP_MAX_ATTEMPTS:
+            transient_transport = isinstance(
+                exc, (requests.Timeout, requests.ConnectionError)
+            )
+            retryable = (
+                status in VISION_RETRYABLE_STATUSES or transient_transport
+            )
+            if not retryable or attempt >= VISION_HTTP_MAX_ATTEMPTS:
                 detail = f"HTTP {status}" if status else type(exc).__name__
                 raise VisionVerificationUnavailable(
                     f"Gemini vision verification request failed after {attempt} attempt(s): {detail}."
                 ) from exc
             delay = retry_after_seconds(exc, attempt, default_base=4, maximum=30)
+            failure_kind = f"HTTP {status}" if status else type(exc).__name__
             print(
-                f"Gemini Vision transient HTTP {status}; retry {attempt + 1}/"
-                f"{VISION_HTTP_MAX_ATTEMPTS} in {delay}s.",
+                f"Gemini Vision transient {failure_kind}; retry "
+                f"{attempt + 1}/{VISION_HTTP_MAX_ATTEMPTS} in {delay}s.",
                 flush=True,
             )
             time.sleep(delay)
