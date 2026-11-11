@@ -35,8 +35,8 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v14-explicit-event-text-control"
-PROMPT_VERSION = 14
+VERSION = "photo-motion-visual-jobs-v15-generator-defect-prevention"
+PROMPT_VERSION = 15
 
 ROLE_ORDER = {
     "hook": 0,
@@ -860,6 +860,36 @@ def build_negative_prompt(
         "face animation",
         "character animation",
         "motion blur",
+        "poor composition",
+        "ambiguous main action",
+        "obscured key event",
+        "subject outside frame",
+        "cut off head",
+        "cut off hands",
+        "cut off feet",
+        "cropped important object",
+        "malformed fingers",
+        "fused fingers",
+        "extra arms",
+        "extra legs",
+        "missing limbs",
+        "disconnected limbs",
+        "deformed eyes",
+        "crossed eyes",
+        "asymmetric facial features",
+        "duplicate face",
+        "face blending",
+        "unnatural body proportions",
+        "warped architecture",
+        "bent straight lines",
+        "melted objects",
+        "ghosting",
+        "double exposure",
+        "over-sharpening",
+        "over-smoothed skin",
+        "unnatural shadows",
+        "incorrect reflections",
+        "low contrast subject",
     ]
 
     if as_bool(config.get("AVOID_CARTOON_LOOK"), True):
@@ -1014,6 +1044,39 @@ def build_prompt(
             "the narration and scene prompt do not establish."
         ),
         (
+            "SCENE FACT PRIORITY: Follow this order when details compete: (1) the exact "
+            "physical event and its visible consequence, (2) explicitly named people, "
+            "objects and animals participating in that event, (3) the stated location "
+            "and time, (4) atmosphere and camera styling. Never let cinematic mood, "
+            "beauty, dramatic lighting or decorative composition replace items 1-3. "
+            "Show the decisive moment, not a vague scene before or after it."
+        ),
+        (
+            "SUBJECT AND OBJECT COMPLETENESS: Keep every essential participant and "
+            "the complete story-critical object visible, recognizable and spatially "
+            "separated. Do not hide, merge, duplicate, replace, shrink into the "
+            "background or crop any item required to understand the event. Use a "
+            "clear foreground-to-background arrangement and one obvious focal action."
+        ),
+        (
+            "HUMAN ANATOMY SAFEGUARD: For every visible person, render one coherent "
+            "anatomically plausible body with a single head, two arms and two legs "
+            "unless the story explicitly establishes otherwise. Faces must have "
+            "naturally aligned eyes and features; hands must have a plausible palm "
+            "and five distinct fingers when visible. No fused, missing, duplicated "
+            "or extra body parts. Keep hands and faces unobstructed when they carry "
+            "the scene action. Do not force hands into the frame if they are not "
+            "needed by the scene."
+        ),
+        (
+            "IMAGE CLARITY AND GEOMETRY: Produce a sharp, clean, high-resolution "
+            "still with a clearly focused key subject, natural proportions, stable "
+            "perspective, straight architecture where appropriate, coherent object "
+            "geometry, consistent lighting, realistic contact shadows and reflections. "
+            "Avoid blur, pixelation, smearing, ghosting, warped edges, melted details, "
+            "double exposure, excessive smoothing and artificial sharpening."
+        ),
+        (
             "ONE SCENE ONLY: Create one coherent continuous cinematic frame at the "
             "exact moment described. No collage, split screen, storyboard panels, "
             "before-and-after layout, montage or multiple alternative moments."
@@ -1077,8 +1140,11 @@ def build_prompt(
             "video motion, motion blur or an illustrated slideshow."
         ),
         (
-            "No captions, subtitles, typography, labels, speech bubbles, "
-            "logos, watermarks or readable text."
+            "FINAL TEXT RULE: Do not add any text, lettering, numbers, captions, "
+            "subtitles, labels, signs, title cards, speech bubbles, logos or watermarks. "
+            "Exception: render readable text only when required_visible_text explicitly "
+            "contains the exact story-required wording; reproduce that wording only, "
+            "without adding any other characters or decorative typography."
         ),
     ]
 
