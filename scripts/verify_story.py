@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -1604,9 +1605,61 @@ def main() -> int:
     if (
         isinstance(ai_story, dict)
         and ai_story.get("source_story_signature") == sha256_json(story)
-        and ai_story.get("source_plan_signature") == sha256_json(plan)
     ):
-        quality_report = validate_story_output(ai_story, plan)
+        source_parts = plan.get("parts")
+        story_parts = story.get("parts")
+        normalized_plan = None
+
+        if (
+            isinstance(source_parts, list)
+            and isinstance(story_parts, list)
+            and len(source_parts) == len(story_parts)
+        ):
+            normalized_plan = copy.deepcopy(plan)
+            normalized_parts = normalized_plan.get("parts")
+
+            for number, (plan_part, story_part) in enumerate(
+                zip(normalized_parts, story_parts), 1
+            ):
+                if (
+                    not isinstance(plan_part, dict)
+                    or not isinstance(story_part, dict)
+                    or positive_int(plan_part.get("part"), f"Plan Part {number}") != number
+                    or positive_int(story_part.get("part"), f"Story Part {number}") != number
+                ):
+                    normalized_plan = None
+                    break
+
+                # The Story record is authoritative for the final-merge flag.
+                # Older AI Story checkpoints signed this value after it was
+                # added in memory, while the persisted Plan omitted the field.
+                plan_part["final_part_merged"] = (
+                    story_part.get("final_part_merged") is True
+                )
+
+        recorded_plan_signature = ai_story.get("source_plan_signature")
+        raw_plan_signature = sha256_json(plan)
+        normalized_plan_signature = (
+            sha256_json(normalized_plan)
+            if isinstance(normalized_plan, dict)
+            else None
+        )
+
+        if recorded_plan_signature not in {
+            raw_plan_signature,
+            normalized_plan_signature,
+        }:
+            fail("AI Story source Plan signature does not match the Story Plan.")
+
+        if normalized_plan is None:
+            fail("Cannot reconcile AI Story Part metadata with Story Plan.")
+
+        quality_plan = (
+            normalized_plan
+            if recorded_plan_signature == normalized_plan_signature
+            else plan
+        )
+        quality_report = validate_story_output(ai_story, quality_plan)
         report["ai_story_quality"] = quality_report
         if quality_report.get("passed") is not True:
             raise RuntimeError(
