@@ -63,7 +63,7 @@ STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिल�
 # Inclusive range examples: "2-8", "4-6", "7-11", "12-18"
 # Range selection is finalized from corrected story word count.
 # Reversed ranges such as "11-8" are invalid.
-PARTS = "7-11"
+PARTS = "1-4"
 
 # SCENES:
 # Min-Max range per story Part.
@@ -78,9 +78,9 @@ PARTS = "7-11"
 # Maximum से अधिक Scene-worthy Units होने पर शेष पूरे वाक्य
 # अगले Part में कहानी के क्रम से भेजे जाएँगे।
 # FULL Mode में पूरी कहानी एक ही Part होगी।
-SCENES = 7-15
-SCENES_MIN = 7
-SCENES_MAX = 15
+SCENES = 5-20
+SCENES_MIN = 5
+SCENES_MAX = 20
 
 # auto | short | medium | long
 STORY_LENGTH = "auto"
