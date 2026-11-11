@@ -44,7 +44,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v38-vision-retry-and-unverified-candidate-resume"
+VERSION = "photo-motion-image-generator-v39-vision-timeout-retry-cloudflare-schnell-schema"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -1237,13 +1237,16 @@ def generate_cloudflare(prompt, destination, size, seed, model):
             timeout=TIMEOUT,
         )
     else:
+        # Flux.1 Schnell's Workers AI schema rejects the seed property.
+        # Keep deterministic seed support only on the separately configured
+        # Flux 2 Klein multipart endpoint above.
         response = SESSION.post(
             endpoint,
             headers={
                 "Authorization": f"Bearer {CLOUDFLARE_IMAGE_API_TOKEN}",
                 "Content-Type": "application/json",
             },
-            json={"prompt": cloudflare_prompt, "seed": seed, "steps": 8},
+            json={"prompt": cloudflare_prompt, "steps": 8},
             timeout=TIMEOUT,
         )
 
