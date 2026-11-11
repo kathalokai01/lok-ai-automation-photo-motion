@@ -1635,13 +1635,13 @@ def main() -> None:
         source_plan, config["format"]
     )
 
-    # Keep the signature tied to the exact on-disk Story Plan. The
-    # metadata enrichment below mutates the in-memory plan for per-Part
-    # validation, so hashing after enrichment makes downstream consumers
-    # reject an otherwise matching story_plan.json file.
-    source_plan_file_signature = stable_hash(source_plan)
+    # final_part_merged is authoritative Story metadata. Persist it to the
+    # Story Plan before computing signatures so the AI Story, quality gate,
+    # and every downstream reader validate the same Part definition.
     apply_story_part_metadata(source_plan, source_story)
-    legacy_enriched_plan_signature = stable_hash(source_plan)
+    write_json(PLAN_FILE, source_plan)
+    source_plan_file_signature = stable_hash(source_plan)
+    legacy_enriched_plan_signature = source_plan_file_signature
 
     canonical_story_title = clean(
         source_story.get("final_title")
