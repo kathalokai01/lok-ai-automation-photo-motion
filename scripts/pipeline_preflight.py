@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v72-provider-adapters-and-production-review"
+VERSION = "photo-motion-preflight-v73-pinned-ubuntu-runner"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -2473,7 +2473,7 @@ def check_workflow_structure(source: str) -> list[dict]:
 
     patterns = {
         "manual_dispatch": r"(?m)^\s{2}workflow_dispatch:\s*(?:#.*)?$",
-        "ubuntu_runner": r"(?m)^\s{4}runs-on:\s*ubuntu-latest\s*$",
+        "ubuntu_runner": r"(?m)^\s{4}runs-on:\s*ubuntu-24\.04\s*$",
         "python_311": r"(?m)^\s{10}python-version:\s*[\"']?3\.11[\"']?\s*$",
         "billable_environment": (
             r"(?m)^\s{6}ALLOW_BILLABLE_PROVIDERS:\s*[\"']?true[\"']?\s*$"
