@@ -1654,12 +1654,10 @@ def main() -> int:
         if normalized_plan is None:
             fail("Cannot reconcile AI Story Part metadata with Story Plan.")
 
-        quality_plan = (
-            normalized_plan
-            if recorded_plan_signature == normalized_plan_signature
-            else plan
-        )
-        quality_report = validate_story_output(ai_story, quality_plan)
+        # Part signatures are calculated from the normalized Part metadata,
+        # even when the AI Story's top-level plan signature refers to the
+        # original persisted Plan. Always validate against this same view.
+        quality_report = validate_story_output(ai_story, normalized_plan)
         report["ai_story_quality"] = quality_report
         if quality_report.get("passed") is not True:
             raise RuntimeError(
