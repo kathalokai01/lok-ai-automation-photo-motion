@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.request
 import wave
+from urllib.parse import quote, urlsplit, urlunsplit
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -238,6 +239,7 @@ def request_bytes(
     headers: dict | None = None,
     payload: dict | None = None,
     timeout: int = REQUEST_TIMEOUT,
+    method: str = "POST",
 ) -> tuple[bytes, str]:
     body = None
     request_headers = dict(headers or {})
@@ -255,7 +257,7 @@ def request_bytes(
         url,
         data=body,
         headers=request_headers,
-        method="POST",
+        method=str(method or "POST").upper(),
     )
 
     try:
@@ -298,9 +300,12 @@ def request_bytes(
 def request_json(
     url: str,
     headers: dict,
-    payload: dict,
+    payload: dict | None = None,
+    method: str = "POST",
 ) -> dict:
-    data, _ = request_bytes(url, headers, payload)
+    data, _ = request_bytes(
+        url, headers, payload, method=method
+    )
 
     try:
         result = json.loads(data.decode("utf-8"))
@@ -1130,50 +1135,151 @@ def synthesize_provider(
         return write_audio_bytes(output_path, audio)
 
     if provider == "finevoice":
+        endpoint = os.getenv("FINEVOICE_TTS_URL", "").strip()
+        api_key = os.getenv("FINEVOICE_API_KEY", "").strip()
+        voice_name = os.getenv("FINEVOICE_VOICE_ID", "").strip()
+
+        parsed_endpoint = urlsplit(endpoint)
+        if (
+            parsed_endpoint.scheme != "https"
+            or not parsed_endpoint.netloc
+            or not parsed_endpoint.path.endswith(
+                "/v1/audio/speech-synthesis"
+            )
+        ):
+            raise RuntimeError(
+                "FINEVOICE_TTS_URL must be the HTTPS "
+                "FineVoice speech-synthesis endpoint."
+            )
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
         payload = {
+            "voice": voice_name,
             "text": text,
-            "voice_id": os.getenv(
-                "FINEVOICE_VOICE_ID", ""
-            ),
-            "format": "mp3",
         }
 
-        data, content_type = request_bytes(
-            os.getenv("FINEVOICE_TTS_URL", ""),
-            {
-                "Authorization": (
-                    f"Bearer {os.getenv('FINEVOICE_API_KEY')}"
-                ),
-                "Accept": "audio/mpeg,application/json",
-            },
+        submitted = request_json(
+            endpoint,
+            headers,
             payload,
+            method="POST",
         )
 
-        if "json" in content_type.lower():
-            try:
-                result = json.loads(data.decode("utf-8"))
-                encoded = (
-                    result.get("audio")
-                    or result.get("audio_base64")
-                    or result.get("data")
+        download_url = str(submitted.get("url") or "").strip()
+        task_id = str(
+            submitted.get("taskId")
+            or submitted.get("task_id")
+            or ""
+        ).strip()
+
+        if not download_url and task_id:
+            task_path = f"/v1/task/{quote(task_id, safe='')}"
+            task_url = urlunsplit((
+                parsed_endpoint.scheme,
+                parsed_endpoint.netloc,
+                task_path,
+                "",
+                "",
+            ))
+
+            for poll_index in range(120):
+                time.sleep(2)
+                task = request_json(
+                    task_url,
+                    {
+                        "Authorization": f"Bearer {api_key}",
+                        "Accept": "application/json",
+                    },
+                    method="GET",
                 )
 
-                if isinstance(encoded, dict):
-                    encoded = (
-                        encoded.get("audio")
-                        or encoded.get("audio_base64")
+                status_value = task.get("status")
+                status_text = str(status_value or "").strip().lower()
+                task_error = task.get("error")
+
+                if status_text in {
+                    "failed", "error", "cancelled", "canceled"
+                } or (
+                    isinstance(status_value, (int, float))
+                    and status_value >= 400
+                ):
+                    if isinstance(task_error, dict):
+                        task_error = (
+                            task_error.get("message")
+                            or task_error.get("code")
+                        )
+                    raise RuntimeError(
+                        "FineVoice TTS task failed: "
+                        + str(task_error or status_text or status_value)[:500]
                     )
 
-                data = base64.b64decode(
-                    encoded, validate=True
+                candidate_url = str(
+                    task.get("url")
+                    or (
+                        task.get("urls", [])[0]
+                        if isinstance(task.get("urls"), list)
+                        and task.get("urls")
+                        else ""
+                    )
+                ).strip()
+
+                completed = (
+                    status_text in {"completed", "complete", "success", "done"}
+                    or (
+                        isinstance(status_value, (int, float))
+                        and status_value == 200
+                    )
                 )
 
-            except Exception as exc:
-                raise RuntimeError(
-                    "FineVoice returned invalid audio JSON."
-                ) from exc
+                if candidate_url and (
+                    completed or status_value is None
+                ):
+                    download_url = candidate_url
+                    break
 
-        return write_audio_bytes(output_path, data)
+                if status_text in {
+                    "pending", "queued", "processing", "running", "in_progress"
+                } or status_value == 202 or not completed:
+                    continue
+
+                if completed and not candidate_url:
+                    continue
+
+            if not download_url:
+                raise RuntimeError(
+                    "FineVoice TTS task did not produce audio "
+                    "within the 4-minute polling limit."
+                )
+
+        if not download_url:
+            raise RuntimeError(
+                "FineVoice submission returned neither an audio URL "
+                "nor a task ID."
+            )
+
+        parsed_audio_url = urlsplit(download_url)
+        if (
+            parsed_audio_url.scheme != "https"
+            or not parsed_audio_url.netloc
+            or parsed_audio_url.username
+            or parsed_audio_url.password
+        ):
+            raise RuntimeError(
+                "FineVoice returned an invalid HTTPS audio URL."
+            )
+
+        audio_data, _ = request_bytes(
+            download_url,
+            headers={},
+            payload=None,
+            method="GET",
+            timeout=REQUEST_TIMEOUT,
+        )
+        return write_audio_bytes(output_path, audio_data)
 
     raise RuntimeError(
         f"Unsupported configured TTS provider: {provider}"
