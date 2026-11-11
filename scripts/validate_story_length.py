@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -482,12 +483,68 @@ def verify_plan(
     if (
         isinstance(ai_story, dict)
         and ai_story.get("source_story_signature") == fingerprint(story)
-        and ai_story.get("source_plan_signature") == fingerprint(plan)
     ):
-        quality_report = validate_story_output(ai_story, plan)
-        quality_passed, quality_errors = validate_story_quality_report(quality_report)
-        if not quality_passed:
-            fail("AI Story quality validation failed: " + "; ".join(quality_errors[:12]))
+        # Older AI Story checkpoints signed each Part after adding
+        # final_part_merged in memory, while story_plan.json was saved
+        # without that field. Reconstruct the authoritative Part metadata
+        # from story.json before checking the per-Part signature.
+        source_parts = plan.get("parts")
+        story_parts = story.get("parts")
+        normalized_plan = None
+
+        if (
+            isinstance(source_parts, list)
+            and isinstance(story_parts, list)
+            and len(source_parts) == len(story_parts)
+        ):
+            normalized_plan = copy.deepcopy(plan)
+            normalized_parts = normalized_plan.get("parts")
+
+            for number, (plan_part, story_part) in enumerate(
+                zip(normalized_parts, story_parts), 1
+            ):
+                if (
+                    not isinstance(plan_part, dict)
+                    or not isinstance(story_part, dict)
+                    or as_int(plan_part.get("part")) != number
+                    or as_int(story_part.get("part")) != number
+                ):
+                    normalized_plan = None
+                    break
+
+                plan_part["final_part_merged"] = (
+                    story_part.get("final_part_merged") is True
+                )
+
+        recorded_plan_signature = ai_story.get("source_plan_signature")
+        raw_plan_signature = fingerprint(plan)
+        normalized_plan_signature = (
+            fingerprint(normalized_plan)
+            if isinstance(normalized_plan, dict)
+            else None
+        )
+
+        if recorded_plan_signature in {
+            raw_plan_signature,
+            normalized_plan_signature,
+        }:
+            if normalized_plan is None:
+                fail(
+                    "Cannot reconcile AI Story Part metadata with Story Plan."
+                )
+
+            plan.clear()
+            plan.update(normalized_plan)
+
+            quality_report = validate_story_output(ai_story, plan)
+            quality_passed, quality_errors = validate_story_quality_report(
+                quality_report
+            )
+            if not quality_passed:
+                fail(
+                    "AI Story quality validation failed: "
+                    + "; ".join(quality_errors[:12])
+                )
 
     if plan.get("status") != "planned":
         fail("Story Plan status must be planned.")
