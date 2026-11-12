@@ -403,12 +403,11 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
             if child.name == "depth_maps" or child.is_symlink():
                 continue
             target = dst_root / child.name
-            if target.exists():
-                continue
             if child.is_dir():
-                shutil.copytree(child, target, symlinks=False)
-                copied += sum(1 for item in target.rglob("*") if item.is_file())
+                copied += copy_tree_merge(child, target)
             elif child.is_file():
+                if target.exists():
+                    continue
                 shutil.copy2(child, target)
                 copied += 1
         return copied
