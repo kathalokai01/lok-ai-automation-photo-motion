@@ -665,7 +665,7 @@ def load_audio_map(parts, scene_counts):
         if (row.get("duration_source") or row.get("audio_duration_source")) != "ffprobe_measured":
             raise RuntimeError(f"Narration duration is not ffprobe-measured: {sid}")
         text_value = str(row.get("text") or row.get("narration") or "")
-        normalized_text = re.sub(r"\\s+", " ", text_value).strip()
+        normalized_text = re.sub(r"\s+", " ", text_value).strip()
         text_hash = hashlib.sha256(
             normalized_text.encode("utf-8")
         ).hexdigest()
