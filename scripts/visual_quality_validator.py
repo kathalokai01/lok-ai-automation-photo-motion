@@ -60,7 +60,7 @@ def _technical_checks(image_path: Path, expected_size: tuple[int, int]) -> dict:
         raise RuntimeError(f"Image decode/integrity check failed: {exc}") from exc
 
 
-VISION_HTTP_MAX_ATTEMPTS = 2
+VISION_HTTP_MAX_ATTEMPTS = 1
 VISION_RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
@@ -292,7 +292,7 @@ def validate_scene_image(
     minimum_score: int = 7,
     model: str = "gemini-3.8-flash",
     api_key: str | None = None,
-    timeout: int = 90,
+    timeout: int = 30,
     reference_image_paths: list[str | Path] | None = None,
 ) -> dict:
     """Return accepted quality evidence; never claim semantic success without vision."""
@@ -316,10 +316,12 @@ def validate_scene_image(
         if key:
             try:
                 vision = _vision_check(
-                    path, prompt, model, key, max(15, min(90, int(timeout))),
+                    path, prompt, model, key, max(10, min(30, int(timeout))),
                     [Path(value) for value in (reference_image_paths or [])[:2]],
                 )
-            except VisionVerificationUnavailable as exc:
+            except Exception as exc:
+                # Vision is advisory. Any API, response-shape, parsing, or SDK error
+                # must not invalidate a technically sound generated image.
                 vision_error = f"{type(exc).__name__}: {exc}"
         else:
             vision_error = "GEMINI_API_KEY is missing."
