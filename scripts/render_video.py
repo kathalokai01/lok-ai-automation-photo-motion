@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v71-part-outputs-only-no-combined-video"
+VERSION = "render-video-v72-split-narration-for-sidechain-and-mix"
 SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
@@ -1100,7 +1100,6 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
             f"volume={NARRATION_GAIN:.3f},"
             "asetpts=PTS-STARTPTS[narr]"
         )
-        mix_labels.append("[narr]")
         input_index += 1
 
     bed_labels = []
@@ -1133,15 +1132,24 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
             "volume=1.0[bed]"
         )
         if audio and MUSIC_DUCKING_ENABLED:
+            # FFmpeg filter outputs are single-consumer. Split narration so
+            # one branch drives sidechain compression and the other remains
+            # available to the final program mix.
+            filters.append("[narr]asplit=2[narr_mix][narr_sc]")
+            mix_labels.append("[narr_mix]")
             ratio = max(2.0, min(12.0, abs(MUSIC_DUCKING_DB) / 2.0))
             filters.append(
-                "[bed][narr]sidechaincompress="
+                "[bed][narr_sc]sidechaincompress="
                 f"threshold=0.025:ratio={ratio:.2f}:attack=120:release=750:"
                 "makeup=1[ducked]"
             )
             mix_labels.append("[ducked]")
         else:
+            if audio:
+                mix_labels.append("[narr]")
             mix_labels.append("[bed]")
+    elif audio:
+        mix_labels.append("[narr]")
 
     sfx_labels = []
     for cue_index, cue in enumerate(sound_assets["sfx"].get(photo["scene_id"], [])):
