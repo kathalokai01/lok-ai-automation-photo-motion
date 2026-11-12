@@ -1576,6 +1576,71 @@ def verify_written_outputs(
             )
 
 
+def resolve_actual_scene_counts(
+    source_document: dict,
+    parts: int,
+    scenes_min: int,
+    scenes_max: int,
+) -> dict[int, int]:
+    """Read canonical generate_scenes metadata, with safe legacy fallbacks."""
+    if not isinstance(source_document, dict):
+        raise RuntimeError("scenes.json root must be an object.")
+
+    raw_counts = source_document.get("actual_scene_counts")
+    counts: dict[int, int] = {}
+
+    if isinstance(raw_counts, list) and len(raw_counts) == parts:
+        counts = {
+            part: positive_int(raw_counts[part - 1], f"Part {part} actual Scene count")
+            for part in range(1, parts + 1)
+        }
+    else:
+        role_counts = source_document.get("part_role_counts")
+        if isinstance(role_counts, dict):
+            for part in range(1, parts + 1):
+                row = role_counts.get(str(part), role_counts.get(part))
+                if not isinstance(row, dict):
+                    raise RuntimeError(f"scenes.json part_role_counts is missing Part {part}.")
+                counts[part] = positive_int(
+                    row.get("main"),
+                    f"Part {part} Main Scene count",
+                )
+        else:
+            rows = source_document.get("scenes")
+            if not isinstance(rows, list) or not rows:
+                raise RuntimeError(
+                    "scenes.json has no actual_scene_counts, part_role_counts, or scene rows."
+                )
+            counts = {part: 0 for part in range(1, parts + 1)}
+            for index, row in enumerate(rows, 1):
+                if not isinstance(row, dict):
+                    raise RuntimeError(f"scenes.json scene row #{index} is invalid.")
+                if normalize_role(row) != "main":
+                    continue
+                part = positive_int(row.get("part"), f"Scene row #{index} Part")
+                if part not in counts:
+                    raise RuntimeError(f"Scene row #{index} uses unselected Part {part}.")
+                counts[part] += 1
+            if any(value < 1 for value in counts.values()):
+                raise RuntimeError("scenes.json does not contain Main scenes for every selected Part.")
+
+    if set(counts) != set(range(1, parts + 1)):
+        raise RuntimeError("scenes.json actual Scene counts do not match selected PARTS.")
+    if any(not scenes_min <= count <= scenes_max for count in counts.values()):
+        raise RuntimeError(
+            f"scenes.json actual Scene counts must stay within {scenes_min}-{scenes_max}."
+        )
+
+    declared_min = source_document.get("scenes_min")
+    declared_max = source_document.get("scenes_max")
+    if declared_min is not None and int(declared_min) != scenes_min:
+        raise RuntimeError("scenes.json SCENES minimum does not match Input/topic.txt.")
+    if declared_max is not None and int(declared_max) != scenes_max:
+        raise RuntimeError("scenes.json SCENES maximum does not match Input/topic.txt.")
+
+    return counts
+
+
 def main() -> int:
     log("=" * 64)
     log("KATHA LOK AI — PREPARING PHOTO MOTION VISUALS")
@@ -1614,17 +1679,12 @@ def main() -> int:
 
     source_document = read_json(SCENES_FILE, required=True)
 
-    raw_counts = source_document.get("actual_scene_counts")
-    if not isinstance(raw_counts, list) or len(raw_counts) != parts:
-        raise RuntimeError("scenes.json actual_scene_counts must contain one count per selected Part.")
-    scene_counts = {
-        part: positive_int(raw_counts[index], f"Part {part} actual Scene count")
-        for index, part in enumerate(range(1, parts + 1))
-    }
-    if any(not scenes_min <= count <= scenes_max for count in scene_counts.values()):
-        raise RuntimeError(f"scenes.json actual Scene counts must stay within {scenes_min}-{scenes_max}.")
-    if source_document.get("scenes_min") != scenes_min or source_document.get("scenes_max") != scenes_max:
-        raise RuntimeError("scenes.json SCENES range does not match Input/topic.txt.")
+    scene_counts = resolve_actual_scene_counts(
+        source_document,
+        parts,
+        scenes_min,
+        scenes_max,
+    )
     source_scenes, part_numbers = normalize_source_scenes(
         source_document, parts, scene_counts, scenes_min, scenes_max,
     )
