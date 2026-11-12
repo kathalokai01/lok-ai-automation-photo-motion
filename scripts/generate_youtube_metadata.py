@@ -40,7 +40,7 @@ OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 CHECKPOINT = ROOT / "output" / "checkpoints" / "youtube_metadata.json"
 
-VERSION = "youtube-metadata-v26-fix-undefined-story-title"
+VERSION = "youtube-metadata-v27-canonical-story-title-lock"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
@@ -589,6 +589,16 @@ def validate_metadata(
     }
 
 
+def enforce_canonical_story_title(metadata: dict, story: dict) -> dict:
+    """Keep publishing metadata bound to the validated story title."""
+    canonical_title = clean(story.get("existing_title"))
+    if not canonical_title:
+        raise RuntimeError("Canonical story title is missing; metadata cannot be published.")
+    result = dict(metadata)
+    result["title"] = normalize_title(canonical_title)
+    return result
+
+
 def make_fingerprint(
     topic: str,
     story: dict,
@@ -662,8 +672,8 @@ COMPLETE STORY:
 1. पूरी कहानी आरंभ से अंत तक पढ़ें।
 2. केवल पहली पंक्ति, शुरुआती वाक्य या USER TOPIC से Title न बनाएं।
 3. मुख्य पात्र, संघर्ष, कारण, turning point और ending समझें।
-4. Title पूरी कहानी के वास्तविक केंद्रीय विचार पर आधारित हो।
-5. मौजूदा story title गलत या अधूरा हो तो बेहतर Title बनाएं।
+4. Title के लिए मौजूदा story title ही canonical title है।
+5. YouTube Title में वही canonical story title अक्षरशः रखें; #Shorts या अतिरिक्त SEO शब्द Title में न जोड़ें।
 6. कहानी में न मौजूद पात्र, घटना, स्थान या twist न जोड़ें।
 7. Description वास्तविक कथानक पर आधारित हो।
 8. झूठा निष्कर्ष या कहानी में न मौजूद घटना न लिखें।
@@ -981,7 +991,7 @@ def generate_metadata_with_fallback(
                 authorized_key = require_gemini_generation(
                     "YouTube metadata generation", api_key=api_key
                 )
-                return generate_gemini_metadata(
+                generated = generate_gemini_metadata(
                     api_key=authorized_key,
                     model=model,
                     prompt=prompt,
@@ -989,6 +999,7 @@ def generate_metadata_with_fallback(
                     fingerprint=fingerprint,
                     mode=mode,
                 )
+                return enforce_canonical_story_title(generated, story)
             except Exception as exc:
                 failures.append(f"Gemini {model}: {exc}")
                 log("Gemini model exhausted; trying next configured model.")
@@ -1002,7 +1013,7 @@ def generate_metadata_with_fallback(
         provider = item["provider"]
         model = item["model"]
         try:
-            return generate_external_metadata(
+            generated = generate_external_metadata(
                 provider=provider,
                 model=model,
                 prompt=prompt,
@@ -1010,6 +1021,7 @@ def generate_metadata_with_fallback(
                 fingerprint=fingerprint,
                 mode=mode,
             )
+            return enforce_canonical_story_title(generated, story)
         except Exception as exc:
             failures.append(f"{provider}/{model}: {exc}")
             log("Provider exhausted; trying next configured fallback.")
