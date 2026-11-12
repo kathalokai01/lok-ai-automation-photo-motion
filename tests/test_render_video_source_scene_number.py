@@ -100,6 +100,12 @@ class FinalValidatorSceneNumberContractTests(unittest.TestCase):
                 "local_scene": 2,
                 "source_scene_number": 1,
             },
+            {
+                "part": 1,
+                "role": "resolution",
+                "scene_id": "part_01_resolution",
+                "scene": 3,
+            },
         ]
         mapping = validate_final_output.validate_role_rows(
             rows, [1], {1: 1}, "Photo Motion"
