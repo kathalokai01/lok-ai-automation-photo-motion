@@ -79,7 +79,7 @@ def text_value(value: Any, default: str = "") -> str:
 def scene_text_hash_metadata(job: dict) -> dict:
     """Persist the exact normalized narration fingerprint in every TTS row."""
     value = re.sub(
-        r"\\s+",
+        r"\s+",
         " ",
         str(job.get("text") or ""),
     ).strip()
