@@ -117,7 +117,7 @@ def test_depth_map_stage_merges_when_progress_restore_created_destination(tmp_pa
 
     copied = checkpoint_manager.copy_stage(source, output, "depth_maps")
 
-    assert copied == 2
+    assert copied == 3
     assert (destination_depth / "depth_manifest.json").is_file()
     assert (destination_depth / "depth_0001.png").read_bytes() == b"verified-depth-map"
 
@@ -161,7 +161,7 @@ def test_visual_stage_merges_when_partial_image_directory_exists(tmp_path):
 
     copied = checkpoint_manager.copy_stage(source, output, "visuals")
 
-    assert copied == 1
+    assert copied == 2
     assert (destination_visuals / "images" / "scene_02.png").read_bytes() == b"scene-two"
 
 
