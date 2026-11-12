@@ -950,8 +950,6 @@ def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash
         declared_duration = finite_number(cue.get("duration_seconds"), f"SFX cue {index} declared duration", minimum=0.01)
         if abs(declared_duration - info["duration"]) > 0.15:
             raise RuntimeError(f"SFX cue declared/file duration mismatch: {sid}")
-        if abs(declared_duration - info["duration"]) > 0.15:
-            raise RuntimeError(f"SFX cue declared/file duration mismatch: {sid}")
         actual_start, usable_duration = validated_sfx_timing(
             cue, duration, sid
         )
