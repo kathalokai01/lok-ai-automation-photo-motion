@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v70-consume-validated-sfx-trim-timeline"
+VERSION = "render-video-v71-part-outputs-only-no-combined-video"
 SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
@@ -1442,13 +1442,7 @@ def build_manifest(
         "extra_scenes": extra_rows,
         "all_completed_scenes": all_rows,
         "parts": sorted(part_rows, key=lambda row: int(row["part"])),
-        "part_outputs_only": False,
-        "pre_caption_video": relative(PRE_CAPTION_VIDEO),
-        "pre_caption_video_sha256": (
-            sha256_file(PRE_CAPTION_VIDEO)
-            if PRE_CAPTION_VIDEO.is_file()
-            else None
-        ),
+        "part_outputs_only": True,
         "audio_mix": {
             "narration_gain": NARRATION_GAIN,
             "music_gain": MUSIC_GAIN,
@@ -1802,33 +1796,6 @@ def main():
                         f"Part {part}: Suspense/Resolution mismatch"
                     )
 
-        ordered_part_paths = [
-            safe_path(
-                next(
-                    row["path"] for row in part_rows
-                    if int(row["part"]) == part
-                ),
-                f"Part {part} output",
-            )
-            for part in part_numbers
-        ]
-
-        concat_videos(
-            ordered_part_paths,
-            PRE_CAPTION_VIDEO,
-            width,
-            height,
-            fps,
-            minimum=10000,
-        )
-
-        pre_caption_info = probe(PRE_CAPTION_VIDEO)
-        if not pre_caption_info["has_video"] or not pre_caption_info["has_audio"]:
-            raise RuntimeError("Pre-caption video lacks audio/video")
-        if (pre_caption_info["width"], pre_caption_info["height"]) != (width, height):
-            raise RuntimeError("Pre-caption video dimensions mismatch")
-        validate_fps(pre_caption_info, fps, "pre-caption video")
-
         final_manifest = build_manifest(
             mode,
             fps,
@@ -1860,8 +1827,6 @@ def main():
             "suspense_count": sum(row["role"] == "suspense" for row in extra_rows),
             "resolution_count": sum(row["role"] == "resolution" for row in extra_rows),
             "narration_duration_seconds": round(total_duration, 5),
-            "pre_caption_video_duration": round(pre_caption_info["duration"], 5),
-            "pre_caption_video_sha256": sha256_file(PRE_CAPTION_VIDEO),
             "audio_mix_summary": {
                 "music_included": bool(sound_assets["music"]),
                 "ambient_included": bool(sound_assets["ambient"]),
@@ -1891,8 +1856,6 @@ def main():
             raise RuntimeError("Final render manifest scene count mismatch")
         if len(saved.get("parts", [])) != parts_count:
             raise RuntimeError("Final render manifest Part output count mismatch")
-        if saved.get("pre_caption_video_sha256") != sha256_file(PRE_CAPTION_VIDEO):
-            raise RuntimeError("Pre-caption video read-back checksum mismatch")
         if saved.get("story_title") != output_slug or saved.get("format_dimensions") != f"{width}x{height}":
             raise RuntimeError("Final render manifest story/format metadata mismatch")
         if saved.get("source_photo_manifest_sha256") != photo_hash or saved.get("source_audio_manifest_sha256") != audio_manifest_hash:
@@ -1918,7 +1881,6 @@ def main():
     log("ALL ROLE CLIPS:", len(ordered_photos))
     log("NEW RENDERS:", new_renders, "REUSED:", reused_renders)
     log("PART OUTPUTS:", len(part_rows))
-    log("PRE-CAPTION VIDEO:", relative(PRE_CAPTION_VIDEO))
     log("MANIFEST:", relative(RENDER_MANIFEST))
     log("CHECKPOINT:", relative(CHECKPOINT_FILE))
     log("=" * 60)
