@@ -14,7 +14,7 @@ import urllib.request
 from typing import Any
 
 
-VERSION = "llm-provider-client-v2-story-order-validation"
+VERSION = "llm-provider-client-v3-openai-completion-token-parameter"
 
 SUPPORTED_PROVIDERS = (
     "openai",
@@ -514,7 +514,7 @@ def generate_text(
         payload = {
             "model": selected_model,
             "messages": messages,
-            "max_tokens": int(max_tokens),
+            "max_completion_tokens": int(max_tokens),
             "temperature": temperature,
             "stream": False,
         }
