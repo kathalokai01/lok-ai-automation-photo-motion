@@ -40,7 +40,7 @@ OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 CHECKPOINT = ROOT / "output" / "checkpoints" / "youtube_metadata.json"
 
-VERSION = "youtube-metadata-v25-preserve-canonical-story-title"
+VERSION = "youtube-metadata-v26-fix-undefined-story-title"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
@@ -580,9 +580,9 @@ def validate_metadata(
         "topic": clean(topic),
         "provider": provider,
         "model": clean(model),
-        "title": normalize_title(
-            story.get("existing_title") or data.get("title")
-        ),
+        # This validator receives the model response, not a story object.
+        # The old undefined story reference raised NameError for every provider.
+        "title": normalize_title(data.get("title")),
         "description": normalize_description(data.get("description")),
         "tags": normalize_tags(data.get("tags")),
         "input_fingerprint": fingerprint,
