@@ -384,12 +384,12 @@ def scene_key(row: dict, label: str) -> tuple[int, str, int | None]:
         # source_scene_number is the canonical story scene index.
         # scene/local_scene may be global visual slots that include Hook/Suspense/
         # Resolution records and therefore must not shift Main scene IDs.
-        scene = positive_int(
-            row.get("source_scene_number")
-            or row.get("local_scene")
-            or row.get("scene"),
-            f"{label} Main scene",
-        )
+        source_scene = row.get("source_scene_number")
+        if source_scene is None or source_scene == "":
+            source_scene = row.get("local_scene")
+        if source_scene is None or source_scene == "":
+            source_scene = row.get("scene")
+        scene = positive_int(source_scene, f"{label} Main scene")
         return part, role, scene
 
     return part, role, None
