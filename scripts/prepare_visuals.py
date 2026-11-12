@@ -36,7 +36,7 @@ PHOTO_JOBS_FILE = VISUALS / "photo_motion_jobs.json"
 PHOTO_MANIFEST_FILE = VISUALS / "photo_motion_manifest.json"
 CHECKPOINT_FILE = CHECKPOINTS / "prepare_visuals_progress.json"
 
-VERSION = "prepare-visuals-v15-all-role-tts-audio"
+VERSION = "prepare-visuals-v16-canonical-scene-metadata"
 
 ROLE_ORDER = {
     "hook": 0,
