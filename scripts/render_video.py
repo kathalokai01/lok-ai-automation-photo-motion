@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v68-normalized-tts-text-hash-contract"
+VERSION = "render-video-v69-sfx-validator-v17-signature-contract"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -741,7 +741,7 @@ def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash
     cue_manifest_hash = validation.get("sfx_cue_manifest_sha256")
     if not isinstance(cue_manifest_hash, str) or len(cue_manifest_hash) != 64:
         raise RuntimeError("SFX validation cue-manifest fingerprint is missing")
-    expected_signature = hashlib.sha256((audio_manifest_hash + sha256_file(SOUND_MANIFEST) + cue_manifest_hash + "sfx-validator-v13-visual-role-scene-timing").encode("utf-8")).hexdigest()
+    expected_signature = hashlib.sha256((audio_manifest_hash + sha256_file(SOUND_MANIFEST) + cue_manifest_hash + "sfx-validator-v17-allow-trimmed-cue-duration").encode("utf-8")).hexdigest()
     if validation.get("validator_source_signature") != expected_signature:
         raise RuntimeError("SFX validation source signature mismatch")
 
