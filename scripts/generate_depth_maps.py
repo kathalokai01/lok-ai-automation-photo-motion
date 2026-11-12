@@ -40,7 +40,7 @@ ALLOW_PSEUDO_FALLBACK = os.environ.get(
     "DEPTH_ALLOW_PSEUDO_FALLBACK", "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
-VERSION = "photo-motion-depth-v10-all-role-narration-provenance"
+VERSION = "photo-motion-depth-v11-model-signature-propagation"
 FALLBACK_MODEL_ID = "content-aware-pseudo-depth-v9"
 
 MIN_IMAGE_BYTES = 1000
@@ -289,6 +289,15 @@ def load_jobs():
     if image_data.get("actual_scene_counts") != jobs_manifest.get("actual_scene_counts"):
         raise RuntimeError("image_manifest.json actual_scene_counts disagree with visual_jobs_manifest.json.")
 
+    model_signature = digest_data({
+        "model": MODEL_ID,
+        "revision": MODEL_REVISION,
+        "device": DEVICE_SETTING,
+        "ai_required": AI_REQUIRED,
+        "fallback_allowed": ALLOW_PSEUDO_FALLBACK,
+        "upgrade_fallback": UPGRADE_FALLBACK,
+    })
+
     prepared = []
     seen_numbers = set()
     seen_ids = set()
@@ -436,6 +445,7 @@ def load_jobs():
             "job_signature": digest_data(job),
             "source_fingerprint": source_fingerprint,
             "config_signature": config_signature,
+            "model_signature": model_signature,
             "format": format_name,
         })
 
@@ -481,14 +491,7 @@ def load_jobs():
         "scenes_min": raw_min,
         "scenes_max": raw_max,
         "actual_scene_counts": {str(k): v for k, v in normalized_counts.items()},
-        "model_signature": digest_data({
-            "model": MODEL_ID,
-            "revision": MODEL_REVISION,
-            "device": DEVICE_SETTING,
-            "ai_required": AI_REQUIRED,
-            "fallback_allowed": ALLOW_PSEUDO_FALLBACK,
-            "upgrade_fallback": UPGRADE_FALLBACK,
-        }),
+        "model_signature": model_signature,
     }
 
 def load_previous(metadata=None):
