@@ -31,7 +31,8 @@ FLOW_MANIFEST = ROOT / "output" / "music" / "flow_music_manifest.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-validator-v15-music-segment-and-role-timeline"
+VERSION = "sfx-validator-v16-sound-design-v34-contract"
+SOUND_DESIGN_VERSION = "photo-motion-sound-design-v34-all-role-measured-tts-timeline"
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 0.20
 SFX_END_MARGIN = 0.08
@@ -536,7 +537,7 @@ def validate_sound_manifest(mode, parts, actual_counts, narration, audio_hash):
             "Sound design was generated from a different narration manifest."
         )
 
-    if manifest.get("version") != "photo-motion-sound-design-v33-loudness-duration-resume-verified-visual-role-scene-timeline":
+    if manifest.get("version") != SOUND_DESIGN_VERSION:
         raise RuntimeError("Sound-design manifest version is unsupported or stale.")
 
     enabled_tracks = manifest.get("enabled")
