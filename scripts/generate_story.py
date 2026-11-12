@@ -1799,6 +1799,10 @@ def make_story(
                 raise RuntimeError(
                     f"Story Plan Scene narration/anchor mismatch: {expected_id}."
                 )
+            if sha256(scene_text) != sha256(anchor):
+                raise RuntimeError(
+                    f"Story Plan Scene source text normalization mismatch: {expected_id}."
+                )
 
             visual = clean(
                 planned.get("visual_prompt")
@@ -1824,6 +1828,8 @@ def make_story(
                 "purpose": clean(planned.get("purpose")),
                 "story_anchor": anchor,
                 "narration": scene_text,
+                "source_text_sha256": sha256(scene_text),
+                "source_word_count": word_count(scene_text),
                 "visual": visual,
                 "visual_prompt": visual,
                 "dialogue": "",
