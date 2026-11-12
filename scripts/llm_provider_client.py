@@ -514,10 +514,15 @@ def generate_text(
         payload = {
             "model": selected_model,
             "messages": messages,
-            "max_completion_tokens": int(max_tokens),
             "temperature": temperature,
             "stream": False,
         }
+        if provider == "openai":
+            # Newer OpenAI models reject the legacy max_tokens field.
+            payload["max_completion_tokens"] = int(max_tokens)
+        else:
+            # Groq and OpenRouter retain the OpenAI-compatible max_tokens API.
+            payload["max_tokens"] = int(max_tokens)
 
     data = _make_request(
         provider,
