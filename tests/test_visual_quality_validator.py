@@ -10,6 +10,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import visual_quality_validator as validator
+import free_image_generator as image_generator
 
 
 def response(status, payload=None):
@@ -146,6 +147,35 @@ class VisionRetryTests(unittest.TestCase):
                     image_path, "A sufficiently detailed complete scene prompt.",
                     (256, 256), enabled=False,
                 )
+
+
+class ImageGeneratorRegressionTests(unittest.TestCase):
+    def test_parse_size_accepts_requested_dimension_tuple(self):
+        self.assertEqual(image_generator.parse_size((720, 1280)), (720, 1280))
+        self.assertEqual(image_generator.parse_size([1280, 720]), (1280, 720))
+        self.assertEqual(image_generator.parse_size("720x1280"), (720, 1280))
+
+    def test_vision_score_is_optional_when_advisory_vision_is_unavailable(self):
+        self.assertIsNone(image_generator.vision_quality_score({
+            "accepted": True,
+            "status": "accepted_with_warning",
+            "vision": None,
+        }))
+        self.assertIsNone(image_generator.vision_quality_score({
+            "accepted": True,
+            "vision": "unavailable",
+        }))
+
+    def test_vision_score_reads_numeric_evidence(self):
+        self.assertEqual(
+            image_generator.vision_quality_score({
+                "vision": {"quality_score": 8}
+            }),
+            8,
+        )
+        self.assertIsNone(image_generator.vision_quality_score({
+            "vision": {"quality_score": True}
+        }))
 
 
 if __name__ == "__main__":
