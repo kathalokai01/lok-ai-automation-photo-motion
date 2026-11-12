@@ -57,7 +57,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v39-long-quoted-dialogue-partition"
+VERSION = "story-builder-v40-locked-scene-source-hashes"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
