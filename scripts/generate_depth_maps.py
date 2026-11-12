@@ -178,6 +178,15 @@ def extract_job_rows(document):
     raise RuntimeError("visual_jobs.json has an unsupported structure.")
 
 
+def bind_model_signature(item, signature):
+    """Attach the exact stage model identity to every normalized scene job."""
+    value = str(signature or "").strip().lower()
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise RuntimeError("Depth model_signature is missing or invalid.")
+    item["model_signature"] = value
+    return item
+
+
 def load_jobs():
     document = read_json(JOBS_FILE, None)
     if document is None:
@@ -425,7 +434,7 @@ def load_jobs():
             part_main_counts[part] += 1
         role_counts[(part, role)] = role_counts.get((part, role), 0) + 1
 
-        prepared.append({
+        prepared.append(bind_model_signature({
             "scene": number,
             "global_scene": number,
             "scene_id": scene_id,
@@ -445,9 +454,8 @@ def load_jobs():
             "job_signature": digest_data(job),
             "source_fingerprint": source_fingerprint,
             "config_signature": config_signature,
-            "model_signature": model_signature,
             "format": format_name,
-        })
+        }, model_signature))
 
     prepared.sort(key=lambda item: item["scene"])
     numbers = [item["scene"] for item in prepared]
