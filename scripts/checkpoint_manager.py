@@ -368,6 +368,28 @@ def validate_stage(name: str, directory: Path, expected: dict) -> bool:
     return True
 
 
+def copy_tree_merge(source: Path, destination: Path) -> int:
+    """Merge a verified checkpoint tree even when progress restore created its root."""
+    if not source.is_dir() or source.is_symlink():
+        return 0
+    if destination.exists() and not destination.is_dir():
+        raise RuntimeError(f"Checkpoint destination is not a directory: {destination}")
+    before = sum(1 for item in destination.rglob("*") if item.is_file()) if destination.is_dir() else 0
+    destination.mkdir(parents=True, exist_ok=True)
+    for item in sorted(source.rglob("*")):
+        if item.is_symlink():
+            raise RuntimeError(f"Checkpoint contains a symlink: {item}")
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif item.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+    after = sum(1 for item in destination.rglob("*") if item.is_file())
+    return max(0, after - before)
+
+
 def copy_stage(source: Path, output: Path, name: str) -> int:
     copied = 0
 
@@ -394,10 +416,7 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
     if name == "depth_maps":
         src = source / "visuals" / "depth_maps"
         dst = output / "visuals" / "depth_maps"
-        if not src.is_dir() or dst.exists():
-            return 0
-        shutil.copytree(src, dst, symlinks=False)
-        return sum(1 for item in dst.rglob("*") if item.is_file())
+        return copy_tree_merge(src, dst)
 
     files = next(files for stage, files in STAGES if stage == name)
     roots = sorted({Path(item).parts[0] for item in files})
@@ -410,15 +429,16 @@ def copy_stage(source: Path, output: Path, name: str) -> int:
     for root_name in roots:
         src = source / root_name
         dst = output / root_name
-        if not src.exists() or dst.exists() or src.is_symlink():
+        if not src.exists() or src.is_symlink():
             continue
         if src.is_file():
+            if dst.exists():
+                continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             copied += 1
         elif src.is_dir():
-            shutil.copytree(src, dst, symlinks=False)
-            copied += sum(1 for item in dst.rglob("*") if item.is_file())
+            copied += copy_tree_merge(src, dst)
     return copied
 
 
