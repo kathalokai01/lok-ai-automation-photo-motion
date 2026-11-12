@@ -434,7 +434,7 @@ jobs:
               "cv2", "edge_tts", "gradio_client",
               "huggingface_hub", "numpy", "PIL",
               "requests", "torch", "transformers",
-              "librosa", "sentencepiece", "soundfile",
+              "librosa", "sentencepiece", "soundfile", "pytest",
           )
 
           for module in modules:
@@ -522,14 +522,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          python -m compileall -q scripts
+          python -m compileall -q scripts tests
 
       - name: Test scene role narration and final scene validation
         shell: bash
         run: |
           set -euo pipefail
 
-          python -m unittest discover -s tests -p 'test_*.py' -v
+          python -m pytest -q tests
 
       - name: Test configured paid and free LLM provider fallback
         shell: bash
