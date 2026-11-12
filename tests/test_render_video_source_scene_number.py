@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import render_video
+import validate_final_output
 
 
 class MainSceneNumberContractTests(unittest.TestCase):
@@ -53,6 +54,46 @@ class MainSceneNumberContractTests(unittest.TestCase):
         )
         self.assertEqual(counts, {1: 10})
 
+
+
+
+
+class FinalValidatorSceneNumberContractTests(unittest.TestCase):
+    def test_source_scene_number_wins_over_global_visual_slot(self):
+        row = {
+            "part": 1,
+            "role": "main",
+            "scene_id": "part_01_scene_01",
+            "local_scene": 2,
+            "source_scene_number": 1,
+            "scene": 2,
+        }
+        self.assertEqual(
+            validate_final_output.scene_key(row, "Photo Motion"),
+            (1, "main", 1),
+        )
+
+    def test_hook_global_slot_does_not_shift_main_scene_identity(self):
+        rows = [
+            {
+                "part": 1,
+                "role": "hook",
+                "scene_id": "part_01_hook",
+                "scene": 1,
+            },
+            {
+                "part": 1,
+                "role": "main",
+                "scene_id": "part_01_scene_01",
+                "scene": 2,
+                "local_scene": 2,
+                "source_scene_number": 1,
+            },
+        ]
+        mapping = validate_final_output.validate_role_rows(
+            rows, [1], {1: 1}, "Photo Motion"
+        )
+        self.assertIn((1, "main", 1), mapping)
 
 if __name__ == "__main__":
     unittest.main()
