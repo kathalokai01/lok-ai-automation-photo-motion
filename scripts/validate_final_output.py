@@ -60,7 +60,7 @@ STORYBOARD_MANIFEST = OUT / "visuals" / "storyboard_manifest.json"
 RENDER_QUALITY_REPORT = OUT / "quality" / "render_quality_report.json"
 PRODUCTION_REPORT = OUT / "production_report.json"
 
-VERSION = "final-validator-v104-production-and-render-quality-contract"
+VERSION = "final-validator-v105-source-scene-number-priority"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -381,9 +381,13 @@ def scene_key(row: dict, label: str) -> tuple[int, str, int | None]:
     role = normalize_role(row)
 
     if role == "main":
+        # source_scene_number is the canonical story scene index.
+        # scene/local_scene may be global visual slots that include Hook/Suspense/
+        # Resolution records and therefore must not shift Main scene IDs.
         scene = positive_int(
-            row.get("local_scene") or row.get("scene")
-            or row.get("source_scene_number"),
+            row.get("source_scene_number")
+            or row.get("local_scene")
+            or row.get("scene"),
             f"{label} Main scene",
         )
         return part, role, scene
