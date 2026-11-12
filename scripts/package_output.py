@@ -55,7 +55,7 @@ METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v106-narration-manifest-authority"
+VERSION = "output-packager-v107-approved-project-image-artifacts"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
@@ -211,6 +211,15 @@ def safe_output(value: Any, label: str, minimum: int = 1) -> Path:
         fail(f"{label}: file is empty or too small")
     return resolved
 
+
+def is_approved_project_image(path: Path) -> bool:
+    """Allow only explicitly declared project-level image artifacts."""
+    candidate = path.resolve()
+    return any(
+        item.suffix.lower() in IMAGE_SUFFIXES
+        and item.resolve() == candidate
+        for item in PROJECT_FILES
+    )
 
 def output_relative(path: Path) -> str:
     try:
@@ -1453,8 +1462,22 @@ def selected_package_files(render: dict) -> list[Path]:
             if isinstance(row, dict)
             and (row.get("path") or row.get("audio_path") or row.get("audio") or row.get("file") or row.get("output"))
         )
-        if suffix in IMAGE_SUFFIXES and path not in scene_image_paths and path not in depth_paths and path != THUMBNAIL.resolve():
+        if (
+            suffix in IMAGE_SUFFIXES
+            and path not in scene_image_paths
+            and path not in depth_paths
+            and path != THUMBNAIL.resolve()
+            and not is_approved_project_image(path)
+        ):
             fail(f"Unreferenced image is forbidden in package: {path}")
+
+        if suffix in IMAGE_SUFFIXES and is_approved_project_image(path):
+            try:
+                from PIL import Image
+                with Image.open(path) as image:
+                    image.verify()
+            except Exception as exc:
+                fail(f"Project image integrity check failed: {path.name}: {exc}")
         if suffix in AUDIO_SUFFIXES and path not in allowed_audio:
             fail(f"Unreferenced audio file is forbidden in package: {path}")
         if suffix == ".zip":
