@@ -813,7 +813,7 @@ def read_depth_maps(
         raise RuntimeError("Depth manifest is missing or invalid; cannot silently downgrade to 2D.")
     if document.get("status") != "completed" or document.get("stage") != "depth_maps":
         raise RuntimeError("Depth manifest is not a completed depth_maps artifact.")
-    if document.get("version") != "photo-motion-depth-v9-manifest-bound-resume-integrity":
+    if document.get("version") != "photo-motion-depth-v11-model-signature-propagation":
         raise RuntimeError("Depth manifest version is incompatible; regenerate depth maps.")
     if document.get("format") != mode:
         raise RuntimeError("Depth manifest FORMAT does not match Photo Motion FORMAT.")
