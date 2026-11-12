@@ -1094,6 +1094,12 @@ def resolve_scene_narration(
         fail(f"Narration metadata record is missing: {scene_id}")
     if audio_row is None:
         fail(f"Role TTS audio is missing: {scene_id}")
+    if clean(narration_row.get("scene_id")) != scene_id:
+        fail(f"Narration metadata scene ID mismatch: {scene_id}")
+    if clean(audio_row.get("scene_id")) != scene_id:
+        fail(f"TTS audio scene ID mismatch: {scene_id}")
+    if clean(photo_row.get("scene_id")) != scene_id:
+        fail(f"Photo Motion scene ID mismatch: {scene_id}")
     if normalize_role(narration_row) != role or normalize_role(audio_row) != role:
         fail(f"Photo Motion/narration/audio role mismatch: {scene_id}")
     if narration_row.get("voiceover_enabled") is not True:
