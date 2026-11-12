@@ -144,3 +144,22 @@ def test_photo_motion_stage_merges_when_progress_restore_created_destination(tmp
     assert copied == 2
     assert (destination_motion / "photo_motion_manifest.json").is_file()
     assert (destination_motion / "part_01.mp4").read_bytes() == b"verified-photo-motion"
+
+
+
+def test_visual_stage_merges_when_partial_image_directory_exists(tmp_path):
+    source = tmp_path / "checkpoint" / "output"
+    output = tmp_path / "output"
+    source_visuals = source / "visuals"
+    destination_visuals = output / "visuals"
+    (source_visuals / "images").mkdir(parents=True)
+    (destination_visuals / "images").mkdir(parents=True)
+
+    (source_visuals / "images" / "scene_01.png").write_bytes(b"scene-one")
+    (source_visuals / "images" / "scene_02.png").write_bytes(b"scene-two")
+    (destination_visuals / "images" / "scene_01.png").write_bytes(b"scene-one")
+
+    copied = checkpoint_manager.copy_stage(source, output, "visuals")
+
+    assert copied == 1
+    assert (destination_visuals / "images" / "scene_02.png").read_bytes() == b"scene-two"
