@@ -55,7 +55,7 @@ METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v105-all-role-narration-captions-assets"
+VERSION = "output-packager-v106-narration-manifest-authority"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
@@ -1082,6 +1082,52 @@ def portable_render_manifest(
     return remap_manifest_paths(data, root_name, slug)
 
 
+def resolve_scene_narration(
+    photo_row: dict,
+    narration_row: dict | None,
+    audio_row: dict | None,
+    scene_id: str,
+    role: str,
+) -> str:
+    """Resolve spoken text from narration.json, not the visual-only manifest."""
+    if narration_row is None:
+        fail(f"Narration metadata record is missing: {scene_id}")
+    if audio_row is None:
+        fail(f"Role TTS audio is missing: {scene_id}")
+    if normalize_role(narration_row) != role or normalize_role(audio_row) != role:
+        fail(f"Photo Motion/narration/audio role mismatch: {scene_id}")
+    if narration_row.get("voiceover_enabled") is not True:
+        fail(f"Narration metadata voiceover is disabled: {scene_id}")
+    if photo_row.get("voiceover_enabled") is not True:
+        fail(f"Photo Motion voiceover is disabled: {scene_id}")
+
+    narration_text = clean(narration_row.get("narration") or narration_row.get("text"))
+    audio_text = clean(audio_row.get("text") or audio_row.get("narration"))
+    if not narration_text or not audio_text:
+        fail(f"Narration text is missing: {scene_id}")
+    if narration_text != audio_text:
+        fail(f"Narration text differs from TTS source text: {scene_id}")
+
+    expected_source = (
+        "ai_generated_role_narration"
+        if role in {"hook", "suspense", "resolution"}
+        else "locked_part_text"
+    )
+    narration_source = clean(narration_row.get("narration_source"))
+    audio_source = clean(audio_row.get("narration_source"))
+    photo_source = clean(photo_row.get("narration_source"))
+    if narration_source != expected_source or audio_source != expected_source or photo_source != expected_source:
+        fail(f"Narration source mismatch: {scene_id}")
+
+    text_hash = hashlib.sha256(narration_text.encode("utf-8")).hexdigest()
+    declared_hash = clean(audio_row.get("text_sha256")).lower()
+    if declared_hash != text_hash:
+        fail(f"Narration/TTS text SHA-256 mismatch: {scene_id}")
+    if clean(photo_row.get("source_text_sha256")).lower() != text_hash:
+        fail(f"Photo Motion/narration text SHA-256 mismatch: {scene_id}")
+    return narration_text
+
+
 def selected_package_files(render: dict) -> list[Path]:
     selected = {path.resolve() for path in REQUIRED_FILES}
     selected.update(path.resolve() for path in render["part_paths"])
@@ -1092,6 +1138,7 @@ def selected_package_files(render: dict) -> list[Path]:
         fail("Photo Motion manifest has no scene asset references")
 
     narration_metadata = read_json(OUT / "narration" / "narration.json")
+    narration_by_id = {}
     for field in ("scenes", "extra_scenes"):
         records = narration_metadata.get(field, [])
         if not isinstance(records, list):
@@ -1099,11 +1146,15 @@ def selected_package_files(render: dict) -> list[Path]:
         for record in records:
             if not isinstance(record, dict):
                 fail(f"Narration metadata {field} contains an invalid record")
+            sid = clean(record.get("scene_id"))
+            if not sid or sid in narration_by_id:
+                fail(f"Narration metadata has a missing or duplicate scene ID: {sid}")
             profile = record.get("voice_profile")
             if not isinstance(profile, dict) or not clean(profile.get("profile_id")):
-                fail(f"{clean(record.get('scene_id'))}: voice profile is missing from package metadata")
+                fail(f"{sid}: voice profile is missing from package metadata")
             if not re.fullmatch(r"[0-9a-f]{64}", clean(profile.get("fingerprint"))):
-                fail(f"{clean(record.get('scene_id'))}: voice profile fingerprint is invalid")
+                fail(f"{sid}: voice profile fingerprint is invalid")
+            narration_by_id[sid] = record
 
     music_metadata = read_json(FLOW_MANIFEST)
     compositions = music_metadata.get("role_compositions", {})
@@ -1153,6 +1204,12 @@ def selected_package_files(render: dict) -> list[Path]:
         audio_by_id[sid] = row
     if set(photo_by_id) != expected_scene_ids or set(audio_by_id) != expected_main_ids:
         fail("Photo Motion and TTS must cover every visual scene role")
+    if set(narration_by_id) != expected_scene_ids:
+        fail(
+            "Narration metadata must cover every visual scene role exactly once: "
+            f"missing={sorted(expected_scene_ids - set(narration_by_id))}, "
+            f"extra={sorted(set(narration_by_id) - expected_scene_ids)}"
+        )
 
     scene_image_paths = set()
     scene_audio_paths = set()
@@ -1173,15 +1230,10 @@ def selected_package_files(render: dict) -> list[Path]:
         if not re.fullmatch(r"[a-f0-9]{64}", declared_image_hash) or declared_image_hash != sha256_file(image_path):
             fail(f"Scene image SHA-256 mismatch: {sid}")
 
-        if audio_row is None:
-            fail(f"Role TTS audio is missing: {sid}")
-        if normalize_role(audio_row) != role:
-            fail(f"Photo Motion/TTS role mismatch: {sid}")
-        if role != "main":
-            if photo_row.get("voiceover_enabled") is not True or not clean(photo_row.get("narration")):
-                fail(f"Narrated extra role has no narration/voiceover: {sid}")
-            if photo_row.get("narration_source") != "ai_generated_role_narration":
-                fail(f"Extra-role narration source mismatch: {sid}")
+        narration_row = narration_by_id.get(sid)
+        narration_text = resolve_scene_narration(
+            photo_row, narration_row, audio_row, sid, role
+        )
         audio_value = (
             audio_row.get("audio_path") or audio_row.get("audio_file")
             or audio_row.get("audio") or audio_row.get("output")
@@ -1223,6 +1275,8 @@ def selected_package_files(render: dict) -> list[Path]:
             fail(f"Photo Motion/narration duration mismatch: {sid}")
         if photo_row.get("source_text_sha256") != audio_row.get("text_sha256"):
             fail(f"Photo Motion/TTS source text hash mismatch: {sid}")
+        if clean(audio_row.get("text")) != narration_text:
+            fail(f"Packager narration read-back mismatch: {sid}")
         scene_audio_paths.add(audio_path.resolve())
 
         try:
