@@ -41,7 +41,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 17
+VERSION = 18
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -74,6 +74,25 @@ def log(*values: Any) -> None:
 
 def text_value(value: Any, default: str = "") -> str:
     return default if value is None else str(value).strip()
+
+
+def scene_text_hash_metadata(job: dict) -> dict:
+    """Persist the exact normalized narration fingerprint in every TTS row."""
+    value = re.sub(
+        r"\\s+",
+        " ",
+        str(job.get("text") or ""),
+    ).strip()
+    if not value:
+        raise RuntimeError("TTS scene text is empty; cannot fingerprint narration.")
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    declared = str(job.get("text_sha256") or "").strip()
+    if declared and declared != digest:
+        raise RuntimeError("TTS scene text fingerprint changed after job preparation.")
+    return {
+        "text_sha256": digest,
+        "source_text_sha256": digest,
+    }
 
 
 def cfg_bool(config: dict, key: str, default: bool = False) -> bool:
@@ -2516,6 +2535,7 @@ def main() -> int:
                 "scene_id": job["scene_id"],
                 "role": job["role"],
                 "text": job["text"],
+                **scene_text_hash_metadata(job),
                 "voice": job["voice"],
                 "tts_fingerprint": scene_fingerprint,
                 "fingerprint": scene_fingerprint,
@@ -2694,6 +2714,7 @@ def main() -> int:
             "scene_id": job["scene_id"],
             "role": job["role"],
             "text": job["text"],
+            **scene_text_hash_metadata(job),
             "voice": job["voice"],
             "audio_path": str(
                 scene_output.relative_to(ROOT)
