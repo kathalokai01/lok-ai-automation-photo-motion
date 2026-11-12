@@ -12,7 +12,7 @@ import requests
 VERSION = "music-provider-client-v1"
 ELEVEN_URL = "https://api.elevenlabs.io/v1/music"
 STABILITY_URL = "https://api.stability.ai/v2beta/audio/stable-audio/text-to-audio"
-TIMEOUT = (30, 900)
+TIMEOUT = (10, 90)
 MIN_AUDIO_BYTES = 10_000
 
 class MusicProviderError(RuntimeError):
