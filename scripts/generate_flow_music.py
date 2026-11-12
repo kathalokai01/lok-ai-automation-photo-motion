@@ -34,10 +34,10 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-multi-provider-music-v20-inline-comments-paid-call-accounting"
+VERSION = "photo-motion-multi-provider-music-v21-fast-failure-circuit-breaker"
 
-REQUEST_TIMEOUT = (30, 900)
-RETRY_DELAYS = (8, 20)
+REQUEST_TIMEOUT = (10, 90)
+RETRY_DELAYS = (3,)
 MIN_AUDIO_BYTES = 10000
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 MIN_AUDIO_DURATION = 10.0
@@ -920,6 +920,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
         cached = {}
 
     compositions = {}
+    blocked_providers = set()
     for role in SEGMENT_ROLES:
         duration = role_durations.get(role, 0.0)
         if duration <= 0:
@@ -957,6 +958,10 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
         )
 
         for provider_index, provider in enumerate(provider_order):
+            if provider in blocked_providers:
+                provider_errors.append(f"{provider}: skipped after an earlier provider failure")
+                log("MUSIC PROVIDER CIRCUIT OPEN; SKIPPING:", provider, role)
+                continue
             if provider == "local":
                 provider_errors.append(
                     "local: handled by the separate local sound-design fallback"
@@ -1002,10 +1007,20 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                 break
 
             except Exception as provider_error:
-                provider_errors.append(
-                    f"{provider}: {str(provider_error)[:300]}"
-                )
-                log("MUSIC PROVIDER FAILED:", provider, role, str(provider_error)[:180])
+                error_text = str(provider_error)
+                provider_errors.append(f"{provider}: {error_text[:300]}")
+                lowered = error_text.lower()
+                permanent_failure = any(marker in lowered for marker in (
+                    "http 402", "http 403", "http 401", "http 404",
+                    "quota", "billing", "free tier limit", "tokens/minute",
+                    "insufficient credit", "api key is missing",
+                    "permission disabled", "not found",
+                )) or ("http 429" in lowered and any(
+                    marker in lowered for marker in ("quota", "limit", "resource_exhausted", "tokens")
+                ))
+                if permanent_failure:
+                    blocked_providers.add(provider)
+                log("MUSIC PROVIDER FAILED:", provider, role, error_text[:180])
                 if not fallback_enabled:
                     break
 
@@ -1426,6 +1441,8 @@ def write_unavailable(reason, model=None, duration=None, signature=None):
         "paid_provider_api_calls": PAID_PROVIDER_CALLS,
         "external_api_calls": API_CALLS,
         "version": VERSION,
+        "failed_at_unix": time.time(),
+        "retry_after_unix": time.time() + 21600,
     }
     if duration is not None:
         record["required_duration_seconds"] = round(float(duration), 3)
@@ -1527,6 +1544,20 @@ def main():
             title, story_text, summary, rows, config, model,
             target_duration, prompts, role_durations,
         )
+
+        previous_failure = read_json(MANIFEST)
+        force_retry = truthy(os.getenv("MUSIC_FORCE_RETRY", "false"), False)
+        if (
+            not force_retry
+            and previous_failure.get("status") == "unavailable"
+            and previous_failure.get("version") == VERSION
+            and previous_failure.get("source_fingerprint") == source_sig
+            and float(previous_failure.get("retry_after_unix", 0) or 0) > time.time()
+        ):
+            log("MUSIC PROVIDER COOLDOWN ACTIVE; skipping repeated failed API calls.")
+            log("NEXT AUTOMATIC RETRY AFTER UNIX:", previous_failure["retry_after_unix"])
+            log("Set MUSIC_FORCE_RETRY=true to bypass cooldown for this run.")
+            return 0
 
         if verify_existing(source_sig, target_duration, timeline):
             previous = read_json(MANIFEST)
