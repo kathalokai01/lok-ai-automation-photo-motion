@@ -33,6 +33,39 @@ def rows(doc):
  for key in ("scenes","jobs","records","images"):
   if isinstance(doc.get(key),list): return [x for x in doc[key] if isinstance(x,dict)]
  return []
+def effective_music(music,sound):
+ tracks=sound.get("tracks") if isinstance(sound.get("tracks"),dict) else {}
+ track=tracks.get("music") if isinstance(tracks.get("music"),dict) else {}
+ external_provider=music.get("provider") or music.get("selected_provider")
+ external_model=music.get("model")
+ if str(track.get("status","")).lower() in {"completed","complete","success","reused"}:
+  provider=track.get("provider") or track.get("generation") or "local_synthesis"
+  return {
+   "status":"completed",
+   "provider":provider,
+   "model":track.get("model") or (external_model if provider != "local_synthesis" else None),
+   "reason":None,
+   "external_status":music.get("status","missing"),
+   "external_reason":music.get("reason"),
+   "external_provider":external_provider,
+   "external_model":external_model,
+   "external_api_calls":music.get("external_api_calls"),
+   "paid_services_used":music.get("paid_services_used"),
+   "paid_provider_api_calls":music.get("paid_provider_api_calls",0),
+  }
+ return {
+  "status":music.get("status","missing"),
+  "provider":external_provider,
+  "model":external_model,
+  "reason":music.get("reason"),
+  "external_status":music.get("status","missing"),
+  "external_reason":music.get("reason"),
+  "external_provider":external_provider,
+  "external_model":external_model,
+  "external_api_calls":music.get("external_api_calls"),
+  "paid_services_used":music.get("paid_services_used"),
+  "paid_provider_api_calls":music.get("paid_provider_api_calls",0),
+ }
 def main():
  config_data=load_and_validate(ROOT/"Input"/"topic.txt")
  configured_provider_order=get_image_provider_order(config_data)
@@ -56,6 +89,7 @@ def main():
  ai_story=docs["ai_story"] or {}
  story=docs["story"] or {}
  music=docs["music"] or {}
+ music_result=effective_music(music,docs["sound"] or {})
  stages={}
  for name,path in SOURCES.items():
   doc=docs[name]
@@ -77,8 +111,10 @@ def main():
    "ai_story_last_successful_model":ai_story.get("last_successful_model") or progression.get("successful_model"),
    "ai_story_progression_cursor":progression.get("cursor_model"),
    "tts_provider_counts":dict(audio_providers),
-   "music_provider":music.get("provider") or music.get("selected_provider"),
-   "music_model":music.get("model"),
+   "music_provider":music_result["provider"],
+   "music_model":music_result["model"],
+   "music_external_provider":music_result["external_provider"],
+   "music_external_model":music_result["external_model"],
    "image_progression_cursor":(image_doc.get("model_progression") or {}).get("model_cursor_key") or (image_doc.get("policy") or {}).get("model_cursor_key"),
    "image_last_successful_model":(image_doc.get("model_progression") or {}).get("last_successful_model"),
   },
@@ -99,11 +135,13 @@ def main():
    "reused_chunks":audio_summary.get("reused_chunks",0),
    "generated_chunks":audio_summary.get("generated_chunks",0),
   },
-  "music_status":music.get("status","missing"),
-  "music_reason":music.get("reason"),
-  "music_external_api_calls":music.get("external_api_calls"),
-  "music_paid_services_used":music.get("paid_services_used"),
-  "music_paid_provider_api_calls":music.get("paid_provider_api_calls",0),
+  "music_status":music_result["status"],
+  "music_reason":music_result["reason"],
+  "music_external_provider_status":music_result["external_status"],
+  "music_external_provider_reason":music_result["external_reason"],
+  "music_external_api_calls":music_result["external_api_calls"],
+  "music_paid_services_used":music_result["paid_services_used"],
+  "music_paid_provider_api_calls":music_result["paid_provider_api_calls"],
   "costs":{"status":"not_reported_by_all_providers","amount":None,"currency":None},
   "stages":stages,
   "input_sha256":digest(input_path) if input_path.is_file() else None,
