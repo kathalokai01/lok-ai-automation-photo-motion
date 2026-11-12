@@ -678,6 +678,8 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
         "visuals/checkpoints",
         "visuals/depth_maps",
         "photo_motion/checkpoints",
+        "scene_renders",
+        "captions",
         "scenes",
     )
     copied = 0
