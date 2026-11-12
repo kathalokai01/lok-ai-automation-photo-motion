@@ -297,10 +297,14 @@ def validate_scene_render_stage(directory: Path) -> bool:
         return False
 
     path_keys = {
-        "path", "file", "output", "output_path", "video", "video_path",
-        "rendered_video", "source_path",
+        "path", "file", "output", "output_path", "image", "image_path",
+        "audio", "audio_path", "video", "video_path", "depth_path",
+        "depth_map", "rendered_video", "source_path",
     }
-    hash_keys = ("sha256", "video_sha256", "file_sha256")
+    hash_keys = (
+        "sha256", "image_sha256", "audio_sha256", "video_sha256",
+        "depth_sha256", "file_sha256", "source_sha256",
+    )
     checked = 0
     invalid = False
 
