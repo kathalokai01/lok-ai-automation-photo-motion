@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v69-sfx-validator-v17-signature-contract"
+VERSION = "render-video-v70-consume-validated-sfx-trim-timeline"
 SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
@@ -733,6 +733,50 @@ def sfx_validation_signature(audio_manifest_hash, sound_manifest_hash, cue_manif
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def validated_sfx_timing(cue, narration_duration, scene_id):
+    """Use the exact shift/trim decision already measured by SFX validation."""
+    original_start = finite_number(
+        cue.get("start_seconds"),
+        f"SFX cue {scene_id} original start",
+        minimum=0,
+    )
+    file_duration = finite_number(
+        cue.get("duration_seconds"),
+        f"SFX cue {scene_id} file duration",
+        minimum=0.01,
+    )
+    start = finite_number(
+        cue.get("renderer_start_seconds"),
+        f"SFX cue {scene_id} validated renderer start",
+        minimum=0,
+    )
+    duration = finite_number(
+        cue.get("renderer_effective_duration_seconds"),
+        f"SFX cue {scene_id} validated renderer duration",
+        minimum=0.01,
+    )
+    if start > original_start + 0.001:
+        raise RuntimeError(f"SFX validator moved cue later than its declared start: {scene_id}")
+    if start + duration > narration_duration + 0.02:
+        raise RuntimeError(f"Validated SFX cue exceeds narration boundary: {scene_id}")
+    expected_truncation = max(0.0, file_duration - duration)
+    reported_truncation = finite_number(
+        cue.get("renderer_truncated_seconds"),
+        f"SFX cue {scene_id} validated truncation",
+        minimum=0,
+    )
+    if abs(expected_truncation - reported_truncation) > 0.03:
+        raise RuntimeError(f"SFX validator trim metadata is inconsistent: {scene_id}")
+    reported_start = finite_number(
+        cue.get("renderer_end_seconds"),
+        f"SFX cue {scene_id} validated renderer end",
+        minimum=0.01,
+    )
+    if abs(reported_start - (start + duration)) > 0.03:
+        raise RuntimeError(f"SFX validator end metadata is inconsistent: {scene_id}")
+    return start, duration
+
+
 def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash):
     manifest = read_json(SOUND_MANIFEST, "Sound design manifest")
     validate_completed(manifest, "Sound design manifest")
@@ -906,10 +950,13 @@ def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash
         declared_duration = finite_number(cue.get("duration_seconds"), f"SFX cue {index} declared duration", minimum=0.01)
         if abs(declared_duration - info["duration"]) > 0.15:
             raise RuntimeError(f"SFX cue declared/file duration mismatch: {sid}")
-        actual_start = start
-        usable_duration = info["duration"]
-        if actual_start + usable_duration > duration + 0.02:
-            raise RuntimeError(f"SFX cue would be truncated by narration boundary: {sid}")
+        if abs(declared_duration - info["duration"]) > 0.15:
+            raise RuntimeError(f"SFX cue declared/file duration mismatch: {sid}")
+        actual_start, usable_duration = validated_sfx_timing(
+            cue, duration, sid
+        )
+        if usable_duration > info["duration"] + 0.02:
+            raise RuntimeError(f"Validated SFX duration exceeds source file: {sid}")
         if actual_start + usable_duration > duration - SFX_END_MARGIN + 0.02:
             assets["warnings"].append({"scene_id": sid, "warning": "SFX tail reaches narration end margin"})
 
