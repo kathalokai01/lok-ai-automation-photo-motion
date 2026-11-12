@@ -53,7 +53,7 @@ def test_renderer_rejects_unvalidated_or_inconsistent_trim_metadata():
 
 def test_renderer_version_records_validated_sfx_timeline_contract():
     source = (ROOT / "scripts" / "render_video.py").read_text(encoding="utf-8")
-    assert 'VERSION = "render-video-v70-consume-validated-sfx-trim-timeline"' in source
+    assert 'VERSION = "render-video-v72-split-narration-for-sidechain-and-mix"' in source
     assert "def validated_sfx_timing(" in source
 
 
@@ -63,4 +63,47 @@ def test_renderer_emits_part_videos_only_without_combined_intermediate():
     assert "PRE_CAPTION_VIDEO" not in source
     assert "pre_caption_video" not in source
     assert "ordered_part_paths" not in source
-    assert 'VERSION = "render-video-v71-part-outputs-only-no-combined-video"' in source
+    assert 'VERSION = "render-video-v72-split-narration-for-sidechain-and-mix"' in source
+
+
+def test_audio_filter_splits_narration_for_sidechain_and_final_mix():
+    old = render_video.MUSIC_DUCKING_ENABLED
+    render_video.MUSIC_DUCKING_ENABLED = True
+    try:
+        inputs, filters = render_video.build_audio_filter(
+            {"video": "scene.mp4", "duration": 4.0, "scene_id": "part_01_hook"},
+            {"audio": "voice.wav", "duration": 4.0},
+            {
+                "music": {"path": "music.wav", "duration": 30.0},
+                "ambient": None,
+                "sfx": {},
+            },
+            0.0, 720, 1280, 24,
+        )
+    finally:
+        render_video.MUSIC_DUCKING_ENABLED = old
+
+    graph = ";".join(filters)
+    assert "[narr]asplit=2[narr_mix][narr_sc]" in graph
+    assert "[bed][narr_sc]sidechaincompress=" in graph
+    assert "[narr_mix]" in graph
+    assert graph.endswith("[aout]")
+
+
+def test_audio_filter_keeps_single_narration_branch_when_ducking_disabled():
+    old = render_video.MUSIC_DUCKING_ENABLED
+    render_video.MUSIC_DUCKING_ENABLED = False
+    try:
+        _, filters = render_video.build_audio_filter(
+            {"video": "scene.mp4", "duration": 4.0, "scene_id": "part_01_hook"},
+            {"audio": "voice.wav", "duration": 4.0},
+            {"music": {"path": "music.wav", "duration": 30.0}, "ambient": None, "sfx": {}},
+            0.0, 720, 1280, 24,
+        )
+    finally:
+        render_video.MUSIC_DUCKING_ENABLED = old
+
+    graph = ";".join(filters)
+    assert "asplit=" not in graph
+    assert "[narr]" in graph
+    assert "[bed]" in graph
