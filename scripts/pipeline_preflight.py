@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v73-pinned-ubuntu-runner"
+VERSION = "photo-motion-preflight-v74-checkpoint-render-artifact-validation"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
