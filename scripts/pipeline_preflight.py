@@ -873,6 +873,75 @@ def allowed_manifest_row_statuses(name: str) -> set[str]:
     return allowed
 
 
+def is_retryable_failed_depth_manifest(data: Any, visual_jobs: Any) -> bool:
+    """Allow only an identity-matched failed depth stage to resume.
+
+    The depth generator independently revalidates every reusable map against
+    the current source/config/model signatures and its file SHA-256.
+    """
+    if not isinstance(data, dict) or not isinstance(visual_jobs, dict):
+        return False
+    if data.get("status") != "failed" or data.get("stage") != "depth_maps":
+        return False
+    if visual_jobs.get("status") != "completed":
+        return False
+    for key in ("source_fingerprint", "config_signature", "format",
+                "scenes_min", "scenes_max", "actual_scene_counts"):
+        if data.get(key) != visual_jobs.get(key):
+            return False
+    model_signature = str(data.get("model_signature") or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", model_signature):
+        return False
+    version = str(data.get("version") or "").strip()
+    if not version or not str(data.get("last_error") or "").strip():
+        return False
+    rows = data.get("scenes")
+    if not isinstance(rows, list):
+        return False
+    if type(data.get("total_scenes")) is not int or data["total_scenes"] < 1:
+        return False
+    if type(data.get("completed_scenes")) is not int:
+        return False
+    if data["completed_scenes"] != len(rows) or len(rows) > data["total_scenes"]:
+        return False
+    counts = visual_jobs.get("actual_scene_counts")
+    if not isinstance(counts, dict) or not counts:
+        return False
+    try:
+        expected_total = sum(int(value) for value in counts.values()) + 2 * len(counts)
+    except (TypeError, ValueError):
+        return False
+    if expected_total != data["total_scenes"]:
+        return False
+    seen_ids = set()
+    seen_numbers = set()
+    valid_row_statuses = SUCCESS | {"generated", "fallback_reused", "fallback_pseudo_depth"}
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        scene_id = str(row.get("scene_id") or "").strip()
+        try:
+            number = int(row.get("global_scene", row.get("scene")))
+        except (TypeError, ValueError):
+            return False
+        if not scene_id or scene_id in seen_ids or number < 1 or number in seen_numbers:
+            return False
+        if str(row.get("status") or "").strip().lower() not in valid_row_statuses:
+            return False
+        for key in ("source_fingerprint", "config_signature", "model_signature", "format"):
+            if row.get(key) != data.get(key):
+                return False
+        if not row.get("depth_map") or not re.fullmatch(
+            r"[a-f0-9]{64}", str(row.get("depth_sha256") or "").strip().lower()
+        ):
+            return False
+        if type(row.get("size_bytes")) is not int or row["size_bytes"] <= 0:
+            return False
+        seen_ids.add(scene_id)
+        seen_numbers.add(number)
+    return True
+
+
 def validate_existing_manifest(
     name: str,
     path: Path,
@@ -929,6 +998,7 @@ def validate_existing_manifest(
 
     legacy_empty_tts_marker = False
     resumable_tts_manifest = False
+    retryable_failed_depth_manifest = False
 
     if isinstance(data, dict):
         status = str(
@@ -1012,7 +1082,21 @@ def validate_existing_manifest(
             or resumable_tts_manifest
         )
 
-        if status in FAILED and not retryable_narration_audio:
+        if name == "depth_manifest" and status == "failed":
+            visual_jobs_path = OUT / "visuals" / "visual_jobs_manifest.json"
+            try:
+                visual_jobs_data = json.loads(
+                    visual_jobs_path.read_text(encoding="utf-8-sig")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                visual_jobs_data = None
+            retryable_failed_depth_manifest = is_retryable_failed_depth_manifest(
+                data, visual_jobs_data
+            )
+
+        if status in FAILED and not (
+            retryable_narration_audio or retryable_failed_depth_manifest
+        ):
             raise ValueError(
                 f"{name}: manifest status is {status}."
             )
@@ -1409,6 +1493,10 @@ def validate_existing_manifest(
             )
 
         allowed_row_statuses = allowed_manifest_row_statuses(name)
+        if name == "depth_manifest":
+            allowed_row_statuses = allowed_row_statuses | {
+                "generated", "fallback_reused", "fallback_pseudo_depth"
+            }
         if (
             row_status
             and row_status not in allowed_row_statuses
@@ -1499,7 +1587,14 @@ def validate_existing_manifest(
         "part_counts": {},
     }
 
-    if legacy_empty_tts_marker:
+    if retryable_failed_depth_manifest:
+        scene_detail = (
+            "Identity-matched failed depth stage found; the depth generator "
+            "will independently verify and reuse valid partial maps, then "
+            "retry every remaining scene."
+        )
+
+    elif legacy_empty_tts_marker:
         scene_detail = (
             "Legacy empty TTS failure marker found; "
             "no completed jobs or audio assets are recorded. "
