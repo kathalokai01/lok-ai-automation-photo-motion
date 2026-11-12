@@ -862,6 +862,17 @@ def validate_actual_scene_counts(
 
 
 
+def allowed_manifest_row_statuses(name: str) -> set[str]:
+    """Return row statuses accepted for each resumable artifact type."""
+    allowed = SUCCESS | NONFINAL
+    if name in {"image_manifest", "image_generation_manifest"}:
+        # Image rows are written by free_image_generator.py before the
+        # pipeline-level manifest is marked completed. These are valid
+        # reusable image states, not unknown preflight states.
+        allowed = allowed | {"generated", "existing"}
+    return allowed
+
+
 def validate_existing_manifest(
     name: str,
     path: Path,
@@ -1397,9 +1408,10 @@ def validate_existing_manifest(
                 f"{row_status}."
             )
 
+        allowed_row_statuses = allowed_manifest_row_statuses(name)
         if (
             row_status
-            and row_status not in SUCCESS | NONFINAL
+            and row_status not in allowed_row_statuses
         ):
             raise ValueError(
                 f"{name}: row {index} has unknown status "
