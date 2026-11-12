@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v67-source-main-scene-number-contract"
+VERSION = "render-video-v68-normalized-tts-text-hash-contract"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -665,9 +665,16 @@ def load_audio_map(parts, scene_counts):
         if (row.get("duration_source") or row.get("audio_duration_source")) != "ffprobe_measured":
             raise RuntimeError(f"Narration duration is not ffprobe-measured: {sid}")
         text_value = str(row.get("text") or row.get("narration") or "")
-        text_hash = hashlib.sha256(text_value.strip().encode("utf-8")).hexdigest()
-        if not text_value.strip() or row.get("text_sha256") != text_hash:
-            raise RuntimeError(f"Locked narration text hash mismatch: {sid}")
+        normalized_text = re.sub(r"\\s+", " ", text_value).strip()
+        text_hash = hashlib.sha256(
+            normalized_text.encode("utf-8")
+        ).hexdigest()
+        if not normalized_text or row.get("text_sha256") != text_hash:
+            raise RuntimeError(
+                f"Locked narration text hash mismatch: {sid}; "
+                "TTS manifest must include the normalized text_sha256."
+            )
+        text_value = normalized_text
 
         mapping[sid] = {
             "scene_id": sid, "part": part, "role": role,
