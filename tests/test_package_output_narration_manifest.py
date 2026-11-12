@@ -39,6 +39,7 @@ class PackageNarrationManifestTests(unittest.TestCase):
                 "scene_id": "part_01_hook",
                 "role": role,
                 "status": "completed",
+                "voiceover_enabled": True,
                 "text": text,
                 "text_sha256": digest,
                 "narration_source": source,
