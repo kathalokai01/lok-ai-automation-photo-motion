@@ -16,3 +16,4 @@ accelerate==1.10.0
 sentencepiece==0.2.1
 soundfile==0.13.1
 librosa==0.11.0
+pytest==8.4.1
