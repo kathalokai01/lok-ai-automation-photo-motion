@@ -374,7 +374,6 @@ def copy_tree_merge(source: Path, destination: Path) -> int:
         return 0
     if destination.exists() and not destination.is_dir():
         raise RuntimeError(f"Checkpoint destination is not a directory: {destination}")
-    before = sum(1 for item in destination.rglob("*") if item.is_file()) if destination.is_dir() else 0
     destination.mkdir(parents=True, exist_ok=True)
     for item in sorted(source.rglob("*")):
         if item.is_symlink():
@@ -386,8 +385,7 @@ def copy_tree_merge(source: Path, destination: Path) -> int:
         elif item.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target)
-    after = sum(1 for item in destination.rglob("*") if item.is_file())
-    return max(0, after - before)
+    return sum(1 for item in source.rglob("*") if item.is_file())
 
 
 def copy_stage(source: Path, output: Path, name: str) -> int:
