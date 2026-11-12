@@ -60,7 +60,7 @@ STORYBOARD_MANIFEST = OUT / "visuals" / "storyboard_manifest.json"
 RENDER_QUALITY_REPORT = OUT / "quality" / "render_quality_report.json"
 PRODUCTION_REPORT = OUT / "production_report.json"
 
-VERSION = "final-validator-v105-source-scene-number-priority"
+VERSION = "final-validator-v106-pathlike-output-paths"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -193,10 +193,14 @@ def parse_fps(value: Any, label: str) -> float:
 
 
 def safe_output(value: Any, label: str, minimum: int = 1) -> Path:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, (str, os.PathLike)):
         fail(f"{label}: path is missing")
 
-    candidate = Path(value.strip())
+    raw_value = os.fspath(value)
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        fail(f"{label}: path is missing")
+
+    candidate = Path(raw_value.strip())
     if not candidate.is_absolute():
         candidate = ROOT / candidate
 
