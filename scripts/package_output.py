@@ -1106,6 +1106,8 @@ def resolve_scene_narration(
         fail(f"Narration metadata voiceover is disabled: {scene_id}")
     if photo_row.get("voiceover_enabled") is not True:
         fail(f"Photo Motion voiceover is disabled: {scene_id}")
+    if audio_row.get("voiceover_enabled") is not True:
+        fail(f"TTS audio voiceover is disabled: {scene_id}")
 
     narration_text = clean(narration_row.get("narration") or narration_row.get("text"))
     audio_text = clean(audio_row.get("text") or audio_row.get("narration"))
