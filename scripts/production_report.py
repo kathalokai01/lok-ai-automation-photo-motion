@@ -99,7 +99,7 @@ def main():
  image_generated=image_status.get("generated",0)
  report={
   "status":"completed" if image_doc.get("status")=="completed" and stages["render_quality"]["status"] in {"passed","completed"} else "incomplete",
-  "version":"production-report-v2-model-reuse-failure-evidence",
+  "version":"production-report-v3-effective-local-music-fallback",
   "run_id":os.getenv("GITHUB_RUN_ID") or "local",
   "story_title":story.get("title") or story.get("story_title") or ai_story.get("title"),
   "format":(docs["visual_jobs"] or {}).get("format") or story.get("format"),
