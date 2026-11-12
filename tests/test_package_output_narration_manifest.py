@@ -75,6 +75,14 @@ class PackageNarrationManifestTests(unittest.TestCase):
                 photo, narration, audio, "part_01_hook", "hook"
             )
 
+    def test_narration_scene_id_mismatch_is_rejected(self):
+        photo, narration, audio, _ = self.make_rows("hook")
+        narration["scene_id"] = "part_01_resolution"
+        with self.assertRaisesRegex(RuntimeError, "Narration metadata scene ID mismatch"):
+            package_output.resolve_scene_narration(
+                photo, narration, audio, "part_01_hook", "hook"
+            )
+
     def test_narration_source_role_mismatch_is_rejected(self):
         photo, narration, audio, _ = self.make_rows("hook")
         photo["narration_source"] = "locked_part_text"
