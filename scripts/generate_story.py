@@ -2087,6 +2087,16 @@ def validate_story(
                 f"Part {number} word count metadata mismatch."
             )
 
+        for scene_number, scene in enumerate(part_scenes, 1):
+            scene_id = f"part_{number:02d}_scene_{scene_number:02d}"
+            scene_text = clean(scene.get("narration"))
+            if not scene_text:
+                raise RuntimeError(f"Scene narration is empty: {scene_id}.")
+            if scene.get("source_text_sha256") != sha256(scene_text):
+                raise RuntimeError(f"Scene source text hash mismatch: {scene_id}.")
+            if scene.get("source_word_count") != word_count(scene_text):
+                raise RuntimeError(f"Scene source word count mismatch: {scene_id}.")
+
         if not isinstance(part.get("hook_scene"), dict):
             raise RuntimeError(f"Part {number} Hook Scene is missing.")
         extra_records = [
