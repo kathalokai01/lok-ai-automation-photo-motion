@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v66-faststart-cfr-photo-motion-quality-contract"
+VERSION = "render-video-v67-source-main-scene-number-contract"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -311,6 +311,20 @@ def row_scene_id(row, label):
         raise RuntimeError(f"{label}: scene_id is missing")
     return value
 
+def main_scene_number(row, label):
+    """Return the Main scene's source number, not its visual slot.
+
+    Visual job local_scene is a slot across hook + Main + ending records.
+    source_scene_number is the canonical 1-based Main scene number.
+    """
+    source = row.get("source_scene_number")
+    if source not in (None, ""):
+        return positive_int(source, f"{label} source scene number")
+    return positive_int(
+        row.get("local_scene", row.get("scene")),
+        f"{label} local scene number",
+    )
+
 
 def first_path(row, keys, label):
     for key in keys:
@@ -383,12 +397,8 @@ def actual_counts_from_photo_rows(manifest, rows, parts, minimum, maximum):
                 continue
             if row_part != part or normalize_role(row) != "main":
                 continue
-            local = positive_int(
-                row.get(
-                    "local_scene",
-                    row.get("source_scene_number", row.get("scene")),
-                ),
-                f"Part {part} Main scene",
+            local = main_scene_number(
+                row, f"Part {part} Main scene"
             )
             if local in main_numbers:
                 raise RuntimeError(
@@ -486,12 +496,8 @@ def load_photo_map(parts, scene_counts, mode, width, height, fps):
         )
 
         if role == "main":
-            local_scene = positive_int(
-                row.get(
-                    "local_scene",
-                    row.get("source_scene_number", row.get("scene")),
-                ),
-                f"{sid} local scene",
+            local_scene = main_scene_number(
+                row, f"{sid} Main scene"
             )
             if local_scene > scene_counts[part]:
                 raise RuntimeError(
