@@ -44,7 +44,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v39-vision-timeout-retry-cloudflare-schnell-schema"
+VERSION = "photo-motion-image-generator-v40-advisory-vision-safe-score-tuple-size"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -314,10 +314,13 @@ def safe_path(value, label):
 
 def parse_size(value):
     try:
-        width, height = map(
-            int,
-            str(value).lower().strip().split("x", 1),
-        )
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            width, height = (int(part) for part in value)
+        else:
+            width, height = map(
+                int,
+                str(value).lower().strip().split("x", 1),
+            )
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"Invalid image size: {value!r}") from exc
 
@@ -2169,6 +2172,12 @@ def run_provider_attempts(
 
                 integrity = image_integrity(destination, item["size"])
                 success_attempts = list(record.get("attempts", []))
+                vision_evidence = quality.get("vision")
+                vision_score = (
+                    vision_evidence.get("quality_score")
+                    if isinstance(vision_evidence, dict)
+                    else None
+                )
                 success_attempts.append({
                     "provider": provider_name,
                     "provider_key": provider_key,
@@ -2177,7 +2186,7 @@ def run_provider_attempts(
                     "round": round_number,
                     "status": "success",
                     "image_sha256": integrity["sha256"],
-                    "quality_score": quality["vision"]["quality_score"],
+                    "quality_score": vision_score,
                     "timestamp": int(time.time()),
                 })
                 record.update(
