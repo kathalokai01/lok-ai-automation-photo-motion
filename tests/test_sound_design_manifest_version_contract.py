@@ -28,7 +28,7 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
     def test_validator_version_is_explicitly_versioned(self):
         validator_tree = ast.parse(VALIDATOR.read_text(encoding="utf-8"))
         validator_version = assigned_string(validator_tree, "VERSION")
-        self.assertIn("sfx-validator-v16-", validator_version)
+        self.assertIn("sfx-validator-v17-", validator_version)
 
 
 if __name__ == "__main__":
