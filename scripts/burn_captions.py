@@ -42,7 +42,7 @@ PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 ALIGNMENT_CACHE = CAPTION_DIR / "word_alignment_cache.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v63-transparent-bottom-caption-style"
+VERSION = "burn-captions-v64-json-path-safe-manifest"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 1000
 FPS_TOLERANCE = 0.03
@@ -113,6 +113,15 @@ def read_json(path, required=True, default=None):
         return default
 
 
+def json_path_default(value):
+    """Serialize filesystem paths as stable strings; reject other unknown types."""
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    raise TypeError(
+        f"Object of type {type(value).__name__} is not JSON serializable"
+    )
+
+
 def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +129,13 @@ def write_json(path, data):
 
     try:
         with temp.open("w", encoding="utf-8") as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2)
+            json.dump(
+                data,
+                stream,
+                ensure_ascii=False,
+                indent=2,
+                default=json_path_default,
+            )
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
