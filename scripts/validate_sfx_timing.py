@@ -31,7 +31,7 @@ FLOW_MANIFEST = ROOT / "output" / "music" / "flow_music_manifest.json"
 CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
-VERSION = "sfx-validator-v16-sound-design-v34-contract"
+VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
 SOUND_DESIGN_VERSION = "photo-motion-sound-design-v34-all-role-measured-tts-timeline"
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 0.20
@@ -162,6 +162,21 @@ def finite_number(value, label, minimum=None, maximum=None):
     if maximum is not None and number > maximum:
         raise RuntimeError(f"{label} must be <= {maximum}.")
     return number
+
+
+def validate_cue_file_duration(declared_duration, measured_file_duration, scene_id):
+    """A cue may intentionally use only the opening portion of a longer SFX file."""
+    declared = finite_number(
+        declared_duration, f"SFX cue duration {scene_id}", minimum=0.01
+    )
+    measured = finite_number(
+        measured_file_duration, f"SFX file duration {scene_id}", minimum=0.01
+    )
+    if declared > measured + DURATION_TOLERANCE:
+        raise RuntimeError(
+            f"SFX cue duration exceeds measured file duration: {scene_id}."
+        )
+    return declared, measured
 
 
 def config_bool(config, keys, default=True):
@@ -784,10 +799,9 @@ def validate_cues(parts, actual_counts, narration, sfx_enabled, sound_manifest):
                 f"SFX cue file does not match sound-design track {kind}."
             )
 
-        if abs(declared_duration - info["duration"]) > DURATION_TOLERANCE:
-            raise RuntimeError(
-                f"SFX cue declared duration does not match measured file duration: {scene_id}."
-            )
+        validate_cue_file_duration(
+            declared_duration, info["duration"], scene_id
+        )
         if cue.get("source_track_sha256") not in (None, track_hash):
             raise RuntimeError(f"SFX cue source-track hash mismatch: {scene_id}.")
         if cue.get("size_bytes") is not None and positive_int(
