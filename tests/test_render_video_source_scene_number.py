@@ -73,6 +73,17 @@ class FinalValidatorSceneNumberContractTests(unittest.TestCase):
             (1, "main", 1),
         )
 
+    def test_invalid_explicit_source_scene_number_is_not_hidden(self):
+        row = {
+            "part": 1,
+            "role": "main",
+            "local_scene": 2,
+            "source_scene_number": 0,
+            "scene": 2,
+        }
+        with self.assertRaises(RuntimeError):
+            validate_final_output.scene_key(row, "Photo Motion")
+
     def test_hook_global_slot_does_not_shift_main_scene_identity(self):
         rows = [
             {
