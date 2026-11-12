@@ -34,7 +34,7 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-multi-provider-music-v21-fast-failure-circuit-breaker"
+VERSION = "photo-motion-multi-provider-music-v22-zero-quota-no-retry"
 
 REQUEST_TIMEOUT = (10, 90)
 RETRY_DELAYS = (3,)
@@ -606,6 +606,11 @@ def build_role_prompt(title, story_text, summary, role, rows, config):
     )
 
 
+def is_zero_quota_limit(message):
+    """A provider limit of zero cannot recover by waiting; fail over immediately."""
+    return bool(re.search(r"\blimit\s*:\s*0(?:\s|[,;)]|$)", str(message or "").lower()))
+
+
 def extract_audio(data):
     if not isinstance(data, dict):
         raise RuntimeError("Google API returned a non-object response.")
@@ -682,7 +687,9 @@ def request_music(api_key, model, prompt, destination):
                     "rate limit", "too many requests", "per minute",
                     "per second", "requests per",
                 ))
-                if quota_error and not rate_error:
+                if quota_error and (
+                    not rate_error or is_zero_quota_limit(response_lower)
+                ):
                     raise RuntimeError(
                         "Google Lyria quota/billing limit reached (HTTP 429): "
                         + response_text[:1000]
