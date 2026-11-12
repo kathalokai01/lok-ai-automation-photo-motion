@@ -55,3 +55,12 @@ def test_renderer_version_records_validated_sfx_timeline_contract():
     source = (ROOT / "scripts" / "render_video.py").read_text(encoding="utf-8")
     assert 'VERSION = "render-video-v70-consume-validated-sfx-trim-timeline"' in source
     assert "def validated_sfx_timing(" in source
+
+
+def test_renderer_emits_part_videos_only_without_combined_intermediate():
+    source = (ROOT / "scripts" / "render_video.py").read_text(encoding="utf-8")
+    assert '"part_outputs_only": True' in source
+    assert "PRE_CAPTION_VIDEO" not in source
+    assert "pre_caption_video" not in source
+    assert "ordered_part_paths" not in source
+    assert 'VERSION = "render-video-v71-part-outputs-only-no-combined-video"' in source
