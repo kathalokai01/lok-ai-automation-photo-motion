@@ -31,6 +31,30 @@ class YouTubeMetadataRegressionTests(unittest.TestCase):
         self.assertEqual(result["title"], "कहानी का सही शीर्षक")
         self.assertEqual(result["provider"], "openai")
 
+    def test_canonical_story_title_overrides_model_generated_seo_title(self):
+        generated = {"title": "अलग SEO शीर्षक #Shorts"}
+        result = metadata.enforce_canonical_story_title(
+            generated,
+            {"existing_title": "लालच का टावर और कुदरत का न्याय"},
+        )
+        self.assertEqual(result["title"], "लालच का टावर और कुदरत का न्याय")
+
+    def test_canonical_story_title_is_required(self):
+        with self.assertRaisesRegex(RuntimeError, "Canonical story title is missing"):
+            metadata.enforce_canonical_story_title({"title": "कुछ भी"}, {})
+
+    def test_prompt_forbids_rewriting_canonical_story_title(self):
+        prompt = metadata.build_prompt(
+            "कहानी",
+            {
+                "existing_title": "लालच का टावर",
+                "summary": "लालच के परिणाम",
+                "text": "यह पूरी कहानी का पर्याप्त उदाहरण पाठ है। " * 10,
+            },
+            "short",
+        )
+        self.assertIn("#Shorts या अतिरिक्त SEO शब्द Title में न जोड़ें", prompt)
+
     def test_metadata_validator_has_no_undefined_story_reference(self):
         import inspect
         source = inspect.getsource(metadata.validate_metadata)
