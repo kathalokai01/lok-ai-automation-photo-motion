@@ -66,6 +66,15 @@ def effective_music(music,sound):
   "paid_services_used":music.get("paid_services_used"),
   "paid_provider_api_calls":music.get("paid_provider_api_calls",0),
  }
+def apply_effective_music_stage(stages, music_result):
+ stage=dict(stages.get("music") or {})
+ stage["status"]=music_result["status"]
+ stage["external_status"]=music_result["external_status"]
+ stage["provider"]=music_result["provider"]
+ stage["model"]=music_result["model"]
+ stages["music"]=stage
+ return stages
+
 def main():
  config_data=load_and_validate(ROOT/"Input"/"topic.txt")
  configured_provider_order=get_image_provider_order(config_data)
@@ -94,12 +103,13 @@ def main():
  for name,path in SOURCES.items():
   doc=docs[name]
   stages[name]={"status":str(doc.get("status","missing")) if doc else "missing","path":path.relative_to(ROOT).as_posix() if path.is_file() else None,"sha256":digest(path) if path.is_file() else None}
+ stages=apply_effective_music_stage(stages,music_result)
  input_path=ROOT/"Input"/"topic.txt"
  image_reused=sum(value for key,value in image_status.items() if key in {"existing","reused"})
  image_generated=image_status.get("generated",0)
  report={
   "status":"completed" if image_doc.get("status")=="completed" and stages["render_quality"]["status"] in {"passed","completed"} else "incomplete",
-  "version":"production-report-v3-effective-local-music-fallback",
+  "version":"production-report-v4-effective-music-stage-status",
   "run_id":os.getenv("GITHUB_RUN_ID") or "local",
   "story_title":story.get("title") or story.get("story_title") or ai_story.get("title"),
   "format":(docs["visual_jobs"] or {}).get("format") or story.get("format"),
