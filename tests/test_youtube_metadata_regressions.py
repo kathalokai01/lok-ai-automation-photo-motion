@@ -40,8 +40,9 @@ class YouTubeMetadataRegressionTests(unittest.TestCase):
         source = (ROOT / "scripts" / "llm_provider_client.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"max_completion_tokens": int(max_tokens)', source)
-        self.assertNotIn('"max_tokens": int(max_tokens)', source)
+        self.assertIn('if provider == "openai":', source)
+        self.assertIn('payload["max_completion_tokens"] = int(max_tokens)', source)
+        self.assertIn('payload["max_tokens"] = int(max_tokens)', source)
 
     def test_generated_metadata_still_requires_complete_story_prompt(self):
         source = (ROOT / "scripts" / "generate_youtube_metadata.py").read_text(
