@@ -2032,7 +2032,7 @@ def run_provider_attempts(
                 enabled=IMAGE_QUALITY_VISION_ENABLED,
                 minimum_score=IMAGE_QUALITY_MIN_SCORE,
                 model=IMAGE_QUALITY_VISION_MODEL,
-                timeout=min(TIMEOUT, 120),
+                timeout=min(TIMEOUT, 30),
                 reference_image_paths=find_character_reference_images(item, records),
             )
             if candidate_quality.get("accepted"):
@@ -2175,7 +2175,7 @@ def run_provider_attempts(
                     enabled=IMAGE_QUALITY_VISION_ENABLED,
                     minimum_score=IMAGE_QUALITY_MIN_SCORE,
                     model=IMAGE_QUALITY_VISION_MODEL,
-                    timeout=min(TIMEOUT, 120),
+                    timeout=min(TIMEOUT, 30),
                     reference_image_paths=find_character_reference_images(item, records),
                 )
                 if not quality.get("accepted"):
