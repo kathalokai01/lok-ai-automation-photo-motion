@@ -252,9 +252,97 @@ def manifest_complete(path: Path, allowed: set[str] | None = None) -> bool:
     return status in SUCCESS_STATES
 
 
+def _checkpoint_output_file(directory: Path, value: Any) -> Path | None:
+    """Resolve a manifest path inside an extracted checkpoint output tree."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    raw = value.strip().replace("\\\\", "/")
+    candidate = PurePosixPath(raw)
+
+    if candidate.is_absolute():
+        parts = candidate.parts
+        try:
+            output_index = parts.index("output")
+        except ValueError:
+            return None
+        parts = parts[output_index + 1:]
+    else:
+        parts = candidate.parts
+        if parts and parts[0] == "output":
+            parts = parts[1:]
+
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+
+    root = directory.resolve()
+    target = directory.joinpath(*parts)
+    try:
+        resolved = target.resolve()
+        if not resolved.is_relative_to(root):
+            return None
+    except (OSError, RuntimeError):
+        return None
+
+    if target.is_symlink() or not resolved.is_file() or resolved.stat().st_size <= 0:
+        return None
+    return resolved
+
+
+def validate_scene_render_stage(directory: Path) -> bool:
+    """Restore a render manifest only when every referenced output is present."""
+    manifest_path = directory / "scene_renders" / "render_manifest.json"
+    manifest = read_json(manifest_path)
+    if not manifest or str(manifest.get("status", "")).strip().lower() not in SUCCESS_STATES:
+        return False
+
+    path_keys = {
+        "path", "file", "output", "output_path", "video", "video_path",
+        "rendered_video", "source_path",
+    }
+    hash_keys = ("sha256", "video_sha256", "file_sha256")
+    checked = 0
+    invalid = False
+
+    def visit(value: Any) -> None:
+        nonlocal checked, invalid
+        if invalid:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in path_keys and isinstance(item, str) and item.strip():
+                    asset = _checkpoint_output_file(directory, item)
+                    if asset is None:
+                        invalid = True
+                        return
+                    checked += 1
+                    declared = next(
+                        (
+                            value.get(hash_key)
+                            for hash_key in hash_keys
+                            if isinstance(value.get(hash_key), str)
+                            and value.get(hash_key).strip()
+                        ),
+                        None,
+                    )
+                    if declared and _sha256_file(asset).lower() != declared.strip().lower():
+                        invalid = True
+                        return
+                else:
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(manifest)
+    return not invalid and checked > 0
+
+
 def validate_stage(name: str, directory: Path, expected: dict) -> bool:
     if name == "story":
         return validate_story_stage(directory, expected)
+    if name == "scene_renders":
+        return validate_scene_render_stage(directory)
     if name == "visuals":
         paths = [directory / item for item in STAGES[3][1]]
         docs = [read_json(path) for path in paths]
