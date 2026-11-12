@@ -257,7 +257,7 @@ def _checkpoint_output_file(directory: Path, value: Any) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
 
-    raw = value.strip().replace("\\\\", "/")
+    raw = value.strip().replace("\\", "/")
     candidate = PurePosixPath(raw)
 
     if candidate.is_absolute():
