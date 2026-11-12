@@ -163,3 +163,23 @@ def test_visual_stage_merges_when_partial_image_directory_exists(tmp_path):
 
     assert copied == 1
     assert (destination_visuals / "images" / "scene_02.png").read_bytes() == b"scene-two"
+
+
+
+def test_merge_progress_restores_caption_and_render_progress_roots(tmp_path):
+    source = tmp_path / "checkpoint" / "output"
+    output = tmp_path / "output"
+    (source / "captions").mkdir(parents=True)
+    (source / "scene_renders").mkdir(parents=True)
+    (source / "captions" / "burn_progress.json").write_text(
+        '{"fingerprint": "caption-cache"}', encoding="utf-8"
+    )
+    (source / "scene_renders" / "render_progress.json").write_text(
+        '{"fingerprint": "render-cache"}', encoding="utf-8"
+    )
+
+    copied = checkpoint_manager.merge_progress_checkpoints(source, output)
+
+    assert copied == 2
+    assert (output / "captions" / "burn_progress.json").is_file()
+    assert (output / "scene_renders" / "render_progress.json").is_file()
