@@ -333,6 +333,19 @@ def parse_size(value):
     return width, height
 
 
+def vision_quality_score(quality):
+    """Return an optional numeric Vision score without gating valid images."""
+    if not isinstance(quality, dict):
+        return None
+    vision = quality.get("vision")
+    if not isinstance(vision, dict):
+        return None
+    score = vision.get("quality_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    return score
+
+
 def get_jobs():
     jobs_document = read_json(JOBS_FILE, required=True)
     jobs_manifest = read_json(JOBS_MANIFEST, {})
@@ -2172,12 +2185,7 @@ def run_provider_attempts(
 
                 integrity = image_integrity(destination, item["size"])
                 success_attempts = list(record.get("attempts", []))
-                vision_evidence = quality.get("vision")
-                vision_score = (
-                    vision_evidence.get("quality_score")
-                    if isinstance(vision_evidence, dict)
-                    else None
-                )
+                vision_score = vision_quality_score(quality)
                 success_attempts.append({
                     "provider": provider_name,
                     "provider_key": provider_key,
