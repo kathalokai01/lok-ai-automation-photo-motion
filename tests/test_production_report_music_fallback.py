@@ -36,6 +36,13 @@ class EffectiveMusicReportTests(unittest.TestCase):
         self.assertEqual(result["external_status"], "unavailable")
         self.assertEqual(result["external_provider"], "google_lyria")
         self.assertEqual(result["external_api_calls"], 2)
+        stages = production_report.apply_effective_music_stage(
+            {"music": {"status": "unavailable", "path": "output/music/flow_music_manifest.json"}},
+            result,
+        )
+        self.assertEqual(stages["music"]["status"], "completed")
+        self.assertEqual(stages["music"]["external_status"], "unavailable")
+        self.assertEqual(stages["music"]["provider"], "local_synthesis")
 
     def test_unavailable_without_local_track_remains_unavailable(self):
         result = production_report.effective_music(
