@@ -41,6 +41,7 @@ RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
 VERSION = "render-video-v69-sfx-validator-v17-signature-contract"
+SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
@@ -721,6 +722,17 @@ def validate_photo_audio_pairing(photo_by_id, audio_by_id):
             raise RuntimeError(f"{sid}: role voiceover must be enabled.")
 
 
+def sfx_validation_signature(audio_manifest_hash, sound_manifest_hash, cue_manifest_hash):
+    """Match the source-signature contract emitted by validate_sfx_timing.py."""
+    payload = (
+        str(audio_manifest_hash)
+        + str(sound_manifest_hash)
+        + str(cue_manifest_hash)
+        + SFX_VALIDATOR_VERSION
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash):
     manifest = read_json(SOUND_MANIFEST, "Sound design manifest")
     validate_completed(manifest, "Sound design manifest")
@@ -741,7 +753,11 @@ def load_sound_assets(parts, photo_by_id, audio_by_id, mode, audio_manifest_hash
     cue_manifest_hash = validation.get("sfx_cue_manifest_sha256")
     if not isinstance(cue_manifest_hash, str) or len(cue_manifest_hash) != 64:
         raise RuntimeError("SFX validation cue-manifest fingerprint is missing")
-    expected_signature = hashlib.sha256((audio_manifest_hash + sha256_file(SOUND_MANIFEST) + cue_manifest_hash + "sfx-validator-v17-allow-trimmed-cue-duration").encode("utf-8")).hexdigest()
+    expected_signature = sfx_validation_signature(
+        audio_manifest_hash,
+        sha256_file(SOUND_MANIFEST),
+        cue_manifest_hash,
+    )
     if validation.get("validator_source_signature") != expected_signature:
         raise RuntimeError("SFX validation source signature mismatch")
 
