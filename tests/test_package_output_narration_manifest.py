@@ -20,7 +20,7 @@ class PackageNarrationManifestTests(unittest.TestCase):
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         return (
             {
-                "scene_id": "part_01_hook",
+                "scene_id": f"part_01_{role}",
                 "role": role,
                 "voiceover_enabled": True,
                 "narration": None,
@@ -28,7 +28,7 @@ class PackageNarrationManifestTests(unittest.TestCase):
                 "source_text_sha256": digest,
             },
             {
-                "scene_id": "part_01_hook",
+                "scene_id": f"part_01_{role}",
                 "role": role,
                 "voiceover_enabled": True,
                 "narration": text,
@@ -36,7 +36,7 @@ class PackageNarrationManifestTests(unittest.TestCase):
                 "narration_source": source,
             },
             {
-                "scene_id": "part_01_hook",
+                "scene_id": f"part_01_{role}",
                 "role": role,
                 "status": "completed",
                 "voiceover_enabled": True,
