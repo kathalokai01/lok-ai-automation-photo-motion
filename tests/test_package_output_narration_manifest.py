@@ -84,6 +84,14 @@ class PackageNarrationManifestTests(unittest.TestCase):
                 photo, narration, audio, "part_01_hook", "hook"
             )
 
+    def test_declared_storyboard_is_approved_project_image(self):
+        storyboard = package_output.OUT / "visuals" / "storyboard.jpg"
+        self.assertTrue(package_output.is_approved_project_image(storyboard))
+
+    def test_unlisted_visual_image_is_not_approved_project_image(self):
+        unrelated = package_output.OUT / "visuals" / "untracked.jpg"
+        self.assertFalse(package_output.is_approved_project_image(unrelated))
+
     def test_narration_source_role_mismatch_is_rejected(self):
         photo, narration, audio, _ = self.make_rows("hook")
         photo["narration_source"] = "locked_part_text"
