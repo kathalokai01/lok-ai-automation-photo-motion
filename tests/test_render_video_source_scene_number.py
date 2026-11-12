@@ -1,5 +1,6 @@
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +60,23 @@ class MainSceneNumberContractTests(unittest.TestCase):
 
 
 class FinalValidatorSceneNumberContractTests(unittest.TestCase):
+    def test_safe_output_accepts_pathlib_path(self):
+        validate_final_output.OUT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".test-safe-output-",
+            dir=validate_final_output.OUT,
+        ) as temporary:
+            artifact = Path(temporary) / "final_captions.srt"
+            artifact.write_text("caption\n", encoding="utf-8")
+            self.assertEqual(
+                validate_final_output.safe_output(
+                    artifact,
+                    "Final captions SRT",
+                    1,
+                ),
+                artifact.resolve(),
+            )
+
     def test_source_scene_number_wins_over_global_visual_slot(self):
         row = {
             "part": 1,
