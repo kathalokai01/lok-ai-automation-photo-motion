@@ -959,7 +959,7 @@ def main() -> int:
         "transliteration_performed": any(
             row.get("selection_method") == "romanized-source-hindi"
             for row in prepared_main + prepared_extras
-        ),\n        "transliteration_performed": mode == "hinglish" and any(\n            record.get("selection_method") == "romanized-source-hindi"\n            for record in prepared_main + prepared_extras\n        ),
+        ),
         "translation_note": (
             "Uses explicit language-specific captions verbatim. If Hinglish is selected "
             "and only Devanagari Hindi narration exists, the same words are "
