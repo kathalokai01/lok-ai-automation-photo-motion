@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v74-checkpoint-render-artifact-validation"
+VERSION = "photo-motion-preflight-v75-event-wrapper-no-stale-config-api"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -3293,9 +3293,9 @@ def main():
     except Exception:
         _pm_record = None
     try:
-        from input_config import load_and_validate, get_production_settings
-        get_production_settings(load_and_validate(Path(__file__).resolve().parents[1] / "Input" / "topic.txt"))
-
+        # The original preflight performs the complete input/configuration
+        # validation itself. Do not call a second, non-existent config API here.
+        # This wrapper only records the real result of that preflight stage.
         _pm_result = _photo_motion_original_main()
         if _pm_record:
             _pm_record("pipeline_preflight", "completed" if _pm_result in (None, 0) else "failed", metadata={"return_code": _pm_result}, started_at=_pm_started)
