@@ -81,9 +81,10 @@ def resolve_voice_profile(config: dict[str, Any], record: dict[str, Any] | None 
     profile["profile_id"] = preset
     profile["speaker_id"] = _clean(record.get("speaker_id") or speaker or "narrator").casefold()
     profile["speaker_name"] = speaker or "Narrator"
+    emotion_enabled = str(config.get("TTS_EMOTION_CONTROL", True)).strip().lower() in {"1", "true", "yes", "on"}
     emotion = _clean(record.get("emotion") or record.get("emotion_tag") or profile["emotion"]).lower()
-    profile["emotion"] = emotion if emotion in EMOTION_GUIDANCE else "neutral"
-    profile["emotion_instruction"] = EMOTION_GUIDANCE[profile["emotion"]]
+    profile["emotion"] = (emotion if emotion in EMOTION_GUIDANCE else "neutral") if emotion_enabled else "neutral"
+    profile["emotion_instruction"] = EMOTION_GUIDANCE[profile["emotion"]] if emotion_enabled else "use clear, natural, emotionally neutral delivery"
     profile["delivery"] = profile["delivery"] + "; " + profile["emotion_instruction"]
     profile["voice_id"] = _clean(config.get("TTS_VOICE_ID", ""))
     profile["provider_voice_id"] = _clean(config.get("TTS_VOICE_ID_" + preset.upper(), ""))
@@ -93,7 +94,7 @@ def resolve_voice_profile(config: dict[str, Any], record: dict[str, Any] | None 
     except (TypeError, ValueError):
         raise ValueError("TTS_PITCH must be a number between 0.85 and 1.15.")
     try:
-        profile["emotion_strength"] = max(0.0, min(1.0, float(config.get("TTS_EMOTION_STRENGTH", 0.65))))
+        profile["emotion_strength"] = max(0.0, min(1.0, float(config.get("TTS_EMOTION_STRENGTH", 0.65)))) if emotion_enabled else 0.0
     except (TypeError, ValueError):
         profile["emotion_strength"] = 0.65
     profile["fingerprint"] = hashlib.sha256(json.dumps(profile, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -101,4 +102,4 @@ def resolve_voice_profile(config: dict[str, Any], record: dict[str, Any] | None 
 
 def profile_summary(config: dict[str, Any], record: dict[str, Any] | None = None) -> dict[str, Any]:
     profile = resolve_voice_profile(config, record)
-    return {key: profile[key] for key in ("profile_id", "speaker_id", "speaker_name", "emotion", "emotion_instruction", "delivery", "emotion_strength", "pitch", "speed", "fingerprint")}
+    return {key: profile[key] for key in ("profile_id", "speaker_id", "speaker_name", "emotion", "emotion_instruction", "delivery", "emotion_strength", "pitch", "speed", "voice_id", "provider_voice_id", "fingerprint")}
