@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v75-event-wrapper-no-stale-config-api"
+VERSION = "photo-motion-preflight-v76-configured-mukta-first-and-provider-audit"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
@@ -147,8 +147,8 @@ REQUIRED_DISTRIBUTIONS = (
 RUNTIME_COMMANDS = ("ffmpeg", "ffprobe", "fc-match", "zip", "unzip")
 
 FONT_FAMILIES = (
-    "Noto Sans Devanagari",
     "Mukta",
+    "Noto Sans Devanagari",
     "Hind",
     "Tiro Devanagari Hindi",
 )
