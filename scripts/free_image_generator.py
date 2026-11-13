@@ -44,7 +44,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v41-no-text-indian-uniform"
+VERSION = "photo-motion-image-generator-v42-no-text-indian-role-uniforms"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -700,12 +700,14 @@ def make_prompt(item):
         "थाना", "पुलिस", "दरोगा", "इंस्पेक्टर", "अधिकारी", "सिपाही",
     )):
         sections.append(
-            "Any police or government officer must look authentically Indian: "
-            "Indian police uniform cut and khaki colour where appropriate, "
-            "Indian police insignia/nameplate styling, Indian service belt and "
-            "locally appropriate headgear. Do not use American, British or "
-            "generic foreign police uniforms, badges, flags or vehicles. "
-            "Do not invent readable insignia or text."
+            "Every police or government official must look authentically Indian "
+            "and match the exact Indian role. Police should use a locally "
+            "appropriate Indian khaki uniform, Indian police insignia styling, "
+            "service belt and correct local headgear where appropriate. Civil "
+            "administrative officers must wear role-appropriate Indian civilian "
+            "attire, not police uniforms. Never use American, British or generic "
+            "foreign uniforms, badges, flags or vehicles. Do not invent readable "
+            "insignia or text."
         )
 
     for key, label in (
