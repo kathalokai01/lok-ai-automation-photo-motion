@@ -61,7 +61,7 @@ def _technical_checks(image_path: Path, expected_size: tuple[int, int]) -> dict:
         raise RuntimeError(f"Image decode/integrity check failed: {exc}") from exc
 
 
-VISION_HTTP_MAX_ATTEMPTS = 1
+VISION_HTTP_MAX_ATTEMPTS = 4
 VISION_RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
@@ -224,7 +224,7 @@ def _vision_check(
                 raise VisionVerificationUnavailable(
                     f"Gemini vision verification request failed after {attempt} attempt(s): {detail}."
                 ) from exc
-            delay = retry_after_seconds(exc, attempt, default_base=4, maximum=30)
+            delay = retry_after_seconds(exc, attempt, default_base=4, maximum=20)
             failure_kind = f"HTTP {status}" if status else type(exc).__name__
             print(
                 f"Gemini Vision transient {failure_kind}; retry "
