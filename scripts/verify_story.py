@@ -34,6 +34,7 @@ from story_length_policy import (
     SHORT_HARD_MAX_WORDS_PER_PART,
     SHORT_FINAL_MERGED_MAX_WORDS,
     verify_revision_evidence,
+    verify_final_merge_evidence,
 )
 
 INPUT_FILE = ROOT / "Input" / "topic.txt"
@@ -45,7 +46,7 @@ AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 REPORT_FILE = ROOT / "output" / "story" / "story_verification.json"
 
-VERSION = "story-verifier-v20-ai-story-quality-gate"
+VERSION = "story-verifier-v21-verified-final-merge-evidence"
 
 SHORT_MIN_WORDS = SHORT_MIN_WORDS_PER_PART
 SHORT_PREFERRED_MAX_WORDS = SHORT_PREFERRED_MAX_WORDS_PER_PART
@@ -1479,6 +1480,21 @@ def verify_story(
 
     if policy.get("final_part_merged") is not bool(merged_parts):
         fail("Story final_part_merged policy metadata mismatch.")
+
+    if merged_parts:
+        merge_evidence = selection.get("merge_evidence")
+        if not verify_final_merge_evidence(
+            merge_evidence,
+            story_parts[-1].get("narration"),
+            part_number=selected_parts,
+            actual_parts=selected_parts,
+            policy=selection,
+        ):
+            fail("Final-Part merge exception lacks valid exact-text merge evidence.")
+        if story_parts[-1].get("merge_evidence") != merge_evidence:
+            fail("Final-Part merge evidence differs between Part and selection metadata.")
+    elif selection.get("merge_evidence") not in (None, {}):
+        fail("Story contains merge evidence while no final-Part merge occurred.")
 
     if input_data["mode"] == "short":
         for part_number, part in enumerate(story_parts, 1):
