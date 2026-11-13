@@ -32,8 +32,8 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v15-bounded-world-context"
-PROMPT_VERSION = 13
+VERSION = "photo-motion-scenes-v16-transition-default-contract"
+PROMPT_VERSION = 14
 
 ROLE_ORDER = {
     "hook": 0,
@@ -1069,9 +1069,7 @@ def build_scene_record(
         "mood": clean(source.get("mood")) or settings["mood"],
         "duration": str(duration),
         "scene_duration": str(duration),
-        "transition": (
-            clean(source.get("transition")) or settings["transitions"]
-        ),
+        "transition": clean(source.get("transition")) or "cut",
         "character_ids": references,
         "characters": references,
         "character_details": character_summary(characters),
