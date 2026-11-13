@@ -83,5 +83,63 @@ class CharacterNameExtractionTests(unittest.TestCase):
         self.assertGreater(found["अयान"]["mention_count"], 0)
 
 
+class CharacterBibleFalsePositiveTests(unittest.TestCase):
+    def test_prompt_directives_and_hindi_grammar_are_not_character_names(self):
+        source = (
+            "Preserve the character identity. Show the key event. "
+            "Reveal the consequence. Bring the story to life. "
+            "Create a cinematic frame. Deliver the scene. "
+            "Establish continuity. Increase suspense. Introduce the setting. "
+            "Pay attention to details. "
+            "चीफ इंजीनियर अयान ने एआई सिस्टम की जाँच की। "
+            "सिक्योरिटी हेड ने बताया कि बेटा रियान लिफ्ट में फँसा है।"
+        )
+        names = bible.extract_story_names(source)
+        self.assertIn("अयान", names)
+        self.assertIn("रियान", names)
+        for false_name in (
+            "Preserve", "Show", "Reveal", "Bring", "Create", "Deliver",
+            "Establish", "Increase", "Introduce", "Pay", "का", "लिफ्ट",
+        ):
+            self.assertNotIn(false_name, names)
+            self.assertFalse(bible.valid_name(false_name))
+
+    def test_gender_markers_do_not_match_inside_ai_or_feminine_nouns(self):
+        ambiguous_ayan = (
+            "न्यू-टेक सिटी के चीफ इंजीनियर अयान को लॉन्च की रात "
+            "अपने एआई सिस्टम में एक खतरनाक बग मिला।"
+        )
+        ambiguous_vikrant = (
+            "ये रहे सारे दस्तावेज, विक्रांत ने ही सिस्टम के साथ "
+            "छेड़छाड़ की थी।"
+        )
+        self.assertEqual(
+            bible.nearby_gender_evidence(
+                "अयान", ambiguous_ayan, "part_01_scene_01", ["अयान"]
+            ),
+            [],
+        )
+        self.assertEqual(
+            bible.nearby_gender_evidence(
+                "विक्रांत", ambiguous_vikrant, "part_01_scene_09", ["विक्रांत"]
+            ),
+            [],
+        )
+        male = "अयान दौड़ रहा था।"
+        female = "सीमा दौड़ रही।"
+        self.assertEqual(
+            bible.nearby_gender_evidence(
+                "अयान", male, "part_01_scene_02", ["अयान"]
+            )[0]["value"],
+            "male",
+        )
+        self.assertEqual(
+            bible.nearby_gender_evidence(
+                "सीमा", female, "part_01_scene_03", ["सीमा"]
+            )[0]["value"],
+            "female",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
