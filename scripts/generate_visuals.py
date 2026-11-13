@@ -2059,7 +2059,14 @@ def load_previous_progress() -> dict:
             merge_row(row, "visual_jobs_progress")
 
     for manifest_name in ("image_manifest.json", "image_generation_manifest.json"):
-        manifest = read_json(VISUALS_DIR / manifest_name)
+        # Manifests are supplementary recovery sources. A truncated or stale
+        # manifest must not invalidate an otherwise usable, hash-verified
+        # visual_jobs_progress checkpoint.
+        try:
+            manifest = read_json(VISUALS_DIR / manifest_name)
+        except RuntimeError as exc:
+            print(f"Ignoring unreadable optional visual manifest {manifest_name}: {exc}")
+            continue
         if not isinstance(manifest, dict):
             continue
         manifest_rows = manifest.get("scenes", [])
