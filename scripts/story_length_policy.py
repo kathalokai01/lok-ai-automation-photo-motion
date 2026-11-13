@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-POLICY_VERSION = "story-length-policy-v13-merge-reduction-proof"
+POLICY_VERSION = "story-length-policy-v14-nonempty-merge-proof"
 
 SHORT_MIN_WORDS_PER_PART = 120
 SHORT_TARGET_WORDS_PER_PART = 135
@@ -872,6 +872,8 @@ def validate_all_parts(
         raise TypeError("Story parts must be supplied as a list.")
     if not isinstance(policy, dict):
         raise TypeError("Story length policy must be a dictionary.")
+    if not parts:
+        raise ValueError("Story parts cannot be empty.")
 
     fmt = normalize_format(policy.get("format", "short"))
 
