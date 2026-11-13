@@ -747,6 +747,13 @@ def has_story_disclaimer(description: str) -> bool:
     )
 
 
+def has_katha_lok_ai_copyright(description: str) -> bool:
+    """Accept the canonical year-qualified notice and the legacy label."""
+    return bool(
+        re.search(r"©\\s*(?:(?:19|20)\\d{2}\\s+)?Katha Lok AI", description)
+    )
+
+
 def validate_metadata(mode: str, title: str) -> tuple[Path, Path, Path, dict]:
     text_path = safe_output(
         "output/youtube_metadata.txt", "Metadata text", MIN_TEXT_BYTES
@@ -788,7 +795,7 @@ def validate_metadata(mode: str, title: str) -> tuple[Path, Path, Path, dict]:
         fail("Metadata exceeds YouTube title/description limits")
     if not has_story_disclaimer(description):
         fail("YouTube description is missing the required story disclaimer")
-    if "© Katha Lok AI" not in description:
+    if not has_katha_lok_ai_copyright(description):
         fail("YouTube description is missing the Katha Lok AI copyright notice")
 
     data = read_json(json_path)
