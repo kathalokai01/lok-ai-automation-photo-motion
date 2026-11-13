@@ -2334,6 +2334,28 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             "English words remain English and accidental mixed casing is normalized.",
         )
 
+        parallax_value = config.get("PHOTO_MOTION_PARALLAX", False)
+        parallax_enabled = (
+            parallax_value if isinstance(parallax_value, bool)
+            else str(parallax_value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        )
+        photo_motion_source = (ROOT / "scripts" / "photo_motion.py").read_text(encoding="utf-8")
+        add(
+            "enabled_depth_parallax",
+            not parallax_enabled or "force_depth_parallax" in photo_motion_source,
+            f"PHOTO_MOTION_PARALLAX={parallax_enabled}; verified depth maps are enforced when enabled.",
+        )
+
+        story_verifier_source = (ROOT / "scripts" / "verify_story.py").read_text(encoding="utf-8")
+        merge_policy_source = (ROOT / "scripts" / "story_length_policy.py").read_text(encoding="utf-8")
+        add(
+            "story_semantic_and_merge_proof",
+            "semantic_preservation_proven" in story_verifier_source
+            and "verify_final_merge_evidence" in story_verifier_source
+            and "verify_final_merge_evidence" in merge_policy_source,
+            "Source-story semantic proof and exact final-Part merge evidence are required.",
+        )
+
         add("caption_font", bool(font), f"CAPTION_FONT={font}.")
 
         add(
