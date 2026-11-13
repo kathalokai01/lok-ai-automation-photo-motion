@@ -35,8 +35,8 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v15-generator-defect-prevention"
-PROMPT_VERSION = 16
+VERSION = "photo-motion-visual-jobs-v16-bounded-scene-prompts"
+PROMPT_VERSION = 17
 
 ROLE_ORDER = {
     "hook": 0,
