@@ -124,19 +124,22 @@ class CheckpointManagerVisualResumeTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(restored.read_bytes()).hexdigest(), checksum)
 
     def test_run_enumerator_includes_success_failure_and_cancelled(self):
-        payload = json.dumps([
-            {"databaseId": 11, "status": "completed", "conclusion": "success"},
-            {"databaseId": 12, "status": "completed", "conclusion": "failure"},
-            {"databaseId": 13, "status": "completed", "conclusion": "cancelled"},
-        ])
-        with patch.object(
-            checkpoint_manager.subprocess, "run",
-            return_value=type("Result", (), {"returncode": 0, "stdout": payload, "stderr": ""})(),
-        ):
+        payload = "11\\n12\\n13\\n"
+        captured = {}
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return type("Result", (), {
+                "returncode": 0, "stdout": payload, "stderr": ""
+            })()
+        with patch.object(checkpoint_manager.subprocess, "run", side_effect=fake_run):
             self.assertEqual(
                 checkpoint_manager.list_runs("owner/repo", "workflow.yml", "main", 0),
                 [11, 12, 13],
             )
+        self.assertIn("--paginate", captured["command"])
+        self.assertIn("--jq", captured["command"])
+        self.assertNotIn("--slurp", captured["command"])
+        self.assertIn("status=completed", captured["command"][-1])
 
 
 if __name__ == "__main__":
