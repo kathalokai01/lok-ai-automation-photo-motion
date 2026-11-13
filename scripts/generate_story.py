@@ -1596,7 +1596,11 @@ def _partition_and_revise(
         "requested_parts_minimum": minimum_parts,
         "requested_parts_maximum": maximum_parts,
         "final_merge_reduced_part_count": bool(
-            merged_fallback and selected_count < minimum_parts
+            merged_fallback and selected_count < pre_merge_part_count
+        ),
+        "pre_merge_selected_parts": pre_merge_part_count,
+        "merge_reduced_part_count": (
+            pre_merge_part_count - selected_count if merged_fallback else 0
         ),
         "corrected_story_word_count": total_words,
         "corrected_story_sha256": sha256(corrected_story),
@@ -1604,26 +1608,6 @@ def _partition_and_revise(
         "story_parts_reconstructed_exactly": True,
         "selection_persisted": True,
         "selection_source": "corrected_story_exact_sentence_partition",
-        "revision_attempted": False,
-        "revision_outcome": "not_required_exact_partition",
-        "revision_parts": [],
-        "revision_evidence_parts": [],
-        "revision_results": [
-            {
-                "part": number,
-                "attempted": False,
-                "outcome": "exact_source_partition_no_rewrite",
-                "before_words": word_count(part),
-                "after_words": word_count(part),
-                "before_sha256": sha256(part),
-                "after_sha256": sha256(part),
-                "text_changed": False,
-                "text_preserved_exactly": True,
-                "attempts": [],
-            }
-            for number, part in enumerate(groups, 1)
-        ],
-        "revision_attempt_count": 0,
         "final_part_merged": bool(merged_fallback),
         "final_merged_maximum_words": SHORT_MERGED_MAX if merged_fallback else None,
         "actual_parts": selected_count,
