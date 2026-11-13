@@ -1442,15 +1442,25 @@ def verify_story(
     source_preservation = source_preservation if isinstance(source_preservation, dict) else {}
     preservation_checks = source_preservation.get("checks")
     preservation_checks = preservation_checks if isinstance(preservation_checks, dict) else {}
+    required_preservation_checks = {
+        "all_events_preserved",
+        "chronology_preserved",
+        "characters_and_relationships_preserved",
+        "locations_and_objects_preserved",
+        "no_new_facts",
+        "ending_and_consequences_preserved",
+    }
+    omitted_events = source_preservation.get("omitted_events")
+    added_events = source_preservation.get("added_events")
     semantic_preservation_proven = bool(
         source_text
         and proofreading.get("complete_story_reviewed") is True
         and source_preservation.get("performed") is True
         and source_preservation.get("passed") is True
-        and preservation_checks
-        and all(value is True for value in preservation_checks.values())
-        and not source_preservation.get("omitted_events")
-        and not source_preservation.get("added_events")
+        and set(preservation_checks) == required_preservation_checks
+        and all(preservation_checks.get(key) is True for key in required_preservation_checks)
+        and isinstance(omitted_events, list) and not omitted_events
+        and isinstance(added_events, list) and not added_events
     )
     if source_text and not semantic_preservation_proven:
         fail(
