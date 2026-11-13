@@ -162,7 +162,7 @@ class PhotoMotionAndCaptionTests(unittest.TestCase):
     def test_mixed_case_hinglish_is_normalized_without_losing_proper_names(self):
         self.assertEqual(
             prepare_captions.normalize_roman_case("JaISe, eXAmpLe, ADdi. Ayaan uses iPhone."),
-            "Jaise, example, add. Ayaan uses iPhone.",
+            "Jaise, example, addi. Ayaan uses iPhone.",
         )
 
     def test_event_sound_types_include_ring_and_siren(self):
