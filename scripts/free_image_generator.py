@@ -44,7 +44,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v42-no-text-indian-role-uniforms"
+VERSION = "photo-motion-image-generator-v43-mandatory-vision-reverification"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -1560,16 +1560,43 @@ def can_reuse_image(item, old):
         return False
 
     quality = old.get("quality_verification")
-    # Previous Vision rejection is advisory: reuse is allowed only when the exact
-    # scene/prompt signature, destination, dimensions, file decode and SHA256 match.
     if quality is not None and not isinstance(quality, dict):
         return False
-    if isinstance(quality, dict) and clean(quality.get("status")).lower() not in {
-        "passed", "accepted_with_warning", "rejected", "unavailable"
-    }:
+
+    image_hash_matches = integrity["sha256"].casefold() == expected_hash.casefold()
+    if not image_hash_matches:
         return False
 
-    return integrity["sha256"].casefold() == expected_hash.casefold()
+    if IMAGE_QUALITY_VISION_ENABLED:
+        vision = quality.get("vision") if isinstance(quality, dict) else None
+        vision_score = (
+            vision.get("quality_score")
+            if isinstance(vision, dict) else None
+        )
+        vision_passed = bool(
+            isinstance(vision, dict)
+            and vision.get("prompt_match") is True
+            and vision.get("character_consistency") is True
+            and isinstance(vision_score, (int, float))
+            and not isinstance(vision_score, bool)
+            and vision_score >= max(7, IMAGE_QUALITY_MIN_SCORE)
+        )
+        if not vision_passed:
+            # Re-verify the existing exact image before any new image-provider
+            # request. This preserves valid old artifacts and avoids regeneration
+            # when the only missing evidence was a previous Vision 429/503.
+            old["unverified_candidate_sha256"] = integrity["sha256"]
+            old["unverified_candidate_prompt_sha256"] = sha256_text(make_prompt(item))
+            old["unverified_candidate_provider"] = clean(old.get("provider") or "previous checkpoint")
+            old["unverified_candidate_provider_key"] = clean(
+                old.get("last_successful_model") or old.get("provider") or ""
+            )
+            old["unverified_candidate_path"] = item["relative_path"]
+            old["status"] = "pending"
+            old["quality_verification_error"] = "Existing image requires mandatory Vision verification."
+            return False
+
+    return True
 
 def make_record(item, status, provider=None, attempts=None):
     integrity = None
