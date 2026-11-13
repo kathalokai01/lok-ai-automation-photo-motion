@@ -376,64 +376,74 @@ def envelope(t, duration, attack=0.08, release=0.5):
 
 
 def sfx_samples(kind, duration=SFX_SECONDS, seed=771):
-    rng = random.Random(seed)
-    low = 0.0
-    smooth = 0.0
+    # Deterministic tonal/transient design replaces the previous broadband
+    # noise-heavy whoosh/ambient cues that sounded like continuous hiss.
     count = int(round(RATE * duration))
+    phase = random.Random(seed).random() * math.tau
     for index in range(count):
         t = index / RATE
         progress = index / max(1, count - 1)
-        noise = rng.uniform(-1.0, 1.0)
-        low = low * 0.90 + noise * 0.10
-        smooth = smooth * 0.994 + noise * 0.006
-        fade = envelope(t, duration, 0.025, 0.45)
+        fade = envelope(t, duration, 0.035, 0.65)
 
         if kind == "whoosh":
-            swell = math.sin(math.pi * progress) ** 1.5
-            value = swell * (0.32 * smooth + 0.16 * low)
+            swell = math.sin(math.pi * progress) ** 1.6
+            frequency = 95.0 + 360.0 * progress
+            value = swell * (
+                0.30 * math.sin(2 * math.pi * frequency * t)
+                + 0.10 * math.sin(2 * math.pi * frequency * 0.5 * t)
+            )
         elif kind == "impact":
             decay = math.exp(-3.2 * t)
-            value = 0.58 * math.sin(2 * math.pi * 52 * t) * decay
-            value += 0.20 * low * math.exp(-4 * t)
+            value = 0.62 * math.sin(2 * math.pi * 52 * t) * decay
+            value += 0.12 * math.sin(2 * math.pi * 104 * t) * math.exp(-5 * t)
         elif kind == "footsteps":
-            phase = (t * 2.0) % 1.0
-            thump = math.exp(-((phase - 0.08) / 0.055) ** 2)
-            value = 0.38 * thump * math.sin(2 * math.pi * 72 * t)
-            value += 0.05 * smooth
+            phase_step = (t * 2.0) % 1.0
+            thump = math.exp(-((phase_step - 0.08) / 0.055) ** 2)
+            value = 0.48 * thump * math.sin(2 * math.pi * 72 * t)
+            value += 0.08 * thump * math.sin(2 * math.pi * 144 * t)
         elif kind == "vehicle":
-            sweep = 65 + 90 * progress
-            value = 0.26 * math.sin(2 * math.pi * sweep * t)
-            value += 0.16 * low + 0.07 * smooth
+            frequency = 58.0 + 70.0 * progress
+            value = 0.30 * math.sin(2 * math.pi * frequency * t)
+            value += 0.12 * math.sin(2 * math.pi * frequency * 2.0 * t + phase)
         elif kind == "door":
-            value = 0.36 * math.sin(2 * math.pi * 88 * t) * math.exp(-2.5 * t)
-            value += 0.12 * low * math.exp(-2 * t)
+            value = 0.42 * math.sin(2 * math.pi * 88 * t) * math.exp(-2.5 * t)
+            value += 0.16 * math.sin(2 * math.pi * 176 * t) * math.exp(-3.5 * t)
         elif kind == "weather":
-            value = 0.28 * low + 0.14 * smooth
-            value += 0.09 * math.sin(2 * math.pi * 43 * t)
-        elif kind == "water":
-            value = 0.22 * smooth + 0.12 * low
-            value += 0.08 * math.sin(
-                2 * math.pi * (170 + 25 * math.sin(t)) * t
+            # Soft low-mid wind bed, deliberately no high-frequency hiss.
+            modulation = 0.65 + 0.35 * math.sin(2 * math.pi * 0.12 * t + phase)
+            value = modulation * (
+                0.16 * math.sin(2 * math.pi * 54 * t)
+                + 0.10 * math.sin(2 * math.pi * 81 * t + phase)
             )
+        elif kind == "water":
+            value = 0.16 * math.sin(2 * math.pi * 92 * t)
+            value += 0.10 * math.sin(2 * math.pi * 138 * t + phase)
+            value += 0.05 * math.sin(2 * math.pi * 184 * t)
         elif kind == "fire":
-            value = 0.23 * low + 0.16 * smooth
-            value += 0.06 * math.sin(2 * math.pi * 120 * t)
+            flicker = 0.75 + 0.25 * math.sin(2 * math.pi * 2.7 * t + phase)
+            value = flicker * (
+                0.12 * math.sin(2 * math.pi * 68 * t)
+                + 0.07 * math.sin(2 * math.pi * 102 * t)
+            )
         elif kind == "heartbeat":
-            phase = (t * 1.05) % 1.0
+            phase_beat = (t * 1.05) % 1.0
             pulse = (
-                0.82 * math.exp(-((phase - 0.10) / 0.06) ** 2)
-                + 0.45 * math.exp(-((phase - 0.28) / 0.075) ** 2)
+                0.82 * math.exp(-((phase_beat - 0.10) / 0.06) ** 2)
+                + 0.45 * math.exp(-((phase_beat - 0.28) / 0.075) ** 2)
             )
             value = pulse * math.sin(2 * math.pi * 48 * t)
         elif kind == "phone":
             pulse = 1.0 if int(t * 2.0) % 2 == 0 else 0.0
             value = pulse * (
-                0.28 * math.sin(2 * math.pi * 740 * t)
-                + 0.16 * math.sin(2 * math.pi * 920 * t)
+                0.22 * math.sin(2 * math.pi * 620 * t)
+                + 0.12 * math.sin(2 * math.pi * 780 * t)
             )
         elif kind == "crowd":
-            value = 0.18 * low + 0.16 * smooth
-            value += 0.05 * math.sin(2 * math.pi * 260 * t)
+            value = (
+                0.09 * math.sin(2 * math.pi * 110 * t)
+                + 0.07 * math.sin(2 * math.pi * 147 * t + phase)
+                + 0.05 * math.sin(2 * math.pi * 196 * t)
+            )
         elif kind == "mystery":
             wobble = 4 * math.sin(2 * math.pi * 0.3 * t)
             value = 0.28 * math.sin(2 * math.pi * (110 + wobble) * t)
@@ -441,9 +451,9 @@ def sfx_samples(kind, duration=SFX_SECONDS, seed=771):
         else:
             decay = math.exp(-1.0 * t)
             value = decay * (
-                0.30 * math.sin(2 * math.pi * 523.25 * t)
-                + 0.19 * math.sin(2 * math.pi * 659.25 * t)
-                + 0.10 * math.sin(2 * math.pi * 783.99 * t)
+                0.26 * math.sin(2 * math.pi * 523.25 * t)
+                + 0.16 * math.sin(2 * math.pi * 659.25 * t)
+                + 0.09 * math.sin(2 * math.pi * 783.99 * t)
             )
         yield value * fade
 
