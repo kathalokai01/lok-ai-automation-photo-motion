@@ -30,7 +30,7 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v18-source-script-preserving-roman-hinglish"
+VERSION = "prepare-captions-v19-normalized-hinglish-english-token-preservation"
 MIN_AUDIO_BYTES = 1000
 DURATION_TOLERANCE = 0.15
 
@@ -237,10 +237,61 @@ def find_nested_caption(container: Any, mode: str) -> tuple[str, str]:
     return "", ""
 
 
+HINGLISH_ENGLISH_WORDS = {
+    "कंप्यूटर": "computer", "कम्प्यूटर": "computer",
+    "मोबाइल": "mobile", "फोन": "phone", "कार": "car",
+    "बाइक": "bike", "ट्रेन": "train", "बस": "bus",
+    "स्कूल": "school", "कॉलेज": "college", "ऑफिस": "office",
+    "डॉक्टर": "doctor", "पुलिस": "police", "वीडियो": "video",
+    "कैमरा": "camera", "इंटरनेट": "internet", "ऑनलाइन": "online",
+    "मैसेज": "message", "मेसेज": "message", "कॉल": "call",
+    "रिंग": "ring", "सायरन": "siren", "कीबोर्ड": "keyboard",
+    "लैपटॉप": "laptop", "बिल्डिंग": "building", "टावर": "tower",
+    "म्यूजिक": "music", "साउंड": "sound", "फाइल": "file",
+    "सीन": "scene", "कैप्शन": "caption", "फोटो": "photo",
+    "लिफ्ट": "lift", "एड": "ad", "ऐड": "add",
+}
+
+
+def normalize_roman_case(value: str) -> str:
+    """Remove accidental mixed casing while retaining acronyms and sentence case."""
+    tokens = re.findall(r"\\S+", value)
+    output = []
+    sentence_start = True
+    for token in tokens:
+        match = re.match(r"^([^A-Za-z]*)([A-Za-z][A-Za-z'’-]*)(.*)$", token)
+        if not match:
+            output.append(token)
+            if re.search(r"[.!?।]$", token):
+                sentence_start = True
+            continue
+        prefix, word, suffix = match.groups()
+        if word.isupper() and len(word) > 1:
+            normalized = word
+        else:
+            normalized = word.lower()
+            if sentence_start:
+                normalized = normalized[:1].upper() + normalized[1:]
+        output.append(prefix + normalized + suffix)
+        sentence_start = bool(re.search(r"[.!?।]$", suffix))
+    return clean_text(" ".join(output))
+
+
 def romanize_hindi_to_hinglish(value: str) -> str:
-    """Convert Devanagari Hindi to ASCII ITRANS Hinglish without translating meaning."""
-    if not re.search(r"[\u0900-\u097F]", value):
-        return value
+    """Romanize Hindi, preserve existing English words, and keep common loanwords English."""
+    if not re.search(r"[\\u0900-\\u097F]", value):
+        return normalize_roman_case(value)
+
+    protected = {}
+    def protect(match):
+        key = f"QXZLATIN{len(protected):04d}ZXQ"
+        protected[key] = match.group(0)
+        return key
+
+    source = re.sub(r"(?<![\\w])[A-Za-z][A-Za-z0-9'’-]*(?![\\w])", protect, value)
+    for hindi, english in HINGLISH_ENGLISH_WORDS.items():
+        source = re.sub(re.escape(hindi), english, source, flags=re.IGNORECASE)
+
     try:
         from indic_transliteration import sanscript
         from indic_transliteration.sanscript import transliterate
@@ -249,9 +300,12 @@ def romanize_hindi_to_hinglish(value: str) -> str:
             "CAPTIONS=hinglish requires indic-transliteration; install requirements.txt. "
             "Hindi-script captions are not allowed to silently pass as Hinglish."
         ) from exc
-    converted = transliterate(value, sanscript.DEVANAGARI, sanscript.ITRANS)
-    converted = converted.replace("~N", "n").replace("~n", "n")
-    return clean_text(converted)
+
+    converted = transliterate(source, sanscript.DEVANAGARI, sanscript.ITRANS)
+    converted = converted.replace("~N", "n").replace("~n", "n").lower()
+    for key, original in protected.items():
+        converted = converted.replace(key.lower(), original)
+    return normalize_roman_case(clean_text(converted))
 
 
 def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
@@ -628,6 +682,8 @@ def prepare_one(
         )
 
     caption = clean_text(caption)
+    if mode == "hinglish":
+        caption = romanize_hindi_to_hinglish(caption)
     if not caption:
         raise RuntimeError(f"{sid}: caption text is empty.")
 
