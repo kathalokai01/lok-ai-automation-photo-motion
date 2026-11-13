@@ -1071,20 +1071,55 @@ def list_runs(repository: str, workflow: str, branch: str, limit: int) -> list[i
 
     run_ids = []
     malformed = []
-    for line in (result.stdout or "").splitlines():
-        value = line.strip()
-        if not value:
-            continue
+    stdout = (result.stdout or "").strip()
+
+    # --jq normally emits one numeric ID per line. Some gh versions,
+    # wrappers, and test doubles return the original JSON response instead.
+    # Accept both formats while retaining completed runs of every conclusion.
+    parsed_json = None
+    if stdout.startswith(("[", "{")):
         try:
-            run_id = int(value)
-        except ValueError:
-            malformed.append(value[:120])
-            continue
-        if run_id > 0 and run_id not in run_ids:
-            run_ids.append(run_id)
+            parsed_json = json.loads(stdout)
+        except (TypeError, ValueError):
+            parsed_json = None
+
+    if isinstance(parsed_json, dict):
+        records = parsed_json.get("workflow_runs", [])
+    elif isinstance(parsed_json, list):
+        records = parsed_json
+    else:
+        records = None
+
+    if isinstance(records, list):
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("status") or "").lower() != "completed":
+                continue
+            raw_id = record.get("id", record.get("databaseId"))
+            try:
+                run_id = int(raw_id)
+            except (TypeError, ValueError, OverflowError):
+                malformed.append(str(raw_id)[:120])
+                continue
+            if run_id > 0 and run_id not in run_ids:
+                run_ids.append(run_id)
+    else:
+        for line in stdout.splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            try:
+                run_id = int(value)
+            except ValueError:
+                malformed.append(value[:120])
+                continue
+            if run_id > 0 and run_id not in run_ids:
+                run_ids.append(run_id)
+
     if malformed:
         log(
-            "Checkpoint run list contained non-numeric output; ignored:",
+            "Checkpoint run list contained malformed entries; ignored:",
             "; ".join(malformed[:5]),
         )
     return run_ids[:limit] if limit else run_ids
