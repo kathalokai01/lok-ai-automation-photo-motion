@@ -1851,6 +1851,7 @@ def valid_existing_audio(
 
     try:
         info = validate_audio(path)
+        verify_audio_audible(path)
 
         if info["sha256"] != expected_hash:
             return None
@@ -1944,6 +1945,7 @@ def load_reusable_records(
 
         try:
             info = validate_audio(path)
+            verify_audio_audible(path)
         except Exception:
             continue
 
@@ -2010,6 +2012,8 @@ def synthesize_chunk_with_fallback(
                 )
 
                 verified = validate_audio(provider_output)
+
+                verify_audio_audible(provider_output)
 
                 if verified["sha256"] != info["sha256"]:
                     raise RuntimeError(
@@ -2150,7 +2154,9 @@ def merge_scene_chunks(
         validate_audio(temporary)
         os.replace(temporary, final_path)
 
-        return validate_audio(final_path)
+        final_info = validate_audio(final_path)
+        verify_audio_audible(final_path)
+        return final_info
 
     finally:
         temporary.unlink(missing_ok=True)
@@ -2269,6 +2275,7 @@ def reusable_legacy_scene(
             "Previous TTS scene audio",
         )
         info = validate_audio(path)
+        verify_audio_audible(path)
     except Exception:
         return None
 
