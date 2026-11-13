@@ -1719,7 +1719,7 @@ def _partition_and_revise(
 
     merge_evidence = None
     if merged_fallback:
-        rebuilt_story = clean("\\n\\n".join(groups))
+        rebuilt_story = clean("\n\n".join(groups))
         source_story = clean(corrected_story)
         merge_evidence = {
             "version": "final-part-merge-evidence-v1",
