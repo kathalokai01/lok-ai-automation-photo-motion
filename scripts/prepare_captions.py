@@ -955,10 +955,15 @@ def main() -> int:
         "audio_source_sha256": audio_manifest_hash,
         "model": "existing-caption-text",
         "api_calls": 0,
-        "translation_performed": False,\n        "transliteration_performed": mode == "hinglish" and any(\n            record.get("selection_method") == "romanized-source-hindi"\n            for record in prepared_main + prepared_extras\n        ),
+        "translation_performed": False,
+        "transliteration_performed": any(
+            row.get("selection_method") == "romanized-source-hindi"
+            for row in prepared_main + prepared_extras
+        ),\n        "transliteration_performed": mode == "hinglish" and any(\n            record.get("selection_method") == "romanized-source-hindi"\n            for record in prepared_main + prepared_extras\n        ),
         "translation_note": (
-            "Uses existing language-specific caption fields or the original "
-            "narration when its language matches. No translation is claimed."
+            "Uses explicit language-specific captions verbatim. If Hinglish is selected "
+            "and only Devanagari Hindi narration exists, the same words are "
+            "romanized into ITRANS without translation."
         ),
         "configured_parts": parts,
         "parts": parts,
