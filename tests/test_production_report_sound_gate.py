@@ -52,6 +52,15 @@ class ProductionReportSoundGateTests(unittest.TestCase):
             self.config, self.music, self.sound, validation
         ))
 
+    def test_missing_sfx_coverage_metadata_fails_closed(self):
+        validation = {
+            "status": "completed",
+            "sfx": {"status": "completed", "cue_count": 12},
+        }
+        self.assertFalse(production_report.sound_checks_passed(
+            self.config, self.music, self.sound, validation
+        ))
+
     def test_failed_sfx_timing_check_fails(self):
         validation = {
             "status": "completed",
