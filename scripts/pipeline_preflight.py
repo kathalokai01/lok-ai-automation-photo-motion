@@ -25,7 +25,7 @@ WORKFLOW_FILE = ROOT / ".github" / "workflows" / "generate-photo-motion-video.ym
 OUT = ROOT / "output"
 REPORT_FILE = OUT / "preflight_report.json"
 
-VERSION = "photo-motion-preflight-v76-configured-mukta-first-and-provider-audit"
+VERSION = "photo-motion-preflight-v77-full-provider-audit-gates"
 
 REQUIRED_SCRIPTS = (
     "input_config.py",
