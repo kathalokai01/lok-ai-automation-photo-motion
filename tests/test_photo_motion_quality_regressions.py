@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import struct
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from PIL import Image
+
+from scripts import checkpoint_manager
+from scripts import photo_motion
+from scripts import prepare_captions
+from scripts import generate_sound_design
+from scripts import visual_quality_validator
+
+
+class CheckpointRestoreTests(unittest.TestCase):
+    def _candidate(self, root: Path, corrupt_hash: bool = False):
+        source = root / "saved"
+        visuals = source / "visuals"
+        images = visuals / "images"
+        images.mkdir(parents=True)
+        image_path = images / "0001_scene_01.png"
+        Image.new("RGB", (720, 1280), (45, 90, 130)).save(image_path)
+        checksum = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        source_fp = "a" * 64
+        config_sig = "b" * 64
+        prompt_sig = "c" * 64
+        prompt_hash = "d" * 64
+        scene_sig = "e" * 64
+        relative = "output/visuals/images/0001_scene_01.png"
+        job = {
+            "scene_id": "part_01_scene_01", "part": 1, "global_scene": 1,
+            "role": "main", "image_path": relative, "image_size": "720x1280",
+            "prompt_sha256": prompt_hash, "prompt_signature": prompt_sig,
+            "source_scene_signature": scene_sig, "config_signature": config_sig,
+            "negative_prompt": "bad anatomy",
+        }
+        row = {
+            "scene_id": job["scene_id"], "part": 1, "global_scene": 1,
+            "role": "main", "image_path": relative,
+            "image_sha256": ("0" * 64 if corrupt_hash else checksum),
+            "prompt_sha256": prompt_hash, "prompt_signature": prompt_sig,
+            "source_scene_signature": scene_sig, "job_signature": "f" * 64,
+            "config_signature": config_sig, "source_fingerprint": source_fp,
+            "image_size": "720x1280", "width": 720, "height": 1280,
+            "status": "generated",
+        }
+        (visuals / "visual_jobs.json").write_text(json.dumps([job]), encoding="utf-8")
+        jobs_manifest = {
+            "status": "completed", "source_fingerprint": source_fp,
+            "config_signature": config_sig, "format": "short",
+        }
+        (visuals / "visual_jobs_manifest.json").write_text(json.dumps(jobs_manifest), encoding="utf-8")
+        for name in ("image_manifest.json", "image_generation_manifest.json"):
+            manifest = {
+                "status": "completed", "source_fingerprint": source_fp,
+                "config_signature": config_sig, "format": "short",
+                "image_size": "720x1280", "scenes": [dict(row)],
+            }
+            (visuals / name).write_text(json.dumps(manifest), encoding="utf-8")
+        return source
+
+    def test_verified_partial_image_rebuilds_generator_progress(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._candidate(root)
+            output = root / "output"
+            restored = checkpoint_manager.restore_partial_visual_images(source, output)
+            self.assertEqual(restored, 1)
+            progress = json.loads(
+                (output / "checkpoints" / "visual_jobs_progress.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(progress["completed_jobs"], 1)
+            self.assertEqual(progress["remaining_jobs"], 0)
+            self.assertEqual(progress["scene_progress"][0]["status"], "existing")
+
+    def test_hash_mismatch_is_not_restored(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._candidate(root, corrupt_hash=True)
+            output = root / "output"
+            self.assertEqual(
+                checkpoint_manager.restore_partial_visual_images(source, output), 0
+            )
+            self.assertFalse(
+                (output / "checkpoints" / "visual_jobs_progress.json").exists()
+            )
+
+    def test_completed_runs_include_failure_and_cancellation_conclusions(self):
+        payload = json.dumps([
+            {"databaseId": 11, "status": "completed", "conclusion": "success"},
+            {"databaseId": 12, "status": "completed", "conclusion": "failure"},
+            {"databaseId": 13, "status": "completed", "conclusion": "cancelled"},
+        ])
+        with patch.object(
+            checkpoint_manager.subprocess, "run",
+            return_value=type("Result", (), {"returncode": 0, "stdout": payload, "stderr": ""})(),
+        ):
+            self.assertEqual(
+                checkpoint_manager.list_runs("owner/repo", "workflow.yml", "main", 100),
+                [11, 12, 13],
+            )
+
+
+class PhotoMotionAndCaptionTests(unittest.TestCase):
+    def test_enabled_parallax_uses_verified_depth_in_dynamic_style(self):
+        prepared = [{
+            "scene_id": "scene-1", "part": 1, "local_scene": 1,
+            "duration": 6.0, "image_sha256": "a" * 64,
+            "audio_sha256": "b" * 64, "role": "main",
+        }]
+        settings = {
+            "parallax_enabled": True, "style": "dynamic",
+            "variation": "high", "preserve_subject": True,
+        }
+        plan = photo_motion.build_effect_plan(
+            prepared, {"scene-1": {"status": "generated", "sha256": "c" * 64}},
+            settings,
+        )
+        self.assertEqual(plan["scene-1"], "parallax")
+
+    def test_mixed_case_hinglish_is_normalized_without_losing_proper_names(self):
+        self.assertEqual(
+            prepare_captions.normalize_roman_case("JaISe, eXAmpLe, ADdi. Ayaan uses iPhone."),
+            "Jaise, example, add. Ayaan uses iPhone.",
+        )
+
+    def test_event_sound_types_include_ring_and_siren(self):
+        self.assertIn("ring", generate_sound_design.SFX_TYPES)
+        self.assertIn("siren", generate_sound_design.SFX_TYPES)
+        self.assertIn("siren", generate_sound_design.EVENT_WORDS)
+        for kind in ("vehicle", "crowd", "weather", "phone", "water", "mystery", "ring", "heartbeat", "footsteps", "door", "siren"):
+            samples = list(generate_sound_design.sfx_samples(kind, duration=0.25, seed=7))
+            self.assertTrue(samples)
+            self.assertGreater(max(samples) - min(samples), 0.01, kind)
+
+
+class VisualQualityGateTests(unittest.TestCase):
+    def test_low_vision_score_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scene.png"
+            Image.new("RGB", (64, 64), (30, 80, 120)).save(path)
+            vision = {
+                "prompt_match": True, "character_consistency": True,
+                "quality_score": 6, "issues": ["soft focus"], "reason": "blur",
+            }
+            with patch.object(visual_quality_validator, "_vision_check", return_value=vision):
+                result = visual_quality_validator.validate_scene_image(
+                    path, "A clear scene-specific visual prompt for a test.",
+                    (64, 64), enabled=True, minimum_score=5, api_key="test",
+                )
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["status"], "rejected")
+
+    def test_vision_unavailable_is_not_silently_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scene.png"
+            Image.new("RGB", (64, 64), (30, 80, 120)).save(path)
+            with patch.object(
+                visual_quality_validator, "_vision_check",
+                side_effect=visual_quality_validator.VisionVerificationUnavailable("HTTP 429"),
+            ):
+                with self.assertRaises(visual_quality_validator.VisionVerificationUnavailable):
+                    visual_quality_validator.validate_scene_image(
+                        path, "A clear scene-specific visual prompt for a test.",
+                        (64, 64), enabled=True, api_key="test",
+                    )
+
+
+if __name__ == "__main__":
+    unittest.main()
