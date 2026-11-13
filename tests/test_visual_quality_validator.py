@@ -46,22 +46,32 @@ class VisionRetryTests(unittest.TestCase):
             self.assertEqual(post.call_count, 1)
             self.assertEqual(result["quality_score"], 9)
 
-    def test_transient_503_is_not_retried(self):
+    def test_transient_503_retries_then_accepts_success(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "candidate.png"
             Image.effect_noise((64, 64), 80).convert("RGB").save(image_path)
+            success = response(200, {"candidates": [{"content": {"parts": [{
+                "text": json.dumps({
+                    "prompt_match": True,
+                    "character_consistency": True,
+                    "quality_score": 9,
+                    "issues": [],
+                    "reason": "matches",
+                })
+            }]}}]})
             with patch.object(
-                validator.requests, "post", return_value=response(503)
+                validator.requests, "post",
+                side_effect=[response(503), response(503), success],
             ) as post, patch.object(validator.time, "sleep") as sleep:
-                with self.assertRaises(validator.VisionVerificationUnavailable):
-                    validator._vision_check(
-                        image_path, "A sufficiently detailed complete scene prompt.",
-                        "gemini-3.8-flash", "test-key", 20,
-                    )
-            self.assertEqual(post.call_count, 1)
-            sleep.assert_not_called()
+                result = validator._vision_check(
+                    image_path, "A sufficiently detailed complete scene prompt.",
+                    "gemini-3.8-flash", "test-key", 20,
+                )
+            self.assertEqual(post.call_count, 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(result["quality_score"], 9)
 
-    def test_read_timeout_is_not_retried(self):
+    def test_read_timeout_retries_with_bounded_attempts(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "candidate.png"
             Image.effect_noise((64, 64), 80).convert("RGB").save(image_path)
@@ -74,8 +84,8 @@ class VisionRetryTests(unittest.TestCase):
                         image_path, "A sufficiently detailed complete scene prompt.",
                         "gemini-3.8-flash", "test-key", 20,
                     )
-            self.assertEqual(post.call_count, 1)
-            sleep.assert_not_called()
+            self.assertEqual(post.call_count, validator.VISION_HTTP_MAX_ATTEMPTS)
+            self.assertEqual(sleep.call_count, validator.VISION_HTTP_MAX_ATTEMPTS - 1)
 
     def test_vision_rejection_fails_mandatory_semantic_gate(self):
         with tempfile.TemporaryDirectory() as directory:
