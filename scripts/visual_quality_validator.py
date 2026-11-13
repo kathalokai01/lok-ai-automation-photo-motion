@@ -73,6 +73,7 @@ def _vision_check(
     timeout: int,
     reference_image_paths: list[Path] | None = None,
     scene_id: str = "",
+    max_attempts: int | None = None,
 ) -> dict:
     try:
         image_bytes = image_path.read_bytes()
@@ -172,8 +173,18 @@ def _vision_check(
     payload = None
     last_http_error = None
     image_sha = hashlib.sha256(image_bytes).hexdigest()
-    for attempt in range(1, VISION_HTTP_MAX_ATTEMPTS + 1):
-        attempt_id = f"vision:{scene_id or image_sha[:12]}:{image_sha[:12]}:{attempt}"
+    attempt_limit = max(
+        1,
+        min(
+            VISION_HTTP_MAX_ATTEMPTS,
+            int(max_attempts or VISION_HTTP_MAX_ATTEMPTS),
+        ),
+    )
+    for attempt in range(1, attempt_limit + 1):
+        attempt_id = (
+            f"vision:{scene_id or image_sha[:12]}:{image_sha[:12]}:"
+            f"{model}:{attempt}"
+        )
         response_received = False
         record_provider_attempt(
             "gemini_vision", model, "request_started", True,
@@ -219,7 +230,7 @@ def _vision_check(
             retryable = (
                 status in VISION_RETRYABLE_STATUSES or transient_transport
             )
-            if not retryable or attempt >= VISION_HTTP_MAX_ATTEMPTS:
+            if not retryable or attempt >= attempt_limit:
                 detail = f"HTTP {status}" if status else type(exc).__name__
                 raise VisionVerificationUnavailable(
                     f"Gemini vision verification request failed after {attempt} attempt(s): {detail}."
@@ -228,7 +239,7 @@ def _vision_check(
             failure_kind = f"HTTP {status}" if status else type(exc).__name__
             print(
                 f"Gemini Vision transient {failure_kind}; retry "
-                f"{attempt + 1}/{VISION_HTTP_MAX_ATTEMPTS} in {delay}s.",
+                f"{attempt + 1}/{attempt_limit} in {delay}s.",
                 flush=True,
             )
             time.sleep(delay)
@@ -358,18 +369,61 @@ def validate_scene_image(
             raise VisionVerificationUnavailable(
                 "GEMINI_API_KEY is missing; image quality cannot be verified."
             )
-        try:
-            vision = _vision_check(
-                path, prompt, model, key, max(10, min(30, int(timeout))),
-                [Path(value) for value in (reference_image_paths or [])[:2]],
-                scene_id=_clean(scene_id),
-            )
-        except VisionVerificationUnavailable:
-            raise
-        except Exception as exc:
+        reference_paths = [
+            Path(value) for value in (reference_image_paths or [])[:2]
+        ]
+        configured_fallbacks = (
+            os.getenv("GEMINI_VISION_MODEL_FALLBACKS", "").strip()
+            or os.getenv("GEMINI_MODEL_FALLBACKS", "").strip()
+        )
+        vision_models = [model]
+        for candidate in re.split(r"[,;\\s]+", configured_fallbacks):
+            candidate = _clean(candidate)
+            if (
+                candidate
+                and candidate not in vision_models
+                and re.fullmatch(r"[A-Za-z0-9_.-]+", candidate)
+            ):
+                vision_models.append(candidate)
+            if len(vision_models) >= 4:
+                break
+
+        vision_errors = []
+        for model_index, vision_model in enumerate(vision_models):
+            try:
+                vision = _vision_check(
+                    path, prompt, vision_model, key,
+                    max(10, min(30, int(timeout))),
+                    reference_paths,
+                    scene_id=_clean(scene_id),
+                    max_attempts=(
+                        VISION_HTTP_MAX_ATTEMPTS
+                        if model_index == 0 else 2
+                    ),
+                )
+                model = vision_model
+                break
+            except VisionVerificationUnavailable as exc:
+                vision_errors.append(
+                    f"{vision_model}: {type(exc).__name__}: {exc}"
+                )
+                if model_index + 1 < len(vision_models):
+                    print(
+                        "Gemini Vision model unavailable; trying configured "
+                        f"fallback {vision_models[model_index + 1]}.",
+                        flush=True,
+                    )
+            except Exception as exc:
+                vision_errors.append(
+                    f"{vision_model}: {type(exc).__name__}: {exc}"
+                )
+
+        if vision is None:
+            details = " | ".join(vision_errors[-4:])
             raise VisionVerificationUnavailable(
-                f"Visual quality verification failed: {type(exc).__name__}: {exc}"
-            ) from exc
+                "Gemini Vision verification failed on the primary and "
+                f"configured fallback models. {details}"
+            )
     else:
         vision_error = "Vision verification is disabled by configuration."
 
