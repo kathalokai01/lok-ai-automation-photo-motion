@@ -56,6 +56,23 @@ class VisualPromptLimitTests(unittest.TestCase):
         self.assertNotIn("CHRONOLOGICAL CONTINUITY:", prompt)
         self.assertNotIn("WORLD CONTINUITY LOCK:", prompt)
 
+    def test_long_duplicate_scene_metadata_is_removed_before_core_text(self):
+        visual = "EXACT STORY EVENT: locked visual"
+        narration = "LOCKED NARRATION: locked spoken text"
+        sections = [
+            visual,
+            narration,
+            "Story-specific objects and props: " + ("अनावश्यक दोहराव " * 5000),
+            "Visible action: " + ("दृश्य कार्रवाई " * 5000),
+        ]
+
+        prompt = visuals.fit_prompt_sections(sections, "part_01_hook")
+
+        self.assertLessEqual(len(prompt), visuals.MAX_PROMPT_LENGTH)
+        self.assertIn(visual, prompt)
+        self.assertIn(narration, prompt)
+        self.assertNotIn("Story-specific objects and props:", prompt)
+
     def test_oversized_core_prompt_fails_without_silent_truncation(self):
         sections = [
             "EXACT STORY EVENT: " + ("दृश्य " * 15000),
