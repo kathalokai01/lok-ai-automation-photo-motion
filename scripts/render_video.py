@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v73-music-forward-low-ambient-hiss"
+VERSION = "render-video-v74-strict-tts-photo-duration-pairing"
 SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
@@ -718,6 +718,11 @@ def validate_photo_audio_pairing(photo_by_id, audio_by_id):
             raise RuntimeError(f"{sid}: Photo Motion/TTS text fingerprint mismatch.")
         if photo.get("audio_sha256") != audio["audio_sha256"]:
             raise RuntimeError(f"{sid}: Photo Motion/TTS audio fingerprint mismatch.")
+        if abs(float(photo["duration"]) - float(audio["duration"])) > 0.15:
+            raise RuntimeError(
+                f"{sid}: Photo Motion clip duration {photo['duration']:.4f}s "
+                f"does not match measured TTS duration {audio['duration']:.4f}s."
+            )
         if photo.get("voiceover_enabled") is not True:
             raise RuntimeError(f"{sid}: role voiceover must be enabled.")
 
