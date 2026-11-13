@@ -459,20 +459,32 @@ def sfx_samples(kind, duration=SFX_SECONDS, seed=771):
 
 
 def music_samples(duration, seed=2718):
-    roots = (110.0, 130.81, 98.0, 146.83, 123.47, 92.5)
+    # Original cinematic instrumental bed: evolving minor/major harmony,
+    # low pulse and a restrained arpeggio. No broadband hiss or static.
+    progressions = (
+        (110.00, 130.81, 164.81, 196.00),
+        (98.00, 116.54, 146.83, 174.61),
+        (130.81, 155.56, 196.00, 233.08),
+        (92.50, 110.00, 138.59, 164.81),
+    )
     phase = random.Random(seed).random() * math.tau
     for index in range(int(round(RATE * duration))):
         t = index / RATE
-        root = roots[int(t // 16) % len(roots)]
+        chord = progressions[int(t // 8) % len(progressions)]
+        beat_phase = (t * 1.5) % 1.0
+        beat = math.exp(-((beat_phase - 0.08) / 0.12) ** 2)
         pad = (
-            0.22 * math.sin(2 * math.pi * root * t)
-            + 0.12 * math.sin(2 * math.pi * root * 1.5 * t)
-            + 0.07 * math.sin(2 * math.pi * root * 2.0 * t)
+            0.17 * math.sin(2 * math.pi * chord[0] * t)
+            + 0.12 * math.sin(2 * math.pi * chord[1] * t)
+            + 0.09 * math.sin(2 * math.pi * chord[2] * t)
+            + 0.05 * math.sin(2 * math.pi * chord[3] * t)
         )
-        pulse = 0.94 + 0.06 * math.sin(
-            2 * math.pi * 0.075 * t + phase
-        )
-        yield pad * pulse * envelope(t, duration, 2.5, 4.0)
+        arpeggio_note = chord[int((t * 2.0) % 4)]
+        arp_envelope = 0.5 + 0.5 * math.sin(math.pi * ((t * 2.0) % 1.0))
+        arpeggio = 0.055 * math.sin(2 * math.pi * arpeggio_note * 2.0 * t) * arp_envelope
+        bass = 0.08 * math.sin(2 * math.pi * (chord[0] * 0.5) * t) * (0.7 + 0.3 * beat)
+        pulse = 0.90 + 0.10 * math.sin(2 * math.pi * 0.08 * t + phase)
+        yield (pad + arpeggio + bass) * pulse * envelope(t, duration, 1.8, 3.0)
 
 
 def make_local_track(
@@ -983,7 +995,15 @@ def choose_sfx(scene_row, audio):
         "सुरक्षित", "न्याय मिला",
     )
     if audio["role"] == "resolution" and any(word in text for word in resolution_words):
-        return "chime"
+        # Avoid a short electronic beep as the only ending sound.
+        return "impact"
+    # Every Main Scene receives a restrained cinematic transition cue when
+    # no literal event-specific effect is present; silence is not reported
+    # as a completed SFX design.
+    if audio["role"] == "main":
+        return "whoosh"
+    if audio["role"] == "resolution":
+        return "impact"
     return None
 
 def build_timeline(ordered):
