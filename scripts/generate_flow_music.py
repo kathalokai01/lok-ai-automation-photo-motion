@@ -665,6 +665,7 @@ def request_music(
     last_error = "Unknown Google Lyria API error."
     for attempt in range(len(RETRY_DELAYS) + 1):
         attempt_id = f"{attempt_id_prefix}:{attempt + 1}"
+        response_received = False
         try:
             API_CALLS += 1
             if billable:
@@ -674,6 +675,7 @@ def request_music(
                 timeout=REQUEST_TIMEOUT,
             )
             status = int(response.status_code)
+            response_received = True
             response_text = str(response.text or "")
             record_provider_attempt(
                 "lyria", model,
@@ -781,11 +783,18 @@ def request_music(
             )
             raise RuntimeError(f"Google music request failed: {exc}") from exc
         except Exception as exc:
-            record_provider_attempt(
-                "lyria", model, "response_received_validation_failed", billable,
-                scene_id=scene_id, attempt_id=attempt_id,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            if response_received and status < 400:
+                record_provider_attempt(
+                    "lyria", model, "response_received_validation_failed", billable,
+                    scene_id=scene_id, attempt_id=attempt_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            elif not response_received:
+                record_provider_attempt(
+                    "lyria", model, "request_failed", billable,
+                    scene_id=scene_id, attempt_id=attempt_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             raise
         if attempt < len(RETRY_DELAYS):
             time.sleep(RETRY_DELAYS[attempt])
