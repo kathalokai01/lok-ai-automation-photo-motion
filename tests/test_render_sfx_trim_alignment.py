@@ -16,7 +16,6 @@ def test_renderer_uses_validator_shift_and_trim_for_hook_cue():
         "renderer_truncated_seconds": 0.111,
         "renderer_end_seconds": 7.889,
     }
-
     assert render_video.validated_sfx_timing(cue, 7.889, "part_01_hook") == (0.0, 7.889)
 
 
@@ -29,7 +28,6 @@ def test_renderer_uses_trimmed_duration_for_short_scene_cue():
         "renderer_truncated_seconds": 5.022,
         "renderer_end_seconds": 2.978,
     }
-
     assert render_video.validated_sfx_timing(cue, 2.978, "part_01_scene_02") == (0.0, 2.978)
 
 
@@ -42,7 +40,6 @@ def test_renderer_rejects_unvalidated_or_inconsistent_trim_metadata():
         "renderer_truncated_seconds": 0.5,
         "renderer_end_seconds": 7.0,
     }
-
     try:
         render_video.validated_sfx_timing(cue, 7.0, "part_01_hook")
     except RuntimeError as exc:
@@ -51,10 +48,11 @@ def test_renderer_rejects_unvalidated_or_inconsistent_trim_metadata():
         raise AssertionError("Inconsistent validator trim metadata was accepted")
 
 
-def test_renderer_version_records_validated_sfx_timeline_contract():
+def test_renderer_exposes_current_sfx_timeline_contract():
     source = (ROOT / "scripts" / "render_video.py").read_text(encoding="utf-8")
-    assert 'VERSION = "render-video-v72-split-narration-for-sidechain-and-mix"' in source
+    assert 'VERSION = "render-video-v73-music-forward-low-ambient-hiss"' in source
     assert "def validated_sfx_timing(" in source
+    assert 'SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"' in source
 
 
 def test_renderer_emits_part_videos_only_without_combined_intermediate():
@@ -63,21 +61,17 @@ def test_renderer_emits_part_videos_only_without_combined_intermediate():
     assert "PRE_CAPTION_VIDEO" not in source
     assert "pre_caption_video" not in source
     assert "ordered_part_paths" not in source
-    assert 'VERSION = "render-video-v72-split-narration-for-sidechain-and-mix"' in source
+    assert 'VERSION = "render-video-v73-music-forward-low-ambient-hiss"' in source
 
 
 def test_audio_filter_splits_narration_for_sidechain_and_final_mix():
     old = render_video.MUSIC_DUCKING_ENABLED
     render_video.MUSIC_DUCKING_ENABLED = True
     try:
-        inputs, filters = render_video.build_audio_filter(
+        _, filters = render_video.build_audio_filter(
             {"video": "scene.mp4", "duration": 4.0, "scene_id": "part_01_hook"},
             {"audio": "voice.wav", "duration": 4.0},
-            {
-                "music": {"path": "music.wav", "duration": 30.0},
-                "ambient": None,
-                "sfx": {},
-            },
+            {"music": {"path": "music.wav", "duration": 30.0}, "ambient": None, "sfx": {}},
             0.0, 720, 1280, 24,
         )
     finally:
