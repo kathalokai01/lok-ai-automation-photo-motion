@@ -809,15 +809,33 @@ def fit_prompt_sections(sections: list[str], scene_id: str) -> str:
         if len(prompt) <= MAX_PROMPT_LENGTH:
             return prompt
 
-    optional_labels = (
-        "world_context", "time_period", "camera_prompt", "dialogue",
-        "weather", "time_of_day", "environment", "location",
-        "buildings", "vehicles", "animals", "clothing", "objects",
-        "story_entities", "named_entities", "action", "effect", "cause",
-        "visible_consequence", "critical_event", "fatal_bug",
+    optional_prefixes = (
+        "Story-world context:",
+        "Story time period:",
+        "Camera direction:",
+        "Dialogue context for expression and action:",
+        "Story weather conditions:",
+        "Story time of day:",
+        "Story-specific environment:",
+        "Exact location:",
+        "Story-specific buildings and structures:",
+        "Exact story vehicles and their state:",
+        "Exact story animals and their actions:",
+        "Story-specific clothing and accessories:",
+        "Story-specific objects and props:",
+        "Named people, places and objects:",
+        "Required story entities:",
+        "Visible action:",
+        "Story-established effect:",
+        "Story-established cause:",
+        "Visible consequence of the event:",
+        "Exact fatal bug or failure, if present in this story scene:",
+        "Critical story event:",
+        "PRIMARY KEY EVENT THAT MUST BE VISIBLE:",
+        "Mandatory visible scene details:",
     )
-    for label in optional_labels:
-        active = [item for item in active if not item.startswith(label + ":")]
+    for prefix in optional_prefixes:
+        active = [item for item in active if not item.startswith(prefix)]
         prompt = render()
         if len(prompt) <= MAX_PROMPT_LENGTH:
             return prompt
