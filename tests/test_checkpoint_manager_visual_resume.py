@@ -116,7 +116,15 @@ class CheckpointManagerVisualResumeTests(unittest.TestCase):
             raw = target.read_text(encoding="utf-8")
             self.assertTrue(raw.endswith("\n"))
             self.assertFalse(raw.endswith("\\n"))
+            self.assertFalse(raw.endswith("\n\n"))
+            self.assertEqual(raw.count("\n"), raw.count("\n"))
             self.assertEqual(json.loads(raw)["scene_progress"][0]["scene_id"], "scene-1")
+            # Restoring must canonicalize the copied destination without
+            # mutating the original checkpoint artifact.
+            self.assertFalse(
+                (checkpoint_dir / "visual_jobs_progress.json")
+                .read_text(encoding="utf-8").endswith("\n")
+            )
 
     def test_corrupt_restored_json_is_quarantined_without_deletion(self):
         with tempfile.TemporaryDirectory() as temporary:
