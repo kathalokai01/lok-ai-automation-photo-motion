@@ -566,6 +566,45 @@ def validate_story_quality_report(report: Any, minimum_score: int = 8) -> tuple[
     return not errors, errors
 
 
+def verify_final_merge_evidence(
+    evidence: Any,
+    narration_text: Any,
+    *,
+    part_number: int,
+    actual_parts: int,
+    policy: dict[str, Any] | None = None,
+) -> bool:
+    """Verify that the 239-word exception represents an exact adjacent-Part merge."""
+    if not isinstance(evidence, dict) or not isinstance(policy, dict):
+        return False
+    text = clean_text(narration_text)
+    expected_hash = sha256_text(text)
+    pre_merge = evidence.get("pre_merge_selected_parts")
+    reduced = evidence.get("merge_reduced_part_count")
+    final_count = evidence.get("final_part_count")
+    final_number = evidence.get("final_part_number")
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in (
+        pre_merge, reduced, final_count, final_number,
+    )):
+        return False
+    return bool(
+        evidence.get("verified") is True
+        and evidence.get("method") == "exact_adjacent_final_part_merge_from_complete_sentence_units"
+        and evidence.get("text_preserved_exactly") is True
+        and pre_merge == actual_parts + 1
+        and reduced == 1
+        and final_count == actual_parts
+        and final_number == part_number == actual_parts
+        and evidence.get("final_part_word_count") == word_count(text)
+        and evidence.get("final_part_sha256") == expected_hash
+        and re.fullmatch(r"[a-f0-9]{64}", str(evidence.get("corrected_story_sha256") or "")) is not None
+        and evidence.get("corrected_story_sha256") == evidence.get("reconstructed_story_sha256")
+        and policy.get("pre_merge_selected_parts") == pre_merge
+        and policy.get("merge_reduced_part_count") == reduced
+        and policy.get("final_part_merged") is True
+    )
+
+
 def validate_story_length(
     narration_text: Any,
     policy: dict[str, Any],
@@ -575,6 +614,8 @@ def validate_story_length(
     revision_evidence: dict[str, Any] | None = None,
     is_final_part: bool = False,
     final_part_merged: bool = False,
+    merge_evidence: dict[str, Any] | None = None,
+    actual_parts: int = 1,
 ) -> dict[str, Any]:
     if not isinstance(policy, dict):
         raise TypeError("Story length policy must be a dictionary.")
@@ -615,6 +656,16 @@ def validate_story_length(
         revision_evidence,
         text,
     )
+    merge_evidence_ok = (
+        verify_final_merge_evidence(
+            merge_evidence,
+            text,
+            part_number=number,
+            actual_parts=actual_parts,
+            policy=policy,
+        )
+        if final_part_merged else False
+    )
 
     if not text:
         status = "missing_narration"
@@ -624,6 +675,10 @@ def validate_story_length(
     elif final_part_merged:
         if not is_final_part:
             status = "merge_exception_not_final_part"
+            passed = False
+            needs_revision = True
+        elif not merge_evidence_ok:
+            status = "merge_evidence_invalid"
             passed = False
             needs_revision = True
         elif SHORT_MIN_WORDS_PER_PART <= actual <= SHORT_FINAL_MERGED_MAX_WORDS:
@@ -682,6 +737,7 @@ def validate_story_length(
         ),
         "revision_attempted": bool(revision_attempted or evidence_ok),
         "revision_evidence_verified": evidence_ok,
+        "merge_evidence_verified": merge_evidence_ok,
         "final_part_merged": bool(final_part_merged),
         "status": status,
         "needs_revision": needs_revision,
@@ -1002,6 +1058,10 @@ def validate_all_parts(
             revision_evidence=evidence,
             is_final_part=is_final,
             final_part_merged=final_part_merged,
+            merge_evidence=(
+                part.get("merge_evidence") if isinstance(part, dict) else None
+            ),
+            actual_parts=len(parts),
         )
 
         results.append(result)
