@@ -756,11 +756,13 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
                 for key in (
                     "config_signature",
                     "config_hash",
+                    "config_sha256",
                     "source_fingerprint",
                     "source_signature",
                     "source_hash",
                     "input_fingerprint",
                     "input_hash",
+                    "input_sha256",
                     "input_signature",
                     "generation_signature",
                     "cache_signature",
