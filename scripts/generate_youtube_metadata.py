@@ -40,7 +40,7 @@ OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 CHECKPOINT = ROOT / "output" / "checkpoints" / "youtube_metadata.json"
 
-VERSION = "youtube-metadata-v28-description-legal-block"
+VERSION = "youtube-metadata-v29-hindi-disclaimer-block"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
@@ -515,31 +515,66 @@ def normalize_description(value: Any) -> str:
     if not description:
         raise RuntimeError("Generated YouTube description is empty.")
 
-    # Keep the model-written story description intact and append the channel
-    # disclaimer/copyright block exactly once. Reserve space before truncating.
-    legal_block = (
-        "अस्वीकरण (Disclaimer): यह वीडियो कहानी-आधारित मनोरंजन और "
-        "रचनात्मक प्रस्तुति के उद्देश्य से बनाया गया है। पात्र, घटनाएँ और "
-        "दृश्य काल्पनिक/रचनात्मक हो सकते हैं; किसी वास्तविक व्यक्ति या घटना "
-        "से समानता संयोगवश है।"
-        "\n\n"
-        "कॉपीराइट (Copyright): © Katha Lok AI. All rights reserved. "
-        "बिना लिखित अनुमति इस वीडियो, narration, visuals या अन्य सामग्री "
-        "की पुनः अपलोडिंग, प्रतिलिपि या व्यावसायिक पुनःप्रयोग की अनुमति नहीं है।"
+    # Remove previously generated legal sections before appending the current
+    # canonical Hindi notices. Keep the story-written description untouched.
+    legal_markers = (
+        "\nअस्वीकरण (Disclaimer):",
+        "\nAI अस्वीकरण (AI Content Disclaimer):",
+        "\nकॉपीराइट सूचना (Copyright Notice):",
+        "\nThird-Party Content Notice:",
+        "\nतृतीय-पक्ष सामग्री सूचना:",
+        "\nदर्शक सूचना (Viewer Notice):",
     )
-    if "अस्वीकरण (Disclaimer):" not in description or "© Katha Lok AI" not in description:
-        description = description.rstrip() + "\n\n" + legal_block
+    cut_positions = [
+        description.find(marker)
+        for marker in legal_markers
+        if description.find(marker) >= 0
+    ]
+    if cut_positions:
+        description = description[:min(cut_positions)].rstrip()
+
+    year = time.strftime("%Y", time.gmtime())
+    legal_block = (
+        "AI अस्वीकरण (AI Content Disclaimer): इस वीडियो के निर्माण में "
+        "कहानी/Script, Images, Voiceover, Background Music और Photo Motion "
+        "जैसे कुछ हिस्सों के लिए AI Tools का उपयोग किया जा सकता है। अंतिम "
+        "रचनात्मक चयन और प्रस्तुति चैनल द्वारा तैयार की जाती है। AI से बने "
+        "दृश्य वास्तविक घटनाओं का प्रमाण नहीं हैं।"
+        "\n\n"
+        "कहानी संबंधी अस्वीकरण (Story Disclaimer): इस वीडियो की कहानी "
+        "काल्पनिक, रचनात्मक या नाटकीय रूपांतरण हो सकती है। पात्रों, स्थानों "
+        "और घटनाओं का किसी वास्तविक व्यक्ति, संस्था या घटना से संबंध "
+        "संयोगवश हो सकता है, जब तक स्पष्ट रूप से अन्यथा न बताया गया हो।"
+        "\n\n"
+        "कॉपीराइट सूचना (Copyright Notice): © "
+        + year
+        + " Katha Lok AI. सर्वाधिकार सुरक्षित। इस चैनल की मूल Script, "
+        "Narration, Editing और स्वयं निर्मित वीडियो सामग्री का अनधिकृत "
+        "Re-upload, Copy, Distribution या व्यावसायिक उपयोग बिना लिखित "
+        "अनुमति के प्रतिबंधित है।"
+        "\n\n"
+        "Third-Party Content Notice (अन्य सामग्री की सूचना): यदि इस वीडियो "
+        "में Third-Party Music, Image, Sound Effect या अन्य सामग्री का "
+        "उपयोग किया गया है, तो उस सामग्री के संबंधित मालिकों के अधिकार "
+        "सुरक्षित रहेंगे। आवश्यकतानुसार स्रोत और License के अनुसार Credit "
+        "दिया जाएगा।"
+        "\n\n"
+        "दर्शक सूचना (Viewer Notice): यह वीडियो मनोरंजन के उद्देश्य से "
+        "प्रस्तुत किया गया है। कहानी में दिखाई गई घटनाओं या परिस्थितियों "
+        "को वास्तविक जीवन में अपनाने की सलाह न समझें।"
+    )
+
+    description = description.rstrip() + "\n\n" + legal_block
     if len(description) > MAX_DESCRIPTION_CHARS:
         reserve = len(legal_block) + 2
         story_limit = max(0, MAX_DESCRIPTION_CHARS - reserve - 3)
-        story_part = description.split("\n\nअस्वीकरण (Disclaimer):", 1)[0]
+        story_part = description[:-(len(legal_block) + 2)].rstrip()
         if len(story_part) > story_limit:
             story_part = story_part[:story_limit].rstrip() + "..."
-        description = story_part.rstrip() + "\n\n" + legal_block
+        description = story_part + "\n\n" + legal_block
     if len(description) > MAX_DESCRIPTION_CHARS:
-        raise RuntimeError("Disclaimer/copyright block exceeds description limit.")
+        raise RuntimeError("Hindi disclaimer block exceeds description limit.")
     return description
-
 
 def normalize_tags(raw: Any) -> list[str]:
     if isinstance(raw, str):
