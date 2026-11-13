@@ -806,6 +806,80 @@ def restore_partial_tts_chunks(source: Path, output: Path) -> int:
     return restored
 
 
+def _progress_identity_compatible(left: dict, right: dict) -> bool:
+    identity_keys = (
+        "input_fingerprint", "input_hash", "input_sha256",
+        "source_fingerprint", "source_signature", "config_signature",
+        "generation_signature", "cache_signature", "manifest_signature",
+    )
+    for key in identity_keys:
+        a, b = left.get(key), right.get(key)
+        if a not in (None, "") and b not in (None, "") and a != b:
+            return False
+    return True
+
+
+def _progress_row_key(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for key in ("scene_id", "chunk_id", "job_id", "track_id", "artifact_id", "id", "key"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return f"{key}:{value}"
+    if row.get("part") is not None and row.get("scene") is not None:
+        return f"part-scene:{row.get('part')}:{row.get('scene')}:{row.get('role', '')}"
+    return _story_fingerprint(row)
+
+
+def _merge_progress_document(existing: dict, incoming: dict) -> dict | None:
+    if not _progress_identity_compatible(existing, incoming):
+        return None
+    merged = dict(existing)
+    row_fields = {
+        "scene_progress", "jobs", "chunks", "records", "items",
+        "scene_records", "completed_jobs", "completed_chunks",
+    }
+    for key, value in incoming.items():
+        if key in row_fields and isinstance(value, list):
+            old_rows = merged.get(key, [])
+            old_rows = old_rows if isinstance(old_rows, list) else []
+            by_key = {_progress_row_key(row): row for row in old_rows if _progress_row_key(row)}
+            for row in value:
+                row_key = _progress_row_key(row)
+                if not row_key:
+                    continue
+                previous = by_key.get(row_key)
+                if previous is None:
+                    by_key[row_key] = row
+                    continue
+                previous_ready = str(previous.get("status", "")).lower() in SUCCESS_STATES
+                incoming_ready = str(row.get("status", "")).lower() in SUCCESS_STATES
+                previous_hash = any(previous.get(field) for field in ("sha256", "image_sha256", "audio_sha256", "video_sha256"))
+                incoming_hash = any(row.get(field) for field in ("sha256", "image_sha256", "audio_sha256", "video_sha256"))
+                if (incoming_ready and incoming_hash) or not (previous_ready and previous_hash):
+                    by_key[row_key] = row
+            merged[key] = list(by_key.values())
+        elif key in {"completed_tracks", "completed_jobs", "completed_chunks"} and isinstance(value, list):
+            previous = merged.get(key, [])
+            previous = previous if isinstance(previous, list) else []
+            merged[key] = list(dict.fromkeys(previous + value))
+        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = dict(merged[key])
+            for nested_key, nested_value in value.items():
+                previous_value = nested.get(nested_key)
+                if isinstance(previous_value, dict) and isinstance(nested_value, dict):
+                    old_ready = str(previous_value.get("status", "")).lower() in SUCCESS_STATES
+                    new_ready = str(nested_value.get("status", "")).lower() in SUCCESS_STATES
+                    if new_ready and not old_ready:
+                        nested[nested_key] = nested_value
+                elif nested_key not in nested:
+                    nested[nested_key] = nested_value
+            merged[key] = nested
+        elif key not in merged or merged[key] in (None, "", [], {}):
+            merged[key] = value
+    return merged
+
+
 def merge_progress_checkpoints(source: Path, output: Path) -> int:
     roots = (
         "checkpoints",
@@ -818,7 +892,7 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
         "captions",
         "scenes",
     )
-    copied = 0
+    changed = 0
     for root_name in roots:
         source_root = source / root_name
         if not source_root.is_dir():
@@ -832,34 +906,35 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
             has_stage_identity = any(
                 data.get(key)
                 for key in (
-                    "config_signature",
-                    "config_hash",
-                    "config_sha256",
-                    "source_fingerprint",
-                    "source_signature",
-                    "source_hash",
-                    "input_fingerprint",
-                    "input_hash",
-                    "input_sha256",
-                    "input_signature",
-                    "generation_signature",
-                    "cache_signature",
-                    "manifest_signature",
-                    "job_signature",
-                    "signature",
-                    "fingerprint",
+                    "config_signature", "config_hash", "config_sha256",
+                    "source_fingerprint", "source_signature", "source_hash",
+                    "input_fingerprint", "input_hash", "input_sha256",
+                    "input_signature", "generation_signature", "cache_signature",
+                    "manifest_signature", "job_signature", "signature", "fingerprint",
                 )
             )
             if not has_stage_identity:
                 continue
             relative = candidate.relative_to(source)
             destination = output / relative
-            if destination.exists():
+            if not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(candidate, destination)
+                changed += 1
                 continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(candidate, destination)
-            copied += 1
-    return copied
+            if destination.is_symlink() or not destination.is_file():
+                continue
+            existing = read_json(destination)
+            if not isinstance(existing, dict):
+                continue
+            merged = _merge_progress_document(existing, data)
+            if merged is None:
+                continue
+            encoded = json.dumps(merged, ensure_ascii=False, sort_keys=True, indent=2) + "\\n"
+            if destination.read_text(encoding="utf-8-sig") != encoded:
+                destination.write_text(encoded, encoding="utf-8")
+                changed += 1
+    return changed
 
 
 def get_expected_context() -> dict:
