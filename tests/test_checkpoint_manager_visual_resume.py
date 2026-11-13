@@ -132,6 +132,29 @@ class CheckpointManagerVisualResumeTests(unittest.TestCase):
             self.assertEqual(len(preserved), 1)
             self.assertEqual(preserved[0].read_text(encoding="utf-8"), original)
 
+    def test_valid_checkpoint_replaces_corrupt_existing_json(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_dir = root / "saved" / "checkpoints"
+            output_dir = root / "output" / "checkpoints"
+            source_dir.mkdir(parents=True)
+            output_dir.mkdir(parents=True)
+            payload = {
+                "source_fingerprint": "a" * 64,
+                "config_signature": "b" * 64,
+                "scene_progress": [{"scene_id": "restored-scene", "status": "completed"}],
+            }
+            relative = "visual_jobs_progress.json"
+            (source_dir / relative).write_text(json.dumps(payload), encoding="utf-8")
+            (output_dir / relative).write_text(
+                '{"broken": true}\\n{"second": true}', encoding="utf-8"
+            )
+            checkpoint_manager.merge_progress_checkpoints(
+                root / "saved", root / "output"
+            )
+            restored = json.loads((output_dir / relative).read_text(encoding="utf-8"))
+            self.assertEqual(restored["scene_progress"][0]["scene_id"], "restored-scene")
+
     def test_partial_audio_asset_is_copied_only_after_sha256_verification(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
