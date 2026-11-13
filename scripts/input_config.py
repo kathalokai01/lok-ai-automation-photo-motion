@@ -163,6 +163,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "MOOD": "dramatic",
     "QUALITY": "high",
     "IMAGE_PROCESSING_PROFILE": "none",
+    "RENDER_TEMPLATE": "documentary",
     "FPS": 24,
     "NEGATIVE_PROMPT": True,
     "AVOID_CARTOON_LOOK": True,
@@ -1260,7 +1261,19 @@ def get_production_settings(
             "IMAGE_PROCESSING_PROFILE must be one of: "
             + ", ".join(sorted(allowed))
         )
-    return {"image_profile": profile}
+    template = str(
+        config.get("RENDER_TEMPLATE", "documentary")
+    ).strip().lower()
+    allowed_templates = {"documentary", "cinematic", "minimal"}
+    if template not in allowed_templates:
+        raise ValueError(
+            "RENDER_TEMPLATE must be one of: "
+            + ", ".join(sorted(allowed_templates))
+        )
+    return {
+        "image_profile": profile,
+        "render_template": template,
+    }
 
 
 
@@ -1547,7 +1560,9 @@ def _validate_general_settings(config: dict[str, Any]) -> None:
     if quality not in {"draft", "standard", "high"}:
         raise ValueError("QUALITY must be draft, standard or high.")
     config["QUALITY"] = quality
-    config["IMAGE_PROCESSING_PROFILE"] = get_production_settings(config)["image_profile"]
+    production = get_production_settings(config)
+    config["IMAGE_PROCESSING_PROFILE"] = production["image_profile"]
+    config["RENDER_TEMPLATE"] = production["render_template"]
 
     for key in (
         "VISUAL_STYLE",
