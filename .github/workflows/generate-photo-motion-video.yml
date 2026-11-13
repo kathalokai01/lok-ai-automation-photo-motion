@@ -851,8 +851,8 @@ jobs:
       - name: Build visual storyboard contact sheet
         run: python scripts/build_visual_storyboard.py
 
-      - name: Create explicit asset review ledger
-        run: python scripts/asset_approval.py
+      - name: Create and enforce explicit asset review ledger
+        run: python scripts/asset_approval.py --enforce-required
 
       - name: Validate images and prepare Photo Motion jobs
         run: python scripts/prepare_visuals.py

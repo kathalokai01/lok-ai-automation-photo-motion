@@ -127,7 +127,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TTS_CHUNK_MAX_CHARS": 500,
     "TTS_CHUNK_MIN_CHARS": 150,
     "TTS_CHUNK_CHECKPOINT": True,
-    "TTS_VALIDATE_AUDIO": True,
     "TTS_MAX_PROVIDER_ATTEMPTS": 2,
 
     "IMAGE_PROVIDER_ORDER": ",".join(ALL_IMAGE_PROVIDERS),
@@ -151,10 +150,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "IMAGE_QUALITY_MIN_SCORE": 5,
     "IMAGE_QUALITY_MAX_FAILURES_PER_MODEL": 2,
     "IMAGE_QUALITY_SKIP_SCENES": 3,
-
-    "PART_HOOK": True,
-    "PART_SUSPENSE": True,
-    "FINAL_RESOLUTION": True,
 
     "VISUAL_STYLE": "cinematic_realistic",
     "REALISM": "high",
@@ -194,15 +189,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "MUSIC_DUCKING_DB": -10.0,
     "SFX": True,
     "AMBIENT_SOUND": True,
-    "TRANSITIONS": "cinematic",
-
-    "WATERMARK": False,
-    "LOGO": False,
     "RESUME_ENABLED": True,
     "MAX_RETRIES": 3,
     "SAVE_CHECKPOINT_AFTER_EACH_SCENE": True,
     "SKIP_COMPLETED_SCENES": True,
-    "FAILURE_POLICY": "retry_then_checkpoint",
+    "ASSET_APPROVAL_REQUIRED": False,
 }
 
 BOOL_KEYS = {
@@ -1538,18 +1529,6 @@ def _validate_general_settings(config: dict[str, Any]) -> None:
         raise ValueError("QUALITY must be draft, standard or high.")
     config["QUALITY"] = quality
 
-    failure_policy = str(
-        config.get("FAILURE_POLICY", "retry_then_checkpoint")
-    ).strip().lower()
-    if failure_policy not in {
-        "retry_then_checkpoint", "skip", "stop",
-    }:
-        raise ValueError(
-            "FAILURE_POLICY must be "
-            "retry_then_checkpoint, skip or stop."
-        )
-    config["FAILURE_POLICY"] = failure_policy
-
     for key in (
         "VISUAL_STYLE",
         "REALISM",
@@ -1557,7 +1536,6 @@ def _validate_general_settings(config: dict[str, Any]) -> None:
         "LIGHTING",
         "MOOD",
         "MUSIC_STYLE",
-        "TRANSITIONS",
     ):
         value = str(
             config.get(key, DEFAULT_CONFIG.get(key, ""))
@@ -1777,7 +1755,6 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "CAPTION_FONT_SIZE": get_caption_font_size(config),
         "STORY_LENGTH": str(config.get("STORY_LENGTH", "")),
         "SCENE_DURATION": str(config.get("SCENE_DURATION", "")),
-        "FAILURE_POLICY": str(config.get("FAILURE_POLICY", "")),
 
         "PHOTO_MOTION_STYLE": config["PHOTO_MOTION_STYLE"],
         "PHOTO_MOTION_SPEED": config["PHOTO_MOTION_SPEED"],
@@ -1801,6 +1778,10 @@ def get_config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "SKIP_COMPLETED_SCENES": parse_bool(
             config.get("SKIP_COMPLETED_SCENES", True),
             "SKIP_COMPLETED_SCENES",
+        ),
+        "ASSET_APPROVAL_REQUIRED": parse_bool(
+            config.get("ASSET_APPROVAL_REQUIRED", False),
+            "ASSET_APPROVAL_REQUIRED",
         ),
 
         "TTS_MAIN_1": config["TTS_MAIN_1"],
@@ -1896,17 +1877,3 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"INPUT CONFIG VALIDATION: FAILED: {exc}")
         raise
-
-# Optional production features. Defaults do not alter the current renderer or provider order.
-def get_production_settings(config: dict[str, Any]) -> dict[str, Any]:
-    def flag(key: str, default: bool) -> bool:
-        value = config.get(key, default)
-        if isinstance(value, bool): return value
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-    template = str(config.get("PRODUCTION_RENDER_TEMPLATE", "documentary")).strip().lower()
-    profile = str(config.get("IMAGE_PROCESSING_PROFILE", "none")).strip().lower()
-    preset = str(config.get("PRODUCTION_PRESET", "default")).strip().lower()
-    if template not in {"documentary", "cinematic", "minimal"}: raise ValueError("Invalid PRODUCTION_RENDER_TEMPLATE")
-    if profile not in {"none", "natural", "cinematic", "soft"}: raise ValueError("Invalid IMAGE_PROCESSING_PROFILE")
-    if preset not in {"default", "cinematic", "natural", "review"}: raise ValueError("Invalid PRODUCTION_PRESET")
-    return {"dashboard_enabled":flag("PRODUCTION_DASHBOARD_ENABLED",True),"preview_enabled":flag("PRODUCTION_PREVIEW_ENABLED",True),"event_journal_enabled":flag("PRODUCTION_EVENT_JOURNAL_ENABLED",True),"render_template":template,"image_profile":profile,"comfyui_optional":flag("COMFYUI_OPTIONAL",False),"asset_approval_required":flag("ASSET_APPROVAL_REQUIRED",False),"preset":preset}

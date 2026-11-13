@@ -164,7 +164,6 @@ def build_settings(config: dict) -> dict:
         "sfx": as_bool(config.get("SFX"), True),
         "ambient_sound": as_bool(config.get("AMBIENT_SOUND"), True),
         "music_style": clean(config.get("MUSIC_STYLE", "cinematic")),
-        "transitions": clean(config.get("TRANSITIONS", "cinematic")),
         "resume_enabled": as_bool(config.get("RESUME_ENABLED"), True),
         "skip_completed": as_bool(
             config.get("SKIP_COMPLETED_SCENES"), True

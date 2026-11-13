@@ -648,12 +648,17 @@ def provider_available(
             os.getenv("ELEVENLABS_VOICE_ID_FEMALE_STORYTELLER"),
             os.getenv("ELEVENLABS_VOICE_ID_MALE_STORYTELLER"),
             os.getenv("ELEVENLABS_VOICE_ID_CHARACTER"),
+            config.get("TTS_VOICE_ID_CHILD_FRIENDLY"),
+            config.get("TTS_VOICE_ID_FEMALE_STORYTELLER"),
+            config.get("TTS_VOICE_ID_MALE_STORYTELLER"),
+            config.get("TTS_VOICE_ID_CHARACTER"),
         )
         ok = bool(
             os.getenv("ELEVENLABS_API_KEY")
             and (
                 os.getenv("ELEVENLABS_VOICE_ID")
-                or any(profile_voice_ids)
+                or config.get("TTS_VOICE_ID")
+                or any(str(value or "").strip() for value in profile_voice_ids)
             )
         )
 
@@ -1082,7 +1087,9 @@ def synthesize_provider(
         ).strip()
         profile_id = str((voice_profile or {}).get("profile_id") or "").upper()
         mapped_voice_id = os.getenv(f"ELEVENLABS_VOICE_ID_{profile_id}", "").strip() if profile_id else ""
-        voice_id = mapped_voice_id or os.getenv(
+        configured_voice_id = str((voice_profile or {}).get("provider_voice_id") or "").strip()
+        global_configured_voice_id = str((voice_profile or {}).get("voice_id") or "").strip()
+        voice_id = configured_voice_id or mapped_voice_id or global_configured_voice_id or os.getenv(
             "ELEVENLABS_VOICE_ID", ""
         ).strip()
 
@@ -2484,6 +2491,8 @@ def main() -> int:
         "VOICE", config.get("TTS_VOICE", "male")
     )
 
+    chunk_checkpoint_enabled = config.get("TTS_CHUNK_CHECKPOINT", True) is True
+
     source_hash = stable_source_signature(
         narration_data, jobs
     )
@@ -2499,6 +2508,7 @@ def main() -> int:
         "max_chars": max_chars,
         "min_chars": min_chars,
         "max_retries": max_retries,
+        "chunk_checkpoint": config.get("TTS_CHUNK_CHECKPOINT", True) is True,
         "voice": voice_setting,
         "voice_profiles": [
             job.get("voice_profile", {}) for job in jobs
@@ -2761,11 +2771,12 @@ def main() -> int:
             chunk_records.append(chunk_record)
             checkpoint_records.append(chunk_record)
 
-            save_checkpoint(
-                checkpoint_records,
-                source_hash,
-                config_hash,
-            )
+            if chunk_checkpoint_enabled:
+                save_checkpoint(
+                    checkpoint_records,
+                    source_hash,
+                    config_hash,
+                )
 
         scene_output = (
             OUTPUT_DIR
