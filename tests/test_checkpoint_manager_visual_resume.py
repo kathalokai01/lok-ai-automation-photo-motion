@@ -117,7 +117,6 @@ class CheckpointManagerVisualResumeTests(unittest.TestCase):
             self.assertTrue(raw.endswith("\n"))
             self.assertFalse(raw.endswith("\\n"))
             self.assertFalse(raw.endswith("\n\n"))
-            self.assertEqual(raw.count("\n"), raw.count("\n"))
             self.assertEqual(json.loads(raw)["scene_progress"][0]["scene_id"], "scene-1")
             # Restoring must canonicalize the copied destination without
             # mutating the original checkpoint artifact.
