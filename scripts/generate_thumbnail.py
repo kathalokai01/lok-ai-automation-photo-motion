@@ -47,7 +47,7 @@ OUTPUT_FILE = ROOT / "output" / "thumbnail.jpg"
 OUTPUT_DIR = ROOT / "output" / "thumbnail"
 MANIFEST_FILE = OUTPUT_DIR / "thumbnail_manifest.json"
 
-VERSION = "thumbnail-v53-clean-colourful-title-no-box-effect"
+VERSION = "thumbnail-v54-raqm-devanagari-shaping-clean-title"
 MIN_IMAGE_BYTES = 1000
 SHORT_SIZE = (720, 1280)
 FULL_SIZE = (1280, 720)
@@ -816,6 +816,19 @@ def choose_hero(
     return selected
 
 
+def load_thumbnail_font(path: str | Path, size: int) -> ImageFont.FreeTypeFont:
+    layout = getattr(ImageFont, "Layout", None)
+    raqm = getattr(layout, "RAQM", None) if layout is not None else None
+    if raqm is not None:
+        try:
+            return ImageFont.truetype(
+                str(path), size=size, layout_engine=raqm
+            )
+        except Exception:
+            pass
+    return load_thumbnail_font(path, size)
+
+
 def find_font(size: int) -> ImageFont.FreeTypeFont:
     for candidate in FONT_CANDIDATES:
         path = Path(candidate)
@@ -845,7 +858,7 @@ def find_font(size: int) -> ImageFont.FreeTypeFont:
             font_path = result.stdout.strip()
 
             if font_path and Path(font_path).is_file():
-                return ImageFont.truetype(font_path, size=size)
+                return load_thumbnail_font(font_path, size)
         except Exception:
             continue
 
