@@ -127,19 +127,19 @@ def main():
  story=docs["story"] or {}
  music=docs["music"] or {}
  sound=docs["sound"] or {}
-sfx_validation=docs["sfx_validation"] or {}
-music_result=effective_music(music,sound)
-sound_quality=sound_quality_summary(sound,sfx_validation)
-music_enabled=enabled(config_data,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
-sfx_enabled=enabled(config_data,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
-sound_checks_passed=(
- (not music_enabled or music_result["status"]=="completed")
- and (not sfx_enabled or (
-  sound.get("status")=="completed"
-  and sfx_validation.get("status")=="completed"
-  and int(sfx_validation.get("failed_checks",0) or 0)==0
- ))
-)
+ sfx_validation=docs["sfx_validation"] or {}
+ music_result=effective_music(music,sound)
+ sound_quality=sound_quality_summary(sound,sfx_validation)
+ music_enabled=enabled(config_data,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
+ sfx_enabled=enabled(config_data,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
+ sound_checks_passed=(
+  (not music_enabled or music_result["status"]=="completed")
+  and (not sfx_enabled or (
+   sound.get("status")=="completed"
+   and sfx_validation.get("status")=="completed"
+   and int(sfx_validation.get("failed_checks",0) or 0)==0
+  ))
+ )
  stages={}
  for name,path in SOURCES.items():
   doc=docs[name]
