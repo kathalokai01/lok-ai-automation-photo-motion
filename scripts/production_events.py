@@ -46,9 +46,20 @@ def record_provider_attempt(
     }
     if http_status is not None:
         metadata["http_status"] = http_status
+    request_status = str(status)
+    event_status = (
+        "failed" if request_status in {
+            "request_failed", "quality_rejected",
+            "response_received_quality_rejected",
+            "response_received_validation_failed",
+        }
+        else "running" if request_status == "request_started"
+        else "pending" if request_status == "verification_pending"
+        else "completed"
+    )
     return record_event(
         "provider_attempt",
-        "failed" if str(status) in {"request_failed", "quality_rejected"} else "completed",
+        event_status,
         error=error,
         metadata=metadata,
     )
