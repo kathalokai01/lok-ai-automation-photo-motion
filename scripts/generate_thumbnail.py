@@ -826,7 +826,7 @@ def load_thumbnail_font(path: str | Path, size: int) -> ImageFont.FreeTypeFont:
             )
         except Exception:
             pass
-    return load_thumbnail_font(path, size)
+    return ImageFont.truetype(str(path), size=size)
 
 
 def find_font(size: int) -> ImageFont.FreeTypeFont:
@@ -835,7 +835,7 @@ def find_font(size: int) -> ImageFont.FreeTypeFont:
 
         if path.is_file():
             try:
-                return ImageFont.truetype(str(path), size=size)
+                return load_thumbnail_font(path, size)
             except Exception:
                 continue
 
