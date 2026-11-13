@@ -1717,12 +1717,41 @@ def _partition_and_revise(
         ],
     })
 
+    merge_evidence = None
+    if merged_fallback:
+        rebuilt_story = clean("\\n\\n".join(groups))
+        source_story = clean(corrected_story)
+        merge_evidence = {
+            "version": "final-part-merge-evidence-v1",
+            "method": "exact_adjacent_final_part_merge_from_complete_sentence_units",
+            "verified": bool(
+                selected_count < pre_merge_part_count
+                and pre_merge_part_count - selected_count == 1
+                and rebuilt_story == source_story
+            ),
+            "pre_merge_selected_parts": pre_merge_part_count,
+            "merge_reduced_part_count": pre_merge_part_count - selected_count,
+            "final_part_count": selected_count,
+            "final_part_number": selected_count,
+            "final_part_word_count": word_count(groups[-1]),
+            "final_part_sha256": sha256(clean(groups[-1])),
+            "corrected_story_sha256": sha256(source_story),
+            "reconstructed_story_sha256": sha256(rebuilt_story),
+            "text_preserved_exactly": rebuilt_story == source_story,
+        }
+        policy["merge_evidence"] = merge_evidence
+    else:
+        policy["merge_evidence"] = None
+
     validation_parts = [
         {
             "part": number,
             "narration": part,
             "revision_evidence": next((row.get("revision_evidence") for row in revision_summaries if row.get("part") == number), None),
             "final_part_merged": bool(merged_fallback and number == selected_count),
+            "merge_evidence": (
+                merge_evidence if merged_fallback and number == selected_count else None
+            ),
         }
         for number, part in enumerate(groups, 1)
     ]
@@ -1753,6 +1782,7 @@ def _partition_and_revise(
         "pre_merge_selected_parts": pre_merge_part_count,
         "merge_reduced_part_count": (pre_merge_part_count - selected_count) if merged_fallback else 0,
         "final_part_merged": bool(merged_fallback),
+        "merge_evidence": merge_evidence,
         "exact_source_text_preserved": not bool(revision_summaries),
         "semantic_preservation_verified": all(row.get("text_preserved_semantically") is True for row in revision_summaries) if revision_summaries else True,
     }
@@ -2065,6 +2095,10 @@ def make_story(
             "revision_evidence": evidence,
             "final_part_merged": bool(
                 selection.get("final_part_merged") and is_final
+            ),
+            "merge_evidence": (
+                selection.get("merge_evidence")
+                if selection.get("final_part_merged") and is_final else None
             ),
             "main_scene_count": len(scenes),
             "actual_scene_count": len(scenes),
