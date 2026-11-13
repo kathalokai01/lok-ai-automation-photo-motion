@@ -1503,7 +1503,10 @@ def _partition_and_revise(
         for index, part_text in enumerate(list(groups)):
             part_number = index + 1
             amount = word_count(part_text)
-            if amount <= SHORT_MAX:
+            is_final_merged = bool(
+                merged_fallback and part_number == len(groups)
+            )
+            if amount <= SHORT_MAX or is_final_merged:
                 continue
             existing = next((
                 row for row in revision_summaries
@@ -1515,9 +1518,6 @@ def _partition_and_revise(
             ), None)
             if existing:
                 continue
-            is_final_merged = bool(
-                merged_fallback and part_number == len(groups)
-            )
             revised, attempts, evidence = repair_short_part(
                 part_text,
                 part_number,
