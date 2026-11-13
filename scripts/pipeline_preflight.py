@@ -942,6 +942,38 @@ def is_retryable_failed_depth_manifest(data: Any, visual_jobs: Any) -> bool:
     return True
 
 
+def is_retryable_completed_tts_integrity_issue(data: Any) -> bool:
+    """Allow TTS to regenerate individually hash-invalid audio from a structurally complete manifest."""
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("status") or "").strip().lower() not in SUCCESS:
+        return False
+    for key in ("source_sha256", "config_sha256"):
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", str(data.get(key) or "")):
+            return False
+    jobs = data.get("jobs")
+    parts = data.get("parts")
+    summary = data.get("summary")
+    if not isinstance(jobs, list) or not jobs or not isinstance(parts, list) or not parts:
+        return False
+    if not isinstance(summary, dict):
+        return False
+    total = summary.get("total_jobs")
+    completed = summary.get("completed_jobs")
+    return (
+        type(total) is int
+        and total == len(jobs)
+        and type(completed) is int
+        and completed == len(jobs)
+        and all(
+            isinstance(row, dict)
+            and row.get("scene_id")
+            and row.get("status") in SUCCESS
+            for row in jobs
+        )
+    )
+
+
 def validate_existing_manifest(
     name: str,
     path: Path,
@@ -1561,7 +1593,18 @@ def validate_existing_manifest(
                 str(declared_hash).strip().lower()
                 != actual_hash.lower()
             ):
-                if retryable_narration_audio:
+                if (
+                    retryable_narration_audio
+                    or (
+                        is_tts
+                        and is_retryable_completed_tts_integrity_issue(data)
+                    )
+                ):
+                    # The TTS stage independently checks each scene's audio
+                    # SHA256 before reuse. Mark this manifest retryable so
+                    # valid rows remain reusable and only corrupt/missing
+                    # scene audio is synthesized again.
+                    retryable_narration_audio = True
                     retryable_unavailable_files += 1
                     hash_mismatch = True
                     break
