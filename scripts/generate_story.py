@@ -1434,6 +1434,7 @@ def _partition_and_revise(
     minimum_parts, maximum_parts = parse_parts_range(parts_specification)
     corrected_story = normalize_text(complete_story)
     total_words = word_count(corrected_story)
+    revision_summaries = []
 
     if mode == "full":
         groups = [corrected_story]
