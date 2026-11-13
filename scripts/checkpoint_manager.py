@@ -950,6 +950,28 @@ def _copy_verified_progress_artifacts(document: dict, source: Path, output: Path
     return copied
 
 
+def _write_checkpoint_json(path: Path, data: dict) -> None:
+    """Atomically write canonical, parseable JSON with a real trailing newline."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(
+        data, ensure_ascii=False, sort_keys=True, indent=2
+    ) + "\n"
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+
+
 def merge_progress_checkpoints(source: Path, output: Path) -> int:
     roots = (
         "checkpoints",
@@ -1005,8 +1027,10 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
             relative = candidate.relative_to(source)
             destination = output / relative
             if not destination.exists():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(candidate, destination)
+                # Do not byte-copy source JSON: progress files from older runs
+                # may be valid but lack a final newline. Canonicalize every
+                # restored JSON document before making it available to stages.
+                _write_checkpoint_json(destination, data)
                 changed += 1
                 continue
             if destination.is_symlink() or not destination.is_file():
@@ -1017,18 +1041,17 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
                 # JSON documents. The incoming source is already parsed and
                 # has a stage identity; replace the corrupt destination with
                 # this valid checkpoint instead of silently retaining damage.
-                destination.write_text(
-                    json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-                    encoding="utf-8",
-                )
+                _write_checkpoint_json(destination, data)
                 changed += 1
                 continue
             merged = _merge_progress_document(existing, data)
             if merged is None:
                 continue
-            encoded = json.dumps(merged, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+            encoded = json.dumps(
+                merged, ensure_ascii=False, sort_keys=True, indent=2
+            ) + "\n"
             if destination.read_text(encoding="utf-8-sig") != encoded:
-                destination.write_text(encoded, encoding="utf-8")
+                _write_checkpoint_json(destination, merged)
                 changed += 1
     return changed
 
