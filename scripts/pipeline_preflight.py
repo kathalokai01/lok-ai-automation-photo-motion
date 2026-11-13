@@ -1691,18 +1691,23 @@ def validate_existing_manifest(
                 str(declared_hash).strip().lower()
                 != actual_hash.lower()
             ):
+                if retryable_image_manifest and name == "image_manifest":
+                    # The image generator independently checks file integrity,
+                    # prompt/source/config signatures and mandatory Vision
+                    # verification before any previous image can be reused.
+                    retryable_unavailable_files += 1
+                    hash_mismatch = True
+                    break
+
                 if (
-                    (retryable_image_manifest and name == "image_manifest")
-                    or retryable_narration_audio
+                    retryable_narration_audio
                     or (
                         is_tts
                         and is_retryable_completed_tts_integrity_issue(data)
                     )
                 ):
-                    # The TTS stage independently checks each scene's audio
-                    # SHA256 before reuse. Mark this manifest retryable so
-                    # valid rows remain reusable and only corrupt/missing
-                    # scene audio is synthesized again.
+                    # TTS independently checks each scene's audio SHA256
+                    # before reuse; only invalid scene audio is regenerated.
                     retryable_narration_audio = True
                     retryable_unavailable_files += 1
                     hash_mismatch = True
