@@ -122,7 +122,7 @@ def sound_quality_summary(sound, validation):
   "sfx_failed_checks":sfx["failed_checks"],
  }
 
-def sound_checks_passed(config, music_result, sound, validation):
+def evaluate_sound_checks(config, music_result, sound, validation):
  music_enabled=enabled(config,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
  sfx_enabled=enabled(config,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
  sfx=normalized_sfx_validation(validation)
@@ -178,7 +178,7 @@ def main():
  sound_quality=sound_quality_summary(sound,sfx_validation)
  music_enabled=enabled(config_data,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
  sfx_enabled=enabled(config_data,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
- sound_checks_passed=sound_checks_passed(
+ sound_checks_passed=evaluate_sound_checks(
   config_data,music_result,sound,sfx_validation
  )
  stages={}
