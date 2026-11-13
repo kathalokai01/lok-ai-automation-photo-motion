@@ -32,7 +32,7 @@ CUES_FILE = ROOT / "output" / "sound_design" / "sfx_cues.json"
 OUTPUT_FILE = ROOT / "output" / "sound_design" / "sfx_timing_validation.json"
 
 VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
-SOUND_DESIGN_VERSION = "photo-motion-sound-design-v34-all-role-measured-tts-timeline"
+SOUND_DESIGN_VERSION = "photo-motion-sound-design-v36-tonal-ambient-fallback"
 MIN_AUDIO_BYTES = 100
 DURATION_TOLERANCE = 0.20
 SFX_END_MARGIN = 0.08
