@@ -696,7 +696,12 @@ def split_text(
     max_chars = max(100, int(max_chars))
     min_chars = max(1, min(int(min_chars), max_chars))
 
-    if len(source) <= max_chars:
+    # Do not let a long paragraph become one breathless provider request merely
+    # because the provider's hard character limit is large. Keep complete
+    # sentences intact when possible; split long sentences at clause boundaries.
+    breath_max_chars = min(max_chars, 190)
+    breath_min_chars = min(min_chars, 75)
+    if len(source) <= breath_max_chars and len(source.split()) <= 24:
         return [source]
 
     sentence_pattern = re.compile(
@@ -788,7 +793,7 @@ def split_text(
         if (
             merged
             and len(chunk) < min_chars
-            and len(merged[-1]) + len(chunk) + 1 <= max_chars
+            and len(merged[-1]) + len(chunk) + 1 <= breath_max_chars and len((merged[-1] + " " + chunk).split()) <= 24
         ):
             merged[-1] += " " + chunk
         else:
