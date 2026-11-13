@@ -46,7 +46,7 @@ AI_STORY_FILE = ROOT / "output" / "story" / "ai_story.json"
 TITLE_FILE = ROOT / "output" / "story" / "final_title.txt"
 REPORT_FILE = ROOT / "output" / "story" / "story_verification.json"
 
-VERSION = "story-verifier-v21-verified-final-merge-evidence"
+VERSION = "story-verifier-v22-source-semantic-proof-and-merge-evidence"
 
 SHORT_MIN_WORDS = SHORT_MIN_WORDS_PER_PART
 SHORT_PREFERRED_MAX_WORDS = SHORT_PREFERRED_MAX_WORDS_PER_PART
@@ -1436,6 +1436,28 @@ def verify_story(
         input_data["mode"],
     )
 
+    proofreading = story.get("proofreading")
+    proofreading = proofreading if isinstance(proofreading, dict) else {}
+    source_preservation = proofreading.get("source_preservation_verification")
+    source_preservation = source_preservation if isinstance(source_preservation, dict) else {}
+    preservation_checks = source_preservation.get("checks")
+    preservation_checks = preservation_checks if isinstance(preservation_checks, dict) else {}
+    semantic_preservation_proven = bool(
+        source_text
+        and proofreading.get("complete_story_reviewed") is True
+        and source_preservation.get("performed") is True
+        and source_preservation.get("passed") is True
+        and preservation_checks
+        and all(value is True for value in preservation_checks.values())
+        and not source_preservation.get("omitted_events")
+        and not source_preservation.get("added_events")
+    )
+    if source_text and not semantic_preservation_proven:
+        fail(
+            "Provided source story lacks verified event, chronology, character, "
+            "location, object and ending preservation evidence."
+        )
+
     policy = story.get("story_length_policy")
     if not isinstance(policy, dict):
         fail("Story length policy metadata is missing.")
@@ -1591,16 +1613,22 @@ def verify_story(
             "plan_top_level_scenes_match_parts": True,
             "strict_json_duplicate_key_check": True,
             "source_vocabulary_coverage": source_coverage["status"],
+            "semantic_preservation": (
+                "verified" if semantic_preservation_proven else "not_applicable_no_source_story"
+            ),
             "no_external_api_calls": plan.get("source", {}).get("api_calls") == 0,
         },
         "api_calls_made": 0,
         "story_modified_by_verifier": False,
         "plan_modified_by_verifier": False,
-        "semantic_preservation_proven": False,
+        "semantic_preservation_proven": (True if semantic_preservation_proven else None),
+        "semantic_preservation_status": (
+            "verified_source_story" if semantic_preservation_proven
+            else "not_applicable_no_source_story"
+        ),
         "semantic_preservation_limitation": (
-            "The verifier checks source integrity, vocabulary coverage, "
-            "ordered narration reconstruction and revision evidence. "
-            "Lexical overlap alone does not prove semantic equivalence."
+            None if semantic_preservation_proven
+            else "No pasted source story was supplied; semantic preservation against an original source is not applicable."
         ),
     }
 
