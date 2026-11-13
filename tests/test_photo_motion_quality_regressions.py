@@ -107,12 +107,43 @@ class CheckpointRestoreTests(unittest.TestCase):
             def verify_saved(path, width, height):
                 return {"sha256": hashes[Path(path).name], "integrity": "verified"}
             with patch.object(generate_visuals, "CHECKPOINT_FILE", progress_path), \
+                 patch.object(generate_visuals, "VISUALS_DIR", output / "visuals"), \
                  patch.object(generate_visuals, "resolve_image_path", side_effect=resolve_saved), \
                  patch.object(generate_visuals, "validate_png", side_effect=verify_saved):
                 previous = generate_visuals.load_previous_progress()
                 rebuilt = generate_visuals.build_progress(jobs, previous, source_fp, config_sig)
             self.assertEqual(rebuilt["completed_jobs"], 12)
             self.assertEqual(rebuilt["remaining_jobs"], 0)
+
+    def test_corrupt_optional_manifests_do_not_break_valid_progress(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = root / "visual_jobs_progress.json"
+            visuals = root / "visuals"
+            visuals.mkdir()
+            row = {
+                "scene_id": "part_01_scene_01",
+                "prompt_signature": "p" * 64,
+                "image_sha256": "a" * 64,
+                "image_path": "output/visuals/images/scene.png",
+                "source_scene_signature": "s" * 64,
+                "source_fingerprint": "f" * 64,
+                "config_signature": "c" * 64,
+                "status": "existing",
+            }
+            checkpoint.write_text(
+                json.dumps({"scene_progress": [row]}), encoding="utf-8"
+            )
+            (visuals / "image_manifest.json").write_text(
+                '{"scenes": [ this is truncated', encoding="utf-8"
+            )
+            (visuals / "image_generation_manifest.json").write_text(
+                '{"scenes": [ this is truncated', encoding="utf-8"
+            )
+            with patch.object(generate_visuals, "CHECKPOINT_FILE", checkpoint), \
+                 patch.object(generate_visuals, "VISUALS_DIR", visuals):
+                recovered = generate_visuals.load_previous_progress()
+            self.assertIn((row["scene_id"], row["prompt_signature"]), recovered)
 
     def test_hash_mismatch_is_not_restored(self):
         with tempfile.TemporaryDirectory() as temporary:
