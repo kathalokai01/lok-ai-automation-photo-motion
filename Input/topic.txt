@@ -32,19 +32,19 @@ TTS_EMOTION_CONTROL = true  # Boolean। true पर रिकॉर्ड क�
 TTS_CHILD_FRIENDLY = true  # Boolean। true पर AUDIENCE=kids होने पर child-friendly preset चुनने की अनुमति; false पर यह auto चयन नहीं होगा।
 
 
-TTS_VOICE_ID = ""  # Text। ElevenLabs जैसे समर्थित provider का voice ID; खाली "" पर provider/profile का सामान्य चयन। ID उसी provider में वैध होना चाहिए।
+TTS_VOICE_ID = ""  # Text override: सभी TTS profiles के लिए सामान्य provider voice ID। खाली "" रखें तो provider का profile-specific voice लागू होगा। ElevenLabs के वास्तविक IDs GitHub Actions Secrets ELEVENLABS_VOICE_ID में रखे जाते हैं; आपके दिए Variables में यह ID मौजूद नहीं है, इसलिए कोई काल्पनिक ID न भरें।
 
 
-TTS_VOICE_ID_CHILD_FRIENDLY = ""  # Text। child_friendly प्रोफ़ाइल के लिए provider voice ID; खाली रखने पर preset/provider चयन।
+TTS_VOICE_ID_CHILD_FRIENDLY = ""  # child_friendly profile का सामान्य provider voice-ID override। खाली रहने पर provider-specific setting लागू होगी: Edge TTS = EDGE_TTS_VOICE_CHILD_FRIENDLY (hi-IN-SwaraNeural); Gemini TTS = GEMINI_TTS_VOICE_CHILD_FRIENDLY (Kore); ElevenLabs ID GitHub Secret ELEVENLABS_VOICE_ID_CHILD_FRIENDLY में होनी चाहिए, आपके दिए Variables में नहीं।
 
 
-TTS_VOICE_ID_FEMALE_STORYTELLER = ""  # Text। female_storyteller प्रोफ़ाइल का provider voice ID; खाली रखने पर preset/provider चयन।
+TTS_VOICE_ID_FEMALE_STORYTELLER = ""  # female_storyteller profile का सामान्य provider voice-ID override। खाली रहने पर provider-specific setting लागू होगी: Edge TTS = EDGE_TTS_VOICE_FEMALE_STORYTELLER (hi-IN-SwaraNeural); Gemini TTS = GEMINI_TTS_VOICE_FEMALE_STORYTELLER (Kore); ElevenLabs ID GitHub Secret ELEVENLABS_VOICE_ID_FEMALE_STORYTELLER में होनी चाहिए, आपके दिए Variables में नहीं।
 
 
-TTS_VOICE_ID_MALE_STORYTELLER = ""  # Text। male_storyteller प्रोफ़ाइल का provider voice ID; खाली रखने पर preset/provider चयन।
+TTS_VOICE_ID_MALE_STORYTELLER = ""  # male_storyteller profile का सामान्य provider voice-ID override। खाली रहने पर provider-specific setting लागू होगी: Edge TTS = EDGE_TTS_VOICE_MALE_STORYTELLER (hi-IN-MadhurNeural); Gemini TTS = GEMINI_TTS_VOICE_MALE_STORYTELLER (Puck); ElevenLabs ID GitHub Secret ELEVENLABS_VOICE_ID_MALE_STORYTELLER में होनी चाहिए, आपके दिए Variables में नहीं।
 
 
-TTS_VOICE_ID_CHARACTER = ""  # Text। character प्रोफ़ाइल का provider voice ID; खाली रखने पर preset/provider चयन।
+TTS_VOICE_ID_CHARACTER = ""  # character profile का सामान्य provider voice-ID override। खाली रहने पर provider-specific setting लागू होगी: Edge TTS = EDGE_TTS_VOICE_CHARACTER (hi-IN-MadhurNeural); Gemini TTS = GEMINI_TTS_VOICE_CHARACTER (Puck); ElevenLabs ID GitHub Secret ELEVENLABS_VOICE_ID_CHARACTER में होनी चाहिए, आपके दिए Variables में नहीं।
 
 
 TTS_PITCH = 1.0  # Number (float)। सामान्य 1.0; voice profile में गुणक के रूप में लगता है और अंतिम value 0.85–1.15 सीमा में सीमित है। उदाहरण: 0.95 थोड़ा नीचे, 1.05 थोड़ा ऊपर।
