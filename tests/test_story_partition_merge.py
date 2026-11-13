@@ -19,7 +19,7 @@ def make_story(sentence_count: int, words_per_sentence: int) -> str:
 
 class ShortStoryMergeRegressionTests(unittest.TestCase):
     def test_239_exception_requires_real_short_final_part(self) -> None:
-        story = make_story(10, 19)  # 190 words; can be split 133 + 57.
+        story = make_story(11, 20)  # 220 words; can be split 120 + 100.
         groups, selected, merged = _partition_short_story(
             story,
             preferred_count=2,
@@ -38,7 +38,7 @@ class ShortStoryMergeRegressionTests(unittest.TestCase):
         )
 
     def test_natural_single_part_over_180_is_not_a_merge(self) -> None:
-        story = make_story(12, 19)  # 228 words, not a pre-existing short-final merge.
+        story = make_story(11, 20)  # 220 words, not a pre-existing short-final merge.
         with self.assertRaisesRegex(
             RuntimeError,
             "Could not divide the corrected story",
