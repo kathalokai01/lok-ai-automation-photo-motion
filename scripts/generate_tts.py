@@ -882,7 +882,7 @@ def synthesize_provider(
                 [
                     shutil.which("edge-tts") or "edge-tts",
                     "--voice", resolve_voice(provider, voice, voice_profile),
-                    "--rate", speed,
+                    f"--rate={normalize_speed(speed)}",
                     "--pitch", f"{pitch_hz:+d}Hz",
                     "--text", text,
                     "--write-media", temporary,
@@ -1125,10 +1125,12 @@ def synthesize_provider(
         return write_audio_bytes(output_path, data)
 
     if provider == "cartesia":
+        configured_model = (
+            os.getenv("CARTESIA_TTS_MODEL", "").strip()
+            or "sonic-latest"
+        )
         payload = {
-            "model_id": os.getenv(
-                "CARTESIA_TTS_MODEL", "sonic-2"
-            ),
+            "model_id": configured_model,
             "transcript": text,
             "voice": {
                 "mode": "id",
@@ -1142,18 +1144,39 @@ def synthesize_provider(
             "language": "hi",
         }
 
-        data, _ = request_bytes(
-            "https://api.cartesia.ai/tts/bytes",
-            {
-                "X-API-Key": os.getenv("CARTESIA_API_KEY"),
-                "Cartesia-Version": os.getenv(
-                    "CARTESIA_API_VERSION",
-                    "2025-04-16",
-                ),
-                "Accept": "audio/mpeg",
-            },
-            payload,
-        )
+        request_headers = {
+            "X-API-Key": os.getenv("CARTESIA_API_KEY"),
+            "Cartesia-Version": os.getenv(
+                "CARTESIA_API_VERSION",
+                "2025-04-16",
+            ),
+            "Accept": "audio/mpeg",
+        }
+        try:
+            data, _ = request_bytes(
+                "https://api.cartesia.ai/tts/bytes",
+                request_headers,
+                payload,
+            )
+        except Exception as exc:
+            message = str(exc).lower()
+            sunset_error = (
+                "sunset" in message
+                or "no longer available" in message
+            )
+            if (
+                not sunset_error
+                or payload["model_id"] == "sonic-latest"
+            ):
+                raise
+            # Cartesia retired sonic-2. Preserve the configured provider
+            # position but retry its supported successor once.
+            payload["model_id"] = "sonic-latest"
+            data, _ = request_bytes(
+                "https://api.cartesia.ai/tts/bytes",
+                request_headers,
+                payload,
+            )
 
         return write_audio_bytes(output_path, data)
 
@@ -1198,12 +1221,28 @@ def synthesize_provider(
         )
 
         try:
-            audio = bytes.fromhex(
-                result["data"]["audio"]
-            )
+            base_response = result.get("base_resp")
+            if isinstance(base_response, dict):
+                provider_code = base_response.get("status_code", 0)
+                if str(provider_code) not in {"0", "None"}:
+                    provider_message = (
+                        base_response.get("status_msg")
+                        or base_response.get("message")
+                        or "unspecified provider error"
+                    )
+                    raise RuntimeError(
+                        f"MiniMax rejected TTS request "
+                        f"(code={provider_code}): {str(provider_message)[:400]}"
+                    )
+            audio_hex = result.get("data", {}).get("audio")
+            if not isinstance(audio_hex, str) or not audio_hex.strip():
+                raise ValueError("missing data.audio")
+            audio = bytes.fromhex(audio_hex)
+            if not audio:
+                raise ValueError("empty decoded audio")
         except Exception as exc:
             raise RuntimeError(
-                "MiniMax returned no usable audio."
+                f"MiniMax returned no usable audio: {str(exc)[:400]}"
             ) from exc
 
         return write_audio_bytes(output_path, audio)
@@ -1243,12 +1282,27 @@ def synthesize_provider(
             method="POST",
         )
 
-        download_url = str(submitted.get("url") or "").strip()
-        task_id = str(
-            submitted.get("taskId")
-            or submitted.get("task_id")
-            or ""
-        ).strip()
+        def response_value(response: dict, keys: tuple[str, ...]) -> str:
+            containers = [response]
+            for container_key in ("data", "result", "output", "task"):
+                nested = response.get(container_key)
+                if isinstance(nested, dict):
+                    containers.append(nested)
+            for container in containers:
+                for key in keys:
+                    value = container.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+            return ""
+
+        download_url = response_value(
+            submitted,
+            ("url", "audio_url", "audioUrl", "download_url", "downloadUrl"),
+        )
+        task_id = response_value(
+            submitted,
+            ("taskId", "task_id", "taskID", "id"),
+        )
 
         if not download_url and task_id:
             task_path = f"/v1/task/{quote(task_id, safe='')}"
@@ -1291,15 +1345,23 @@ def synthesize_provider(
                         + str(task_error or status_text or status_value)[:500]
                     )
 
-                candidate_url = str(
-                    task.get("url")
-                    or (
-                        task.get("urls", [])[0]
-                        if isinstance(task.get("urls"), list)
-                        and task.get("urls")
-                        else ""
-                    )
-                ).strip()
+                candidate_url = response_value(
+                    task,
+                    ("url", "audio_url", "audioUrl", "download_url", "downloadUrl"),
+                )
+                if not candidate_url:
+                    for container_key in ("data", "result", "output"):
+                        nested_result = task.get(container_key)
+                        if isinstance(nested_result, dict):
+                            urls = nested_result.get("urls")
+                            if isinstance(urls, list) and urls:
+                                candidate_url = str(urls[0] or "").strip()
+                                if candidate_url:
+                                    break
+                if not candidate_url:
+                    urls = task.get("urls")
+                    if isinstance(urls, list) and urls:
+                        candidate_url = str(urls[0] or "").strip()
 
                 completed = (
                     status_text in {"completed", "complete", "success", "done"}
