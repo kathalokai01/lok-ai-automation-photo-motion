@@ -560,26 +560,50 @@ def restore_partial_visual_images(source: Path, output: Path) -> int:
     ):
         return 0
 
-    # Do not mix a second candidate into a different already-restored manifest.
     destination_visuals = output / "visuals"
     destination_image_manifest = destination_visuals / "image_manifest.json"
     destination_generation_manifest = destination_visuals / "image_generation_manifest.json"
-    if destination_image_manifest.exists() or destination_generation_manifest.exists():
-        existing_image = read_json(destination_image_manifest)
-        existing_generation = read_json(destination_generation_manifest)
-        if not existing_image or not existing_generation:
-            return 0
+    destination_visuals.mkdir(parents=True, exist_ok=True)
+
+    # Merge same-input candidates across completed runs, including failed and
+    # cancelled conclusions. Never replace a verified row with a failed row.
+    for manifest_path, incoming in (
+        (destination_image_manifest, image_doc),
+        (destination_generation_manifest, generation_doc),
+    ):
+        existing = read_json(manifest_path) if manifest_path.is_file() else None
+        if existing is None:
+            continue
         if (
-            existing_image.get("source_fingerprint") != source_fingerprint
-            or existing_generation.get("source_fingerprint") != source_fingerprint
-            or existing_image.get("config_signature") != config_signature
-            or existing_generation.get("config_signature") != config_signature
+            existing.get("source_fingerprint") != source_fingerprint
+            or existing.get("config_signature") != config_signature
+            or str(existing.get("format") or "").lower() != format_name
         ):
             return 0
-        return 0
+        existing_rows = {
+            str(row.get("scene_id") or "").strip(): row
+            for row in existing.get("scenes", [])
+            if isinstance(row, dict) and row.get("scene_id")
+        }
+        for row in incoming.get("scenes", []):
+            if not isinstance(row, dict) or not row.get("scene_id"):
+                continue
+            key = str(row["scene_id"]).strip()
+            previous = existing_rows.get(key)
+            if previous and str(previous.get("status", "")).lower() in {"generated", "existing", "completed"}:
+                if str(row.get("status", "")).lower() not in {"generated", "existing", "completed"}:
+                    continue
+            existing_rows[key] = row
+        existing.update({key: value for key, value in incoming.items() if key != "scenes"})
+        existing["scenes"] = list(existing_rows.values())
+        if manifest_path == destination_image_manifest:
+            image_doc = existing
+        else:
+            generation_doc = existing
 
     ready_statuses = {"generated", "existing", "completed"}
     verified = 0
+    progress_rows = []
     for scene_id, image_row in image_rows.items():
         generation_row = generation_rows[scene_id]
         if (
@@ -650,12 +674,28 @@ def restore_partial_visual_images(source: Path, output: Path) -> int:
         for row in (image_row, generation_row):
             row["negative_prompt_sha256"] = negative_hash
             row["reuse_signature"] = reuse_signature
+        progress_rows.append({
+            "scene_id": scene_id,
+            "part": int(job.get("part", image_row.get("part", 0))),
+            "global_scene": int(job.get("global_scene", image_row.get("global_scene", 0))),
+            "role": str(job.get("role") or image_row.get("role") or "main"),
+            "image_path": str(image_row["image_path"]),
+            "prompt_signature": str(image_row.get("prompt_signature") or ""),
+            "source_scene_signature": str(image_row.get("source_scene_signature") or job.get("source_scene_signature") or ""),
+            "source_fingerprint": source_fingerprint,
+            "config_signature": config_signature,
+            "status": "existing",
+            "image_sha256": str(image_row["image_sha256"]).lower(),
+            "image_integrity": "sha256_png_dimensions_verified",
+            "semantic_verification": image_row.get("semantic_verification", "pending_external_vision_verification"),
+            "negative_prompt_sha256": negative_hash,
+            "reuse_signature": reuse_signature,
+        })
         verified += 1
 
     if not verified:
         return 0
 
-    destination_visuals.mkdir(parents=True, exist_ok=True)
     for document, path in (
         (image_doc, destination_image_manifest),
         (generation_doc, destination_generation_manifest),
@@ -664,7 +704,45 @@ def restore_partial_visual_images(source: Path, output: Path) -> int:
             json.dumps(document, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-    log(f"Restored {verified} individually verified partial scene images from checkpoint.")
+
+    # Rebuild the progress file consumed by generate_visuals.py. A verified
+    # image on disk is not reusable until its scene/prompt/config record exists.
+    progress_path = output / "checkpoints" / "visual_jobs_progress.json"
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_progress = read_json(progress_path) if progress_path.is_file() else {}
+    previous_rows = previous_progress.get("scene_progress", []) if isinstance(previous_progress, dict) else []
+    merged = {
+        str(row.get("scene_id")) + "|" + str(row.get("prompt_signature")): row
+        for row in previous_rows
+        if isinstance(row, dict)
+        and row.get("scene_id") and row.get("prompt_signature")
+        and row.get("source_fingerprint") == source_fingerprint
+        and row.get("config_signature") == config_signature
+    }
+    for row in progress_rows:
+        if row["prompt_signature"] and row["source_scene_signature"]:
+            merged[row["scene_id"] + "|" + row["prompt_signature"]] = row
+    rows = list(merged.values())
+    completed_ids = {row["scene_id"] for row in rows}
+    total = len(jobs_by_id)
+    progress = {
+        "version": "checkpoint-manager-restored-visual-progress-v1",
+        "status": "ready",
+        "stage": "visual_jobs_prepared",
+        "source_fingerprint": source_fingerprint,
+        "config_signature": config_signature,
+        "total_jobs": total,
+        "prepared_jobs": total,
+        "completed_jobs": len(completed_ids),
+        "remaining_jobs": max(0, total - len(completed_ids)),
+        "scene_progress": rows,
+        "restored_from_checkpoint": True,
+    }
+    progress_path.write_text(
+        json.dumps(progress, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    log(f"Restored {verified} individually verified partial scene images and rebuilt visual progress records.")
     return verified
 
 
