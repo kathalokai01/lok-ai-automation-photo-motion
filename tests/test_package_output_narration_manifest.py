@@ -66,6 +66,25 @@ class PackageNarrationManifestTests(unittest.TestCase):
             package_output.has_story_disclaimer("केवल सामान्य विवरण।")
         )
 
+    def test_year_qualified_copyright_notice_is_accepted(self):
+        self.assertTrue(
+            package_output.has_katha_lok_ai_copyright(
+                "कॉपीराइट सूचना: © 2026 Katha Lok AI. सर्वाधिकार सुरक्षित।"
+            )
+        )
+
+    def test_legacy_copyright_notice_is_accepted(self):
+        self.assertTrue(
+            package_output.has_katha_lok_ai_copyright(
+                "© Katha Lok AI. सर्वाधिकार सुरक्षित।"
+            )
+        )
+
+    def test_unrelated_copyright_notice_is_rejected(self):
+        self.assertFalse(
+            package_output.has_katha_lok_ai_copyright("© Other Channel")
+        )
+
     def test_hook_uses_narration_json_when_photo_manifest_text_is_null(self):
         photo, narration, audio, expected = self.make_rows("hook")
         result = package_output.resolve_scene_narration(
