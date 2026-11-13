@@ -23,6 +23,7 @@ from select_gemini_model import configured_fallbacks
 from llm_provider_client import generate_text as generate_provider_text
 from gemini_api_guard import require_gemini_generation
 from gemini_http import http_error_body, retry_after_seconds
+from production_events import record_provider_attempt
 
 INPUT_TOPIC = ROOT / "Input" / "topic.txt"
 STORY_FILES = (
@@ -883,6 +884,12 @@ def generate_gemini_metadata(
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         retry_http_error = None
+        attempt_id = f"metadata:gemini:{model}:{fingerprint[:12]}:{attempt}"
+        response_received = False
+        record_provider_attempt(
+            "gemini", model, "request_started", True,
+            scene_id="youtube_metadata", attempt_id=attempt_id,
+        )
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
@@ -910,14 +917,30 @@ def generate_gemini_metadata(
                 request, timeout=REQUEST_TIMEOUT
             ) as response:
                 result = json.loads(response.read().decode("utf-8"))
+            response_received = True
+            record_provider_attempt(
+                "gemini", model, "response_received", True,
+                scene_id="youtube_metadata", attempt_id=attempt_id,
+            )
 
             parsed = parse_metadata_json(extract_gemini_text(result))
-            return validate_metadata_result(
+            validated = validate_metadata_result(
                 parsed, topic, model, fingerprint, mode, "gemini"
             )
+            record_provider_attempt(
+                "gemini", model, "accepted", True,
+                scene_id="youtube_metadata", attempt_id=attempt_id,
+            )
+            return validated
 
         except urllib.error.HTTPError as exc:
             retry_http_error = exc
+            record_provider_attempt(
+                "gemini", model, "request_failed", True,
+                scene_id="youtube_metadata", attempt_id=attempt_id,
+                error=f"HTTP {exc.code}: {http_error_body(exc, 500)}",
+                http_status=exc.code,
+            )
             last_error = RuntimeError(
                 f"Gemini HTTP {exc.code}: "
                 f"{http_error_body(exc, 1500)}"
@@ -931,9 +954,28 @@ def generate_gemini_metadata(
             json.JSONDecodeError,
             RuntimeError,
         ) as exc:
+            if not response_received:
+                record_provider_attempt(
+                    "gemini", model, "request_failed", True,
+                    scene_id="youtube_metadata", attempt_id=attempt_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            else:
+                record_provider_attempt(
+                    "gemini", model, "response_received_validation_failed", True,
+                    scene_id="youtube_metadata", attempt_id=attempt_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             last_error = exc
 
         except Exception as exc:
+            record_provider_attempt(
+                "gemini", model,
+                "response_received_validation_failed" if response_received else "request_failed",
+                True,
+                scene_id="youtube_metadata", attempt_id=attempt_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             last_error = exc
 
         log("Gemini attempt failed:", last_error)
