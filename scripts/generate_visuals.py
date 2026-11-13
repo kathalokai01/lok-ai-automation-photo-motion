@@ -710,23 +710,124 @@ def find_scene_character_references(
     return selected
 
 
-def compact_character(character: dict) -> dict:
-    fields = (
-        "id", "character_id", "name", "aliases",
-        "age", "gender", "appearance", "face",
-        "face_features", "skin_tone", "hair", "eyes",
-        "body_features", "height", "build", "clothing",
-        "accessories", "distinctive_features",
-        "visual_identity", "continuity_notes",
-        "consistency_rules", "description",
-    )
+def _prompt_value(value: Any, maximum: int) -> Any:
+    """Bound supplemental prompt data without touching locked scene narration."""
+    if isinstance(value, list):
+        result = []
+        for item in value[:6]:
+            rendered = (
+                json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+                if isinstance(item, dict) else clean(item)
+            )
+            if rendered:
+                result.append(rendered[:maximum])
+        return result
+    if isinstance(value, dict):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, (str, int, float, bool)):
+        rendered = clean(value)
+        return rendered[:maximum] if rendered else value
+    return ""
 
-    return {
-        key: character[key]
-        for key in fields
-        if key in character
-        and character[key] not in (None, "", [], {})
+
+def compact_character(character: dict) -> dict:
+    """Return a bounded identity card, not the full source dossier."""
+    limits = {
+        "id": 48, "character_id": 48, "name": 80, "aliases": 60,
+        "age": 32, "gender": 24, "appearance": 100, "face": 100,
+        "face_features": 100, "skin_tone": 48, "hair": 64, "eyes": 48,
+        "body_features": 72, "height": 24, "build": 32, "clothing": 100,
+        "accessories": 60, "distinctive_features": 100,
+        "visual_identity": 220, "continuity_notes": 72,
+        "consistency_rules": 100, "description": 100,
     }
+    compact = {}
+    for key, maximum in limits.items():
+        value = character.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = _prompt_value(value, maximum)
+    return compact
+
+
+def compact_character_context(characters: list[dict], maximum: int = 6500) -> list[dict]:
+    """Keep every referenced name while bounding the total character payload."""
+    compact = [compact_character(item) for item in characters]
+    encoded = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) <= maximum:
+        return compact
+
+    reduced = []
+    for item in compact:
+        reduced.append({
+            key: item[key]
+            for key in ("id", "character_id", "name", "gender", "age")
+            if item.get(key) not in (None, "", [], {})
+        } | {
+            key: item[key][:limit]
+            for key, limit in (
+                ("visual_identity", 150), ("clothing", 48),
+                ("hair", 40), ("distinctive_features", 48),
+            )
+            if isinstance(item.get(key), str) and item[key]
+        })
+    encoded = json.dumps(reduced, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) <= maximum:
+        return reduced
+
+    return [
+        {
+            key: item[key]
+            for key in ("id", "character_id", "name", "gender")
+            if item.get(key) not in (None, "", [], {})
+        }
+        for item in compact
+    ]
+
+
+def fit_prompt_sections(sections: list[str], scene_id: str) -> str:
+    """Drop duplicated optional context before ever dropping the scene itself."""
+    active = [section for section in sections if section]
+
+    def render() -> str:
+        return "\n\n".join(active).strip()
+
+    prompt = render()
+    if len(prompt) <= MAX_PROMPT_LENGTH:
+        return prompt
+
+    for prefix in (
+        "CHRONOLOGICAL CONTINUITY:",
+        "WORLD CONTINUITY LOCK:",
+        "CHARACTER IDENTITY LOCK:",
+        "Dialogue context for expression and action:",
+        "Camera direction:",
+        "Lighting:",
+        "Emotional mood:",
+    ):
+        active = [item for item in active if not item.startswith(prefix)]
+        prompt = render()
+        if len(prompt) <= MAX_PROMPT_LENGTH:
+            return prompt
+
+    optional_labels = (
+        "world_context", "time_period", "camera_prompt", "dialogue",
+        "weather", "time_of_day", "environment", "location",
+        "buildings", "vehicles", "animals", "clothing", "objects",
+        "story_entities", "named_entities", "action", "effect", "cause",
+        "visible_consequence", "critical_event", "fatal_bug",
+    )
+    for label in optional_labels:
+        active = [item for item in active if not item.startswith(label + ":")]
+        prompt = render()
+        if len(prompt) <= MAX_PROMPT_LENGTH:
+            return prompt
+
+    raise RuntimeError(
+        f"{scene_id}: core visual instruction plus locked narration "
+        f"exceeds {MAX_PROMPT_LENGTH} characters after optional context "
+        f"was removed (remaining={len(prompt)}). Shorten the source scene "
+        "visual_prompt or narration; neither will be silently truncated."
+    )
 
 
 def validate_bible_coverage(
@@ -958,22 +1059,13 @@ def build_negative_prompt(
 
 def scene_detail(source: dict, key: str) -> str:
     value = source.get(key)
-
-    if isinstance(value, list):
-        return ", ".join(
-            clean(item)
-            for item in value
-            if clean(item)
-        )
-
-    if isinstance(value, dict):
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-
-    return clean(value)
+    if isinstance(value, (dict, list)):
+        rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        rendered = clean(value)
+    # Supplemental metadata is bounded; the primary visual_prompt and
+    # locked narration are deliberately not truncated.
+    return rendered[:1400] if rendered else ""
 
 
 def compact_world_context(world: dict, maximum: int = 3000) -> dict:
@@ -1213,10 +1305,7 @@ def build_prompt(
                 "Do not swap, merge or redesign characters. Do not "
                 "invent unspecified physical traits. Approved records: "
                 + json.dumps(
-                    [
-                        compact_character(item)
-                        for item in characters
-                    ],
+                    compact_character_context(characters),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
@@ -1247,17 +1336,10 @@ def build_prompt(
             "CHRONOLOGICAL CONTINUITY: " + continuity
         )
 
-    prompt = "\n\n".join(
-        section for section in sections if section
-    ).strip()
-
-    if len(prompt) > MAX_PROMPT_LENGTH:
-        raise RuntimeError(
-            f"{source['scene_id']}: visual prompt exceeds "
-            f"{MAX_PROMPT_LENGTH} characters."
-        )
-
-    return prompt
+    return fit_prompt_sections(
+        sections,
+        clean(source.get("scene_id")),
+    )
 
 def build_config_signature(
     config: dict,
