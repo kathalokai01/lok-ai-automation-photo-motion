@@ -4,298 +4,298 @@
 # ============================================================
 
 # HEADING / TOPIC
-TITLE = "लालच का टावर और कुदरत का न्याय"  # वीडियो का शीर्षक; खाली छोड़ने पर पूरी कहानी के सार से बनाया जाएगा।
+TITLE = "लालच का टावर और कुदरत का न्याय"  # प्रकार: टेक्स्ट। मान: अपनी वीडियो हेडलाइन लिखें; खाली स्ट्रिंग "" रखने पर पूरी कहानी के सार से शीर्षक बनाया जाता है। शीर्षक छोटा, स्पष्ट और कहानी के अनुरूप रखें।
 
 
-TOPIC = "अयान, Orion-9 और विक्रांत मेहरा की कहानी"  # कहानी का विषय, मुख्य पात्र और केंद्रीय विचार।
+TOPIC = "अयान, Orion-9 और विक्रांत मेहरा की कहानी"  # प्रकार: टेक्स्ट। मान: कहानी का विषय, मुख्य पात्र या केंद्रीय विचार; कोई निश्चित सूची नहीं। उदाहरण: "अयान और Orion-9 की कहानी"।
 
 # INPUT
 # वीडियो का स्वरूप
-FORMAT = "short"  # short में केवल खड़े आकार के छोटे वीडियो; full में केवल चौड़े आकार का पूरा वीडियो बनेगा।
+FORMAT = "short"  # मान केवल "short" या "full"। short = केवल vertical Shorts आउटपुट; full = पूरी कहानी का एक landscape वीडियो। बड़े/छोटे अक्षर या अन्य शब्द न दें।
 
 
-AUDIENCE = "adult"  # दर्शक वर्ग; इसके अनुसार कथन की भाषा, स्वर और विषय की उपयुक्तता तय होगी।
+AUDIENCE = "adult"  # प्रचलित मान "kids" या "adult"। kids पर बच्चों के अनुकूल कथन/शब्द-चयन और शब्द-गति लागू होती है; adult सामान्य वयस्क प्रस्तुति है।
 
 # ============================================================
 # कथावाचन की आवाज़ और भाव
 # ============================================================
 # आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
-TTS_PROFILE = "auto"  # आवाज़ का स्वभाव; स्वतः चयन कहानी और दर्शक वर्ग के अनुसार होगा।
+TTS_PROFILE = "auto"  # मान: "auto", "child_friendly", "female_storyteller", "male_storyteller", "character"। auto में दर्शक, VOICE और वक्ता के अनुसार प्रोफ़ाइल चुनी जाती है।
 
 
-CHARACTER_VOICES = true  # हर बोलने वाले पात्र की आवाज़ अलग और सभी दृश्यों में एक जैसी रखी जाएगी।
+CHARACTER_VOICES = true  # Boolean: true/false (yes/no, on/off, 1/0 भी)। true पर अलग पात्रों के लिए अलग स्थिर आवाज़ प्रोफ़ाइल; false पर पात्र-आधारित अलगाव बंद।
 
 
-TTS_EMOTION_CONTROL = true  # आवाज़ में प्रसंग के अनुसार भाव व्यक्त करने की सुविधा चालू या बंद करता है।
+TTS_EMOTION_CONTROL = true  # Boolean। true पर रिकॉर्ड के emotion tags के अनुसार भाव; false पर neutral delivery और emotion strength 0।
 
 
-TTS_CHILD_FRIENDLY = true  # जहाँ उपयुक्त हो, बच्चों के अनुकूल आवाज़ और प्रस्तुति लागू करता है।
+TTS_CHILD_FRIENDLY = true  # Boolean। true पर AUDIENCE=kids होने पर child-friendly preset चुनने की अनुमति; false पर यह auto चयन नहीं होगा।
 
 
-TTS_VOICE_ID = ""  # आवाज़ सेवा की वैकल्पिक पहचान; खाली होने पर अपने-आप चयन होगा।
+TTS_VOICE_ID = ""  # टेक्स्ट। ElevenLabs जैसे समर्थित provider का voice ID; खाली "" पर provider/profile का सामान्य चयन। ID उसी provider में वैध होना चाहिए।
 
 
-TTS_VOICE_ID_CHILD_FRIENDLY = ""  # बच्चों के अनुकूल आवाज़ की वैकल्पिक पहचान।
+TTS_VOICE_ID_CHILD_FRIENDLY = ""  # टेक्स्ट। child_friendly प्रोफ़ाइल के लिए provider voice ID; खाली रखने पर preset/provider चयन।
 
 
-TTS_VOICE_ID_FEMALE_STORYTELLER = ""  # महिला कथावाचक की वैकल्पिक आवाज़ पहचान।
+TTS_VOICE_ID_FEMALE_STORYTELLER = ""  # टेक्स्ट। female_storyteller प्रोफ़ाइल का provider voice ID; खाली रखने पर preset/provider चयन।
 
 
-TTS_VOICE_ID_MALE_STORYTELLER = ""  # पुरुष कथावाचक की वैकल्पिक आवाज़ पहचान।
+TTS_VOICE_ID_MALE_STORYTELLER = ""  # टेक्स्ट। male_storyteller प्रोफ़ाइल का provider voice ID; खाली रखने पर preset/provider चयन।
 
 
-TTS_VOICE_ID_CHARACTER = ""  # पात्र की आवाज़ की वैकल्पिक पहचान।
+TTS_VOICE_ID_CHARACTER = ""  # टेक्स्ट। character प्रोफ़ाइल का provider voice ID; खाली रखने पर preset/provider चयन।
 
 
-TTS_PITCH = 1.0  # आवाज़ का उतार-चढ़ाव; 1.0 सामान्य स्तर है।
+TTS_PITCH = 1.0  # संख्या (float)। सामान्य 1.0; voice profile में गुणक के रूप में लगता है और अंतिम मान 0.85–1.15 सीमा में सीमित है। उदाहरण: 0.95 थोड़ा नीचे, 1.05 थोड़ा ऊपर।
 
 
-TTS_EMOTION_STRENGTH = 0.65  # आवाज़ में भाव की तीव्रता।
+TTS_EMOTION_STRENGTH = 0.65  # संख्या 0.0–1.0। भाव की तीव्रता; 0 = न्यूनतम, 1 = अधिकतम। TTS_EMOTION_CONTROL=false होने पर प्रभावी मान 0।
 
 # ============================================================
 # संगीत स्रोत और ध्वनि मिश्रण
 # ============================================================
-MUSIC_PROVIDER_ORDER = "eleven_music,lyria,stable_audio,local"  # संगीत बनाने वाले स्रोतों का क्रम; असफलता पर अगला स्रोत आज़माया जाएगा।
+MUSIC_PROVIDER_ORDER = "eleven_music,lyria,stable_audio,local"  # कॉमा से अलग provider क्रम। समर्थित क्रम के नाम: eleven_music, lyria, stable_audio, local। पहले से आखिरी तक fallback क्रम; केवल उपलब्ध credentials/सेवा पर provider चलेगा।
 
 
-MUSIC_FALLBACK_ENABLED = true  # संगीत स्रोत असफल होने पर अगले स्रोत पर जाने की अनुमति।
+MUSIC_FALLBACK_ENABLED = true  # Boolean। true पर असफल संगीत provider के बाद अगला provider; false पर fallback बंद।
 
 
-MUSIC_ALLOW_PAID = true  # शुल्क लेने वाली संगीत सेवाओं के उपयोग की अनुमति।
+MUSIC_ALLOW_PAID = true  # Boolean। true पर paid music provider की अनुमति; false पर paid विकल्प न चलाएँ। ALLOW_BILLABLE_PROVIDERS भी अनुमति देनी चाहिए।
 
 
-MUSIC_GENRE = "original cinematic score"  # पृष्ठभूमि संगीत की शैली।
+MUSIC_GENRE = "original cinematic score"  # टेक्स्ट prompt। संगीत शैली/वाद्य/स्वर का वर्णन; उदाहरण: "original cinematic score", "soft orchestral", "ambient piano"।
 
 
-MUSIC_INTENSITY = "evolving"  # कहानी के साथ संगीत की ऊर्जा और तीव्रता में बदलाव।
+MUSIC_INTENSITY = "evolving"  # टेक्स्ट prompt। ऊर्जा का वर्णन; उदाहरण: "low", "moderate", "high", "evolving"। यह prompt निर्देश है, numeric स्तर नहीं।
 
 
-MUSIC_GAIN = 0.35  # पृष्ठभूमि संगीत का स्तर; कथावाचन सबसे स्पष्ट और ऊँचा रहना चाहिए।
+MUSIC_GAIN = 0.35  # संख्या। मिक्स में music gain; 0 = mute, 1 = मूल स्तर। बहुत अधिक मान narration को दबा सकता है; 0.35 वर्तमान मान।
 
 
-MUSIC_SCENE_ADAPTIVE = true  # हर दृश्य के भाव के अनुसार संगीत बदलता है।
+MUSIC_SCENE_ADAPTIVE = true  # Boolean। true पर दृश्य के भाव/घटना के अनुसार संगीत बदलने का निर्देश; false पर कम scene-specific adaptation।
 
 
-MUSIC_DUCKING = true  # कथावाचन के समय संगीत की आवाज़ अपने-आप कम करता है।
+MUSIC_DUCKING = true  # Boolean। true पर narration के समय music अपने-आप कम; false पर automatic ducking बंद।
 
 
-MUSIC_DUCKING_DB = -10.0  # कथावाचन के दौरान संगीत कितने डेसीबल कम होगा।
+MUSIC_DUCKING_DB = -10.0  # संख्या dB में। Ducking के दौरान music attenuation; ऋणात्मक मान जैसे -10.0 का अर्थ 10 dB कम।
 
 # ============================================================
 # कहानी की संरचना
 # ============================================================
 
 # भागों की संख्या निश्चित रखी जा सकती है या न्यूनतम-अधिकतम सीमा दी जा सकती है।
-PARTS = "1-4"  # भागों की निश्चित संख्या या न्यूनतम-अधिकतम सीमा; वास्तविक संख्या कहानी की लंबाई से तय होगी।
+PARTS = "1-4"  # SHORT में निश्चित positive integer (जैसे 4) या inclusive range "2-8"। पहला अंक minimum, दूसरा maximum; उल्टा range अमान्य। FULL में runtime इसे एक Part करता है।
 
 # दृश्य पूरे वाक्य या अर्थपूर्ण वाक्यांशों में बाँटें; वाक्य के बीच से न काटें।
-SCENES = 5-20  # हर भाग में दृश्यों की न्यूनतम-अधिकतम संख्या; दृश्य पूरे वाक्य या अर्थपूर्ण वाक्यांश पर बाँटे जाएँगे।
+SCENES = 5-20  # Positive integer या inclusive range (जैसे 7 या 9-15); प्रति Part scene-count सीमा। अधिकतम सीमा 500; min, max दोनों positive और min≤max।
 
 
-SCENES_MIN = 5  # हर भाग में दृश्यों की न्यूनतम संख्या।
+SCENES_MIN = 5  # वैकल्पिक positive integer। SCENES range का minimum दोहराता है; तभी दें जब SCENES_MAX भी दिया हो और दोनों SCENES से बिल्कुल मेल खाएँ।
 
 
-SCENES_MAX = 20  # हर भाग में दृश्यों की अधिकतम संख्या।
+SCENES_MAX = 20  # वैकल्पिक positive integer। SCENES range का maximum दोहराता है; तभी दें जब SCENES_MIN भी दिया हो और दोनों SCENES से बिल्कुल मेल खाएँ।
 
 
-STORY_LENGTH = "auto"  # कहानी की लंबाई का नियम; स्वतः चयन या निर्धारित विकल्प।
+STORY_LENGTH = "auto"  # टेक्स्ट policy selector। "auto" वर्तमान स्वचालित नीति है; अन्य मान तभी उपयोग करें जब संबंधित story-length validator में समर्थित हों।
 
 
-SCENE_DURATION = "auto"  # दृश्य की अवधि; स्वतः विकल्प में अवधि संबंधित कथावाचन की वास्तविक ध्वनि अवधि के बराबर होगी।
+SCENE_DURATION = "auto"  # टेक्स्ट। "auto" में scene की अवधि उसके narration audio की वास्तविक अवधि से तय होती है; कोई fixed seconds मान न दें जब तक runtime समर्थन न हो।
 
 
 # ============================================================
 # कथन की सामान्य सेटिंग्स
 # ============================================================
 
-VOICE = "female"  # जहाँ सेवा समर्थन करे वहाँ कथावाचन की मूल आवाज़ चुनता है।
+VOICE = "female"  # मान: "female" या "male" (woman/feminine भी female में normalize होते हैं)। कथावाचक की मूल आवाज़; पात्र-आवाज़ प्रोफ़ाइल अलग हो सकती है।
 
 
-SPEED = "+0%"  # बोलने की गति; ऋणात्मक मान धीमा और धनात्मक मान तेज़ करता है।
+SPEED = "+0%"  # टेक्स्ट गति offset, उदाहरण "+0%", "+5%", "-5%"। शून्य सामान्य गति; धनात्मक तेज़, ऋणात्मक धीमा।
 
 # ============================================================
 # आवाज़ बनाने वाली सेवा का चयन
 # ============================================================
 
-TTS_MAIN_1 = "elevenlabs"  # पहली पसंद की आवाज़ सेवा; सबसे पहले यही चलेगी।
+TTS_MAIN_1 = "elevenlabs"  # टेक्स्ट provider ID; मुख्य TTS की पहली पसंद। समर्थित नाम: elevenlabs, fish_audio, cartesia, finevoice, gemini_tts, edge_tts, piper, minimax; alias भी normalize हो सकते हैं।
 
 
-TTS_MAIN_2 = "fish_audio"  # दूसरी पसंद की आवाज़ सेवा।
+TTS_MAIN_2 = "fish_audio"  # टेक्स्ट provider ID; मुख्य TTS की दूसरी पसंद। पहली पसंद विफल/अनुपलब्ध होने पर उपयोग; समर्थित provider सूची TTS_MAIN_1 जैसी।
 
 
-TTS_MAIN_3 = "cartesia"  # तीसरी पसंद की आवाज़ सेवा।
+TTS_MAIN_3 = "cartesia"  # टेक्स्ट provider ID; मुख्य TTS की तीसरी पसंद। ऊपर की दोनों सेवाएँ विफल/अनुपलब्ध होने पर उपयोग; समर्थित provider सूची वही।
 
 
-TTS_FALLBACK_ENABLED = true  # मुख्य सेवाएँ असफल होने पर वैकल्पिक सेवाएँ चलाने की अनुमति।
+TTS_FALLBACK_ENABLED = true  # Boolean। true पर मुख्य सेवाएँ विफल होने पर fallback सूची चलती है; false पर fallback बंद।
 
 
-TTS_FALLBACK_ORDER = "elevenlabs,fish_audio,cartesia,finevoice,gemini_tts,edge_tts,piper,minimax"  # वैकल्पिक आवाज़ सेवाओं का क्रम; पहले आज़माई गई सेवाएँ दोबारा नहीं चलेंगी।
+TTS_FALLBACK_ORDER = "elevenlabs,fish_audio,cartesia,finevoice,gemini_tts,edge_tts,piper,minimax"  # कॉमा से अलग TTS provider IDs का क्रम: elevenlabs, fish_audio, cartesia, finevoice, gemini_tts, edge_tts, piper, minimax। क्रम बदलने से retry प्राथमिकता बदलती है।
 
 
-TTS_ALLOW_PAID = true  # शुल्क लेने वाली आवाज़ सेवाओं के उपयोग की अनुमति।
+TTS_ALLOW_PAID = true  # Boolean। true पर paid TTS providers की अनुमति; false पर paid सेवा न चुनें। समग्र ALLOW_BILLABLE_PROVIDERS भी true होना चाहिए।
 
 
-ALLOW_BILLABLE_PROVIDERS = true  # शुल्क वाली सेवाओं से अनुरोध करने की समग्र अनुमति।
+ALLOW_BILLABLE_PROVIDERS = true  # Boolean global billing gate। true होने पर ही अन्य paid अनुमति flags के साथ billable providers चल सकते हैं; false सभी paid requests रोकने का संकेत है।
 
 
-TTS_CHUNK_MAX_CHARS = 500  # एक बार में भेजे जाने वाले पाठ की अधिकतम वर्ण संख्या।
+TTS_CHUNK_MAX_CHARS = 500  # Positive integer। एक TTS request के text chunk की अधिकतम वर्ण संख्या; वर्तमान 500। provider सीमा के अनुरूप रखें।
 
 
-TTS_CHUNK_MIN_CHARS = 150  # एक बार में भेजे जाने वाले पाठ की न्यूनतम वर्ण संख्या।
+TTS_CHUNK_MIN_CHARS = 150  # Positive integer। chunk बनाने का लक्ष्य न्यूनतम वर्ण; वर्तमान 150। इसे MAX से अधिक न रखें।
 
 
-TTS_CHUNK_CHECKPOINT = true  # पाठ के प्रत्येक खंड के बाद सुरक्षित प्रगति दर्ज करता है।
+TTS_CHUNK_CHECKPOINT = true  # Boolean। true पर हर chunk के बाद checkpoint लिखता है; false पर per-chunk checkpoint बंद, scene-level manifest/checkpoint फिर भी रहता है।
 
 
-TTS_MAX_PROVIDER_ATTEMPTS = 2  # एक आवाज़ सेवा पर अधिकतम प्रयास।
+TTS_MAX_PROVIDER_ATTEMPTS = 2  # Positive integer। एक provider पर अधिकतम request attempts; वर्तमान 2। अधिक मान से retry समय/API खर्च बढ़ सकता है।
 
 # ============================================================
 # चित्र बनाने वाले स्रोतों का क्रम
 # ============================================================
 
 # चित्र बनाने वाली सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
-IMAGE_PROVIDER_ORDER = "huggingface,cloudflare_schnell,ovhcloud,aihorde,pollinations,cloudflare_klein,replicate"  # चित्र बनाने वाली सेवाओं का क्रम; क्रम बदलने पर वैकल्पिक चयन भी बदल जाएगा।
+IMAGE_PROVIDER_ORDER = "huggingface,cloudflare_schnell,ovhcloud,aihorde,pollinations,cloudflare_klein,replicate"  # कॉमा से अलग image provider IDs का क्रम: huggingface, cloudflare_schnell, ovhcloud, aihorde, pollinations, cloudflare_klein, replicate। क्रम प्राथमिकता और fallback तय करता है।
 
 
-IMAGE_FALLBACK_ENABLED = true  # चित्र सेवा असफल होने पर अगली सेवा आज़माने की अनुमति।
+IMAGE_FALLBACK_ENABLED = true  # Boolean। true पर image provider विफल होने पर अगला provider; false पर fallback बंद।
 
 
-IMAGE_ALLOW_BILLABLE = true  # शुल्क लेने वाली चित्र सेवाओं के उपयोग की अनुमति।
+IMAGE_ALLOW_BILLABLE = true  # Boolean। true पर paid image provider की अनुमति; global ALLOW_BILLABLE_PROVIDERS भी true होना चाहिए।
 
 
-HF_IMAGE_SPACE = "mrfakename/Z-Image-Turbo"  # हगिंग फ़ेस पर उपयोग होने वाले चित्र मॉडल का नाम।
+HF_IMAGE_SPACE = "mrfakename/Z-Image-Turbo"  # Hugging Face Space/model identifier, सामान्यतः owner/name। उदाहरण: "mrfakename/Z-Image-Turbo"। चुने गए Space में image generation endpoint उपलब्ध होना चाहिए।
 
 
-FREE_IMAGE_FALLBACK_SPACES = ""  # मुफ़्त वैकल्पिक चित्र मॉडल स्थानों की सूची।
+FREE_IMAGE_FALLBACK_SPACES = ""  # टेक्स्ट सूची; वैकल्पिक मुफ़्त Hugging Face Space IDs। खाली "" = अतिरिक्त Space सूची नहीं। सूची का delimiter/format वही रखें जो provider adapter पढ़ता है।
 
 
-POLLINATIONS_FREE_IMAGE_MODELS = "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"  # पोलिनेशन्स पर उपलब्ध मुफ़्त चित्र मॉडलों का क्रम।
+POLLINATIONS_FREE_IMAGE_MODELS = "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"  # कॉमा से अलग Pollinations model IDs का क्रम। हर ID Pollinations पर उपलब्ध होना चाहिए; पहला प्राथमिक, बाकी fallback।
 
 
-REPLICATE_IMAGE_MODEL = "black-forest-labs/flux-schnell"  # रेप्लिकेट पर उपयोग होने वाला चित्र मॉडल।
+REPLICATE_IMAGE_MODEL = "black-forest-labs/flux-schnell"  # Replicate model identifier, उदाहरण "black-forest-labs/flux-schnell"। Replicate पर उपलब्ध model slug/version अपेक्षित हो सकता है।
 
 
-CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"  # क्लाउडफ्लेयर का मुख्य चित्र मॉडल।
+CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"  # Cloudflare Workers AI model ID, उदाहरण "@cf/black-forest-labs/flux-2-klein-4b"। Account/token को model access चाहिए।
 
 
-CLOUDFLARE_IMAGE_FALLBACK_MODEL = "@cf/black-forest-labs/flux-1-schnell"  # मुख्य मॉडल असफल होने पर क्लाउडफ्लेयर का वैकल्पिक मॉडल।
+CLOUDFLARE_IMAGE_FALLBACK_MODEL = "@cf/black-forest-labs/flux-1-schnell"  # Cloudflare का वैकल्पिक model ID; मुख्य model असफल होने पर उपयोग। उदाहरण "@cf/black-forest-labs/flux-1-schnell"।
 
 
-OVHCLOUD_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"  # ओवीएचक्लाउड पर उपयोग होने वाला चित्र मॉडल।
+OVHCLOUD_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"  # OVHcloud image model identifier; उदाहरण "stabilityai/stable-diffusion-xl-base-1.0"। उपलब्ध endpoint/model के अनुसार मान चुनें।
 
 
-AIHORDE_IMAGE_MODEL = "stable_diffusion_xl"  # एआई होर्ड पर उपयोग होने वाला चित्र मॉडल।
+AIHORDE_IMAGE_MODEL = "stable_diffusion_xl"  # AI Horde model name; उदाहरण "stable_diffusion_xl"। AI Horde पर उपलब्ध model नाम ही दें।
 
 # ============================================================
 # उपशीर्षक
 # ============================================================
 
-CAPTIONS = "hinglish"  # उपशीर्षक की भाषा और लिपि चुनता है; उपलब्ध मान हिंदी, अंग्रेज़ी या रोमन लिपि में हिंदी हैं।
+CAPTIONS = "hinglish"  # उपशीर्षक भाषा/लिपि। प्रचलित मान: "hindi", "english", "hinglish" (रोमन लिपि में हिंदी)। वही चुनें जिसमें subtitle text चाहिए।
 
 
-CAPTION_FONT = "mukta"  # उपशीर्षक में प्रयुक्त अक्षर शैली।
+CAPTION_FONT = "mukta"  # फ़ॉन्ट नाम/alias। समर्थित aliases में mukta, hind, noto/noto sans/noto sans devanagari, tiro/tiro devanagari hindi। देवनागरी के लिए Mukta/Hind/Noto उपयुक्त।
 
 
-CAPTION_FONT_SIZE = 20  # उपशीर्षक के अक्षरों का आकार; स्वतः या 16 से 64 के बीच संख्या।
+CAPTION_FONT_SIZE = 20  # Positive integer या "auto"; वर्तमान validator/renderer में उपयोगी सीमा 16–64। बड़ा मान अधिक जगह लेता है; mobile frame पर preview करें।
 
 # ============================================================
 # दृश्य शैली और एकरूपता
 # ============================================================
 
-VISUAL_STYLE = "cinematic_realistic"  # सभी दृश्यों पर लागू होने वाली चित्र शैली।
+VISUAL_STYLE = "cinematic_realistic"  # टेक्स्ट style preset/prompt। वर्तमान उदाहरण "cinematic_realistic"; अन्य वर्णन तभी दें जब image prompt pipeline समझ सके।
 
 
-REALISM = "high"  # चित्रों में वास्तविकता का स्तर।
+REALISM = "high"  # टेक्स्ट realism level; उदाहरण "low", "medium", "high"। यह visual prompt का निर्देश है, स्वतंत्र image-quality guarantee नहीं।
 
 
-CHARACTER_BIBLE = true  # पूरी कहानी से पात्रों का स्थायी रूप, पहचान और पहनावा तय करता है।
+CHARACTER_BIBLE = true  # Boolean। true पर कहानी से पात्रों का रूप/पहचान विवरण तैयार; false पर Character Bible generation बंद।
 
 
-CHARACTER_CONSISTENCY = true  # हर दृश्य में पात्र का चेहरा, रूप और पहनावा एक जैसा रखता है।
+CHARACTER_CONSISTENCY = true  # Boolean। true पर पात्र का चेहरा, बाल, शरीर-रूप और कपड़े दृश्यों में स्थिर रखने का निर्देश।
 
 
-WORLD_CONSISTENCY = true  # स्थान, वस्तुओं, इमारतों और पूरे दृश्य संसार की एकरूपता रखता है।
+WORLD_CONSISTENCY = true  # Boolean। true पर locations, buildings, props और environment की दृश्य निरंतरता।
 
 
-SCENE_CONTINUITY = true  # एक के बाद आने वाले दृश्यों के बीच निरंतरता बनाए रखता है।
+SCENE_CONTINUITY = true  # Boolean। true पर क्रमिक दृश्यों में action/स्थिति की continuity बनाए रखने का निर्देश।
 
 # ============================================================
 # स्थिर चित्रों में गति के विकल्प
 # ============================================================
 
-PHOTO_MOTION_STYLE = "dynamic"  # स्थिर चित्र पर केवल पास आना-दूर जाना, दाएँ-बाएँ सरकना या गहराई का हल्का प्रभाव लागू करता है; शरीर या चेहरे को नहीं हिलाता।
+PHOTO_MOTION_STYLE = "dynamic"  # टेक्स्ट motion preset। वर्तमान मान "dynamic"; कैमरा-जैसी zoom/pan/parallax गति का निर्देश। केवल still-image motion, character animation नहीं।
 
 
-PHOTO_MOTION_PARALLAX = true  # गहराई के आधार पर स्थिर चित्र में परतों की गति चालू या बंद करता है।
+PHOTO_MOTION_PARALLAX = true  # Boolean। true पर depth layers से 2.5D parallax; false पर parallax बंद, zoom/pan रह सकते हैं।
 
 
-PHOTO_MOTION_PARALLAX_STRENGTH = 0.045  # गहराई वाली परतों के खिसकाव की तीव्रता; अधिक मान से किनारों में विकृति हो सकती है।
+PHOTO_MOTION_PARALLAX_STRENGTH = 0.045  # Float। parallax displacement strength; वर्तमान 0.045। छोटा मान subtle; बड़ा मान edge gaps/distortion का जोखिम बढ़ाता है।
 
 
-PHOTO_MOTION_SPEED = "fast"  # स्थिर चित्र पर गति की रफ़्तार।
+PHOTO_MOTION_SPEED = "fast"  # टेक्स्ट गति preset; वर्तमान "fast"। उदाहरण slow/normal/fast केवल तभी चुनें जब motion renderer में समर्थित हों।
 
 
-PHOTO_MOTION_VARIATION = "high"  # अलग-अलग दृश्यों में गति के बदलाव की मात्रा।
+PHOTO_MOTION_VARIATION = "high"  # टेक्स्ट variation स्तर; उदाहरण low/medium/high। अधिक variation पर scenes में camera movement अधिक बदलता है।
 
 
-PHOTO_MOTION_PRESERVE_SUBJECT = true  # मुख्य पात्र या विषय को चित्र में सुरक्षित रखता है।
+PHOTO_MOTION_PRESERVE_SUBJECT = true  # Boolean। true पर crop/zoom के दौरान मुख्य विषय को frame में सुरक्षित रखने का प्रयास।
 
 # ============================================================
 # कैमरा, प्रकाश और दृश्य का भाव
 # ============================================================
 
-CINEMATIC_CAMERA = true  # चित्र संकेतों में फ़िल्मी कैमरा संयोजन संबंधी निर्देश जोड़ता है।
+CINEMATIC_CAMERA = true  # Boolean। true पर image prompt में cinematic camera composition निर्देश जोड़ता है।
 
 
-CAMERA_STYLE = "cinematic"  # चित्र का कोण, दूरी, फ़्रेम और लेंस जैसा दृश्य रूप तय करता है।
+CAMERA_STYLE = "cinematic"  # टेक्स्ट camera look/prompt; उदाहरण "cinematic", "wide", "close-up", "documentary"। prompt निर्देश, fixed enum नहीं।
 
 
-LIGHTING = "cinematic"  # प्रकाश की दिशा, कोमलता, छाया, विरोधाभास और दिन के समय का रूप तय करता है।
+LIGHTING = "cinematic"  # टेक्स्ट lighting prompt; उदाहरण "cinematic", "natural daylight", "soft", "low-key"। दृश्य के अनुरूप चुनें।
 
 
-MOOD = "dramatic"  # दृश्य और ध्वनि का भाव; जैसे तनावपूर्ण, आशावादी या नाटकीय।
+MOOD = "dramatic"  # टेक्स्ट mood prompt; उदाहरण "dramatic", "hopeful", "tense", "calm", "mysterious"।
 
 # ============================================================
 # दृश्य गुणवत्ता
 # ============================================================
 
-QUALITY = "high"  # चित्र और वीडियो तैयार करने की गुणवत्ता का स्तर।
+QUALITY = "high"  # टेक्स्ट quality prompt/preset; वर्तमान "high"। यह prompt निर्देश है, output resolution/quality की गारंटी नहीं।
 
 
-FPS = 24  # प्रति सेकंड दिखाई जाने वाली फ़्रेम संख्या।
+FPS = 24  # Positive integer frames per second; वर्तमान 24। सामान्य विकल्प 24, 25, 30, 60; अधिक FPS से render size/time बढ़ सकता है।
 
 
-NEGATIVE_PROMPT = true  # अनचाहे दृश्य तत्वों से बचने के निर्देश लागू करता है।
+NEGATIVE_PROMPT = true  # Boolean। true पर अनचाहे दृश्य तत्वों से बचने वाले negative prompt निर्देश लागू; false पर यह toggle बंद।
 
 
-AVOID_CARTOON_LOOK = true  # कार्टून जैसी बनावट से बचाता है।
+AVOID_CARTOON_LOOK = true  # Boolean। true पर photorealistic लक्ष्य में cartoon/anime look से बचने का निर्देश।
 
 
-AVOID_NEON = true  # अनावश्यक चमकीली नीयन रोशनी से बचाता है।
+AVOID_NEON = true  # Boolean। true पर अनावश्यक neon glow/lighting से बचने का निर्देश।
 
 
-AVOID_GLITCH_EFFECTS = true  # टूटी-फूटी या विकृत डिजिटल छवि वाले प्रभावों से बचाता है।
+AVOID_GLITCH_EFFECTS = true  # Boolean। true पर glitch, digital tearing और विकृत visual effects से बचने का निर्देश।
 
 
-NATURAL_MOTION = true  # स्थिर चित्र पर लागू गति को सहज रखता है।
+NATURAL_MOTION = true  # Boolean। true पर still image की camera movement को सहज रखने का निर्देश; यह subject animation नहीं है।
 
 
-REALISTIC_LIGHTING = true  # प्रकाश को वास्तविक दुनिया जैसा रखता है।
+REALISTIC_LIGHTING = true  # Boolean। true पर प्रकाश/छाया को प्राकृतिक और विश्वसनीय रखने का निर्देश।
 
 # ============================================================
 # संगीत, ध्वनि प्रभाव और वातावरण
 # ============================================================
 
-MUSIC = true  # पृष्ठभूमि संगीत चालू या बंद करता है।
+MUSIC = true  # Boolean। true पर background music generation/mix चालू; false पर background music बंद।
 
 
-MUSIC_STYLE = "cinematic"  # पृष्ठभूमि संगीत का स्वभाव और शैली तय करता है।
+MUSIC_STYLE = "cinematic"  # टेक्स्ट music-style prompt; उदाहरण "cinematic", "orchestral", "ambient", "minimal piano"।
 
 
-SFX = true  # दृश्य के साथ मेल खाते अर्थपूर्ण ध्वनि प्रभाव जोड़ता है; अनावश्यक बीप या खरखराहट नहीं।
+SFX = true  # Boolean। true पर दृश्य के अनुरूप sound effects; false पर SFX generation बंद।
 
 
-AMBIENT_SOUND = true  # स्थान और मौसम के अनुरूप हल्की वातावरण ध्वनि जोड़ता है; कथावाचन पर हावी नहीं होनी चाहिए।
+AMBIENT_SOUND = true  # Boolean। true पर स्थान/मौसम का हल्का ambience; false पर ambience बंद।
 
 
 
@@ -303,10 +303,10 @@ AMBIENT_SOUND = true  # स्थान और मौसम के अनुर�
 # DESCRIPTION
 # ============================================================
 # कहानी का मूल पाठ नीचे दिया गया है।
-PRESERVE_STORY_TEXT = true  # मूल कहानी के पात्र, घटनाएँ, संबंध, क्रम और अंत सुरक्षित रखता है; केवल भाषा की आवश्यक शुद्धि की अनुमति देता है।
+PRESERVE_STORY_TEXT = true  # Boolean। true पर STORY_TEXT के पात्र, घटनाएँ, क्रम और अर्थ सुरक्षित रखते हुए केवल भाषा सुधार; false पर कहानी को rewrite/adapt करने की अनुमति हो सकती है।
 
 
-STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिला 'सिटैडल टावर्स' के चीफ इंजीनियर अयान को लॉन्च की रात अपने एआई सिस्टम 'ओरियन-9' में एक खतरनाक बग मिला। तेज तूफान में बिल्डिंग के ऊपरी हिस्से गिर सकते थे। प्रोजेक्ट के मालिक विक्रांत मेहरा ने उद्घाटन रोकने से मना कर दिया और अयान के खाते में 5 मिलियन डॉलर ट्रांसफर कर कोड छिपाने को कहा। लालच में आकर अयान ने उस खामी को बाईपास कर दिया।  # पूरी मूल कहानी; कहानी, कथावाचन और दृश्य विभाजन का मुख्य स्रोत।
+STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिला 'सिटैडल टावर्स' के चीफ इंजीनियर अयान को लॉन्च की रात अपने एआई सिस्टम 'ओरियन-9' में एक खतरनाक बग मिला। तेज तूफान में बिल्डिंग के ऊपरी हिस्से गिर सकते थे। प्रोजेक्ट के मालिक विक्रांत मेहरा ने उद्घाटन रोकने से मना कर दिया और अयान के खाते में 5 मिलियन डॉलर ट्रांसफर कर कोड छिपाने को कहा। लालच में आकर अयान ने उस खामी को बाईपास कर दिया।  # बहु-पंक्ति मूल कहानी। triple quotes के भीतर पूरा पाठ लिखें; यह story generation/segmentation/narration का मुख्य स्रोत है। खाली पाठ पर pipeline topic से कहानी बनाने का प्रयास कर सकती है। मूल कहानी के भीतर triple-quote delimiter न रखें।
 अगले दिन ग्रैंड पार्टी के दौरान शहर में भयानक चक्रवाती तूफान आ गया और 'ओरियन-9' सिस्टम क्रैश हो गया। तभी सिक्योरिटी हेड का फोन आया कि अयान की बूढ़ी मां और बेटा रियान उसी फॉल्टी जोन की लिफ्ट में फंस गए हैं, और विक्रांत हेलीकॉप्टर से भाग चुका है।
 पछतावे से भरा अयान जान की बाजी लगाकर सर्वर रूम पहुंचा और आखिरी सेकंड में नया कोड डालकर अपने परिवार को बचा लिया। उधर छत से भागते विक्रांत के पैरों पर उसी कमजोर हिस्से का भारी स्लैब गिर गया, जिससे उसके दोनों पैर कट गए। अयान ने पुलिस को सारे सबूत सौंप दिए। विक्रांत व्हीलचेयर पर उम्रकैद के लिए जेल गया, और अयान ने अपना अपराध कबूल कर अपनी भूल का प्रायश्चित किया। """
 
@@ -314,21 +314,21 @@ STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिल�
 # त्रुटि से उबरना और काम फिर शुरू करना
 # ============================================================
 
-RESUME_ENABLED = true  # असफलता के बाद पहले से सुरक्षित काम से फिर शुरू करने की सुविधा।
+RESUME_ENABLED = true  # Boolean। true पर उपलब्ध checkpoint से pipeline फिर शुरू; false पर resume व्यवहार बंद/नई processing।
 
 
-MAX_RETRIES = 3  # असफलता नीति लागू होने से पहले दोबारा प्रयासों की अधिकतम संख्या।
+MAX_RETRIES = 3  # Positive integer। असफल operation के अधिकतम retry; वर्तमान 3। हर अतिरिक्त retry समय और provider calls बढ़ा सकता है।
 
 
-SAVE_CHECKPOINT_AFTER_EACH_SCENE = true  # हर दृश्य के बाद सत्यापित काम सुरक्षित करता है।
+SAVE_CHECKPOINT_AFTER_EACH_SCENE = true  # Boolean। true पर हर scene के बाद प्रगति checkpoint सुरक्षित; false पर यह scene-level checkpoint writing बंद करता है।
 
 
-SKIP_COMPLETED_SCENES = true  # केवल उन्हीं पूर्ण दृश्यों का पुराना काम दोबारा उपयोग करता है जिनकी पहचान और जाँच अभी भी सही है।
+SKIP_COMPLETED_SCENES = true  # Boolean। true पर केवल सत्यापित पहचान/hash/signature वाले पूर्ण scene artifacts reuse; false पर पुराने completed scenes reuse न करें।
 
 
-IMAGE_PROCESSING_PROFILE="none"  # चित्र सुधार की प्रक्रिया चुनता है।
+IMAGE_PROCESSING_PROFILE ="none"  # टेक्स्ट profile। "none" = कोई अतिरिक्त image processing profile नहीं; अन्य नाम केवल तभी दें जब संबंधित processor में profile लागू हो।
 
 
-ASSET_APPROVAL_REQUIRED=false  # true होने पर चित्रों की SHA256-मिलान वाली स्वीकृति Input/asset_approval.json में देना आवश्यक है।
+ASSET_APPROVAL_REQUIRED =false  # Boolean। false पर approval gate अनिवार्य नहीं; true पर हर generated image के लिए matching SHA256 के साथ Input/asset_approval.json में approved decision आवश्यक।
 
 
