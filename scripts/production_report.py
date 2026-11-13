@@ -5,6 +5,7 @@ import hashlib,json,os
 from collections import Counter
 from pathlib import Path
 from input_config import load_and_validate, get_image_provider_order
+from production_events import provider_summary
 ROOT=Path(__file__).resolve().parents[1]; OUT=ROOT/"output"
 TARGET=OUT/"production_report.json"
 SOURCES={
@@ -180,6 +181,7 @@ def main():
  sound=docs["sound"] or {}
  sfx_validation=docs["sfx_validation"] or {}
  music_result=effective_music(music,sound)
+ provider_usage=provider_summary()
  sound_quality=sound_quality_summary(sound,sfx_validation)
  music_enabled=enabled(config_data,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
  sfx_enabled=enabled(config_data,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
@@ -196,7 +198,7 @@ def main():
  image_generated=image_status.get("generated",0)
  report={
   "status":"completed" if image_doc.get("status")=="completed" and stages["render_quality"]["status"] in {"passed","completed"} and sound_checks_passed else "incomplete",
-  "version":"production-report-v5-sound-track-and-sfx-audibility-gates",
+  "version":"production-report-v6-provider-attempt-and-receipt-accounting",
   "run_id":os.getenv("GITHUB_RUN_ID") or "local",
   "story_title":story.get("title") or story.get("story_title") or ai_story.get("title"),
   "format":(docs["visual_jobs"] or {}).get("format") or story.get("format"),
@@ -241,7 +243,14 @@ def main():
   "music_external_api_calls":music_result["external_api_calls"],
   "music_paid_services_used":music_result["paid_services_used"],
   "music_paid_provider_api_calls":music_result["paid_provider_api_calls"],
-  "costs":{"status":"not_reported_by_all_providers","amount":None,"currency":None},
+  "provider_usage":provider_usage,
+  "billable_provider_attempts":provider_usage.get("billable_marked_attempts",0),
+  "costs":{
+   "status":provider_usage.get("actual_cost_status","unknown_no_provider_receipts"),
+   "amount":provider_usage.get("actual_cost_total"),
+   "currency":None,
+   "unknown_cost_attempts":provider_usage.get("unknown_cost_attempts",0),
+  },
   "stages":stages,
   "input_sha256":digest(input_path) if input_path.is_file() else None,
  }
