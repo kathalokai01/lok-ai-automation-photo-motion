@@ -2251,6 +2251,7 @@ def run_provider_attempts(
                     model=IMAGE_QUALITY_VISION_MODEL,
                     timeout=min(TIMEOUT, 30),
                     reference_image_paths=find_character_reference_images(item, records),
+                    scene_id=item["scene_id"],
                 )
                 if not quality.get("accepted"):
                     raise ImageQualityRejected(
