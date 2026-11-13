@@ -47,10 +47,10 @@ TTS_VOICE_ID_MALE_STORYTELLER = ""  # male_storyteller profile का साम�
 TTS_VOICE_ID_CHARACTER = ""  # character profile का सामान्य provider voice-ID override। खाली रहने पर provider-specific setting लागू होगी: Edge TTS = EDGE_TTS_VOICE_CHARACTER (hi-IN-MadhurNeural); Gemini TTS = GEMINI_TTS_VOICE_CHARACTER (Puck); ElevenLabs ID GitHub Secret ELEVENLABS_VOICE_ID_CHARACTER में होनी चाहिए, आपके दिए Variables में नहीं।
 
 
-TTS_PITCH = 1.0  # Number (float)। सामान्य 1.0; voice profile में गुणक के रूप में लगता है और अंतिम value 0.85–1.15 सीमा में सीमित है। उदाहरण: 0.95 थोड़ा नीचे, 1.05 थोड़ा ऊपर।
+TTS_PITCH = 1.07  # Number (float)। सामान्य 1.0; voice profile में गुणक के रूप में लगता है और अंतिम value 0.85–1.15 सीमा में सीमित है। उदाहरण: 0.95 थोड़ा नीचे, 1.05 थोड़ा ऊपर।
 
 
-TTS_EMOTION_STRENGTH = 0.65  # Number 0.0–1.0। भाव की तीव्रता; 0 = minimum, 1 = maximum। TTS_EMOTION_CONTROL=false होने पर प्रभावी value 0।
+TTS_EMOTION_STRENGTH = 0.88  # Number 0.0–1.0। भाव की तीव्रता; 0 = minimum, 1 = maximum। TTS_EMOTION_CONTROL=false होने पर प्रभावी value 0।
 
 # ============================================================
 # music स्रोत और ध्वनि मिश्रण
@@ -111,7 +111,7 @@ SCENE_DURATION = "auto"  # Text। "auto" में scene की अवधि �
 VOICE = "female"  # Values: "female" या "male" (woman/feminine भी female में normalize होते हैं)। कथावाचक की मूल voice; character-voice प्रोफ़ाइल अलग हो सकती है।
 
 
-SPEED = "+0%"  # Text speed offset, उदाहरण "+0%", "+5%", "-5%"। शून्य सामान्य speed; धनात्मक तेज़, ऋणात्मक धीमा।
+SPEED = "-8%"  # Text speed offset, उदाहरण "+0%", "+5%", "-5%"। शून्य सामान्य speed; धनात्मक तेज़, ऋणात्मक धीमा।
 
 # ============================================================
 # voice बनाने वाली provider का चयन
