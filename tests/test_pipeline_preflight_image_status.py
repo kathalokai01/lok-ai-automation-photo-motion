@@ -43,3 +43,49 @@ class ManifestRowStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompletedTTSIntegrityRetryTests(unittest.TestCase):
+    def setUp(self):
+        self.manifest = {
+            "status": "completed",
+            "source_sha256": "a" * 64,
+            "config_sha256": "b" * 64,
+            "jobs": [
+                {"scene_id": "part_01_hook", "status": "completed"},
+                {"scene_id": "part_01_scene_01", "status": "completed"},
+            ],
+            "parts": [{"part": 1, "audio_path": "output/narration/part-01.mp3"}],
+            "summary": {"total_jobs": 2, "completed_jobs": 2},
+        }
+
+    def test_completed_identity_matched_manifest_can_retry_corrupt_audio(self):
+        self.assertTrue(
+            pipeline_preflight.is_retryable_completed_tts_integrity_issue(
+                self.manifest
+            )
+        )
+
+    def test_invalid_source_identity_is_not_retryable(self):
+        self.manifest["source_sha256"] = "not-a-sha256"
+        self.assertFalse(
+            pipeline_preflight.is_retryable_completed_tts_integrity_issue(
+                self.manifest
+            )
+        )
+
+    def test_incomplete_completed_manifest_is_not_retryable(self):
+        self.manifest["summary"]["completed_jobs"] = 1
+        self.assertFalse(
+            pipeline_preflight.is_retryable_completed_tts_integrity_issue(
+                self.manifest
+            )
+        )
+
+    def test_noncompleted_manifest_is_not_handled_by_completed_retry_policy(self):
+        self.manifest["status"] = "failed"
+        self.assertFalse(
+            pipeline_preflight.is_retryable_completed_tts_integrity_issue(
+                self.manifest
+            )
+        )
