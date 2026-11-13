@@ -1515,13 +1515,62 @@ def _partition_and_revise(
                 config=None,
             )
 
-        groups, _selected_count, merged_fallback = _partition_short_story(
-            corrected_story,
-            preferred,
-            minimum_parts,
-            maximum_parts,
-            scenes_range,
-        )
+        try:
+            groups, _selected_count, merged_fallback = _partition_short_story(
+                corrected_story,
+                preferred,
+                minimum_parts,
+                maximum_parts,
+                scenes_range,
+            )
+        except RuntimeError:
+            # If a genuine final-short-Part merge cannot be formed from
+            # complete sentence/clause units, revise the complete SHORT
+            # narration to the normal 120-180 limit instead of mislabeling
+            # a naturally single Part as a 239-word merge.
+            if not SHORT_HARD_MAX < total_words <= SHORT_MERGED_MAX:
+                raise
+            before_text = corrected_story
+            corrected_story, attempts, evidence = repair_short_part(
+                corrected_story,
+                1,
+                corrected_story,
+                title,
+                model,
+                api_key,
+                final_merged=False,
+                return_evidence=True,
+            )
+            revision_summaries.append({
+                "part": 1,
+                "attempted": True,
+                "before_words": word_count(before_text),
+                "after_words": word_count(corrected_story),
+                "before_sha256": sha256(before_text),
+                "after_sha256": sha256(corrected_story),
+                "revision_evidence": evidence,
+                "attempts": attempts,
+                "text_changed": sha256(before_text) != sha256(corrected_story),
+                "text_preserved_semantically": bool(
+                    evidence and evidence.get("semantic_preservation_verified") is True
+                ),
+                "reason": "No valid real final-Part merge could be formed.",
+            })
+            total_words = word_count(corrected_story)
+            preferred = select_final_part_count(
+                total_corrected_words=total_words,
+                format_type=mode,
+                parts_specification=parts_specification,
+                story_length=story_length,
+                config=None,
+            )
+            groups, _selected_count, merged_fallback = _partition_short_story(
+                corrected_story,
+                preferred,
+                minimum_parts,
+                maximum_parts,
+                scenes_range,
+            )
 
         # Every 151-180 word Part needs a completed revision attempt;
         # the final merged Part may reach 239 only with semantic evidence.
