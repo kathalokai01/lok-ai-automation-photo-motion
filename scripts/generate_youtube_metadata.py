@@ -514,8 +514,30 @@ def normalize_description(value: Any) -> str:
     description = re.sub(r"\n{3,}", "\n\n", description)
     if not description:
         raise RuntimeError("Generated YouTube description is empty.")
+
+    # Keep the model-written story description intact and append the channel
+    # disclaimer/copyright block exactly once. Reserve space before truncating.
+    legal_block = (
+        "अस्वीकरण (Disclaimer): यह वीडियो कहानी-आधारित मनोरंजन और "
+        "रचनात्मक प्रस्तुति के उद्देश्य से बनाया गया है। पात्र, घटनाएँ और "
+        "दृश्य काल्पनिक/रचनात्मक हो सकते हैं; किसी वास्तविक व्यक्ति या घटना "
+        "से समानता संयोगवश है।"
+        "\\n\\n"
+        "कॉपीराइट (Copyright): © Katha Lok AI. All rights reserved. "
+        "बिना लिखित अनुमति इस वीडियो, narration, visuals या अन्य सामग्री "
+        "की पुनः अपलोडिंग, प्रतिलिपि या व्यावसायिक पुनःप्रयोग की अनुमति नहीं है।"
+    )
+    if "अस्वीकरण (Disclaimer):" not in description:
+        description = description.rstrip() + "\\n\\n" + legal_block
     if len(description) > MAX_DESCRIPTION_CHARS:
-        description = description[:MAX_DESCRIPTION_CHARS - 3].rstrip() + "..."
+        reserve = len(legal_block) + 2
+        story_limit = max(0, MAX_DESCRIPTION_CHARS - reserve - 3)
+        story_part = description.split("\\n\\nअस्वीकरण (Disclaimer):", 1)[0]
+        if len(story_part) > story_limit:
+            story_part = story_part[:story_limit].rstrip() + "..."
+        description = story_part.rstrip() + "\\n\\n" + legal_block
+    if len(description) > MAX_DESCRIPTION_CHARS:
+        raise RuntimeError("Disclaimer/copyright block exceeds description limit.")
     return description
 
 
