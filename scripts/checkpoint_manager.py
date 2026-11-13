@@ -854,10 +854,22 @@ def _merge_progress_document(existing: dict, incoming: dict) -> dict | None:
                 if previous is None:
                     by_key[row_key] = row
                     continue
-                previous_ready = str(previous.get("status", "")).lower() in SUCCESS_STATES
-                incoming_ready = str(row.get("status", "")).lower() in SUCCESS_STATES
-                previous_hash = any(previous.get(field) for field in ("sha256", "image_sha256", "audio_sha256", "video_sha256"))
-                incoming_hash = any(row.get(field) for field in ("sha256", "image_sha256", "audio_sha256", "video_sha256"))
+                previous_ready = (
+                    isinstance(previous, dict)
+                    and str(previous.get("status", "")).lower() in SUCCESS_STATES
+                )
+                incoming_ready = (
+                    isinstance(row, dict)
+                    and str(row.get("status", "")).lower() in SUCCESS_STATES
+                )
+                previous_hash = (
+                    isinstance(previous, dict)
+                    and any(previous.get(field) for field in ("sha256", "image_sha256", "audio_sha256", "video_sha256"))
+                )
+                incoming_hash = (
+                    isinstance(row, dict)
+                    and any(row.get(field) for field in ("sha256", "image_sha256", "audio_sha256", "video_sha256"))
+                )
                 if (incoming_ready and incoming_hash) or not (previous_ready and previous_hash):
                     by_key[row_key] = row
             merged[key] = list(by_key.values())
