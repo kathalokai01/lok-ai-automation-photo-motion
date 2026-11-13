@@ -90,6 +90,18 @@ class CompletedTTSIntegrityRetryTests(unittest.TestCase):
 
     def test_completed_manifest_with_missing_scene_rows_is_retryable(self):
         self.manifest["summary"]["total_jobs"] = 3
+        self.manifest["summary"]["completed_jobs"] = 3
+        self.assertTrue(
+            pipeline_preflight.is_retryable_completed_tts_integrity_issue(
+                self.manifest
+            )
+        )
+
+    def test_completed_manifest_with_stale_extra_rows_is_retryable(self):
+        self.manifest["jobs"].append({
+            "scene_id": "part_01_stale_scene_99",
+            "status": "completed",
+        })
         self.assertTrue(
             pipeline_preflight.is_retryable_completed_tts_integrity_issue(
                 self.manifest
@@ -148,6 +160,61 @@ class InProgressImageManifestRetryTests(unittest.TestCase):
                         {"scene_id": row["scene_id"], "source_fingerprint": source,
                          "config_signature": config, "status": "generated"}
                         for row in jobs
+                    ],
+                }
+                self.assertTrue(
+                    pipeline_preflight.is_retryable_in_progress_image_manifest(
+                        manifest
+                    )
+                )
+            finally:
+                pipeline_preflight.OUT = original_out
+
+    def test_stale_visual_jobs_file_does_not_reject_matching_image_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_out = pipeline_preflight.OUT
+            try:
+                output_dir = Path(temporary) / "output"
+                pipeline_preflight.OUT = output_dir
+                visual_dir = output_dir / "visuals"
+                visual_dir.mkdir(parents=True)
+                source = "a" * 64
+                config = "b" * 64
+                current_ids = ["part_01_hook", "part_01_scene_01"]
+                (visual_dir / "visual_jobs_manifest.json").write_text(
+                    json.dumps({
+                        "source_fingerprint": source,
+                        "config_signature": config,
+                        "format": "short",
+                        "total_jobs": 2,
+                        "scene_order": "part_then_hook_then_main",
+                        "jobs_file": "output/visuals/visual_jobs.json",
+                    }),
+                    encoding="utf-8",
+                )
+                # This JSON belongs to a different restored checkpoint.
+                (visual_dir / "visual_jobs.json").write_text(
+                    json.dumps([{
+                        "scene_id": "part_01_old_scene",
+                        "source_fingerprint": "c" * 64,
+                        "config_signature": "d" * 64,
+                    }]),
+                    encoding="utf-8",
+                )
+                manifest = {
+                    "status": "in_progress",
+                    "source_fingerprint": source,
+                    "config_signature": config,
+                    "format": "short",
+                    "total_scenes": 2,
+                    "images_required": 2,
+                    "images_ready": 0,
+                    "images_failed": 0,
+                    "images_pending": 2,
+                    "scenes": [
+                        {"scene_id": scene_id, "source_fingerprint": source,
+                         "config_signature": config, "status": "pending"}
+                        for scene_id in current_ids
                     ],
                 }
                 self.assertTrue(
