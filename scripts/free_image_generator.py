@@ -14,6 +14,7 @@ from io import BytesIO
 from pathlib import Path
 
 from gemini_http import retry_after_seconds
+from production_events import record_provider_attempt
 from visual_quality_validator import (
     VisionVerificationUnavailable,
     validate_scene_image,
@@ -2208,6 +2209,15 @@ def run_provider_attempts(
             MODEL_PROGRESS_STATE["cursor_key"] = provider_key
             save_model_progress(metadata)
 
+            attempt_id = (
+                f"{item['scene_id']}:{provider_key}:{round_number}:"
+                f"{len(record.get('attempts', [])) + 1}"
+            )
+            provider_response_received = False
+            record_provider_attempt(
+                provider_name, provider_key, "request_started", billable,
+                scene_id=item["scene_id"], attempt_id=attempt_id,
+            )
             try:
                 log(
                     "Generating:", item["scene_id"],
@@ -2226,6 +2236,11 @@ def run_provider_attempts(
                 if billable:
                     counters["billable_api_calls"] += 1
                 generate()
+                provider_response_received = True
+                record_provider_attempt(
+                    provider_name, provider_key, "response_received", billable,
+                    scene_id=item["scene_id"], attempt_id=attempt_id,
+                )
 
                 quality = validate_scene_image(
                     destination,
@@ -2274,6 +2289,10 @@ def run_provider_attempts(
                 MODEL_PROGRESS_STATE["quality_failure_streaks"][provider_key] = 0
                 MODEL_PROGRESS_STATE["skip_until_scene"].pop(provider_key, None)
                 succeeded = True
+                record_provider_attempt(
+                    provider_name, provider_key, "accepted", billable,
+                    scene_id=item["scene_id"], attempt_id=attempt_id,
+                )
                 save_checkpoints(records, metadata, build_policy(), counters)
                 log(
                     "IMAGE ACCEPTED:", item["scene_id"],
@@ -2289,6 +2308,11 @@ def run_provider_attempts(
 
             except VisionVerificationUnavailable as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
+                record_provider_attempt(
+                    provider_name, provider_key, "verification_pending", billable,
+                    scene_id=item["scene_id"], attempt_id=attempt_id,
+                    error=last_error,
+                )
                 record["status"] = "pending"
                 record["quality_verification_error"] = last_error[:1000]
                 # Keep the generated file, hash and prompt signature. A later run can
@@ -2311,6 +2335,22 @@ def run_provider_attempts(
 
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
+                record_provider_attempt(
+                    provider_name,
+                    provider_key,
+                    (
+                        "response_received_quality_rejected"
+                        if provider_response_received and isinstance(exc, ImageQualityRejected)
+                        else "response_received_validation_failed"
+                        if provider_response_received
+                        else "request_failed"
+                    ),
+                    billable,
+                    scene_id=item["scene_id"],
+                    attempt_id=attempt_id,
+                    error=last_error,
+                    http_status=getattr(getattr(exc, "response", None), "status_code", None),
+                )
                 if isinstance(exc, ImageQualityRejected):
                     category = "quality_failure"
                     classification = {
