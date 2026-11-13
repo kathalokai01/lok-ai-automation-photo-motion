@@ -1051,9 +1051,12 @@ def get_expected_context() -> dict:
 def list_runs(repository: str, workflow: str, branch: str, limit: int) -> list[int]:
     # --paginate + --slurp walks every page, not merely the newest 30/100 runs.
     # GitHub's status=completed includes successful, failed and cancelled conclusions.
+    query = ["status=completed", "per_page=100"]
+    if branch and branch.casefold() not in {"all", "*"}:
+        query.insert(0, f"branch={branch}")
     endpoint = (
-        f"repos/{repository}/actions/workflows/{workflow}/runs"
-        f"?branch={branch}&status=completed&per_page=100"
+        f"repos/{repository}/actions/workflows/{workflow}/runs?"
+        + "&".join(query)
     )
     command = [
         "gh", "api", "--paginate", "--slurp", "--jq",
