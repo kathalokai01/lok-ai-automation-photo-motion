@@ -306,46 +306,55 @@ def validate_scene_image(
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", model):
         raise ValueError("IMAGE_QUALITY_VISION_MODEL contains invalid characters.")
 
-    # Technical integrity is mandatory. Gemini Vision is advisory so a low-capacity
-    # pipeline does not discard usable images because of semantic false negatives,
-    # transient API limits, missing keys or model timeouts.
+    # Technical integrity is always mandatory. When Vision is enabled, semantic
+    # scene match, character continuity and minimum clarity score are also gates.
+    # An unavailable Vision service keeps the generated candidate/checkpoint so a
+    # later run can verify it without paying for another image-generation request.
     vision = None
     vision_error = None
     if enabled:
         key = _clean(api_key or os.getenv("GEMINI_API_KEY"))
-        if key:
-            try:
-                vision = _vision_check(
-                    path, prompt, model, key, max(10, min(30, int(timeout))),
-                    [Path(value) for value in (reference_image_paths or [])[:2]],
-                )
-            except Exception as exc:
-                # Vision is advisory. Any API, response-shape, parsing, or SDK error
-                # must not invalidate a technically sound generated image.
-                vision_error = f"{type(exc).__name__}: {exc}"
-        else:
-            vision_error = "GEMINI_API_KEY is missing."
+        if not key:
+            raise VisionVerificationUnavailable(
+                "GEMINI_API_KEY is missing; image quality cannot be verified."
+            )
+        try:
+            vision = _vision_check(
+                path, prompt, model, key, max(10, min(30, int(timeout))),
+                [Path(value) for value in (reference_image_paths or [])[:2]],
+            )
+        except VisionVerificationUnavailable:
+            raise
+        except Exception as exc:
+            raise VisionVerificationUnavailable(
+                f"Visual quality verification failed: {type(exc).__name__}: {exc}"
+            ) from exc
     else:
-        vision_error = "Vision verification is disabled."
+        vision_error = "Vision verification is disabled by configuration."
 
     vision_accepted = bool(
         isinstance(vision, dict)
         and vision.get("prompt_match") is True
         and vision.get("character_consistency") is True
-        and vision.get("quality_score", 0) >= max(1, min(10, int(minimum_score)))
+        and vision.get("quality_score", 0) >= max(7, min(10, int(minimum_score)))
     )
+    accepted = vision_accepted if enabled else True
     return {
-        "status": "passed" if vision_accepted else "accepted_with_warning",
-        "accepted": True,
+        "status": (
+            "passed" if vision_accepted
+            else "rejected" if enabled
+            else "accepted_without_vision"
+        ),
+        "accepted": accepted,
         "vision_accepted": vision_accepted,
         "technical": technical,
         "vision": vision,
         "verification_warning": vision_error or (
-            None if vision_accepted else "Gemini Vision flagged a possible prompt, character or quality mismatch."
+            None if vision_accepted else "Vision rejected the scene match, character continuity or clarity score."
         ),
         "semantic_story_match": "verified" if vision_accepted else "not_verified",
         "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "verification_contract": "mandatory_technical_integrity+advisory_gemini_vision",
+        "verification_contract": "mandatory_technical_integrity+mandatory_vision_gate_when_enabled",
     }
 
 
