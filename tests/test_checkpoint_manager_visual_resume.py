@@ -96,6 +96,42 @@ class CheckpointManagerVisualResumeTests(unittest.TestCase):
             self.assertEqual(progress["completed_jobs"], 11)
             self.assertEqual(progress["remaining_jobs"], 1)
 
+    def test_merged_progress_json_uses_real_newline_and_parses(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "saved"
+            checkpoint_dir = source / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            payload = {
+                "source_fingerprint": "a" * 64,
+                "config_signature": "b" * 64,
+                "scene_progress": [{"scene_id": "scene-1", "status": "completed"}],
+            }
+            (checkpoint_dir / "visual_jobs_progress.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            output = root / "output"
+            checkpoint_manager.merge_progress_checkpoints(source, output)
+            target = output / "checkpoints" / "visual_jobs_progress.json"
+            raw = target.read_text(encoding="utf-8")
+            self.assertTrue(raw.endswith("\n"))
+            self.assertFalse(raw.endswith("\\n"))
+            self.assertEqual(json.loads(raw)["scene_progress"][0]["scene_id"], "scene-1")
+
+    def test_corrupt_restored_json_is_quarantined_without_deletion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            output.mkdir()
+            corrupt = output / "story.json"
+            original = '{"story": true}\\n{"extra": true}'
+            corrupt.write_text(original, encoding="utf-8")
+            count = checkpoint_manager.quarantine_invalid_json_files(output)
+            self.assertEqual(count, 1)
+            self.assertFalse(corrupt.exists())
+            preserved = list(output.glob("story.json.invalid-*"))
+            self.assertEqual(len(preserved), 1)
+            self.assertEqual(preserved[0].read_text(encoding="utf-8"), original)
+
     def test_partial_audio_asset_is_copied_only_after_sha256_verification(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
