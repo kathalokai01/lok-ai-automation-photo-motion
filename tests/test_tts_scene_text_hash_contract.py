@@ -35,7 +35,7 @@ class TTSSceneTextHashContractTests(unittest.TestCase):
     def test_both_reuse_and_generation_paths_write_hash_metadata(self):
         source = (ROOT / "scripts/generate_tts.py").read_text(encoding="utf-8")
         self.assertGreaterEqual(source.count("**scene_text_hash_metadata(job)"), 2)
-        self.assertIn("VERSION = 23", source)
+        self.assertIn(f"VERSION = {generate_tts.VERSION}", source)
 
     def test_renderer_uses_same_whitespace_normalization(self):
         source = (ROOT / "scripts/render_video.py").read_text(encoding="utf-8")
