@@ -1657,7 +1657,7 @@ def _partition_and_revise(
         "maximum_parts": maximum_parts,
         "corrected_story_words": total_words,
         "final_story_words": word_count("\n\n".join(groups)),
-        "revision_attempted_parts": [],
+        "revision_attempted_parts": [row["part"] for row in revision_summaries],\n        "pre_merge_selected_parts": pre_merge_part_count,\n        "merge_reduced_part_count": (pre_merge_part_count - selected_count) if merged_fallback else 0,
         "final_part_merged": bool(merged_fallback),
         "exact_source_text_preserved": True,
     }
