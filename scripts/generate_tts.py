@@ -41,7 +41,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 21
+VERSION = 22
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -391,6 +391,49 @@ def validate_audio(path: Path) -> dict:
         "size_bytes": path.stat().st_size,
         "sha256": sha256_file(path),
     }
+
+
+def verify_audio_audible(path: Path) -> dict:
+    """Reject silent/near-silent TTS files, including stale cached scenes."""
+    command = [
+        shutil.which("ffmpeg") or "ffmpeg",
+        "-hide_banner", "-nostats",
+        "-i", str(path),
+        "-af", "volumedetect",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Could not verify TTS loudness for {path.name}: "
+            f"{result.stderr[-800:]}"
+        )
+    mean_match = re.search(
+        r"mean_volume:\\s*(-?\\d+(?:\\.\\d+)?)\\s*dB",
+        result.stderr,
+    )
+    peak_match = re.search(
+        r"max_volume:\\s*(-?\\d+(?:\\.\\d+)?)\\s*dB",
+        result.stderr,
+    )
+    if not mean_match or not peak_match:
+        raise RuntimeError(
+            f"FFmpeg did not report TTS loudness for {path.name}."
+        )
+    mean_db = float(mean_match.group(1))
+    peak_db = float(peak_match.group(1))
+    if mean_db < -52.0 or peak_db < -32.0:
+        raise RuntimeError(
+            f"TTS audio is silent or near-silent for {path.name} "
+            f"(mean={mean_db:.1f} dB, peak={peak_db:.1f} dB)."
+        )
+    return {"mean_volume_db": mean_db, "peak_volume_db": peak_db}
 
 
 def write_audio_bytes(path: Path, data: bytes) -> dict:
