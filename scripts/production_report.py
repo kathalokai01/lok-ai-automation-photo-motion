@@ -248,7 +248,8 @@ def main():
   "costs":{
    "status":provider_usage.get("actual_cost_status","unknown_no_provider_receipts"),
    "amount":provider_usage.get("actual_cost_total"),
-   "currency":None,
+   "currency":provider_usage.get("actual_cost_currency"),
+   "by_currency":provider_usage.get("actual_cost_by_currency",{}),
    "unknown_cost_attempts":provider_usage.get("unknown_cost_attempts",0),
   },
   "stages":stages,
