@@ -45,7 +45,7 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
 CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v35-tonal-music-scene-sfx"
+VERSION = "photo-motion-sound-design-v36-tonal-ambient-fallback"
 RATE = 22050
 SFX_SECONDS = 8.0
 DEFAULT_VISUAL_SCENE_SECONDS = 6.0
@@ -618,8 +618,8 @@ def make_ambient(total_duration, scene_records, old_record, source_sig):
             old_record,
             source_sig,
             "ambient_fallback",
-            lambda seconds: sfx_samples(
-                "weather", seconds, int(source_sig[:8], 16)
+            lambda seconds: music_samples(
+                seconds, seed=int(source_sig[:8], 16)
             ),
         )
         fallback.update({
