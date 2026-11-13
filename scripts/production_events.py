@@ -89,7 +89,7 @@ def provider_summary():
     by_provider = {}
     billable_marked = 0
     unknown_cost = 0
-    verified_cost = 0.0
+    verified_costs_by_currency = {}
     verified_receipts = 0
     failed = 0
     accepted = 0
@@ -117,7 +117,10 @@ def provider_summary():
             item["accepted"] += 1
         cost = metadata.get("actual_cost")
         if metadata.get("cost_status") == "receipt_verified" and isinstance(cost, (int, float)) and not isinstance(cost, bool):
-            verified_cost += float(cost)
+            currency = str(metadata.get("currency") or "unspecified")
+            verified_costs_by_currency[currency] = (
+                verified_costs_by_currency.get(currency, 0.0) + float(cost)
+            )
             verified_receipts += 1
         else:
             unknown_cost += 1
@@ -129,8 +132,22 @@ def provider_summary():
         "accepted_attempts": accepted,
         "verification_pending_attempts": pending,
         "actual_cost_receipt_count": verified_receipts,
-        "actual_cost_total": round(verified_cost, 6) if verified_receipts else None,
-        "actual_cost_status": "receipt_verified" if verified_receipts else "unknown_no_provider_receipts",
+        "actual_cost_total": (
+            round(next(iter(verified_costs_by_currency.values())), 6)
+            if len(verified_costs_by_currency) == 1 else None
+        ),
+        "actual_cost_currency": (
+            next(iter(verified_costs_by_currency))
+            if len(verified_costs_by_currency) == 1 else None
+        ),
+        "actual_cost_by_currency": {
+            key: round(value, 6) for key, value in verified_costs_by_currency.items()
+        },
+        "actual_cost_status": (
+            "receipt_verified" if len(verified_costs_by_currency) == 1
+            else "receipt_verified_multiple_currencies" if verified_costs_by_currency
+            else "unknown_no_provider_receipts"
+        ),
         "unknown_cost_attempts": unknown_cost,
         "by_provider": by_provider,
     }
