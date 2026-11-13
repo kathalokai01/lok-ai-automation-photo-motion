@@ -47,6 +47,25 @@ class PackageNarrationManifestTests(unittest.TestCase):
             text,
         )
 
+    def test_canonical_hindi_story_disclaimer_is_accepted(self):
+        self.assertTrue(
+            package_output.has_story_disclaimer(
+                "विवरण।\\n\\nकहानी संबंधी अस्वीकरण (Story Disclaimer): काल्पनिक कहानी।"
+            )
+        )
+
+    def test_legacy_story_disclaimer_is_still_accepted(self):
+        self.assertTrue(
+            package_output.has_story_disclaimer(
+                "विवरण।\\n\\nअस्वीकरण (Disclaimer): काल्पनिक कहानी।"
+            )
+        )
+
+    def test_missing_story_disclaimer_is_rejected(self):
+        self.assertFalse(
+            package_output.has_story_disclaimer("केवल सामान्य विवरण।")
+        )
+
     def test_hook_uses_narration_json_when_photo_manifest_text_is_null(self):
         photo, narration, audio, expected = self.make_rows("hook")
         result = package_output.resolve_scene_narration(
