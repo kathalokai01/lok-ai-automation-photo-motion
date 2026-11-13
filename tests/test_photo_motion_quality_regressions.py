@@ -250,7 +250,7 @@ class VisualQualityGateTests(unittest.TestCase):
     def test_low_vision_score_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "scene.png"
-            Image.new("RGB", (64, 64), (30, 80, 120)).save(path)
+            Image.effect_noise((64, 64), 100).convert("RGB").save(path)
             vision = {
                 "prompt_match": True, "character_consistency": True,
                 "quality_score": 6, "issues": ["soft focus"], "reason": "blur",
@@ -266,7 +266,7 @@ class VisualQualityGateTests(unittest.TestCase):
     def test_vision_unavailable_is_not_silently_accepted(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "scene.png"
-            Image.new("RGB", (64, 64), (30, 80, 120)).save(path)
+            Image.effect_noise((64, 64), 100).convert("RGB").save(path)
             with patch.object(
                 visual_quality_validator, "_vision_check",
                 side_effect=visual_quality_validator.VisionVerificationUnavailable("HTTP 429"),
