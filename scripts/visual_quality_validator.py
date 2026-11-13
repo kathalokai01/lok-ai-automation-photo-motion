@@ -377,7 +377,7 @@ def validate_scene_image(
             or os.getenv("GEMINI_MODEL_FALLBACKS", "").strip()
         )
         vision_models = [model]
-        for candidate in re.split(r"[,;\\s]+", configured_fallbacks):
+        for candidate in re.split(r"[,;\s]+", configured_fallbacks):
             candidate = _clean(candidate)
             if (
                 candidate
