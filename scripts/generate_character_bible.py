@@ -21,7 +21,7 @@ AI_STORY_FILE = STORY_DIR / "ai_story.json"
 SOURCE_STORY_FILE = STORY_DIR / "story.json"
 OUTPUT_FILE = STORY_DIR / "character_bible.json"
 
-VERSION = "character-bible-v10-repeated-proper-name-extraction"
+VERSION = "character-bible-v11-person-name-filtered-proper-nouns"
 
 ROLE_FIELDS = (
     ("hook_scene", "hook"),
@@ -562,7 +562,14 @@ def extract_story_names(text: str) -> list[str]:
     )
     for match in proper_pattern.finditer(source):
         name = normalize_name(match.group(0))
-        if not valid_name(name):
+        if not valid_name(name) or any(char.isdigit() for char in name):
+            continue
+        tokens = [token.casefold() for token in name.split()]
+        if any(token in {
+            "tower", "towers", "building", "buildings", "city",
+            "river", "bridge", "station", "hospital", "school",
+            "company", "corporation", "airport", "highway",
+        } for token in tokens):
             continue
         first = name.split()[0].casefold()
         if first in GENERIC_ENGLISH:
