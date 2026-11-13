@@ -14,13 +14,15 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from input_config import load_and_validate, get_caption_font
 FONT_DIR = Path.home() / ".local" / "share" / "fonts" / "katha-caption"
 MANIFEST = FONT_DIR / "font_install_manifest.json"
 PROJECT_MANIFEST = ROOT / "output" / "fonts" / "font_manifest.json"
 PROJECT_FONT_FILE = ROOT / "output" / "fonts" / "selected_hindi_caption_font.ttf"
 PROJECT_LICENSE_FILE = ROOT / "output" / "fonts" / "OFL-1.1.txt"
 
-VERSION = "caption-font-installer-v8-portable-font-copy-license-and-manifest"
+VERSION = "caption-font-installer-v9-configured-family-first"
 MAX_BYTES = 20 * 1024 * 1024
 MIN_BYTES = 1024
 SIGNATURES = {b"\x00\x01\x00\x00", b"OTTO", b"true", b"typ1"}
@@ -428,21 +430,36 @@ def main():
             "fc-cache failed: " + cache.stderr.strip()
         )
 
-    selected = None
-    fallback_order = (
+    config = load_and_validate(ROOT / "Input" / "topic.txt")
+    requested = str(get_caption_font(config) or "mukta").strip()
+    aliases = {
+        "mukta": "Mukta",
+        "hind": "Hind",
+        "noto": "Noto Sans Devanagari",
+        "noto sans": "Noto Sans Devanagari",
+        "noto sans devanagari": "Noto Sans Devanagari",
+        "tiro": "Tiro Devanagari Hindi",
+        "tiro devanagari hindi": "Tiro Devanagari Hindi",
+    }
+    requested_family = aliases.get(requested.casefold(), requested)
+    fallback_order = list(dict.fromkeys((
+        requested_family,
         "Noto Sans Devanagari",
         "Mukta",
         "Hind",
         "Tiro Devanagari Hindi",
-    )
+    )))
 
+    selected = None
     for family in fallback_order:
         selected = system_font(family)
         if selected:
             selected["source"] = "fontconfig-verified"
-            if family != "Noto Sans Devanagari":
-                selected["fallback_for"] = "Noto Sans Devanagari"
-            log("HINDI FONT SELECTED:", family)
+            selected["requested_family"] = requested_family
+            selected["fallback_used"] = family.casefold() != requested_family.casefold()
+            if selected["fallback_used"]:
+                selected["fallback_for"] = requested_family
+            log("HINDI FONT SELECTED:", family, "| requested:", requested_family)
             break
 
     if not selected:
