@@ -109,7 +109,7 @@ def provider_summary():
         if status in {"request_failed", "quality_rejected", "response_received_quality_rejected", "response_received_validation_failed"}:
             failed += 1
             item["failed"] += 1
-        elif status == "verification_pending":
+        elif status in {"verification_pending", "response_received", "request_started"}:
             pending += 1
             item["pending"] += 1
         elif status == "accepted":
