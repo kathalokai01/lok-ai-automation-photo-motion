@@ -527,7 +527,7 @@ def normalize_description(value: Any) -> str:
         "बिना लिखित अनुमति इस वीडियो, narration, visuals या अन्य सामग्री "
         "की पुनः अपलोडिंग, प्रतिलिपि या व्यावसायिक पुनःप्रयोग की अनुमति नहीं है।"
     )
-    if "अस्वीकरण (Disclaimer):" not in description:
+    if "अस्वीकरण (Disclaimer):" not in description or "© Katha Lok AI" not in description:
         description = description.rstrip() + "\n\n" + legal_block
     if len(description) > MAX_DESCRIPTION_CHARS:
         reserve = len(legal_block) + 2
