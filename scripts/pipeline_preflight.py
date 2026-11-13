@@ -965,11 +965,17 @@ def is_retryable_completed_tts_integrity_issue(data: Any) -> bool:
         for row in jobs
         if isinstance(row, dict)
     ]
+    # The checkpoint can contain extra completed records from an older
+    # narration revision. The current TTS stage rebuilds its job list from
+    # narration.json and reuses a record only when scene ID, role, text,
+    # voice, file SHA256 and measured duration all match. Therefore the
+    # manifest summary is authoritative for the current job count; stale
+    # extra rows must not make preflight reject a safely regenerable stage.
     return (
         type(total) is int
-        and total >= len(jobs)
+        and total > 0
         and type(completed) is int
-        and completed == len(jobs)
+        and completed == total
         and len(scene_ids) == len(jobs)
         and all(scene_ids)
         and len(set(scene_ids)) == len(scene_ids)
@@ -1020,6 +1026,8 @@ def is_retryable_in_progress_image_manifest(data: Any) -> bool:
     if ready + failed + pending != total:
         return False
     jobs_file = str(visual_jobs.get("jobs_file") or "output/visuals/visual_jobs.json")
+    jobs_path = None
+    job_rows = None
     try:
         jobs_path = (OUT.parent / jobs_file).resolve()
         output_root = OUT.parent.resolve()
@@ -1027,27 +1035,44 @@ def is_retryable_in_progress_image_manifest(data: Any) -> bool:
             return False
         job_rows = json.loads(jobs_path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-        return False
-    if not isinstance(job_rows, list):
-        return False
-    expected_ids = {
-        str(row.get("scene_id") or row.get("id") or "").strip()
-        for row in job_rows
-        if isinstance(row, dict)
-    }
+        # The visual-job manifest is the identity authority. A missing,
+        # truncated or checkpoint-mixed jobs JSON is rebuilt by
+        # generate_visuals.py before image generation.
+        job_rows = None
+    if job_rows is not None and not isinstance(job_rows, list):
+        job_rows = None
     actual_ids = [
         str(row.get("scene_id") or "").strip()
         for row in rows
         if isinstance(row, dict)
     ]
     if (
-        len(expected_ids) != total
-        or len(actual_ids) != total
+        len(actual_ids) != total
         or any(not item for item in actual_ids)
         or len(set(actual_ids)) != total
-        or set(actual_ids) != expected_ids
     ):
         return False
+    if isinstance(job_rows, list):
+        # Do not compare against a stale jobs file from another checkpoint.
+        # Compare IDs only when every row proves the same source/config
+        # identity as the authoritative visual_jobs_manifest.json.
+        job_rows_match_identity = all(
+            isinstance(row, dict)
+            and row.get("source_fingerprint") == visual_jobs.get("source_fingerprint")
+            and row.get("config_signature") == visual_jobs.get("config_signature")
+            for row in job_rows
+        )
+        if job_rows_match_identity:
+            expected_ids = {
+                str(row.get("scene_id") or row.get("id") or "").strip()
+                for row in job_rows
+            }
+            if (
+                len(expected_ids) != total
+                or any(not item for item in expected_ids)
+                or set(actual_ids) != expected_ids
+            ):
+                return False
     for row in rows:
         if not isinstance(row, dict):
             return False
@@ -1842,7 +1867,11 @@ def validate_existing_manifest(
             declared_completed is not None
             and (
                 type(declared_completed) is not int
-                or declared_completed != len(raw_jobs)
+                or (
+                    declared_completed != total_jobs
+                    if retryable_narration_audio
+                    else declared_completed != len(raw_jobs)
+                )
             )
         ):
             raise ValueError(
