@@ -64,7 +64,7 @@ SFX_TYPES = (
     "crowd", "mystery", "chime", "ring", "siren",
 )
 
-# Cue gain is later multiplied by render_video.py's 1.65 factor.
+# Cue gain is later multiplied by render_video.py's 1.90 factor.
 # Values are intentionally stronger than the previous v30 values.
 SFX_GAINS = {
     "whoosh": 0.82,
