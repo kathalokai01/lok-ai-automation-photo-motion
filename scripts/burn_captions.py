@@ -42,7 +42,7 @@ PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 ALIGNMENT_CACHE = CAPTION_DIR / "word_alignment_cache.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v65-low-position-vivid-colour"
+VERSION = "burn-captions-v66-low-position-vivid-colour-thin-outline"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 1000
 FPS_TOLERANCE = 0.03
@@ -1391,8 +1391,8 @@ def contrast_style(
         "samples": samples,
         "primary": primary,
         "outline": outline,
-        "outline_width": 3 if spread < 90 else 4,
-        "shadow": 1,
+        "outline_width": 2,
+        "shadow": 2,
         "alignment": 2,
         "margin_vertical": 26 if height > width else 24,
         "length_factor": length_factor,
