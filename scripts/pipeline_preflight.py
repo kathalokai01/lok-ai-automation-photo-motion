@@ -1019,13 +1019,19 @@ def is_retryable_in_progress_image_manifest(data: Any) -> bool:
         return False
     if ready + failed + pending != total:
         return False
-    job_rows = visual_jobs.get("scene_order")
-    if not isinstance(job_rows, list):
-        job_rows = visual_jobs.get("jobs")
+    jobs_file = str(visual_jobs.get("jobs_file") or "output/visuals/visual_jobs.json")
+    try:
+        jobs_path = (OUT.parent / jobs_file).resolve()
+        output_root = OUT.parent.resolve()
+        if output_root not in jobs_path.parents or jobs_path.is_symlink():
+            return False
+        job_rows = json.loads(jobs_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return False
     if not isinstance(job_rows, list):
         return False
     expected_ids = {
-        str(row.get("scene_id") or "").strip()
+        str(row.get("scene_id") or row.get("id") or "").strip()
         for row in job_rows
         if isinstance(row, dict)
     }
@@ -1824,7 +1830,7 @@ def validate_existing_manifest(
             + (len(normalized_counts) * 2)
         )
 
-        if total_jobs != expected_job_total:
+        if total_jobs != expected_job_total and not retryable_narration_audio:
             raise ValueError(
                 "narration_audio: total_jobs does not "
                 "match Main + Hook + Suspense/Resolution jobs."
