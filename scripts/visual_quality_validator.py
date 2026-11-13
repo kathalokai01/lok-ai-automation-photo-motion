@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from production_events import record_provider_attempt
 
 from gemini_http import retry_after_seconds
 from PIL import Image, ImageStat
@@ -71,6 +72,7 @@ def _vision_check(
     api_key: str,
     timeout: int,
     reference_image_paths: list[Path] | None = None,
+    scene_id: str = "",
 ) -> dict:
     try:
         image_bytes = image_path.read_bytes()
@@ -169,7 +171,14 @@ def _vision_check(
 
     payload = None
     last_http_error = None
+    image_sha = hashlib.sha256(image_bytes).hexdigest()
     for attempt in range(1, VISION_HTTP_MAX_ATTEMPTS + 1):
+        attempt_id = f"vision:{scene_id or image_sha[:12]}:{image_sha[:12]}:{attempt}"
+        response_received = False
+        record_provider_attempt(
+            "gemini_vision", model, "request_started", True,
+            scene_id=scene_id, attempt_id=attempt_id,
+        )
         try:
             response = requests.post(
                 endpoint,
@@ -177,12 +186,33 @@ def _vision_check(
                 json=request_body,
                 timeout=timeout,
             )
+            response_received = True
+            status = int(response.status_code)
+            if status >= 400:
+                record_provider_attempt(
+                    "gemini_vision", model, "request_failed", True,
+                    scene_id=scene_id, attempt_id=attempt_id,
+                    http_status=status, error=str(response.text or "")[:500],
+                )
+            else:
+                record_provider_attempt(
+                    "gemini_vision", model, "response_received", True,
+                    scene_id=scene_id, attempt_id=attempt_id,
+                    http_status=status,
+                )
             response.raise_for_status()
             payload = response.json()
             break
         except requests.RequestException as exc:
             last_http_error = exc
             status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status is None or status < 400:
+                record_provider_attempt(
+                    "gemini_vision", model,
+                    "response_received_validation_failed" if response_received else "request_failed",
+                    True, scene_id=scene_id, attempt_id=attempt_id,
+                    error=f"{type(exc).__name__}: {exc}", http_status=status,
+                )
             transient_transport = isinstance(
                 exc, (requests.Timeout, requests.ConnectionError)
             )
@@ -203,6 +233,11 @@ def _vision_check(
             )
             time.sleep(delay)
         except ValueError as exc:
+            record_provider_attempt(
+                "gemini_vision", model, "response_received_validation_failed", True,
+                scene_id=scene_id, attempt_id=attempt_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             raise VisionVerificationUnavailable(
                 "Gemini vision verification returned invalid JSON."
             ) from exc
@@ -269,6 +304,10 @@ def _vision_check(
             "Gemini vision verification omitted character_consistency boolean."
         )
 
+    record_provider_attempt(
+        "gemini_vision", model, "accepted", True,
+        scene_id=scene_id, attempt_id=attempt_id,
+    )
     issues = result.get("issues", [])
     if not isinstance(issues, list):
         issues = [_clean(issues)] if issues else []
@@ -294,6 +333,7 @@ def validate_scene_image(
     api_key: str | None = None,
     timeout: int = 30,
     reference_image_paths: list[str | Path] | None = None,
+    scene_id: str = "",
 ) -> dict:
     """Return accepted quality evidence; never claim semantic success without vision."""
     path = Path(image_path)
@@ -322,6 +362,7 @@ def validate_scene_image(
             vision = _vision_check(
                 path, prompt, model, key, max(10, min(30, int(timeout))),
                 [Path(value) for value in (reference_image_paths or [])[:2]],
+                scene_id=clean(scene_id),
             )
         except VisionVerificationUnavailable:
             raise
