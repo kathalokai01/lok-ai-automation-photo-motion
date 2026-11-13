@@ -880,6 +880,54 @@ def _merge_progress_document(existing: dict, incoming: dict) -> dict | None:
     return merged
 
 
+def _copy_verified_progress_artifacts(document: dict, source: Path, output: Path) -> int:
+    """Restore individual files referenced by resumable records after SHA256 verification."""
+    path_keys = ("image_path", "audio_path", "video_path", "video", "file", "path", "output")
+    hash_keys = ("image_sha256", "audio_sha256", "video_sha256", "sha256", "file_sha256")
+    copied = 0
+    stack = [document]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            raw_path = next((value.get(key) for key in path_keys if isinstance(value.get(key), str) and value.get(key).strip()), None)
+            expected_hash = next((value.get(key) for key in hash_keys if isinstance(value.get(key), str) and re.fullmatch(r"[a-fA-F0-9]{64}", value.get(key).strip())), None)
+            if raw_path and expected_hash:
+                relative = Path(raw_path.replace("\\", "/"))
+                if not relative.is_absolute() and ".." not in relative.parts:
+                    parts = list(relative.parts)
+                    if parts and parts[0].casefold() == "output":
+                        parts = parts[1:]
+                    if parts:
+                        source_path = source.joinpath(*parts)
+                        destination_path = output.joinpath(*parts)
+                        try:
+                            if (
+                                source_path.is_file()
+                                and not source_path.is_symlink()
+                                and _sha256_file(source_path).casefold() == expected_hash.casefold()
+                            ):
+                                if destination_path.is_symlink():
+                                    continue
+                                if destination_path.is_file():
+                                    if _sha256_file(destination_path).casefold() == expected_hash.casefold():
+                                        pass
+                                    else:
+                                        continue
+                                else:
+                                    destination_path.parent.mkdir(parents=True, exist_ok=True)
+                                    shutil.copy2(source_path, destination_path)
+                                    if _sha256_file(destination_path).casefold() != expected_hash.casefold():
+                                        destination_path.unlink(missing_ok=True)
+                                        continue
+                                    copied += 1
+                        except (OSError, RuntimeError, ValueError):
+                            continue
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return copied
+
+
 def merge_progress_checkpoints(source: Path, output: Path) -> int:
     roots = (
         "checkpoints",
@@ -915,6 +963,7 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
             )
             if not has_stage_identity:
                 continue
+            copied += _copy_verified_progress_artifacts(data, source, output)
             relative = candidate.relative_to(source)
             destination = output / relative
             if not destination.exists():
