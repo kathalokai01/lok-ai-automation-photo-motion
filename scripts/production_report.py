@@ -97,7 +97,7 @@ def sound_quality_summary(sound, validation):
   "music_provider":music_track.get("provider") or music_track.get("generation") or "local_synthesis",
   "music_loudness":music_track.get("loudness"),
   "ambient_track_status":ambient_track.get("status","missing"),
-  "sfx_cue_count":len(sfx_rows) if sfx_rows else sound.get("sfx_cue_count",0),
+  "sfx_cue_count":validation.get("cue_count",len(sfx_rows) if sfx_rows else sound.get("sfx_cue_count",0)),\n  "sfx_scenes_without_cues":validation.get("scenes_without_sfx"),
   "sfx_validation_status":validation.get("status","missing"),
   "sfx_invalid_cues":validation.get("invalid_cues"),
   "sfx_timing_errors":validation.get("timing_errors"),
@@ -138,7 +138,7 @@ def main():
   and (not sfx_enabled or (
    sound.get("status")=="completed"
    and sfx_validation.get("status")=="completed"
-   and int(sfx_validation.get("failed_checks",0) or 0)==0
+   and int(sfx_validation.get("scenes_without_sfx",1) or 0)==0\n   and int(sfx_validation.get("cue_count",0) or 0)>0
   ))
  )
  stages={}
