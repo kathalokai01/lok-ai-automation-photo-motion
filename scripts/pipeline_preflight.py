@@ -1428,11 +1428,15 @@ def validate_existing_manifest(
 
             if (
                 type(completed_jobs) is not int
-                or completed_jobs != len(raw_jobs)
+                or (
+                    completed_jobs != total_jobs
+                    if retryable_narration_audio
+                    else completed_jobs != len(raw_jobs)
+                )
             ):
                 raise ValueError(
                     "narration_audio: summary completed_jobs "
-                    "does not match jobs."
+                    "does not match the authoritative job count."
                 )
 
     else:
