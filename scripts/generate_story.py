@@ -57,7 +57,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v41-verified-short-revision-real-merge-only"
+VERSION = "story-builder-v42-revise-all-151-180-short-parts"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -288,7 +288,7 @@ def _balanced_unit_partition(
                         continue
                     if amount < SHORT_MIN and not allow_final_short:
                         continue
-                elif not SHORT_MIN <= amount <= SHORT_MAX:
+                elif not SHORT_MIN <= amount <= SHORT_HARD_MAX:
                     continue
 
                 segment_cost = abs(amount - SHORT_TARGET)
@@ -526,7 +526,7 @@ def _partition_short_story(
                 scenes_min,
                 scenes_max,
                 allow_final_short=False,
-                final_max=SHORT_MAX,
+                final_max=SHORT_HARD_MAX,
             )
 
             if groups is not None:
@@ -1498,35 +1498,53 @@ def _partition_and_revise(
             scenes_range,
         )
 
-        # A real final merge may still be above 150 words. It is allowed up
-        # to 239 only after a changed-text, semantically verified revision.
-        if merged_fallback and word_count(groups[-1]) > SHORT_MAX:
-            before_text = groups[-1]
+        # Every 151-180 word Part needs a completed revision attempt;
+        # the final merged Part may reach 239 only with semantic evidence.
+        for index, part_text in enumerate(list(groups)):
+            part_number = index + 1
+            amount = word_count(part_text)
+            if amount <= SHORT_MAX:
+                continue
+            existing = next((
+                row for row in revision_summaries
+                if row.get("part") == part_number
+                and row.get("after_sha256") == sha256(part_text)
+                and verify_revision_evidence(
+                    row.get("revision_evidence"), part_text
+                )
+            ), None)
+            if existing:
+                continue
+            is_final_merged = bool(
+                merged_fallback and part_number == len(groups)
+            )
             revised, attempts, evidence = repair_short_part(
-                before_text,
-                len(groups),
+                part_text,
+                part_number,
                 corrected_story,
                 title,
                 model,
                 api_key,
-                final_merged=True,
+                final_merged=is_final_merged,
                 return_evidence=True,
             )
-            groups[-1] = revised
+            groups[index] = revised
             revision_summaries.append({
-                "part": len(groups),
+                "part": part_number,
                 "attempted": True,
-                "before_words": word_count(before_text),
+                "before_words": amount,
                 "after_words": word_count(revised),
-                "before_sha256": sha256(before_text),
+                "before_sha256": sha256(part_text),
                 "after_sha256": sha256(revised),
                 "revision_evidence": evidence,
                 "attempts": attempts,
-                "text_changed": sha256(before_text) != sha256(revised),
+                "text_changed": sha256(part_text) != sha256(revised),
                 "text_preserved_semantically": bool(
                     evidence and evidence.get("semantic_preservation_verified") is True
                 ),
             })
+
+        if revision_summaries:
             corrected_story = "\n\n".join(groups)
             total_words = word_count(corrected_story)
 
@@ -1661,7 +1679,7 @@ def _partition_and_revise(
         "pre_merge_selected_parts": pre_merge_part_count,
         "merge_reduced_part_count": (pre_merge_part_count - selected_count) if merged_fallback else 0,
         "final_part_merged": bool(merged_fallback),
-        "exact_source_text_preserved": True,
+        "exact_source_text_preserved": not bool(revision_summaries),\n        "semantic_preservation_verified": all(row.get("text_preserved_semantically") is True for row in revision_summaries) if revision_summaries else True,
     }
     return groups, policy, selection
 
