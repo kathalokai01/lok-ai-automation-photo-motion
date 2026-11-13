@@ -1043,6 +1043,24 @@ def build_effect_plan(
         )
         if "parallax" in choices and depth is None:
             choices.remove("parallax")
+
+        # When the user explicitly enables 2.5D parallax, a verified AI depth
+        # map must not be discarded by the random dynamic-effect planner.
+        # Long scenes remain on safe 2D motion because the renderer's validated
+        # parallax duration limit still applies.
+        force_depth_parallax = bool(
+            settings.get("parallax_enabled", False)
+            and depth is not None
+            and item["duration"] <= MAX_PARALLAX_SECONDS
+            and "parallax" in choices
+        )
+        if force_depth_parallax:
+            selected = "parallax"
+            plan[scene_id] = selected
+            recent = recent_by_part.setdefault(item["part"], [])
+            recent_by_part[item["part"]] = (recent + [selected])[-4:]
+            continue
+
         recent = recent_by_part.setdefault(item["part"], [])
         recent_effects = set(recent[-4:])
         available = [effect for effect in choices if effect not in recent_effects]
