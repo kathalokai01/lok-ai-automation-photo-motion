@@ -42,7 +42,7 @@ PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 ALIGNMENT_CACHE = CAPTION_DIR / "word_alignment_cache.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v64-json-path-safe-manifest"
+VERSION = "burn-captions-v65-low-position-vivid-colour"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 1000
 FPS_TOLERANCE = 0.03
@@ -1374,14 +1374,12 @@ def contrast_style(
 
     palette = PALETTES[token[0] % len(PALETTES)]
 
-    if average >= 145:
-        primary = palette["dark"]
-        outline = "&H00FFFFFF"
-        mode = "dark-on-light"
-    else:
-        primary = palette["light"]
-        outline = "&H00101010"
-        mode = "light-on-dark"
+    # Use vivid palette colours on both bright and dark scenes. A thin,
+    # dark navy outline and soft shadow preserve readability without the
+    # heavy black-only border that obscures the caption colour.
+    primary = palette["light"]
+    outline = "&H00201808"
+    mode = "vivid-colour-with-dark-outline"
 
     spread = max(samples) - min(samples)
     length_factor = 0.90 if len(text) > 90 else 1.0
@@ -1396,7 +1394,7 @@ def contrast_style(
         "outline_width": 3 if spread < 90 else 4,
         "shadow": 1,
         "alignment": 2,
-        "margin_vertical": 64 if height > width else 42,
+        "margin_vertical": 26 if height > width else 24,
         "length_factor": length_factor,
     }
 
