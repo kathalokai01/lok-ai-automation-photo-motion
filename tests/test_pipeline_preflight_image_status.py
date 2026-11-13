@@ -41,10 +41,6 @@ class ManifestRowStatusTests(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CompletedTTSIntegrityRetryTests(unittest.TestCase):
     def setUp(self):
         self.manifest = {
@@ -89,3 +85,7 @@ class CompletedTTSIntegrityRetryTests(unittest.TestCase):
                 self.manifest
             )
         )
+
+
+if __name__ == "__main__":
+    unittest.main()
