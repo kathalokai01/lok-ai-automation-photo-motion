@@ -1754,7 +1754,7 @@ def build_policy():
         "max_complete_rounds": MAX_RETRIES,
         "persistent_model_cursor": True,
         "quality_validation_enabled": IMAGE_QUALITY_VISION_ENABLED,
-        "quality_validation_mode": "advisory",
+        "quality_validation_mode": "mandatory",
         "technical_image_integrity_required": True,
         "quality_validation_model": IMAGE_QUALITY_VISION_MODEL,
         "quality_minimum_score": IMAGE_QUALITY_MIN_SCORE,
@@ -2576,7 +2576,7 @@ def main():
     log("BILLABLE PROVIDERS ALLOWED:", ALLOW_BILLABLE)
     log("FALLBACK ENABLED:", IMAGE_FALLBACK_ENABLED)
     log("PERSISTENT MODEL CURSOR:", MODEL_PROGRESS_STATE.get("cursor_key") or "first configured model")
-    log("QUALITY VALIDATION:", "Gemini Vision advisory" if IMAGE_QUALITY_VISION_ENABLED else "technical integrity only")
+    log("QUALITY VALIDATION:", "Gemini Vision mandatory" if IMAGE_QUALITY_VISION_ENABLED else "technical integrity only")
     log("MANDATORY IMAGE CHECKS: decode, format, dimensions, file size and SHA256")
     log("-" * 64)
 
@@ -2622,7 +2622,7 @@ def main():
     log(
         "All image files passed format, dimensions, integrity and SHA256 checks."
     )
-    log("All accepted images passed mandatory file-integrity checks; Gemini Vision is advisory.")
+    log("All accepted images passed mandatory file-integrity and Gemini Vision semantic checks.")
 
     return 0
 
