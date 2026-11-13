@@ -41,7 +41,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 20
+VERSION = 21
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -2048,23 +2048,46 @@ def merge_scene_chunks(
     concat_file = final_path.with_name(
         final_path.stem + ".concat.txt"
     )
+    padded_paths = []
 
     try:
+        # Add a short, measured breath gap before each chunk. This protects
+        # opening words and avoids stitching long clauses into one breathless
+        # stream. FFprobe measures the final padded audio downstream.
+        for index, path in enumerate(chunk_paths):
+            if not path.is_file():
+                raise RuntimeError(
+                    f"Audio chunk missing: {path.name}"
+                )
+            delay_ms = 180 if index == 0 else 140
+            padded = path.with_name(
+                path.stem + f".breathpad-{index + 1:03d}.mp3"
+            )
+            padded.unlink(missing_ok=True)
+            run_command(
+                [
+                    shutil.which("ffmpeg") or "ffmpeg",
+                    "-y", "-v", "error",
+                    "-i", path,
+                    "-af", f"adelay={delay_ms}|{delay_ms},afade=t=in:st=0:d=0.05",
+                    "-codec:a", "libmp3lame",
+                    "-q:a", "3",
+                    "-ar", "48000",
+                    padded,
+                ]
+            )
+            validate_audio(padded)
+            padded_paths.append(padded)
+
         with concat_file.open(
             "w", encoding="utf-8"
         ) as handle:
-            for path in chunk_paths:
-                if not path.is_file():
-                    raise RuntimeError(
-                        f"Audio chunk missing: {path.name}"
-                    )
-
+            for path in padded_paths:
                 escaped = str(
                     path.resolve()
                 ).replace("'", "'\\''")
-
                 handle.write(
-                    f"file '{escaped}'\n"
+                    f"file '{escaped}'\\n"
                 )
 
         run_command(
@@ -2076,9 +2099,6 @@ def merge_scene_chunks(
                 "-i", concat_file,
                 "-codec:a", "libmp3lame",
                 "-q:a", "3",
-                # Leading headroom prevents Hook opening words from being
-                # clipped by encoder/player startup; duration is re-probed.
-                "-af", "adelay=180|180,afade=t=in:st=0:d=0.05",
                 "-ar", "48000",
                 temporary,
             ]
@@ -2092,6 +2112,8 @@ def merge_scene_chunks(
     finally:
         temporary.unlink(missing_ok=True)
         concat_file.unlink(missing_ok=True)
+        for padded in padded_paths:
+            padded.unlink(missing_ok=True)
 
 
 def combine_part_audio(
