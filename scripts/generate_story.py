@@ -532,41 +532,8 @@ def _partition_short_story(
             if groups is not None:
                 return groups, part_count, False
 
-    # If the strict partition leaves a short tail, keep all complete story
-    # units in order and absorb that tail into the final Part. The final
-    # combined Part may contain up to 239 words; no sentence is discarded.
-    for units_source in variants:
-        for part_count in candidates:
-            units = list(units_source)
-            required = part_count * scenes_min
-
-            if len(units) < required:
-                try:
-                    units = _expand_to_scene_minimum(
-                        units,
-                        required,
-                    )
-                except RuntimeError as exc:
-                    last_errors.append(str(exc))
-                    continue
-
-            if len(units) > part_count * scenes_max:
-                continue
-
-            groups = _balanced_unit_partition(
-                units,
-                part_count,
-                scenes_min,
-                scenes_max,
-                allow_final_short=False,
-                final_max=SHORT_MERGED_MAX,
-            )
-
-            if groups is not None:
-                counts = [word_count(group) for group in groups]
-                if counts[-1] > SHORT_MAX and counts[-1] <= SHORT_MERGED_MAX:
-                    return groups, part_count, True
-
+    # A 151-239 word final Part is not automatically a merge exception.
+    # Only the later reduced-Part-count path may mark a real final merge.
     merged_candidates = [
         number for number in range(max(1, minimum_parts - 1), preferred_count)
         if number >= 1
@@ -1493,6 +1460,15 @@ def _partition_and_revise(
         )
 
     selected_count = len(groups)
+    pre_merge_part_count = (
+        preferred if mode == "short" else selected_count
+    )
+    if merged_fallback and not (
+        selected_count < pre_merge_part_count and selected_count >= 1
+    ):
+        raise RuntimeError(
+            "Final-Part merge exception requires a real reduction in Part count."
+        )
     if mode == "short":
         for number, part in enumerate(groups, 1):
             amount = word_count(part)
