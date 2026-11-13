@@ -179,6 +179,27 @@ class PhotoMotionAndCaptionTests(unittest.TestCase):
             self.assertTrue(samples)
             self.assertGreater(max(samples) - min(samples), 0.01, kind)
 
+    def test_scene_event_text_selects_matching_sfx(self):
+        examples = {
+            "vehicle": "A car engine starts and the vehicle drives past.",
+            "crowd": "A large crowd is talking in the street.",
+            "weather": "Heavy rain and thunder begin.",
+            "phone": "The phone starts ringing.",
+            "water": "Water flows down the river.",
+            "mystery": "A mysterious shadow appears.",
+            "ring": "A bell rings loudly.",
+            "heartbeat": "His heartbeat becomes faster.",
+            "footsteps": "Footsteps approach the door.",
+            "door": "She opens the door.",
+            "siren": "An ambulance siren sounds.",
+        }
+        for expected, prompt in examples.items():
+            selected = generate_sound_design.choose_sfx(
+                {"visual_prompt": prompt},
+                {"role": "main", "text": prompt},
+            )
+            self.assertEqual(selected, expected, prompt)
+
 
 class ProviderAccountingTests(unittest.TestCase):
     def test_cost_stays_unknown_without_provider_receipt(self):
