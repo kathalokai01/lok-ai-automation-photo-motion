@@ -21,7 +21,7 @@ AI_STORY_FILE = STORY_DIR / "ai_story.json"
 SOURCE_STORY_FILE = STORY_DIR / "story.json"
 OUTPUT_FILE = STORY_DIR / "character_bible.json"
 
-VERSION = "character-bible-v9-full-story-physical-evidence-scene-map"
+VERSION = "character-bible-v10-repeated-proper-name-extraction"
 
 ROLE_FIELDS = (
     ("hook_scene", "hook"),
@@ -545,11 +545,36 @@ def collect_story_text(story: dict | None) -> str:
 
 def extract_story_names(text: str) -> list[str]:
     candidates = set()
+    source = clean(text)
     for pattern in HINDI_NAME_PATTERNS + ENGLISH_NAME_PATTERNS:
-        for match in pattern.findall(text):
+        for match in pattern.findall(source):
             name = normalize_name(match)
             if valid_name(name):
                 candidates.add(name)
+
+    # Stories frequently introduce English character names directly
+    # ("Ayaan entered..." / "Vikrant Mehra called...") without "named".
+    # Recover repeated proper-name forms while excluding common sentence
+    # openers and generic words. Requiring repetition reduces false cast IDs.
+    proper_pattern = re.compile(
+        r"\\b[A-Z][a-z]{2,}(?:[-'][A-Za-z0-9]+)?"
+        r"(?:\\s+[A-Z][a-z]{2,}){0,2}\\b"
+    )
+    for match in proper_pattern.finditer(source):
+        name = normalize_name(match.group(0))
+        if not valid_name(name):
+            continue
+        first = name.split()[0].casefold()
+        if first in GENERIC_ENGLISH:
+            continue
+        occurrences = len(re.findall(
+            r"(?<![\\w])" + re.escape(name) + r"(?![\\w])",
+            source,
+            flags=re.IGNORECASE,
+        ))
+        if occurrences >= 2:
+            candidates.add(name)
+
     return sorted(candidates, key=str.casefold)
 
 
@@ -1631,6 +1656,15 @@ def build_bible(
         warnings.append(
             "No reliable character names or explicit cast records were found."
         )
+        if any(
+            extract_story_names(collect_story_text(candidate))
+            for candidate in (story, supplemental_story)
+            if isinstance(candidate, dict)
+        ) or any(extract_explicit_names(row) for row in scenes):
+            raise RuntimeError(
+                "Character Bible is empty although named characters are present "
+                "in the complete story or scene narration."
+            )
 
     if any(item["gender"] == "unspecified" for item in characters):
         warnings.append(
