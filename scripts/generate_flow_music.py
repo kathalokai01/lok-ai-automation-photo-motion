@@ -17,7 +17,8 @@ from pathlib import Path
 import requests
 
 from gemini_http import retry_after_seconds
-from music_provider_client import generate_music, MusicProviderError
+from music_provider_client import generate_music
+from production_events import record_provider_attempt, MusicProviderError
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_FILE = ROOT / "Input" / "topic.txt"
@@ -975,6 +976,11 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                 )
                 continue
 
+            attempt_id = f"{role}:{provider}:{role_signature[:12]}"
+            provider_response_received = False
+            provider_billable = provider in {"eleven_music", "stable_audio"} or (
+                provider == "lyria" and truthy(config.get("MUSIC_ALLOW_PAID", False), False)
+            )
             try:
                 if provider in {"eleven_music", "stable_audio"}:
                     if not truthy(config.get("MUSIC_ALLOW_PAID", False), False):
@@ -989,13 +995,22 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                     )
                     if not os.getenv(required_key, "").strip():
                         raise MusicProviderError(f"{required_key} is missing.")
-                    # Count the paid request attempt even when the provider returns HTTP error.
+                    # Count and journal the paid request attempt even on HTTP failure.
                     PAID_PROVIDER_CALLS += 1
+                    record_provider_attempt(
+                        provider, model, "request_started", True,
+                        scene_id=role, attempt_id=attempt_id,
+                    )
                     generate_music(
                         provider,
                         prompts[role],
                         max(MIN_AUDIO_DURATION, duration),
                         source,
+                    )
+                    provider_response_received = True
+                    record_provider_attempt(
+                        provider, model, "response_received", True,
+                        scene_id=role, attempt_id=attempt_id,
                     )
                     source_duration = probe_audio(source, MIN_AUDIO_DURATION)
                     API_CALLS += 1
@@ -1005,16 +1020,42 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                         raise RuntimeError(
                             "GEMINI_API_KEY/GOOGLE_API_KEY is missing for Lyria"
                         )
+                    record_provider_attempt(
+                        provider, model, "request_started", provider_billable,
+                        scene_id=role, attempt_id=attempt_id,
+                    )
                     source_duration = request_music(
                         api_key, model, prompts[role], source
                     )
+                    provider_response_received = True
+                    record_provider_attempt(
+                        provider, model, "response_received", provider_billable,
+                        scene_id=role, attempt_id=attempt_id,
+                    )
 
                 selected_provider = provider
+                record_provider_attempt(
+                    provider, model, "accepted", provider_billable,
+                    scene_id=role, attempt_id=attempt_id,
+                )
                 log("MUSIC PROVIDER SUCCESS:", provider, role)
                 break
 
             except Exception as provider_error:
                 error_text = str(provider_error)
+                if provider in {"eleven_music", "stable_audio"} or (
+                    provider == "lyria" and api_key
+                ):
+                    record_provider_attempt(
+                        provider,
+                        model,
+                        "response_received_validation_failed" if provider_response_received else "request_failed",
+                        provider_billable,
+                        scene_id=role,
+                        attempt_id=attempt_id,
+                        error=error_text,
+                        http_status=getattr(provider_error, "status_code", None),
+                    )
                 provider_errors.append(f"{provider}: {error_text[:300]}")
                 lowered = error_text.lower()
                 permanent_failure = any(marker in lowered for marker in (
