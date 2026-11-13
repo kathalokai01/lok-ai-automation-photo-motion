@@ -1883,6 +1883,15 @@ def main() -> int:
                     if used_depth else None
                 ),
                 "depth_map_available": depth is not None,
+                "depth_fallback_reason": (
+                    None if used_depth is not None
+                    else (
+                        "depth_map_unavailable_or_disabled"
+                        if depth is None
+                        else "2d_effect_selected_by_configured_style_or_variation"
+                    )
+                ),
+                "effect_mode": "2.5d_depth_parallax" if used_depth is not None else "2d_zoom_pan",
                 "depth_model": (
                     used_depth["model"] if used_depth else None
                 ),
