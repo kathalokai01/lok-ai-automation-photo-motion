@@ -2017,34 +2017,56 @@ def validate_png(
 
 
 def load_previous_progress() -> dict:
+    """Load checkpoint progress and reconstruct missing records from image manifests."""
     previous = read_json(CHECKPOINT_FILE)
-
-    if not isinstance(previous, dict):
-        return {}
-
-    rows = previous.get("scene_progress", [])
-
-    if not isinstance(rows, list):
-        return {}
-
+    rows = (
+        previous.get("scene_progress", [])
+        if isinstance(previous, dict) else []
+    )
     result = {}
 
-    for row in rows:
+    def merge_row(row, source_name):
         if not isinstance(row, dict):
-            continue
-
+            return
         scene_id = clean(row.get("scene_id"))
         signature = clean(row.get("prompt_signature"))
+        image_hash = clean(row.get("image_sha256"))
+        if (
+            not scene_id or not signature
+            or not re.fullmatch(r"[a-fA-F0-9]{64}", image_hash)
+            or clean(row.get("status")).lower() not in {"generated", "existing", "completed"}
+            or not clean(row.get("image_path"))
+            or not clean(row.get("source_scene_signature"))
+            or not clean(row.get("source_fingerprint"))
+            or not clean(row.get("config_signature"))
+        ):
+            return
+        key = (scene_id, signature)
+        existing = result.get(key)
+        if existing is None:
+            result[key] = dict(row)
+            result[key]["progress_source"] = source_name
+            return
+        # Merge manifest metadata into the progress row; current job signatures
+        # and on-disk SHA256 are still checked by verified_previous_image().
+        merged = dict(existing)
+        merged.update(row)
+        merged["progress_source"] = f"{existing.get('progress_source', 'progress')}+{source_name}"
+        result[key] = merged
 
-        if scene_id and signature:
-            key = (scene_id, signature)
+    if isinstance(rows, list):
+        for row in rows:
+            merge_row(row, "visual_jobs_progress")
 
-            if key in result:
-                raise RuntimeError(
-                    f"Duplicate previous progress record: {scene_id}."
-                )
-
-            result[key] = row
+    for manifest_name in ("image_manifest.json", "image_generation_manifest.json"):
+        manifest = read_json(VISUALS_DIR / manifest_name)
+        if not isinstance(manifest, dict):
+            continue
+        manifest_rows = manifest.get("scenes", [])
+        if not isinstance(manifest_rows, list):
+            continue
+        for row in manifest_rows:
+            merge_row(row, manifest_name)
 
     return result
 
