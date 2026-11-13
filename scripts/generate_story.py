@@ -57,7 +57,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v40-locked-scene-source-hashes"
+VERSION = "story-builder-v41-verified-short-revision-real-merge-only"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -1446,6 +1446,49 @@ def _partition_and_revise(
             story_length=story_length,
             config=None,
         )
+
+        revision_summaries = []
+        # A one-Part SHORT story that is above the 150-word preferred ceiling
+        # must be revised before partitioning. Otherwise the old flow could
+        # classify a 151-239 word single Part as a "merge" despite having no
+        # preceding Part to merge into.
+        if preferred == 1 and (
+            total_words < SHORT_MIN or total_words > SHORT_MAX
+        ):
+            before_text = corrected_story
+            corrected_story, attempts, evidence = repair_short_part(
+                corrected_story,
+                1,
+                corrected_story,
+                title,
+                model,
+                api_key,
+                final_merged=False,
+                return_evidence=True,
+            )
+            revision_summaries.append({
+                "part": 1,
+                "attempted": True,
+                "before_words": word_count(before_text),
+                "after_words": word_count(corrected_story),
+                "before_sha256": sha256(before_text),
+                "after_sha256": sha256(corrected_story),
+                "revision_evidence": evidence,
+                "attempts": attempts,
+                "text_changed": sha256(before_text) != sha256(corrected_story),
+                "text_preserved_semantically": bool(
+                    evidence and evidence.get("semantic_preservation_verified") is True
+                ),
+            })
+            total_words = word_count(corrected_story)
+            preferred = select_final_part_count(
+                total_corrected_words=total_words,
+                format_type=mode,
+                parts_specification=parts_specification,
+                story_length=story_length,
+                config=None,
+            )
+
         groups, _selected_count, merged_fallback = _partition_short_story(
             corrected_story,
             preferred,
@@ -1453,6 +1496,38 @@ def _partition_and_revise(
             maximum_parts,
             scenes_range,
         )
+
+        # A real final merge may still be above 150 words. It is allowed up
+        # to 239 only after a changed-text, semantically verified revision.
+        if merged_fallback and word_count(groups[-1]) > SHORT_MAX:
+            before_text = groups[-1]
+            revised, attempts, evidence = repair_short_part(
+                before_text,
+                len(groups),
+                corrected_story,
+                title,
+                model,
+                api_key,
+                final_merged=True,
+                return_evidence=True,
+            )
+            groups[-1] = revised
+            revision_summaries.append({
+                "part": len(groups),
+                "attempted": True,
+                "before_words": word_count(before_text),
+                "after_words": word_count(revised),
+                "before_sha256": sha256(before_text),
+                "after_sha256": sha256(revised),
+                "revision_evidence": evidence,
+                "attempts": attempts,
+                "text_changed": sha256(before_text) != sha256(revised),
+                "text_preserved_semantically": bool(
+                    evidence and evidence.get("semantic_preservation_verified") is True
+                ),
+            })
+            corrected_story = "\n\n".join(groups)
+            total_words = word_count(corrected_story)
 
     if not groups or clean("\n\n".join(groups)) != clean(corrected_story):
         raise RuntimeError(
@@ -1501,6 +1576,22 @@ def _partition_and_revise(
         selected_parts=selected_count,
     )
     policy.update({
+        "revision_attempted": bool(revision_summaries),
+        "revision_attempt_count": sum(
+            len(row.get("attempts", [])) for row in revision_summaries
+        ),
+        "revision_outcome": (
+            "verified_revision" if revision_summaries
+            else "not_required_exact_partition"
+        ),
+        "revision_parts": [
+            row["part"] for row in revision_summaries
+        ],
+        "revision_evidence_parts": [
+            row["part"] for row in revision_summaries
+            if isinstance(row.get("revision_evidence"), dict)
+        ],
+        "revision_results": revision_summaries,
         "requested_parts_minimum": minimum_parts,
         "requested_parts_maximum": maximum_parts,
         "final_merge_reduced_part_count": bool(
