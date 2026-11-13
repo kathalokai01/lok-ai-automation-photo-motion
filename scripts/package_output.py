@@ -775,6 +775,10 @@ def validate_metadata(mode: str, title: str) -> tuple[Path, Path, Path, dict]:
         fail("Metadata title does not match the story title")
     if len(text_title) > 100 or len(description) > 5000:
         fail("Metadata exceeds YouTube title/description limits")
+    if "अस्वीकरण (Disclaimer):" not in description:
+        fail("YouTube description is missing the required story disclaimer")
+    if "© Katha Lok AI" not in description:
+        fail("YouTube description is missing the Katha Lok AI copyright notice")
 
     data = read_json(json_path)
     if clean(data.get("status")).lower() not in SUCCESS:
