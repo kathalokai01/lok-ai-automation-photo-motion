@@ -1007,8 +1007,8 @@ def is_retryable_in_progress_image_manifest(data: Any) -> bool:
     jobs = visual_jobs.get("total_jobs")
     if (
         type(total) is not int or total <= 0
-        or required != total
-        or jobs != total
+        or type(required) is not int or required != total
+        or type(jobs) is not int or jobs != total
         or not isinstance(rows, list) or len(rows) != total
     ):
         return False
