@@ -2301,6 +2301,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
         )
 
         provider_source = (ROOT / "scripts" / "free_image_generator.py").read_text(encoding="utf-8")
+        vision_source = (ROOT / "scripts" / "visual_quality_validator.py").read_text(encoding="utf-8")
         tts_source = (ROOT / "scripts" / "generate_tts.py").read_text(encoding="utf-8")
         music_source = (ROOT / "scripts" / "generate_flow_music.py").read_text(encoding="utf-8")
         llm_source = (ROOT / "scripts" / "llm_provider_client.py").read_text(encoding="utf-8")
@@ -2312,6 +2313,7 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             "provider_attempt_accounting",
             (
                 "record_provider_attempt" in provider_source
+                and "record_provider_attempt" in vision_source
                 and "record_provider_attempt" in tts_source
                 and "record_provider_attempt" in music_source
                 and "record_provider_attempt" in llm_source
