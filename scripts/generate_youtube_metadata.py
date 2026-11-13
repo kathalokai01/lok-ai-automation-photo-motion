@@ -40,7 +40,7 @@ OUTPUT_TAGS = OUTPUT_DIR / "youtube_tags.txt"
 OUTPUT_TEXT = ROOT / "output" / "youtube_metadata.txt"
 CHECKPOINT = ROOT / "output" / "checkpoints" / "youtube_metadata.json"
 
-VERSION = "youtube-metadata-v27-canonical-story-title-lock"
+VERSION = "youtube-metadata-v28-description-legal-block"
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 180
 MAX_TITLE_CHARS = 100
