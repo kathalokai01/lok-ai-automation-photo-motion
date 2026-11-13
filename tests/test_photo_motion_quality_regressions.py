@@ -15,6 +15,7 @@ from scripts import photo_motion
 from scripts import prepare_captions
 from scripts import generate_sound_design
 from scripts import visual_quality_validator
+from scripts.story_length_policy import verify_final_merge_evidence
 
 
 class CheckpointRestoreTests(unittest.TestCase):
@@ -137,6 +138,33 @@ class PhotoMotionAndCaptionTests(unittest.TestCase):
             samples = list(generate_sound_design.sfx_samples(kind, duration=0.25, seed=7))
             self.assertTrue(samples)
             self.assertGreater(max(samples) - min(samples), 0.01, kind)
+
+
+class StoryMergeEvidenceTests(unittest.TestCase):
+    def test_exact_final_merge_evidence_is_required_and_verified(self):
+        final_text = " ".join(f"word{i}" for i in range(192))
+        digest = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
+        evidence = {
+            "final_part_merged": True,
+            "verified": True,
+            "method": "exact_adjacent_final_part_merge_from_complete_sentence_units",
+            "text_preserved_exactly": True,
+            "pre_merge_selected_parts": 2,
+            "merge_reduced_part_count": 1,
+            "final_part_count": 1,
+            "final_part_number": 1,
+            "final_part_word_count": 192,
+            "final_part_sha256": digest,
+            "corrected_story_sha256": "a" * 64,
+            "reconstructed_story_sha256": "a" * 64,
+        }
+        self.assertTrue(verify_final_merge_evidence(
+            evidence, final_text, part_number=1, actual_parts=1, policy=evidence,
+        ))
+        evidence["text_preserved_exactly"] = False
+        self.assertFalse(verify_final_merge_evidence(
+            evidence, final_text, part_number=1, actual_parts=1, policy=evidence,
+        ))
 
 
 class VisualQualityGateTests(unittest.TestCase):
