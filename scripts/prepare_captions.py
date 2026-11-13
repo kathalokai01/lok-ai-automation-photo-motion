@@ -250,6 +250,19 @@ HINGLISH_ENGLISH_WORDS = {
     "म्यूजिक": "music", "साउंड": "sound", "फाइल": "file",
     "सीन": "scene", "कैप्शन": "caption", "फोटो": "photo",
     "लिफ्ट": "lift", "एड": "ad", "ऐड": "add",
+    "स्मार्टफोन": "smartphone", "टैबलेट": "tablet", "टीवी": "TV",
+    "रेडियो": "radio", "प्लेन": "plane", "एयरपोर्ट": "airport",
+    "स्टेशन": "station", "हॉस्पिटल": "hospital", "अस्पताल": "hospital",
+    "होटल": "hotel", "रेस्टोरेंट": "restaurant", "कंपनी": "company",
+    "बैंक": "bank", "बटन": "button", "स्क्रीन": "screen",
+    "माउस": "mouse", "मॉनिटर": "monitor", "बैटरी": "battery",
+    "चार्जर": "charger", "रिमोट": "remote", "सिग्नल": "signal",
+    "नेटवर्क": "network", "लोकेशन": "location", "सिस्टम": "system",
+    "प्लान": "plan", "टाइम": "time", "मिनट": "minute",
+    "सेकंड": "second", "डिजिटल": "digital", "प्रोजेक्ट": "project",
+    "इमेज": "image", "एआई": "AI", "ईमेल": "email",
+    "पासवर्ड": "password", "यूज़र": "user", "लॉगिन": "login",
+    "डाउनलोड": "download", "अपलोड": "upload",
 }
 
 
