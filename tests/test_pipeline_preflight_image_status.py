@@ -110,8 +110,9 @@ class InProgressImageManifestRetryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             original_out = pipeline_preflight.OUT
             try:
-                pipeline_preflight.OUT = Path(temporary)
-                visual_dir = Path(temporary) / "visuals"
+                output_dir = Path(temporary) / "output"
+                pipeline_preflight.OUT = output_dir
+                visual_dir = output_dir / "visuals"
                 visual_dir.mkdir(parents=True)
                 source = "a" * 64
                 config = "b" * 64
@@ -125,9 +126,13 @@ class InProgressImageManifestRetryTests(unittest.TestCase):
                         "config_signature": config,
                         "format": "short",
                         "total_jobs": 2,
-                        "scene_order": jobs,
+                        "scene_order": "part_then_hook_then_main",
+                        "jobs_file": "output/visuals/visual_jobs.json",
                     }),
                     encoding="utf-8",
+                )
+                (visual_dir / "visual_jobs.json").write_text(
+                    json.dumps(jobs), encoding="utf-8"
                 )
                 manifest = {
                     "status": "in_progress",
@@ -157,8 +162,9 @@ class InProgressImageManifestRetryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             original_out = pipeline_preflight.OUT
             try:
-                pipeline_preflight.OUT = Path(temporary)
-                visual_dir = Path(temporary) / "visuals"
+                output_dir = Path(temporary) / "output"
+                pipeline_preflight.OUT = output_dir
+                visual_dir = output_dir / "visuals"
                 visual_dir.mkdir(parents=True)
                 (visual_dir / "visual_jobs_manifest.json").write_text(
                     json.dumps({
@@ -166,8 +172,13 @@ class InProgressImageManifestRetryTests(unittest.TestCase):
                         "config_signature": "b" * 64,
                         "format": "short",
                         "total_jobs": 1,
-                        "scene_order": [{"scene_id": "part_01_scene_01"}],
+                        "scene_order": "part_then_hook_then_main",
+                        "jobs_file": "output/visuals/visual_jobs.json",
                     }),
+                    encoding="utf-8",
+                )
+                (visual_dir / "visual_jobs.json").write_text(
+                    json.dumps([{"scene_id": "part_01_scene_01"}]),
                     encoding="utf-8",
                 )
                 manifest = {
