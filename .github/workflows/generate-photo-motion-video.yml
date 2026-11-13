@@ -320,7 +320,7 @@ jobs:
           python scripts/checkpoint_manager.py restore \
             --repository "$GITHUB_REPOSITORY" \
             --workflow generate-photo-motion-video.yml \
-            --branch "$GITHUB_REF_NAME" \
+            --branch all \
             --limit 0 \
             --input-hash "$CURRENT_INPUT_HASH" \
             --output output
