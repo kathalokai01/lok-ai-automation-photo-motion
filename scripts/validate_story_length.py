@@ -34,6 +34,7 @@ from story_length_policy import (
     normalize_format,
     sha256_text,
     verify_revision_evidence,
+    verify_final_merge_evidence,
     word_count,
     validate_story_quality_report,
 )
@@ -47,7 +48,7 @@ AI_STORY_FILE = STORY_DIR / "ai_story.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 REPORT_FILE = STORY_DIR / "story_length_validation.json"
 
-REPORT_VERSION = "story-length-validation-v16-ai-story-quality-gate"
+REPORT_VERSION = "story-length-validation-v17-verified-final-merge-evidence"
 
 MAX_PARTS = 1000
 MAX_SCENES_PER_PART = 500
@@ -380,6 +381,17 @@ def verify_short_part(
     amount = word_count(narration)
     final_part = part_number == parts_count
     merged = final_part and part.get("final_part_merged") is True
+
+    if merged and not verify_final_merge_evidence(
+        part.get("merge_evidence"),
+        narration,
+        part_number=part_number,
+        actual_parts=parts_count,
+        policy=part.get("merge_evidence"),
+    ):
+        fail(
+            f"SHORT Part {part_number} merge exception has no valid exact-merge evidence."
+        )
 
     if amount < SHORT_MIN_WORDS_PER_PART:
         fail(
