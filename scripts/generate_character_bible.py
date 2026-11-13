@@ -21,7 +21,7 @@ AI_STORY_FILE = STORY_DIR / "ai_story.json"
 SOURCE_STORY_FILE = STORY_DIR / "story.json"
 OUTPUT_FILE = STORY_DIR / "character_bible.json"
 
-VERSION = "character-bible-v12-devanagari-and-scene-name-detection"
+VERSION = "character-bible-v13-filter-prompt-words-and-safe-gender-evidence"
 
 ROLE_FIELDS = (
     ("hook_scene", "hook"),
@@ -109,6 +109,7 @@ STOP_NAMES = {
     "कहाँ", "कहां", "कब", "कैसे", "पहले", "बाद", "फिर",
     "अचानक", "आखिर", "अंत", "शुरुआत", "सामने", "पीछे",
     "पास", "दूर", "अंदर", "बाहर", "ऊपर", "नीचे",
+    "का", "की", "के", "लिफ्ट",
 }
 
 GENERIC_ENGLISH = {
@@ -118,7 +119,8 @@ GENERIC_ENGLISH = {
     "chapter", "someone", "nobody", "everyone", "morning",
     "evening", "inside", "outside", "previous", "next",
     "character", "context", "camera", "visual", "cinematic",
-    "realistic", "lighting",
+    "realistic", "lighting", "preserve", "show", "reveal", "bring",
+    "create", "deliver", "establish", "increase", "introduce", "pay",
 }
 
 GENDER_ALIASES = {
@@ -135,11 +137,11 @@ GENDER_ALIASES = {
 }
 
 HINDI_MALE_MARKERS = re.compile(
-    r"(?:गया|आया|बैठा|उठा|बोला|कहा|करता|रहा|था|हुआ|चुका|सकता)"
+    r"(?<![\\w])(?:गया|आया|बैठा|उठा|बोला|कहा|करता|रहा|था|हुआ|चुका|सकता)(?![\\w])"
 )
 
 HINDI_FEMALE_MARKERS = re.compile(
-    r"(?:गई|आई|बैठी|उठी|बोली|कही|करती|रही|थी|हुई|चुकी|सकती)"
+    r"(?<![\\w])(?:गई|आई|बैठी|उठी|बोली|करती|रही|चुकी|सकती)(?![\\w])"
 )
 
 ENGLISH_MALE_MARKERS = re.compile(
