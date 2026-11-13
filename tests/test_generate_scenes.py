@@ -467,6 +467,55 @@ class FreeFirstImageProviderOrderTests(unittest.TestCase):
         )
 
 
+
+class ScenePromptContextDeduplicationTests(unittest.TestCase):
+    def test_scene_prompt_does_not_embed_full_character_or_world_dossiers(self):
+        settings = scenes.build_settings({"FORMAT": "short"})
+        source = {
+            "scene_id": "part_01_scene_06",
+            "role": "main",
+            "visual_prompt": (
+                "Ayan holds his phone in shock while a helicopter leaves "
+                "beyond the window."
+            ),
+            "story_anchor": "अयान को परिवार के लिफ्ट में फँसने की खबर मिली।",
+            "beat": "choice",
+            "purpose": "Show the consequential decision.",
+            "camera_prompt": "Close framing on Ayan's shocked expression.",
+            "lighting_prompt": "Emergency lights illuminate the dark room.",
+        }
+        characters = [{
+            "id": "character_001",
+            "name": "अयान",
+            "visual_identity": "CHARACTER_DOSSIER_SENTINEL " * 3000,
+            "consistency_rules": ["RULE_SENTINEL " * 1000] * 10,
+        }]
+        world = {
+            "setting": "WORLD_DOSSIER_SENTINEL " * 3000,
+            "continuity_rules": ["WORLD_RULE_SENTINEL " * 1000] * 10,
+        }
+        previous = {
+            "scene_id": "part_01_scene_05",
+            "story_anchor": "PREVIOUS_SCENE_SENTINEL " * 1000,
+            "world_context": "PREVIOUS_WORLD_SENTINEL " * 1000,
+            "character_ids": ["character_001"],
+        }
+
+        prompt = scenes.build_visual_prompt(
+            source, settings, characters, world, previous, "main"
+        )
+
+        self.assertLess(len(prompt), 5000)
+        self.assertIn("Ayan holds his phone in shock", prompt)
+        self.assertIn("Exact story moment:", prompt)
+        self.assertNotIn("CHARACTER_DOSSIER_SENTINEL", prompt)
+        self.assertNotIn("WORLD_DOSSIER_SENTINEL", prompt)
+        self.assertNotIn("PREVIOUS_SCENE_SENTINEL", prompt)
+        self.assertNotIn("CHARACTER IDENTITY LOCK", prompt)
+        self.assertNotIn("WORLD CONTINUITY LOCK", prompt)
+        self.assertNotIn("CHRONOLOGICAL CONTINUITY", prompt)
+
+
 class SceneTransitionDefaultTests(unittest.TestCase):
     def _build(self, source):
         settings = scenes.build_settings({"FORMAT": "short"})
