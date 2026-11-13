@@ -1,321 +1,321 @@
 # ============================================================
-# KATHA LOK AI — PHOTO MOTION INPUT CONFIGURATION
+# कथा लोक एआई — स्थिर चित्रों में गति देने की व्यवस्था
 # ============================================================
 
 # HEADING / TOPIC
-# TITLE = वीडियो का मुख्य शीर्षक। खाली होने पर पूरी कहानी के सार से बनाया जाएगा।
-# TOPIC = कहानी का विषय/मुख्य पात्र/केंद्रीय विचार।
-TITLE = "लालच का टावर और कुदरत का न्याय"
-TOPIC = "अयान, Orion-9 और विक्रांत मेहरा की कहानी"
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+TITLE = "लालच का टावर और कुदरत का न्याय"  # वीडियो का शीर्षक; खाली छोड़ने पर पूरी कहानी के सार से बनाया जाएगा।
+TOPIC = "अयान, Orion-9 और विक्रांत मेहरा की कहानी"  # कहानी का विषय, मुख्य पात्र और केंद्रीय विचार।
 
 # INPUT
-# नीचे सभी उत्पादन सेटिंग्स हैं। किसी विकल्प को बदलने से पहले उसका विवरण पढ़ें।
-# VIDEO MODE
-# short = केवल vertical Shorts output
-# full  = केवल landscape full-length output
-FORMAT = "short"                  # short = vertical Shorts only; full = landscape full video only
-AUDIENCE = "adult"                 # adult | kids; narration tone and content suitability
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# video mode
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+FORMAT = "short"  # short में केवल खड़े आकार के छोटे वीडियो; full में केवल चौड़े आकार का पूरा वीडियो बनेगा।
+AUDIENCE = "adult"  # दर्शक वर्ग; इसके अनुसार कथन की भाषा, स्वर और विषय की उपयुक्तता तय होगी।
 
 
 # ============================================================
-# NARRATION VOICE AND EMOTION
+# कथावाचन की आवाज़ और भाव
 # ============================================================
-# TTS_PROFILE = voice personality preset; auto selects from audience/story requirements.
-# CHARACTER_VOICES = keep a stable, distinct voice for each speaking character.
-# TTS_EMOTION_CONTROL / TTS_EMOTION_STRENGTH = enable and control expressive delivery.
-# TTS_CHILD_FRIENDLY = apply child-safe delivery only when appropriate.
-# TTS_VOICE_ID* = optional provider-specific voice IDs; blank means automatic selection.
-# TTS_PITCH = voice pitch multiplier; 1.0 is neutral.
-TTS_PROFILE = "auto"              # auto | child_friendly | female_storyteller | male_storyteller
-CHARACTER_VOICES = true            # अलग किरदारों की अलग स्थायी voice identity
-TTS_EMOTION_CONTROL = true
-TTS_CHILD_FRIENDLY = true
-TTS_VOICE_ID = ""
-TTS_VOICE_ID_CHILD_FRIENDLY = ""
-TTS_VOICE_ID_FEMALE_STORYTELLER = ""
-TTS_VOICE_ID_MALE_STORYTELLER = ""
-TTS_VOICE_ID_CHARACTER = ""
-TTS_PITCH = 1.0
-TTS_EMOTION_STRENGTH = 0.65
-
-# ============================================================
-# MUSIC PROVIDERS AND MIXING
-# ============================================================
-# MUSIC_PROVIDER_ORDER = ordered provider fallback list; do not reorder unless intended.
-# MUSIC_FALLBACK_ENABLED = try the next configured provider after failure.
-# MUSIC_ALLOW_PAID = allow billable music providers.
-# MUSIC_GENRE / MUSIC_INTENSITY = score genre and energy progression.
-# MUSIC_SCENE_ADAPTIVE = adapt score to scene emotion; MUSIC_DUCKING lowers music under speech.
-MUSIC_PROVIDER_ORDER = "eleven_music,lyria,stable_audio,local"
-MUSIC_FALLBACK_ENABLED = true
-MUSIC_ALLOW_PAID = true
-MUSIC_GENRE = "original cinematic score"
-MUSIC_INTENSITY = "evolving"
-MUSIC_GAIN = 0.35                # background music level; narration remains dominant
-MUSIC_SCENE_ADAPTIVE = true
-MUSIC_DUCKING = true
-MUSIC_DUCKING_DB = -10.0         # lower music by this amount while narration is active
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+TTS_PROFILE = "auto"  # आवाज़ का स्वभाव; स्वतः चयन कहानी और दर्शक वर्ग के अनुसार होगा।
+CHARACTER_VOICES = true  # हर बोलने वाले पात्र की आवाज़ अलग और सभी दृश्यों में एक जैसी रखी जाएगी।
+TTS_EMOTION_CONTROL = true  # आवाज़ में प्रसंग के अनुसार भाव व्यक्त करने की सुविधा चालू या बंद करता है।
+TTS_CHILD_FRIENDLY = true  # जहाँ उपयुक्त हो, बच्चों के अनुकूल आवाज़ और प्रस्तुति लागू करता है।
+TTS_VOICE_ID = ""  # आवाज़ सेवा की वैकल्पिक पहचान; खाली होने पर अपने-आप चयन होगा।
+TTS_VOICE_ID_CHILD_FRIENDLY = ""  # बच्चों के अनुकूल आवाज़ की वैकल्पिक पहचान।
+TTS_VOICE_ID_FEMALE_STORYTELLER = ""  # महिला कथावाचक की वैकल्पिक आवाज़ पहचान।
+TTS_VOICE_ID_MALE_STORYTELLER = ""  # पुरुष कथावाचक की वैकल्पिक आवाज़ पहचान।
+TTS_VOICE_ID_CHARACTER = ""  # पात्र की आवाज़ की वैकल्पिक पहचान।
+TTS_PITCH = 1.0  # आवाज़ का उतार-चढ़ाव; 1.0 सामान्य स्तर है।
+TTS_EMOTION_STRENGTH = 0.65  # आवाज़ में भाव की तीव्रता।
 
 # ============================================================
-# STORY STRUCTURE
+# संगीत स्रोत और ध्वनि मिश्रण
 # ============================================================
-
-# PARTS:
-# Fixed count example: PARTS = 4
-# Inclusive range examples: "2-8", "4-6", "7-11", "12-18"
-# Range selection is finalized from corrected story word count.
-# Reversed ranges such as "11-8" are invalid.
-PARTS = "1-4"                    # fixed count or inclusive min-max range; story policy selects actual Parts
-
-# SCENES:
-# Min-Max range per story Part.
-# दोनों संख्याएँ Inclusive हैं।
-# उदाहरण: SCENES = 7-15
-# पहला अंक = प्रत्येक Part के लिए न्यूनतम Scene Count।
-# दूसरा अंक = प्रत्येक Part के लिए अधिकतम Scene Count।
-# प्रत्येक Part का Actual Scene Count इस Range के भीतर अलग हो सकता है।
-# Scene Count को सभी Parts के लिए समान रखना अनिवार्य नहीं है।
-# Scene का विभाजन पूर्ण वाक्य, अर्थपूर्ण Clause और संबंधित छोटे वाक्यों
-# के समूह के आधार पर होगा।
-# Maximum से अधिक Scene-worthy Units होने पर शेष पूरे वाक्य
-# अगले Part में कहानी के क्रम से भेजे जाएँगे।
-# FULL Mode में पूरी कहानी एक ही Part होगी।
-SCENES = 5-20                    # inclusive minimum-maximum scene count per Part
-SCENES_MIN = 5
-SCENES_MAX = 20
-
-# auto | short | medium | long
-STORY_LENGTH = "auto"
-
-# auto | fixed
-SCENE_DURATION = "auto"
-
-# STORY_LENGTH = automatic or requested story length policy; not a fixed scene duration.
-# SCENE_DURATION = auto follows each narration audio duration; fixed is legacy/manual mode.
-# PART_HOOK = add a separate opening hook narration record to each Part.
-# PART_SUSPENSE = add suspense beat to non-final Parts; final Part uses resolution.
-# FINAL_RESOLUTION = include the story's ending/resolution as a separate narration record.
-PART_HOOK = true
-PART_SUSPENSE = true
-FINAL_RESOLUTION = true
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+MUSIC_PROVIDER_ORDER = "eleven_music,lyria,stable_audio,local"  # संगीत बनाने वाले स्रोतों का क्रम; असफलता पर अगला स्रोत आज़माया जाएगा।
+MUSIC_FALLBACK_ENABLED = true  # संगीत स्रोत असफल होने पर अगले स्रोत पर जाने की अनुमति।
+MUSIC_ALLOW_PAID = true  # शुल्क लेने वाली संगीत सेवाओं के उपयोग की अनुमति।
+MUSIC_GENRE = "original cinematic score"  # पृष्ठभूमि संगीत की शैली।
+MUSIC_INTENSITY = "evolving"  # कहानी के साथ संगीत की ऊर्जा और तीव्रता में बदलाव।
+MUSIC_GAIN = 0.35  # पृष्ठभूमि संगीत का स्तर; कथावाचन सबसे स्पष्ट और ऊँचा रहना चाहिए।
+MUSIC_SCENE_ADAPTIVE = true  # हर दृश्य के भाव के अनुसार संगीत बदलता है।
+MUSIC_DUCKING = true  # कथावाचन के समय संगीत की आवाज़ अपने-आप कम करता है।
+MUSIC_DUCKING_DB = -10.0  # कथावाचन के दौरान संगीत कितने डेसीबल कम होगा।
 
 # ============================================================
-# VOICE / NARRATION
+# कहानी की संरचना
 # ============================================================
 
-VOICE = "female"                   # male | female; default narration voice when provider supports it
-SPEED = "+0%"                      # speaking rate: negative slower, positive faster
+# भागों की संख्या निश्चित रखी जा सकती है या न्यूनतम-अधिकतम सीमा दी जा सकती है।
+# भागों की संख्या निश्चित रखी जा सकती है या न्यूनतम-अधिकतम सीमा दी जा सकती है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+PARTS = "1-4"  # भागों की निश्चित संख्या या न्यूनतम-अधिकतम सीमा; वास्तविक संख्या कहानी की लंबाई से तय होगी।
+
+# दृश्य पूरे वाक्य या अर्थपूर्ण वाक्यांशों में बाँटें; वाक्य के बीच से न काटें।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# दृश्य पूरे वाक्य या अर्थपूर्ण वाक्यांशों में बाँटें; वाक्य के बीच से न काटें।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+SCENES = 5-20  # हर भाग में दृश्यों की न्यूनतम-अधिकतम संख्या; दृश्य पूरे वाक्य या अर्थपूर्ण वाक्यांश पर बाँटे जाएँगे।
+SCENES_MIN = 5  # हर भाग में दृश्यों की न्यूनतम संख्या।
+SCENES_MAX = 20  # हर भाग में दृश्यों की अधिकतम संख्या।
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+STORY_LENGTH = "auto"  # कहानी की लंबाई का नियम; स्वतः चयन या निर्धारित विकल्प।
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+SCENE_DURATION = "auto"  # दृश्य की अवधि; स्वतः विकल्प में अवधि संबंधित कथावाचन की वास्तविक ध्वनि अवधि के बराबर होगी।
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+PART_HOOK = true  # हर भाग की शुरुआत में अलग आरंभिक आकर्षक कथन जोड़ता है।
+PART_SUSPENSE = true  # अंतिम भाग को छोड़कर अन्य भागों में अलग रहस्य या रोमांच वाला कथन जोड़ता है।
+FINAL_RESOLUTION = true  # अंतिम भाग में कहानी का निष्कर्ष अलग कथन के रूप में जोड़ता है।
 
 # ============================================================
-# TTS MODEL SELECTION
+# आवाज़ और कथावाचन
 # ============================================================
 
-# तीन प्राथमिक मॉडल इसी क्रम में चलेंगे।
-# इनके बाद configured fallback list के शेष मॉडल चलेंगे।
-# Primary में चुना गया मॉडल fallback में दोबारा नहीं चलेगा।
-# हर कहानी के लिए नीचे दिए गए तीन प्राथमिक मॉडल पहले चलेंगे।
-# तीनों असफल होने पर fallback सूची के शेष मॉडल इसी क्रम में चलेंगे।
-# प्राथमिक मॉडल fallback सूची में दोबारा नहीं चलेंगे।
-# TTS_MAIN_1/2/3 = first-choice voice providers in exact order.
-# TTS_FALLBACK_ORDER = remaining provider order; already-tried primary providers are not repeated.
-# TTS_ALLOW_PAID / ALLOW_BILLABLE_PROVIDERS = permit paid API usage.
-# TTS_CHUNK_* = safe text chunk sizing, checkpointing and audio validation controls.
-TTS_MAIN_1 = "elevenlabs"
-TTS_MAIN_2 = "fish_audio"
-TTS_MAIN_3 = "cartesia"
-
-TTS_FALLBACK_ENABLED = true
-TTS_FALLBACK_ORDER = "elevenlabs,fish_audio,cartesia,finevoice,gemini_tts,edge_tts,piper,minimax"
-
-# उपलब्ध मॉडल:
-# fish_audio, gemini_tts, edge_tts, piper,
-# elevenlabs, cartesia, finevoice, minimax
-
-TTS_ALLOW_PAID = true
-ALLOW_BILLABLE_PROVIDERS = true
-
-TTS_CHUNK_MAX_CHARS = 500
-TTS_CHUNK_MIN_CHARS = 150
-TTS_CHUNK_CHECKPOINT = true
-TTS_VALIDATE_AUDIO = true
-TTS_MAX_PROVIDER_ATTEMPTS = 2
+VOICE = "female"  # जहाँ सेवा समर्थन करे वहाँ कथावाचन की मूल आवाज़ चुनता है।
+SPEED = "+0%"  # बोलने की गति; ऋणात्मक मान धीमा और धनात्मक मान तेज़ करता है।
 
 # ============================================================
-# IMAGE PROVIDER FALLBACK
+# आवाज़ बनाने वाले मॉडल का चयन
 # ============================================================
 
-# Provider order को बदले बिना इसी क्रम में fallback होगा।
-# IMAGE_PROVIDER_ORDER = image provider fallback sequence; order is intentional.
-# IMAGE_FALLBACK_ENABLED = continue to the next provider after a failure.
-# IMAGE_ALLOW_BILLABLE = permit billable image providers.
-# Model/Space fields below pin provider-specific models and fallback choices.
-IMAGE_PROVIDER_ORDER = "huggingface,cloudflare_schnell,ovhcloud,aihorde,pollinations,cloudflare_klein,replicate"
-IMAGE_FALLBACK_ENABLED = true
-IMAGE_ALLOW_BILLABLE = true
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# आवाज़ की सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+TTS_MAIN_1 = "elevenlabs"  # पहली पसंद की आवाज़ सेवा; सबसे पहले यही चलेगी।
+TTS_MAIN_2 = "fish_audio"  # दूसरी पसंद की आवाज़ सेवा।
+TTS_MAIN_3 = "cartesia"  # तीसरी पसंद की आवाज़ सेवा।
 
-HF_IMAGE_SPACE = "mrfakename/Z-Image-Turbo"
-FREE_IMAGE_FALLBACK_SPACES = ""
+TTS_FALLBACK_ENABLED = true  # मुख्य सेवाएँ असफल होने पर वैकल्पिक सेवाएँ चलाने की अनुमति।
+TTS_FALLBACK_ORDER = "elevenlabs,fish_audio,cartesia,finevoice,gemini_tts,edge_tts,piper,minimax"  # वैकल्पिक आवाज़ सेवाओं का क्रम; पहले आज़माई गई सेवाएँ दोबारा नहीं चलेंगी।
 
-POLLINATIONS_FREE_IMAGE_MODELS = "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
 
-REPLICATE_IMAGE_MODEL = "black-forest-labs/flux-schnell"
-CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"
-CLOUDFLARE_IMAGE_FALLBACK_MODEL = "@cf/black-forest-labs/flux-1-schnell"
-OVHCLOUD_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
-AIHORDE_IMAGE_MODEL = "stable_diffusion_xl"
+TTS_ALLOW_PAID = true  # शुल्क लेने वाली आवाज़ सेवाओं के उपयोग की अनुमति।
+ALLOW_BILLABLE_PROVIDERS = true  # शुल्क वाली सेवाओं से अनुरोध करने की समग्र अनुमति।
 
-# ============================================================
-# CAPTIONS
-# ============================================================
-
-# CAPTIONS = output script: hindi (Devanagari), english, or hinglish (Roman Hindi).
-# Explicit language-specific caption text in the narration record is used verbatim.
-# If Hinglish is selected and only Devanagari narration exists, it is romanized without translation.
-CAPTIONS = "hinglish"              # hindi = Devanagari; english = English; hinglish = Roman Hindi/Hinglish. Existing explicit caption text is preserved.
-
-# Noto Sans Devanagari | Mukta | Hind | Tiro Devanagari Hindi
-CAPTION_FONT = "mukta"
-
-# auto या 16 से 64 के बीच integer
-CAPTION_FONT_SIZE = 20           # caption font size; valid configured range is 16–64 or auto
+TTS_CHUNK_MAX_CHARS = 500  # एक बार में भेजे जाने वाले पाठ की अधिकतम वर्ण संख्या।
+TTS_CHUNK_MIN_CHARS = 150  # एक बार में भेजे जाने वाले पाठ की न्यूनतम वर्ण संख्या।
+TTS_CHUNK_CHECKPOINT = true  # पाठ के प्रत्येक खंड के बाद सुरक्षित प्रगति दर्ज करता है।
+TTS_VALIDATE_AUDIO = true  # बनी हुई आवाज़ की फ़ाइल की जाँच करता है।
+TTS_MAX_PROVIDER_ATTEMPTS = 2  # एक आवाज़ सेवा पर अधिकतम प्रयास।
 
 # ============================================================
-# VISUAL STYLE AND CONSISTENCY
+# चित्र बनाने वाले स्रोतों का क्रम
 # ============================================================
 
-VISUAL_STYLE = "cinematic_realistic" # visual rendering style applied consistently across scenes
-# cinematic_realistic | realistic_3d | cinematic_2d
-# indian_folk | storybook | historical | fantasy
-# dark_fantasy | anime_cinematic | clay_animation
-# watercolor | comic_cinematic | minimalist
+# चित्र बनाने वाली सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# चित्र बनाने वाली सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# चित्र बनाने वाली सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# चित्र बनाने वाली सेवाओं और उनके क्रम का विवरण संबंधित सेटिंग में दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+IMAGE_PROVIDER_ORDER = "huggingface,cloudflare_schnell,ovhcloud,aihorde,pollinations,cloudflare_klein,replicate"  # चित्र बनाने वाली सेवाओं का क्रम; क्रम बदलने पर वैकल्पिक चयन भी बदल जाएगा।
+IMAGE_FALLBACK_ENABLED = true  # चित्र सेवा असफल होने पर अगली सेवा आज़माने की अनुमति।
+IMAGE_ALLOW_BILLABLE = true  # शुल्क लेने वाली चित्र सेवाओं के उपयोग की अनुमति।
 
-REALISM = "high"
+HF_IMAGE_SPACE = "mrfakename/Z-Image-Turbo"  # हगिंग फ़ेस पर उपयोग होने वाले चित्र मॉडल का नाम।
+FREE_IMAGE_FALLBACK_SPACES = ""  # मुफ़्त वैकल्पिक चित्र मॉडल स्थानों की सूची।
 
-# CHARACTER_BIBLE = extract canonical character appearance/identity from the full story.
-# CHARACTER_CONSISTENCY = preserve the same character identity in every scene.
-# WORLD_CONSISTENCY = preserve locations, objects, architecture and visual world.
-# SCENE_CONTINUITY = maintain continuity between adjacent scenes.
-CHARACTER_BIBLE = true
-CHARACTER_CONSISTENCY = true
-WORLD_CONSISTENCY = true
-SCENE_CONTINUITY = true
+POLLINATIONS_FREE_IMAGE_MODELS = "black-forest-labs/flux.1-schnell,tongyi-mai/z-image-turbo,lykon/dreamshaper-8-lcm"  # पोलिनेशन्स पर उपलब्ध मुफ़्त चित्र मॉडलों का क्रम।
 
-# ============================================================
-# PHOTO MOTION OPTIONS
-# केवल image zoom, pan और 2.5D parallax
-# कोई character/body/face animation नहीं
-# ============================================================
-
-# mixed = zoom, pan, diagonal movement और cinematic drift
-# zoom = zoom in / zoom out
-# pan = left / right / up / down
-# parallax = depth-map आधारित 2.5D movement
-# dynamic = varied zoom, pan और cinematic movement
-# static = बिना motion
-PHOTO_MOTION_STYLE = "dynamic"   # still-image-only zoom/pan/parallax motion; no body or face animation
-
-PHOTO_MOTION_PARALLAX = true
-PHOTO_MOTION_PARALLAX_STRENGTH = 0.045 # depth displacement strength; increase cautiously to avoid edge distortion
-
-# slow | normal | fast | very_fast
-# PHOTO_MOTION_SPEED = motion pace; movement is only still-image zoom/pan/parallax.
-PHOTO_MOTION_SPEED = "fast"
-
-# low | medium | high
-# PHOTO_MOTION_VARIATION = amount of movement variation across still-image scenes.
-PHOTO_MOTION_VARIATION = "high"
-
-PHOTO_MOTION_PRESERVE_SUBJECT = true
+REPLICATE_IMAGE_MODEL = "black-forest-labs/flux-schnell"  # रेप्लिकेट पर उपयोग होने वाला चित्र मॉडल।
+CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"  # क्लाउडफ्लेयर का मुख्य चित्र मॉडल।
+CLOUDFLARE_IMAGE_FALLBACK_MODEL = "@cf/black-forest-labs/flux-1-schnell"  # मुख्य मॉडल असफल होने पर क्लाउडफ्लेयर का वैकल्पिक मॉडल।
+OVHCLOUD_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"  # ओवीएचक्लाउड पर उपयोग होने वाला चित्र मॉडल।
+AIHORDE_IMAGE_MODEL = "stable_diffusion_xl"  # एआई होर्ड पर उपयोग होने वाला चित्र मॉडल।
 
 # ============================================================
-# CAMERA / LIGHTING / MOOD
+# उपशीर्षक
 # ============================================================
 
-# CINEMATIC_CAMERA = include cinematic camera-language guidance in image prompts.
-# CAMERA_STYLE = framing/lens/composition approach (e.g. cinematic, documentary, close-up).
-# LIGHTING = light direction, softness, contrast, time-of-day and practical sources.
-# MOOD = emotional atmosphere for visual and sound design (e.g. tense, hopeful, dramatic).
-CINEMATIC_CAMERA = true
-CAMERA_STYLE = "cinematic"        # camera framing/movement language for still-image composition
-LIGHTING = "cinematic"             # light source, direction, contrast and time-of-day treatment
-MOOD = "dramatic"                 # emotional tone of visuals and sound
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+CAPTIONS = "hinglish"  # उपशीर्षक की भाषा और लिपि चुनता है; उपलब्ध मान हिंदी, अंग्रेज़ी या रोमन लिपि में हिंदी हैं।
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+CAPTION_FONT = "mukta"  # उपशीर्षक में प्रयुक्त अक्षर शैली।
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+CAPTION_FONT_SIZE = 20  # उपशीर्षक के अक्षरों का आकार; स्वतः या 16 से 64 के बीच संख्या।
 
 # ============================================================
-# VISUAL QUALITY
+# दृश्य शैली और एकरूपता
 # ============================================================
 
-QUALITY = "high"                 # image/render quality preset
-FPS = 24                         # output frame rate
+VISUAL_STYLE = "cinematic_realistic"  # सभी दृश्यों पर लागू होने वाली चित्र शैली।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
 
-NEGATIVE_PROMPT = true
-AVOID_CARTOON_LOOK = true
-AVOID_NEON = true
-AVOID_GLITCH_EFFECTS = true
-NATURAL_MOTION = true
-REALISTIC_LIGHTING = true
+REALISM = "high"  # चित्रों में वास्तविकता का स्तर।
 
-# ============================================================
-# MUSIC / SFX / AMBIENT
-# ============================================================
-
-# MUSIC = enable a continuous background score.
-# MUSIC_STYLE = desired score character; provider order is configured above.
-# SFX = add meaningful scene-synchronized effects (not arbitrary beeps or hiss).
-# AMBIENT_SOUND = add restrained environmental beds; never overpower narration or music.
-MUSIC = true
-MUSIC_STYLE = "cinematic"         # background score character; MUSIC_PROVIDER_ORDER controls provider fallback
-
-SFX = true                       # scene-synced sound effects; disable only to omit effects
-AMBIENT_SOUND = true              # low-level location/weather ambience; must not become hiss or overpower narration
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+CHARACTER_BIBLE = true  # पूरी कहानी से पात्रों का स्थायी रूप, पहचान और पहनावा तय करता है।
+CHARACTER_CONSISTENCY = true  # हर दृश्य में पात्र का चेहरा, रूप और पहनावा एक जैसा रखता है।
+WORLD_CONSISTENCY = true  # स्थान, वस्तुओं, इमारतों और पूरे दृश्य संसार की एकरूपता रखता है।
+SCENE_CONTINUITY = true  # एक के बाद आने वाले दृश्यों के बीच निरंतरता बनाए रखता है।
 
 # ============================================================
-# EDITING
+# स्थिर चित्रों में गति के विकल्प
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
 # ============================================================
 
-# TRANSITIONS = edit transition style between scene clips (cinematic, cut, dissolve etc.).
-# Rendered scene duration follows the measured narration audio; no fixed scene duration.
-TRANSITIONS = "cinematic"         # edit transition style between scene clips
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+PHOTO_MOTION_STYLE = "dynamic"  # स्थिर चित्र पर केवल पास आना-दूर जाना, दाएँ-बाएँ सरकना या गहराई का हल्का प्रभाव लागू करता है; शरीर या चेहरे को नहीं हिलाता।
+
+PHOTO_MOTION_PARALLAX = true  # गहराई के आधार पर स्थिर चित्र में परतों की गति चालू या बंद करता है।
+PHOTO_MOTION_PARALLAX_STRENGTH = 0.045  # गहराई वाली परतों के खिसकाव की तीव्रता; अधिक मान से किनारों में विकृति हो सकती है।
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+PHOTO_MOTION_SPEED = "fast"  # स्थिर चित्र पर गति की रफ़्तार।
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+PHOTO_MOTION_VARIATION = "high"  # अलग-अलग दृश्यों में गति के बदलाव की मात्रा।
+
+PHOTO_MOTION_PRESERVE_SUBJECT = true  # मुख्य पात्र या विषय को चित्र में सुरक्षित रखता है।
 
 # ============================================================
-# BRANDING
+# कैमरा / प्रकाश / भाव
 # ============================================================
 
-WATERMARK = false                # add project watermark only when true
-LOGO = false                     # add configured logo only when true
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+CINEMATIC_CAMERA = true  # चित्र संकेतों में फ़िल्मी कैमरा संयोजन संबंधी निर्देश जोड़ता है।
+CAMERA_STYLE = "cinematic"  # चित्र का कोण, दूरी, फ़्रेम और लेंस जैसा दृश्य रूप तय करता है।
+LIGHTING = "cinematic"  # प्रकाश की दिशा, कोमलता, छाया, विरोधाभास और दिन के समय का रूप तय करता है।
+MOOD = "dramatic"  # दृश्य और ध्वनि का भाव; जैसे तनावपूर्ण, आशावादी या नाटकीय।
+
+# ============================================================
+# दृश्य गुणवत्ता
+# ============================================================
+
+QUALITY = "high"  # चित्र और वीडियो तैयार करने की गुणवत्ता का स्तर।
+FPS = 24  # प्रति सेकंड दिखाई जाने वाली फ़्रेम संख्या।
+
+NEGATIVE_PROMPT = true  # अनचाहे दृश्य तत्वों से बचने के निर्देश लागू करता है।
+AVOID_CARTOON_LOOK = true  # कार्टून जैसी बनावट से बचाता है।
+AVOID_NEON = true  # अनावश्यक चमकीली नीयन रोशनी से बचाता है।
+AVOID_GLITCH_EFFECTS = true  # टूटी-फूटी या विकृत डिजिटल छवि वाले प्रभावों से बचाता है।
+NATURAL_MOTION = true  # स्थिर चित्र पर लागू गति को सहज रखता है।
+REALISTIC_LIGHTING = true  # प्रकाश को वास्तविक दुनिया जैसा रखता है।
+
+# ============================================================
+# संगीत / ध्वनि प्रभाव / वातावरण
+# ============================================================
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+MUSIC = true  # पृष्ठभूमि संगीत चालू या बंद करता है।
+MUSIC_STYLE = "cinematic"  # पृष्ठभूमि संगीत का स्वभाव और शैली तय करता है।
+
+SFX = true  # दृश्य के साथ मेल खाते अर्थपूर्ण ध्वनि प्रभाव जोड़ता है; अनावश्यक बीप या खरखराहट नहीं।
+AMBIENT_SOUND = true  # स्थान और मौसम के अनुरूप हल्की वातावरण ध्वनि जोड़ता है; कथावाचन पर हावी नहीं होनी चाहिए।
+
+# ============================================================
+# संपादन
+# ============================================================
+
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+TRANSITIONS = "cinematic"  # दृश्यों के बीच बदलाव का तरीका तय करता है।
+
+# ============================================================
+# पहचान चिह्न
+# ============================================================
+
+WATERMARK = false  # चालू होने पर परियोजना का पहचान चिह्न जोड़ता है।
+LOGO = false  # चालू होने पर निर्धारित प्रतीक चिह्न जोड़ता है।
 
 # ============================================================
 # DESCRIPTION
 # ============================================================
-# STORY_TEXT = पूरी कहानी का मूल पाठ। यही story, narration और scene विभाजन का स्रोत है।
-# PRESERVE_STORY_TEXT = true रखने पर घटनाएँ, पात्र, संबंध, क्रम और अंत नहीं बदलेंगे;
-# केवल आवश्यक भाषा/वर्तनी/मात्रा/व्याकरण/विराम-चिह्न सुधार स्वीकार होंगे।
-# Caption का output वही भाषा/लिपि रखेगा जो source caption में दी गई है;
-# CAPTIONS=hinglish होने पर हिंदी narration का fallback Roman Hinglish होगा।
-PRESERVE_STORY_TEXT = true
-STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिला 'सिटैडल टावर्स' के चीफ इंजीनियर अयान को लॉन्च की रात अपने एआई सिस्टम 'ओरियन-9' में एक खतरनाक बग मिला। तेज तूफान में बिल्डिंग के ऊपरी हिस्से गिर सकते थे। प्रोजेक्ट के मालिक विक्रांत मेहरा ने उद्घाटन रोकने से मना कर दिया और अयान के खाते में 5 मिलियन डॉलर ट्रांसफर कर कोड छिपाने को कहा। लालच में आकर अयान ने उस खामी को बाईपास कर दिया।
+# कहानी का मूल पाठ नीचे दिया गया है।
+# कहानी का मूल पाठ नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+PRESERVE_STORY_TEXT = true  # मूल कहानी के पात्र, घटनाएँ, संबंध, क्रम और अंत सुरक्षित रखता है; केवल भाषा की आवश्यक शुद्धि की अनुमति देता है।
+STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिला 'सिटैडल टावर्स' के चीफ इंजीनियर अयान को लॉन्च की रात अपने एआई सिस्टम 'ओरियन-9' में एक खतरनाक बग मिला। तेज तूफान में बिल्डिंग के ऊपरी हिस्से गिर सकते थे। प्रोजेक्ट के मालिक विक्रांत मेहरा ने उद्घाटन रोकने से मना कर दिया और अयान के खाते में 5 मिलियन डॉलर ट्रांसफर कर कोड छिपाने को कहा। लालच में आकर अयान ने उस खामी को बाईपास कर दिया।  # पूरी मूल कहानी; कहानी, कथावाचन और दृश्य विभाजन का मुख्य स्रोत।
 अगले दिन ग्रैंड पार्टी के दौरान शहर में भयानक चक्रवाती तूफान आ गया और 'ओरियन-9' सिस्टम क्रैश हो गया। तभी सिक्योरिटी हेड का फोन आया कि अयान की बूढ़ी मां और बेटा रियान उसी फॉल्टी जोन की लिफ्ट में फंस गए हैं, और विक्रांत हेलीकॉप्टर से भाग चुका है।
 पछतावे से भरा अयान जान की बाजी लगाकर सर्वर रूम पहुंचा और आखिरी सेकंड में नया कोड डालकर अपने परिवार को बचा लिया। उधर छत से भागते विक्रांत के पैरों पर उसी कमजोर हिस्से का भारी स्लैब गिर गया, जिससे उसके दोनों पैर कट गए। अयान ने पुलिस को सारे सबूत सौंप दिए। विक्रांत व्हीलचेयर पर उम्रकैद के लिए जेल गया, और अयान ने अपना अपराध कबूल कर अपनी भूल का प्रायश्चित किया। """
 
 # ============================================================
-# ERROR RECOVERY / RESUME
+# त्रुटि से उबरना और काम फिर शुरू करना
 # ============================================================
 
-RESUME_ENABLED = true
-MAX_RETRIES = 3                  # retry count before failure policy is applied
+RESUME_ENABLED = true  # असफलता के बाद पहले से सुरक्षित काम से फिर शुरू करने की सुविधा।
+MAX_RETRIES = 3  # असफलता नीति लागू होने से पहले दोबारा प्रयासों की अधिकतम संख्या।
 
-SAVE_CHECKPOINT_AFTER_EACH_SCENE = true # persist verified scene work after each scene
-SKIP_COMPLETED_SCENES = true     # reuse only completed artifacts whose signatures and hashes still match
+SAVE_CHECKPOINT_AFTER_EACH_SCENE = true  # हर दृश्य के बाद सत्यापित काम सुरक्षित करता है।
+SKIP_COMPLETED_SCENES = true  # केवल उन्हीं पूर्ण दृश्यों का पुराना काम दोबारा उपयोग करता है जिनकी पहचान और जाँच अभी भी सही है।
 
-# FAILURE_POLICY = retry_then_checkpoint, skip, or stop after MAX_RETRIES.
-FAILURE_POLICY = "retry_then_checkpoint"
-# retry_then_checkpoint | skip | stop
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+FAILURE_POLICY = "retry_then_checkpoint"  # निर्धारित प्रयास पूरे होने पर दोबारा प्रयास, छोड़ने या काम रोकने का नियम।
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
 
-# Optional static production dashboard, preview, presets and image finishing.
-PRODUCTION_DASHBOARD_ENABLED=true
-PRODUCTION_PREVIEW_ENABLED=true
-PRODUCTION_EVENT_JOURNAL_ENABLED=true
-PRODUCTION_RENDER_TEMPLATE="documentary"
-IMAGE_PROCESSING_PROFILE="none"
-COMFYUI_OPTIONAL=false
-ASSET_APPROVAL_REQUIRED=false
-PRODUCTION_PRESET="default"
+# इस अनुभाग की सेटिंग्स का विवरण नीचे दिया गया है।
+PRODUCTION_DASHBOARD_ENABLED=true  # निर्माण की स्थिति दिखाने वाला पटल चालू करता है।
+PRODUCTION_PREVIEW_ENABLED=true  # निर्माण का पूर्वावलोकन चालू करता है।
+PRODUCTION_EVENT_JOURNAL_ENABLED=true  # निर्माण के दौरान हुई घटनाओं का लेखा सुरक्षित करता है।
+PRODUCTION_RENDER_TEMPLATE="documentary"  # वीडियो तैयार करने का साँचा चुनता है।
+IMAGE_PROCESSING_PROFILE="none"  # चित्र सुधार की प्रक्रिया चुनता है।
+COMFYUI_OPTIONAL=false  # कॉम्फ़ी यूआई को वैकल्पिक रखता है; अनिवार्य निर्भरता नहीं बनाता।
+ASSET_APPROVAL_REQUIRED=false  # अंतिम उपयोग से पहले सामग्री की स्वीकृति अनिवार्य करता है।
+PRODUCTION_PRESET="default"  # निर्माण की पूर्वनिर्धारित सेटिंग चुनता है।
