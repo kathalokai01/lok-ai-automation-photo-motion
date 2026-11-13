@@ -321,7 +321,7 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --workflow generate-photo-motion-video.yml \
             --branch "$GITHUB_REF_NAME" \
-            --limit 30 \
+            --limit 100 \
             --input-hash "$CURRENT_INPUT_HASH" \
             --output output
 
@@ -1401,7 +1401,7 @@ jobs:
           path: checkpoint.zip
           if-no-files-found: warn
           compression-level: 0
-          retention-days: 7
+          retention-days: 90
 
       - name: Upload production review artifacts
         if: always()
