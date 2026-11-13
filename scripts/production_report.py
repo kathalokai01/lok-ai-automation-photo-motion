@@ -139,7 +139,8 @@ def main():
   and (not sfx_enabled or (
    sound.get("status")=="completed"
    and sfx_validation.get("status")=="completed"
-   and int(sfx_validation.get("scenes_without_sfx",1) or 0)==0\n   and int(sfx_validation.get("cue_count",0) or 0)>0
+   and int(sfx_validation.get("scenes_without_sfx",1) or 0)==0
+   and int(sfx_validation.get("cue_count",0) or 0)>0
   ))
  )
  stages={}
