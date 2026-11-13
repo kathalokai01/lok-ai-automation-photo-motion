@@ -36,7 +36,7 @@ RENDER_DIR = OUTPUT / "photo_motion"
 MANIFEST_FILE = RENDER_DIR / "photo_motion_manifest.json"
 CHECKPOINT_FILE = OUTPUT / "checkpoints" / "photo_motion_progress.json"
 
-VERSION = "photo-motion-v25-depth-fallback-reason-recording"
+VERSION = "photo-motion-v26-enabled-depth-parallax-enforced"
 
 MIN_IMAGE_BYTES = 1000
 MIN_DEPTH_BYTES = 100
