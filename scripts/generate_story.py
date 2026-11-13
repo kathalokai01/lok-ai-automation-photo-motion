@@ -1679,7 +1679,8 @@ def _partition_and_revise(
         "pre_merge_selected_parts": pre_merge_part_count,
         "merge_reduced_part_count": (pre_merge_part_count - selected_count) if merged_fallback else 0,
         "final_part_merged": bool(merged_fallback),
-        "exact_source_text_preserved": not bool(revision_summaries),\n        "semantic_preservation_verified": all(row.get("text_preserved_semantically") is True for row in revision_summaries) if revision_summaries else True,
+        "exact_source_text_preserved": not bool(revision_summaries),
+        "semantic_preservation_verified": all(row.get("text_preserved_semantically") is True for row in revision_summaries) if revision_summaries else True,
     }
     return groups, policy, selection
 
