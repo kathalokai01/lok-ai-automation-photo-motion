@@ -13,8 +13,10 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from production_events import record_provider_attempt
 
-VERSION = "llm-provider-client-v3-openai-completion-token-parameter"
+
+VERSION = "llm-provider-client-v4-provider-attempt-audit"
 
 SUPPORTED_PROVIDERS = (
     "openai",
@@ -524,12 +526,34 @@ def generate_text(
             # Groq and OpenRouter retain the OpenAI-compatible max_tokens API.
             payload["max_tokens"] = int(max_tokens)
 
-    data = _make_request(
-        provider,
-        url,
-        api_key,
-        payload,
-        int(timeout),
+    attempt_id = (
+        f"llm:{provider}:{selected_model}:"
+        f"{hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:12]}:{time.time_ns()}"
+    )
+    billable_marked = True
+    record_provider_attempt(
+        provider, selected_model, "request_started", billable_marked,
+        scene_id="llm_text_generation", attempt_id=attempt_id,
+    )
+    try:
+        data = _make_request(
+            provider,
+            url,
+            api_key,
+            payload,
+            int(timeout),
+        )
+    except Exception as exc:
+        record_provider_attempt(
+            provider, selected_model, "request_failed", billable_marked,
+            scene_id="llm_text_generation", attempt_id=attempt_id,
+            error=f"{type(exc).__name__}: {exc}",
+            http_status=getattr(exc, "status_code", None),
+        )
+        raise
+    record_provider_attempt(
+        provider, selected_model, "response_received", billable_marked,
+        scene_id="llm_text_generation", attempt_id=attempt_id,
     )
 
     if provider == "cloudflare":
@@ -569,13 +593,18 @@ def generate_text(
     if not isinstance(usage, dict):
         usage = {}
 
-    return {
+    result = {
         "provider": provider,
         "model": selected_model,
         "text": text,
         "usage": usage,
         "version": VERSION,
     }
+    record_provider_attempt(
+        provider, selected_model, "accepted", billable_marked,
+        scene_id="llm_text_generation", attempt_id=attempt_id,
+    )
+    return result
 
 
 def provider_configuration_status() -> list[dict]:
