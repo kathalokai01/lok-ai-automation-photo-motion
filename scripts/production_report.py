@@ -86,24 +86,66 @@ def enabled(config, *keys, default=True):
   if value in {"false","no","0","off","disabled"}: return False
   raise RuntimeError(f"{key} must be true or false.")
 
+def normalized_sfx_validation(validation):
+ nested=validation.get("sfx") if isinstance(validation.get("sfx"),dict) else {}
+ def field(name, default=None):
+  return nested.get(name, validation.get(name, default))
+ return {
+  "status":field("status","missing"),
+  "cue_count":field("cue_count"),
+  "scenes_without_sfx":field("scenes_without_sfx"),
+  "invalid_cues":field("invalid_cues"),
+  "timing_errors":field("timing_errors"),
+  "failed_checks":field("failed_checks"),
+ }
+
 def sound_quality_summary(sound, validation):
  tracks=sound.get("tracks") if isinstance(sound.get("tracks"),dict) else {}
  music_track=tracks.get("music") if isinstance(tracks.get("music"),dict) else {}
  ambient_track=tracks.get("ambient") if isinstance(tracks.get("ambient"),dict) else {}
  sfx_rows=sound.get("sfx_cues") if isinstance(sound.get("sfx_cues"),list) else []
+ sfx=normalized_sfx_validation(validation)
+ cue_count=sfx["cue_count"]
+ if cue_count is None:
+  cue_count=len(sfx_rows) if sfx_rows else sound.get("sfx_cue_count",0)
  return {
   "sound_design_status":sound.get("status","missing"),
   "music_track_status":music_track.get("status","missing"),
   "music_provider":music_track.get("provider") or music_track.get("generation") or "local_synthesis",
   "music_loudness":music_track.get("loudness"),
   "ambient_track_status":ambient_track.get("status","missing"),
-  "sfx_cue_count":validation.get("cue_count",len(sfx_rows) if sfx_rows else sound.get("sfx_cue_count",0)),
-  "sfx_scenes_without_cues":validation.get("scenes_without_sfx"),
-  "sfx_validation_status":validation.get("status","missing"),
-  "sfx_invalid_cues":validation.get("invalid_cues"),
-  "sfx_timing_errors":validation.get("timing_errors"),
-  "sfx_failed_checks":validation.get("failed_checks"),
+  "sfx_cue_count":cue_count,
+  "sfx_scenes_without_cues":sfx["scenes_without_sfx"],
+  "sfx_validation_status":sfx["status"],
+  "sfx_invalid_cues":sfx["invalid_cues"],
+  "sfx_timing_errors":sfx["timing_errors"],
+  "sfx_failed_checks":sfx["failed_checks"],
  }
+
+def sound_checks_passed(config, music_result, sound, validation):
+ music_enabled=enabled(config,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
+ sfx_enabled=enabled(config,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
+ sfx=normalized_sfx_validation(validation)
+ sfx_rows=sound.get("sfx_cues") if isinstance(sound.get("sfx_cues"),list) else []
+ cue_count=sfx["cue_count"]
+ if cue_count is None:
+  cue_count=len(sfx_rows) if sfx_rows else sound.get("sfx_cue_count",0)
+ try:
+  cue_count=int(cue_count or 0)
+  missing=int(sfx["scenes_without_sfx"] or 0)
+ except (TypeError,ValueError):
+  return False
+ music_ok=(not music_enabled or music_result.get("status")=="completed")
+ sfx_ok=(not sfx_enabled or (
+  sound.get("status")=="completed"
+  and sfx["status"]=="completed"
+  and missing==0
+  and cue_count>0
+  and not sfx["invalid_cues"]
+  and not sfx["timing_errors"]
+  and not sfx["failed_checks"]
+ ))
+ return bool(music_ok and sfx_ok)
 
 def main():
  config_data=load_and_validate(ROOT/"Input"/"topic.txt")
@@ -134,14 +176,8 @@ def main():
  sound_quality=sound_quality_summary(sound,sfx_validation)
  music_enabled=enabled(config_data,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
  sfx_enabled=enabled(config_data,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
- sound_checks_passed=(
-  (not music_enabled or music_result["status"]=="completed")
-  and (not sfx_enabled or (
-   sound.get("status")=="completed"
-   and sfx_validation.get("status")=="completed"
-   and int(sfx_validation.get("scenes_without_sfx",1) or 0)==0
-   and int(sfx_validation.get("cue_count",0) or 0)>0
-  ))
+ sound_checks_passed=sound_checks_passed(
+  config_data,music_result,sound,sfx_validation
  )
  stages={}
  for name,path in SOURCES.items():
