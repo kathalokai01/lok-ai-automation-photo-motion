@@ -1963,9 +1963,11 @@ def classify_provider_error(exc):
 
     quota_terms = (
         "quota exceeded", "quota limit", "daily quota", "monthly quota",
-        "billing", "payment required", "insufficient credit",
-        "insufficient funds", "resource_exhausted", "resource exhausted",
-        "exceeded your", "credit balance", "account suspended",
+        "daily free allocation", "free allocation", "daily allocation exhausted",
+        "allocation exhausted", "used up your daily", "billing",
+        "payment required", "insufficient credit", "insufficient funds",
+        "resource_exhausted", "resource exhausted", "exceeded your",
+        "credit balance", "account suspended",
     )
 
     auth_terms = (
