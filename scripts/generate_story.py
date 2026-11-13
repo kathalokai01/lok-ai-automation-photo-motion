@@ -900,14 +900,13 @@ def call_model(
                         method="POST",
                     )
                     with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-                        response_data = json.loads(
-                            response.read().decode("utf-8", errors="replace")
-                        )
+                        response_body = response.read().decode("utf-8", errors="replace")
                     gemini_response_received = True
                     record_provider_attempt(
                         provider, candidate_model, "response_received", True,
                         scene_id="story_generation", attempt_id=attempt_id,
                     )
+                    response_data = json.loads(response_body)
                     candidates = response_data.get("candidates") or []
                     if not candidates:
                         raise ModelError("Gemini returned no response candidate.")
