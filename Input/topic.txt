@@ -159,7 +159,7 @@ CAPTIONS = "hinglish"              # hindi | english | hinglish
 CAPTION_FONT = "mukta"
 
 # auto या 16 से 64 के बीच integer
-CAPTION_FONT_SIZE = 22
+CAPTION_FONT_SIZE = 20
 
 # ============================================================
 # VISUAL STYLE AND CONSISTENCY
