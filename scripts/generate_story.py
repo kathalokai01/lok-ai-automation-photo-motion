@@ -536,7 +536,7 @@ def _partition_short_story(
     # Only the later reduced-Part-count path may mark a real final merge.
     merged_candidates = [
         number for number in range(max(1, minimum_parts - 1), preferred_count)
-        if number >= 1
+        if number >= 2
         and number < preferred_count
         and number <= maximum_parts
         and number * scenes_max <= MAX_TOTAL_SCENES
