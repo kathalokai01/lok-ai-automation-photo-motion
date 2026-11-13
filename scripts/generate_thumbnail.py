@@ -47,7 +47,7 @@ OUTPUT_FILE = ROOT / "output" / "thumbnail.jpg"
 OUTPUT_DIR = ROOT / "output" / "thumbnail"
 MANIFEST_FILE = OUTPUT_DIR / "thumbnail_manifest.json"
 
-VERSION = "thumbnail-v52-story-context-ranked-format-bound-source-verified"
+VERSION = "thumbnail-v53-clean-colourful-title-no-box-effect"
 MIN_IMAGE_BYTES = 1000
 SHORT_SIZE = (720, 1280)
 FULL_SIZE = (1280, 720)
@@ -1176,13 +1176,14 @@ def draw_title(
 
         x = max(12, min(x, width - text_width - 12))
 
+        # Soft offset shadow plus a slim coloured outline. The former
+        # oversized black stroke made Devanagari glyphs look boxed-in.
         draw.text(
-            (x + 3, y + 4),
+            (x + 2, y + 2),
             line,
             font=selected_font,
-            fill=(0, 0, 0),
-            stroke_width=max(4, selected_size // 10),
-            stroke_fill=(0, 0, 0),
+            fill=(8, 8, 12),
+            stroke_width=0,
         )
 
         draw.text(
@@ -1190,7 +1191,7 @@ def draw_title(
             line,
             font=selected_font,
             fill=palette["text"],
-            stroke_width=max(2, selected_size // 17),
+            stroke_width=1,
             stroke_fill=palette["outline"],
         )
 
