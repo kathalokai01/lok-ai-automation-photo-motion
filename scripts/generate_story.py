@@ -1724,6 +1724,7 @@ def _partition_and_revise(
         merge_evidence = {
             "version": "final-part-merge-evidence-v1",
             "method": "exact_adjacent_final_part_merge_from_complete_sentence_units",
+            "final_part_merged": True,
             "verified": bool(
                 selected_count < pre_merge_part_count
                 and pre_merge_part_count - selected_count == 1
