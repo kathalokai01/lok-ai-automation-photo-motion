@@ -820,6 +820,8 @@ def _progress_identity_compatible(left: dict, right: dict) -> bool:
 
 
 def _progress_row_key(row: Any) -> str:
+    if isinstance(row, (str, int)) and not isinstance(row, bool):
+        return f"value:{row}"
     if not isinstance(row, dict):
         return ""
     for key in ("scene_id", "chunk_id", "job_id", "track_id", "artifact_id", "id", "key"):
