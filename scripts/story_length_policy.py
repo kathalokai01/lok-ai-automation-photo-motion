@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-POLICY_VERSION = "story-length-policy-v12-real-final-merge-only"
+POLICY_VERSION = "story-length-policy-v13-merge-reduction-proof"
 
 SHORT_MIN_WORDS_PER_PART = 120
 SHORT_TARGET_WORDS_PER_PART = 135
@@ -895,6 +895,34 @@ def validate_all_parts(
         minimum=minimum_parts,
         maximum=MAX_PARTS,
     )
+
+    # The 239-word exception is valid only when the actual Part count was
+    # reduced after a real final-text merge, never for a naturally single Part.
+    merge_claimed = bool(policy.get("final_part_merged")) or any(
+        isinstance(part, dict) and part.get("final_part_merged") is True
+        for part in parts
+    )
+    if merge_claimed:
+        pre_merge = _strict_integer(
+            policy.get("pre_merge_selected_parts"),
+            name="pre_merge_selected_parts",
+            minimum=2,
+            maximum=MAX_PARTS,
+        )
+        reduced = _strict_integer(
+            policy.get("merge_reduced_part_count"),
+            name="merge_reduced_part_count",
+            minimum=1,
+            maximum=MAX_PARTS,
+        )
+        if pre_merge <= len(parts) or reduced != pre_merge - len(parts):
+            raise ValueError(
+                "Final-Part merge exception lacks proof of an actual reduced Part count."
+            )
+        if not isinstance(parts[-1], dict) or parts[-1].get("final_part_merged") is not True:
+            raise ValueError(
+                "Final-Part merge metadata is not attached to the final Part."
+            )
 
     errors = []
     retry_parts = []
