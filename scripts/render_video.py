@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v72-split-narration-for-sidechain-and-mix"
+VERSION = "render-video-v73-music-forward-low-ambient-hiss"
 SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
@@ -50,10 +50,10 @@ DURATION_TOLERANCE = 1.25
 SFX_END_MARGIN = 0.08
 
 NARRATION_GAIN = 1.0
-MUSIC_GAIN = 0.35
+MUSIC_GAIN = 0.50
 MUSIC_DUCKING_ENABLED = True
 MUSIC_DUCKING_DB = -10.0
-AMBIENT_GAIN = 0.24
+AMBIENT_GAIN = 0.08
 SFX_GAIN_MULTIPLIER = 1.90
 MASTER_LIMIT = 0.95
 
