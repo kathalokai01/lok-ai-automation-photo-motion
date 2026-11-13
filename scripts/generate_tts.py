@@ -415,11 +415,11 @@ def verify_audio_audible(path: Path) -> dict:
             f"{result.stderr[-800:]}"
         )
     mean_match = re.search(
-        r"mean_volume:\\s*(-?\\d+(?:\\.\\d+)?)\\s*dB",
+        r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB",
         result.stderr,
     )
     peak_match = re.search(
-        r"max_volume:\\s*(-?\\d+(?:\\.\\d+)?)\\s*dB",
+        r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB",
         result.stderr,
     )
     if not mean_match or not peak_match:
