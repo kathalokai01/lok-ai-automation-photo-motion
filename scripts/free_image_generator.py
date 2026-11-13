@@ -44,7 +44,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v40-advisory-vision-safe-score-tuple-size"
+VERSION = "photo-motion-image-generator-v41-no-text-indian-uniform"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -680,6 +680,34 @@ def make_prompt(item):
         ),
     ]
 
+    # Explicit negative typography instruction: the story text is
+    # context for the image model, never text to render inside the image.
+    sections.extend([
+        "ABSOLUTE IMAGE RULE: render ZERO readable or decorative text. "
+        "No words, letters, Hindi/Devanagari, subtitles, captions, title, "
+        "PART number, scene number, labels, signs, banners, logos, watermarks, "
+        "speech bubbles, typography or text-like glyphs anywhere in the image.",
+        "Do not print, copy, quote, typeset or visualize any part of the "
+        "narration, prompt, story paragraph or scene description.",
+    ])
+    story_context = " ".join([
+        str(item.get("narration") or ""),
+        str(item.get("prompt") or ""),
+        str(item.get("visual_prompt") or ""),
+    ]).casefold()
+    if any(token in story_context for token in (
+        "police", "inspector", "officer", "constable", "cop",
+        "थाना", "पुलिस", "दरोगा", "इंस्पेक्टर", "अधिकारी", "सिपाही",
+    )):
+        sections.append(
+            "Any police or government officer must look authentically Indian: "
+            "Indian police uniform cut and khaki colour where appropriate, "
+            "Indian police insignia/nameplate styling, Indian service belt and "
+            "locally appropriate headgear. Do not use American, British or "
+            "generic foreign police uniforms, badges, flags or vehicles. "
+            "Do not invent readable insignia or text."
+        )
+
     for key, label in (
         ("location", "Exact story location"),
         ("world_context", "Story-world continuity"),
@@ -737,7 +765,7 @@ def build_negative_prompt(item):
         "wrong location", "wrong time period", "distorted face",
         "unrealistic anatomy", "extra fingers", "missing fingers",
         "fused limbs", "duplicated people", "plastic skin", "waxy face",
-        "floating objects", "captions", "subtitles", "unintended text",
+        "floating objects", "captions", "subtitles", "unintended text", "all text", "letters", "words", "subtitles", "captions", "Hindi text", "Devanagari text", "PART number", "scene number", "typography", "speech bubbles",
         "logo", "watermark", "low resolution", "blurry main subject",
         "cartoon", "anime", "comic-book illustration", "2D drawing",
         "3D animated character", "body animation", "face animation",
