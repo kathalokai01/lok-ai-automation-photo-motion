@@ -2087,7 +2087,7 @@ def merge_scene_chunks(
                     path.resolve()
                 ).replace("'", "'\\''")
                 handle.write(
-                    f"file '{escaped}'\\n"
+                    f"file '{escaped}'\n"
                 )
 
         run_command(
