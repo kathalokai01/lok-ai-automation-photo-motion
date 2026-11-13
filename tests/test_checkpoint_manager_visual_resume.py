@@ -124,7 +124,7 @@ class CheckpointManagerVisualResumeTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(restored.read_bytes()).hexdigest(), checksum)
 
     def test_run_enumerator_includes_success_failure_and_cancelled(self):
-        payload = "11\\n12\\n13\\n"
+        payload = "11\n12\n13\n"
         captured = {}
         def fake_run(command, **kwargs):
             captured["command"] = command
