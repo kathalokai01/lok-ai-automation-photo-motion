@@ -2252,7 +2252,7 @@ def main() -> int:
     log("=" * 64)
     log("KATHA LOK AI — STORY-GROUNDED VISUAL JOB BUILDER")
     log("VERSION:", VERSION)
-    log("IMAGE API CALLS: 0")
+    log("IMAGE PROVIDER CALLS: 0 (job-preparation stage only; generation is a separate stage)")
     log("=" * 64)
 
     config = load_and_validate(INPUT_FILE)
@@ -2443,6 +2443,7 @@ def main() -> int:
             "part_then_hook_then_main_then_suspense_or_resolution"
         ),
         "image_api_calls": 0,
+        "image_api_call_scope": "job_preparation_only_no_provider_requests",
         "semantic_image_verification": (
             "pending_external_vision_verification"
         ),
@@ -2500,7 +2501,7 @@ def main() -> int:
         "Images requiring generation:",
         progress["remaining_jobs"],
     )
-    log("Image API calls: 0")
+    log("Image provider calls: 0 (job-preparation stage only)")
     log(
         "Semantic image verification:",
         "pending external vision verification",
