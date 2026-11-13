@@ -55,7 +55,7 @@ METADATA_TEXT = OUT / "youtube_metadata.txt"
 METADATA_JSON = OUT / "publish" / "youtube_metadata.json"
 TAGS = OUT / "publish" / "youtube_tags.txt"
 
-VERSION = "output-packager-v107-approved-project-image-artifacts"
+VERSION = "output-packager-v107-approved-project-image-artifacts-merge-legal-contract"
 MIN_VIDEO_BYTES = 1000
 MIN_IMAGE_BYTES = 1000
 MIN_TEXT_BYTES = 5
