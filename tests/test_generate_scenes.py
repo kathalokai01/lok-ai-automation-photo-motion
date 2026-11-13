@@ -469,7 +469,7 @@ class FreeFirstImageProviderOrderTests(unittest.TestCase):
 
 class SceneTransitionDefaultTests(unittest.TestCase):
     def _build(self, source):
-        settings = scenes.build_settings({})
+        settings = scenes.build_settings({"FORMAT": "short"})
         item = {
             "source": {
                 "scene_id": "part_01_scene_01",
