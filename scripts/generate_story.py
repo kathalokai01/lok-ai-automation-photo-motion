@@ -57,7 +57,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v43-revision-evidence-and-merge-contract"
+VERSION = "story-builder-v44-single-leftover-merge-only"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
@@ -534,18 +534,15 @@ def _partition_short_story(
 
     # A 151-239 word final Part is not automatically a merge exception.
     # Only the later reduced-Part-count path may mark a real final merge.
-    merged_candidates = [
-        number for number in range(max(1, minimum_parts - 1), preferred_count)
-        if number >= 1
-        and number < preferred_count
-        and number <= maximum_parts
-        and number * scenes_max <= MAX_TOTAL_SCENES
-    ]
-    merged_candidates.sort(
-        key=lambda value: (
-            abs(value - max(minimum_parts, preferred_count - 1)),
-            value,
-        )
+    # Merge exactly one final leftover Part into its immediate
+    # predecessor. Do not collapse multiple Parts to reach the 239-word cap.
+    merged_candidates = (
+        [preferred_count - 1]
+        if preferred_count > 1
+        and preferred_count - 1 >= max(1, minimum_parts - 1)
+        and preferred_count - 1 <= maximum_parts
+        and (preferred_count - 1) * scenes_max <= MAX_TOTAL_SCENES
+        else []
     )
 
     for units_source in variants:
