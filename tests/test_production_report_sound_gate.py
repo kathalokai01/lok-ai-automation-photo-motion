@@ -31,7 +31,7 @@ class ProductionReportSoundGateTests(unittest.TestCase):
                 "scenes_without_sfx": 0,
             },
         }
-        self.assertTrue(production_report.sound_checks_passed(
+        self.assertTrue(production_report.evaluate_sound_checks(
             self.config, self.music, self.sound, validation
         ))
         summary = production_report.sound_quality_summary(self.sound, validation)
@@ -48,7 +48,7 @@ class ProductionReportSoundGateTests(unittest.TestCase):
                 "scenes_without_sfx": 1,
             },
         }
-        self.assertFalse(production_report.sound_checks_passed(
+        self.assertFalse(production_report.evaluate_sound_checks(
             self.config, self.music, self.sound, validation
         ))
 
@@ -57,7 +57,7 @@ class ProductionReportSoundGateTests(unittest.TestCase):
             "status": "completed",
             "sfx": {"status": "completed", "cue_count": 12},
         }
-        self.assertFalse(production_report.sound_checks_passed(
+        self.assertFalse(production_report.evaluate_sound_checks(
             self.config, self.music, self.sound, validation
         ))
 
@@ -71,13 +71,13 @@ class ProductionReportSoundGateTests(unittest.TestCase):
                 "timing_errors": 1,
             },
         }
-        self.assertFalse(production_report.sound_checks_passed(
+        self.assertFalse(production_report.evaluate_sound_checks(
             self.config, self.music, self.sound, validation
         ))
 
     def test_disabled_sfx_does_not_block_when_music_is_complete(self):
         config = {"MUSIC": "true", "SFX": "false"}
-        self.assertTrue(production_report.sound_checks_passed(
+        self.assertTrue(production_report.evaluate_sound_checks(
             config, self.music, self.sound, {"status": "missing"}
         ))
 
@@ -87,7 +87,7 @@ class ProductionReportSoundGateTests(unittest.TestCase):
             "status": "completed",
             "sfx": {"status": "completed", "cue_count": 12, "scenes_without_sfx": 0},
         }
-        self.assertFalse(production_report.sound_checks_passed(
+        self.assertFalse(production_report.evaluate_sound_checks(
             self.config, music, self.sound, validation
         ))
 
