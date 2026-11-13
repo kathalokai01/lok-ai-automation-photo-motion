@@ -1081,8 +1081,10 @@ def scene_detail(source: dict, key: str) -> str:
         rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     else:
         rendered = clean(value)
-    # Supplemental metadata is bounded; the primary visual_prompt and
-    # locked narration are deliberately not truncated.
+    # Story-required visible wording must remain exact. Other supplemental
+    # metadata is bounded; visual_prompt and narration are never truncated.
+    if key == "required_visible_text":
+        return rendered
     return rendered[:1400] if rendered else ""
 
 
