@@ -41,7 +41,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 22
+VERSION = 23
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -2106,7 +2106,7 @@ def merge_scene_chunks(
                 raise RuntimeError(
                     f"Audio chunk missing: {path.name}"
                 )
-            delay_ms = 180 if index == 0 else 140
+            delay_ms = 180 if index == 0 else 260
             padded = path.with_name(
                 path.stem + f".breathpad-{index + 1:03d}.mp3"
             )
