@@ -18,7 +18,7 @@ SOURCES={
  "render_quality":OUT/"quality"/"render_quality_report.json",
  "audio":OUT/"narration"/"audio_jobs.json",
  "music":OUT/"music"/"flow_music_manifest.json",
- "sound":OUT/"sound_design"/"sound_design_manifest.json",
+ "sound":OUT/"sound_design"/"sound_design_manifest.json",\n "sfx_validation":OUT/"sound_design"/"sfx_timing_validation.json",
 }
 def digest(path):
  return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -75,6 +75,34 @@ def apply_effective_music_stage(stages, music_result):
  stages["music"]=stage
  return stages
 
+def enabled(config, *keys, default=True):
+ for key in keys:
+  if key not in config: continue
+  value=config[key]
+  if isinstance(value,bool): return value
+  value=str(value).strip().lower()
+  if value in {"true","yes","1","on","enabled"}: return True
+  if value in {"false","no","0","off","disabled"}: return False
+  raise RuntimeError(f"{key} must be true or false.")
+
+def sound_quality_summary(sound, validation):
+ tracks=sound.get("tracks") if isinstance(sound.get("tracks"),dict) else {}
+ music_track=tracks.get("music") if isinstance(tracks.get("music"),dict) else {}
+ ambient_track=tracks.get("ambient") if isinstance(tracks.get("ambient"),dict) else {}
+ sfx_rows=sound.get("sfx_cues") if isinstance(sound.get("sfx_cues"),list) else []
+ return {
+  "sound_design_status":sound.get("status","missing"),
+  "music_track_status":music_track.get("status","missing"),
+  "music_provider":music_track.get("provider") or music_track.get("generation") or "local_synthesis",
+  "music_loudness":music_track.get("loudness"),
+  "ambient_track_status":ambient_track.get("status","missing"),
+  "sfx_cue_count":len(sfx_rows) if sfx_rows else sound.get("sfx_cue_count",0),
+  "sfx_validation_status":validation.get("status","missing"),
+  "sfx_invalid_cues":validation.get("invalid_cues"),
+  "sfx_timing_errors":validation.get("timing_errors"),
+  "sfx_failed_checks":validation.get("failed_checks"),
+ }
+
 def main():
  config_data=load_and_validate(ROOT/"Input"/"topic.txt")
  configured_provider_order=get_image_provider_order(config_data)
@@ -98,7 +126,20 @@ def main():
  ai_story=docs["ai_story"] or {}
  story=docs["story"] or {}
  music=docs["music"] or {}
- music_result=effective_music(music,docs["sound"] or {})
+ sound=docs["sound"] or {}
+sfx_validation=docs["sfx_validation"] or {}
+music_result=effective_music(music,sound)
+sound_quality=sound_quality_summary(sound,sfx_validation)
+music_enabled=enabled(config_data,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
+sfx_enabled=enabled(config_data,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
+sound_checks_passed=(
+ (not music_enabled or music_result["status"]=="completed")
+ and (not sfx_enabled or (
+  sound.get("status")=="completed"
+  and sfx_validation.get("status")=="completed"
+  and int(sfx_validation.get("failed_checks",0) or 0)==0
+ ))
+)
  stages={}
  for name,path in SOURCES.items():
   doc=docs[name]
@@ -108,8 +149,8 @@ def main():
  image_reused=sum(value for key,value in image_status.items() if key in {"existing","reused"})
  image_generated=image_status.get("generated",0)
  report={
-  "status":"completed" if image_doc.get("status")=="completed" and stages["render_quality"]["status"] in {"passed","completed"} else "incomplete",
-  "version":"production-report-v4-effective-music-stage-status",
+  "status":"completed" if image_doc.get("status")=="completed" and stages["render_quality"]["status"] in {"passed","completed"} and sound_checks_passed else "incomplete",
+  "version":"production-report-v5-sound-track-and-sfx-audibility-gates",
   "run_id":os.getenv("GITHUB_RUN_ID") or "local",
   "story_title":story.get("title") or story.get("story_title") or ai_story.get("title"),
   "format":(docs["visual_jobs"] or {}).get("format") or story.get("format"),
@@ -145,7 +186,7 @@ def main():
    "reused_chunks":audio_summary.get("reused_chunks",0),
    "generated_chunks":audio_summary.get("generated_chunks",0),
   },
-  "music_status":music_result["status"],
+  "music_status":music_result["status"],\n  "sound_quality":sound_quality,\n  "sound_checks_passed":sound_checks_passed,
   "music_reason":music_result["reason"],
   "music_external_provider_status":music_result["external_status"],
   "music_external_provider_reason":music_result["external_reason"],
