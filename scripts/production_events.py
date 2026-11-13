@@ -74,7 +74,76 @@ def read_events():
             if isinstance(row,dict): rows.append(row)
         except json.JSONDecodeError: continue
     return rows
+def provider_summary():
+    latest = {}
+    for event in read_events():
+        if event.get("stage") != "provider_attempt":
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        attempt_id = str(metadata.get("attempt_id") or "")
+        if attempt_id:
+            latest[attempt_id] = metadata
+
+    by_provider = {}
+    billable_marked = 0
+    unknown_cost = 0
+    verified_cost = 0.0
+    verified_receipts = 0
+    failed = 0
+    accepted = 0
+    pending = 0
+    for metadata in latest.values():
+        provider = str(metadata.get("provider") or "unknown")
+        item = by_provider.setdefault(provider, {
+            "attempts": 0, "billable_marked": 0,
+            "failed": 0, "accepted": 0, "pending": 0,
+        })
+        item["attempts"] += 1
+        billable = metadata.get("billable_marked") is True
+        if billable:
+            billable_marked += 1
+            item["billable_marked"] += 1
+        status = str(metadata.get("request_status") or "")
+        if status in {"request_failed", "quality_rejected", "response_received_quality_rejected", "response_received_validation_failed"}:
+            failed += 1
+            item["failed"] += 1
+        elif status == "verification_pending":
+            pending += 1
+            item["pending"] += 1
+        elif status == "accepted":
+            accepted += 1
+            item["accepted"] += 1
+        cost = metadata.get("actual_cost")
+        if metadata.get("cost_status") == "receipt_verified" and isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            verified_cost += float(cost)
+            verified_receipts += 1
+        else:
+            unknown_cost += 1
+
+    return {
+        "attempt_count": len(latest),
+        "billable_marked_attempts": billable_marked,
+        "failed_attempts": failed,
+        "accepted_attempts": accepted,
+        "verification_pending_attempts": pending,
+        "actual_cost_receipt_count": verified_receipts,
+        "actual_cost_total": round(verified_cost, 6) if verified_receipts else None,
+        "actual_cost_status": "receipt_verified" if verified_receipts else "unknown_no_provider_receipts",
+        "unknown_cost_attempts": unknown_cost,
+        "by_provider": by_provider,
+    }
+
+
 def stage_summary():
     latest={}
     for row in read_events(): latest[str(row.get("stage","unknown"))]=row
-    return {"stage_count":len(latest),"completed":sum(x.get("status")=="completed" for x in latest.values()),"failed":sum(x.get("status")=="failed" for x in latest.values()),"running":sum(x.get("status")=="running" for x in latest.values()),"stages":latest}
+    return {
+        "stage_count":len(latest),
+        "completed":sum(x.get("status")=="completed" for x in latest.values()),
+        "failed":sum(x.get("status")=="failed" for x in latest.values()),
+        "running":sum(x.get("status")=="running" for x in latest.values()),
+        "stages":latest,
+        "provider_usage":provider_summary(),
+    }
