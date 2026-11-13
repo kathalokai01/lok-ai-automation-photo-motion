@@ -17,8 +17,8 @@ from pathlib import Path
 import requests
 
 from gemini_http import retry_after_seconds
-from music_provider_client import generate_music
-from production_events import record_provider_attempt, MusicProviderError
+from music_provider_client import generate_music, MusicProviderError
+from production_events import record_provider_attempt
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_FILE = ROOT / "Input" / "topic.txt"
