@@ -960,18 +960,91 @@ def is_retryable_completed_tts_integrity_issue(data: Any) -> bool:
         return False
     total = summary.get("total_jobs")
     completed = summary.get("completed_jobs")
+    scene_ids = [
+        str(row.get("scene_id") or "").strip()
+        for row in jobs
+        if isinstance(row, dict)
+    ]
     return (
         type(total) is int
-        and total == len(jobs)
+        and total >= len(jobs)
         and type(completed) is int
         and completed == len(jobs)
+        and len(scene_ids) == len(jobs)
+        and all(scene_ids)
+        and len(set(scene_ids)) == len(scene_ids)
         and all(
             isinstance(row, dict)
-            and row.get("scene_id")
             and row.get("status") in SUCCESS
             for row in jobs
         )
     )
+
+
+def is_retryable_in_progress_image_manifest(data: Any) -> bool:
+    """Accept only identity-matched partial image manifests; the image stage revalidates every reused file."""
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("status") or "").strip().lower() != "in_progress":
+        return False
+    visual_jobs_path = OUT / "visuals" / "visual_jobs_manifest.json"
+    try:
+        visual_jobs = json.loads(visual_jobs_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(visual_jobs, dict):
+        return False
+    for key in ("source_fingerprint", "config_signature"):
+        expected = str(visual_jobs.get(key) or "").strip()
+        actual = str(data.get(key) or "").strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", expected) or actual != expected:
+            return False
+    if str(data.get("format") or "").strip().lower() != str(visual_jobs.get("format") or "").strip().lower():
+        return False
+    total = data.get("total_scenes")
+    required = data.get("images_required")
+    rows = data.get("scenes")
+    jobs = visual_jobs.get("total_jobs")
+    if (
+        type(total) is not int or total <= 0
+        or required != total
+        or jobs != total
+        or not isinstance(rows, list) or len(rows) != total
+    ):
+        return False
+    ready = data.get("images_ready")
+    failed = data.get("images_failed")
+    pending = data.get("images_pending")
+    if any(type(value) is not int or value < 0 for value in (ready, failed, pending)):
+        return False
+    if ready + failed + pending != total:
+        return False
+    expected_ids = {
+        str(row.get("scene_id") or "").strip()
+        for row in visual_jobs.get("jobs", [])
+        if isinstance(row, dict)
+    }
+    actual_ids = [
+        str(row.get("scene_id") or "").strip()
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    if (
+        len(expected_ids) != total
+        or len(actual_ids) != total
+        or any(not item for item in actual_ids)
+        or len(set(actual_ids)) != total
+        or set(actual_ids) != expected_ids
+    ):
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        if row.get("source_fingerprint") != data.get("source_fingerprint"):
+            return False
+        if row.get("config_signature") != data.get("config_signature"):
+            return False
+    return True
 
 
 def validate_existing_manifest(
@@ -1031,6 +1104,7 @@ def validate_existing_manifest(
     legacy_empty_tts_marker = False
     resumable_tts_manifest = False
     retryable_failed_depth_manifest = False
+    retryable_image_manifest = False
 
     if isinstance(data, dict):
         status = str(
@@ -1114,6 +1188,13 @@ def validate_existing_manifest(
             or resumable_tts_manifest
         )
 
+        if name == "image_manifest" and status == "in_progress":
+            retryable_image_manifest = is_retryable_in_progress_image_manifest(data)
+            if not retryable_image_manifest:
+                raise ValueError(
+                    "image_manifest: in_progress manifest does not match current visual-job identity."
+                )
+
         if name == "depth_manifest" and status == "failed":
             visual_jobs_path = OUT / "visuals" / "visual_jobs_manifest.json"
             try:
@@ -1149,9 +1230,8 @@ def validate_existing_manifest(
             status
             and status not in known_status
             and not (
-                is_tts
-                and resumable_tts_manifest
-                and status == "running"
+                (is_tts and resumable_tts_manifest and status == "running")
+                or (name == "image_manifest" and retryable_image_manifest and status == "in_progress")
             )
         ):
             raise ValueError(
@@ -1300,10 +1380,13 @@ def validate_existing_manifest(
                 type(total_jobs) is not int
                 or len(raw_jobs) != total_jobs
             ):
-                raise ValueError(
-                    "narration_audio: completed job count "
-                    "does not match total_jobs."
-                )
+                if is_retryable_completed_tts_integrity_issue(data):
+                    retryable_narration_audio = True
+                else:
+                    raise ValueError(
+                        "narration_audio: completed job count "
+                        "does not match total_jobs and cannot be safely resumed."
+                    )
 
             completed_jobs = summary.get("completed_jobs")
 
@@ -1515,6 +1598,9 @@ def validate_existing_manifest(
         ).strip().lower()
 
         if row_status in FAILED:
+            if retryable_image_manifest and name == "image_manifest":
+                retryable_failed_rows += 1
+                continue
             if retryable_narration_audio:
                 retryable_failed_rows += 1
                 continue
@@ -1532,6 +1618,7 @@ def validate_existing_manifest(
         if (
             row_status
             and row_status not in allowed_row_statuses
+            and not (retryable_image_manifest and name == "image_manifest" and row_status in FAILED)
         ):
             raise ValueError(
                 f"{name}: row {index} has unknown status "
@@ -1549,6 +1636,9 @@ def validate_existing_manifest(
         )
 
         if not file_value:
+            if retryable_image_manifest and name == "image_manifest":
+                retryable_unavailable_files += 1
+                continue
             if (
                 retryable_narration_audio
                 and row_status in SUCCESS
@@ -1573,6 +1663,9 @@ def validate_existing_manifest(
                 f"{name} row {index}",
             )
         except Exception:
+            if retryable_image_manifest and name == "image_manifest":
+                retryable_unavailable_files += 1
+                continue
             if retryable_narration_audio:
                 retryable_unavailable_files += 1
                 continue
@@ -1594,7 +1687,8 @@ def validate_existing_manifest(
                 != actual_hash.lower()
             ):
                 if (
-                    retryable_narration_audio
+                    (retryable_image_manifest and name == "image_manifest")
+                    or retryable_narration_audio
                     or (
                         is_tts
                         and is_retryable_completed_tts_integrity_issue(data)
