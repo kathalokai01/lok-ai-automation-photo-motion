@@ -41,7 +41,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 18
+VERSION = 19
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -2076,6 +2076,10 @@ def merge_scene_chunks(
                 "-i", concat_file,
                 "-codec:a", "libmp3lame",
                 "-q:a", "3",
+                # Leading headroom prevents Hook opening words from being
+                # clipped by encoder/player startup; duration is re-probed.
+                "-af", "adelay=180|180,afade=t=in:st=0:d=0.05",
+                "-ar", "48000",
                 temporary,
             ]
         )
