@@ -184,9 +184,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     "MUSIC": True,
     "MUSIC_STYLE": "cinematic",
-    "MUSIC_PROVIDER_ORDER": "lyria,eleven_music,stable_audio,local",
+    "MUSIC_PROVIDER_ORDER": "eleven_music,lyria,stable_audio,local",
     "MUSIC_FALLBACK_ENABLED": True,
-    "MUSIC_ALLOW_PAID": False,
+    "MUSIC_ALLOW_PAID": True,
     "MUSIC_GENRE": "original cinematic score",
     "MUSIC_INTENSITY": "evolving",
     "MUSIC_SCENE_ADAPTIVE": True,
@@ -1124,7 +1124,7 @@ def _split_provider_list(raw: Any) -> list[str]:
 def get_music_provider_order(config: dict[str, Any]) -> list[str]:
     """Validate and return the configured music provider order."""
     allowed = {"lyria", "eleven_music", "stable_audio", "local"}
-    raw = config.get("MUSIC_PROVIDER_ORDER", "lyria,eleven_music,stable_audio,local")
+    raw = config.get("MUSIC_PROVIDER_ORDER", "eleven_music,lyria,stable_audio,local")
     if isinstance(raw, (list, tuple)):
         values = raw
     else:
