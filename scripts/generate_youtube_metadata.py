@@ -916,12 +916,13 @@ def generate_gemini_metadata(
             with urllib.request.urlopen(
                 request, timeout=REQUEST_TIMEOUT
             ) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                response_body = response.read().decode("utf-8")
             response_received = True
             record_provider_attempt(
                 "gemini", model, "response_received", True,
                 scene_id="youtube_metadata", attempt_id=attempt_id,
             )
+            result = json.loads(response_body)
 
             parsed = parse_metadata_json(extract_gemini_text(result))
             validated = validate_metadata_result(
