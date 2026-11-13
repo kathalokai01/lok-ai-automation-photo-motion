@@ -1019,9 +1019,14 @@ def is_retryable_in_progress_image_manifest(data: Any) -> bool:
         return False
     if ready + failed + pending != total:
         return False
+    job_rows = visual_jobs.get("scene_order")
+    if not isinstance(job_rows, list):
+        job_rows = visual_jobs.get("jobs")
+    if not isinstance(job_rows, list):
+        return False
     expected_ids = {
         str(row.get("scene_id") or "").strip()
-        for row in visual_jobs.get("jobs", [])
+        for row in job_rows
         if isinstance(row, dict)
     }
     actual_ids = [
