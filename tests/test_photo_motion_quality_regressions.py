@@ -11,6 +11,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from scripts import checkpoint_manager
+from scripts import generate_visuals
 from scripts import photo_motion
 from scripts import prepare_captions
 from scripts import generate_sound_design
@@ -19,38 +20,47 @@ from scripts.story_length_policy import verify_final_merge_evidence
 
 
 class CheckpointRestoreTests(unittest.TestCase):
-    def _candidate(self, root: Path, corrupt_hash: bool = False):
+    def _candidate(self, root: Path, corrupt_hash: bool = False, count: int = 12):
         source = root / "saved"
         visuals = source / "visuals"
         images = visuals / "images"
         images.mkdir(parents=True)
-        image_path = images / "0001_scene_01.png"
-        Image.new("RGB", (720, 1280), (45, 90, 130)).save(image_path)
-        checksum = hashlib.sha256(image_path.read_bytes()).hexdigest()
         source_fp = "a" * 64
         config_sig = "b" * 64
-        prompt_sig = "c" * 64
-        prompt_hash = "d" * 64
-        scene_sig = "e" * 64
-        relative = "output/visuals/images/0001_scene_01.png"
-        job = {
-            "scene_id": "part_01_scene_01", "part": 1, "global_scene": 1,
-            "role": "main", "image_path": relative, "image_size": "720x1280",
-            "prompt_sha256": prompt_hash, "prompt_signature": prompt_sig,
-            "source_scene_signature": scene_sig, "config_signature": config_sig,
-            "negative_prompt": "bad anatomy",
-        }
-        row = {
-            "scene_id": job["scene_id"], "part": 1, "global_scene": 1,
-            "role": "main", "image_path": relative,
-            "image_sha256": ("0" * 64 if corrupt_hash else checksum),
-            "prompt_sha256": prompt_hash, "prompt_signature": prompt_sig,
-            "source_scene_signature": scene_sig, "job_signature": "f" * 64,
-            "config_signature": config_sig, "source_fingerprint": source_fp,
-            "image_size": "720x1280", "width": 720, "height": 1280,
-            "status": "generated",
-        }
-        (visuals / "visual_jobs.json").write_text(json.dumps([job]), encoding="utf-8")
+        jobs = []
+        rows = []
+        hashes = {}
+        for index in range(1, count + 1):
+            scene_id = f"part_01_scene_{index:02d}"
+            filename = f"0001_scene_{index:02d}.png"
+            image_path = images / filename
+            Image.new("RGB", (720, 1280), (45 + index, 90, 130)).save(image_path)
+            checksum = hashlib.sha256(image_path.read_bytes()).hexdigest()
+            hashes[filename] = checksum
+            relative = f"output/visuals/images/{filename}"
+            prompt_sig = hashlib.sha256(f"prompt-{index}".encode()).hexdigest()
+            prompt_hash = hashlib.sha256(f"prompt-hash-{index}".encode()).hexdigest()
+            scene_sig = hashlib.sha256(f"scene-{index}".encode()).hexdigest()
+            job = {
+                "scene_id": scene_id, "part": 1, "global_scene": index,
+                "role": "main", "image_path": relative, "image_size": "720x1280",
+                "prompt_sha256": prompt_hash, "prompt_signature": prompt_sig,
+                "source_scene_signature": scene_sig, "config_signature": config_sig,
+                "negative_prompt": "bad anatomy",
+            }
+            row = {
+                "scene_id": scene_id, "part": 1, "global_scene": index,
+                "role": "main", "image_path": relative,
+                "image_sha256": ("0" * 64 if corrupt_hash else checksum),
+                "prompt_sha256": prompt_hash, "prompt_signature": prompt_sig,
+                "source_scene_signature": scene_sig, "job_signature": "f" * 64,
+                "config_signature": config_sig, "source_fingerprint": source_fp,
+                "image_size": "720x1280", "width": 720, "height": 1280,
+                "status": "generated",
+            }
+            jobs.append(job)
+            rows.append(row)
+        (visuals / "visual_jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
         jobs_manifest = {
             "status": "completed", "source_fingerprint": source_fp,
             "config_signature": config_sig, "format": "short",
@@ -60,29 +70,53 @@ class CheckpointRestoreTests(unittest.TestCase):
             manifest = {
                 "status": "completed", "source_fingerprint": source_fp,
                 "config_signature": config_sig, "format": "short",
-                "image_size": "720x1280", "scenes": [dict(row)],
+                "image_size": "720x1280", "scenes": [dict(row) for row in rows],
             }
             (visuals / name).write_text(json.dumps(manifest), encoding="utf-8")
-        return source
-
+        return source, hashes, source_fp, config_sig
     def test_verified_partial_image_rebuilds_generator_progress(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = self._candidate(root)
+            source, hashes, source_fp, config_sig = self._candidate(root, count=12)
             output = root / "output"
             restored = checkpoint_manager.restore_partial_visual_images(source, output)
-            self.assertEqual(restored, 1)
-            progress = json.loads(
-                (output / "checkpoints" / "visual_jobs_progress.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(progress["completed_jobs"], 1)
+            self.assertEqual(restored, 12)
+            progress_path = output / "checkpoints" / "visual_jobs_progress.json"
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(progress["completed_jobs"], 12)
             self.assertEqual(progress["remaining_jobs"], 0)
-            self.assertEqual(progress["scene_progress"][0]["status"], "existing")
+            self.assertEqual(len(progress["scene_progress"]), 12)
+            self.assertTrue(all(row["status"] == "existing" for row in progress["scene_progress"]))
+
+            jobs = []
+            for index, row in enumerate(progress["scene_progress"], 1):
+                jobs.append({
+                    "scene_id": row["scene_id"], "part": 1,
+                    "global_scene": index, "local_scene": index,
+                    "scene": index, "source_scene_number": index,
+                    "role": "main", "image_path": row["image_path"],
+                    "prompt_signature": row["prompt_signature"],
+                    "source_scene_signature": row["source_scene_signature"],
+                    "source_fingerprint": source_fp,
+                    "config_signature": config_sig,
+                    "image_width": 720, "image_height": 1280,
+                })
+            def resolve_saved(relative):
+                return output / relative.removeprefix("output/")
+            def verify_saved(path, width, height):
+                return {"sha256": hashes[Path(path).name], "integrity": "verified"}
+            with patch.object(generate_visuals, "CHECKPOINT_FILE", progress_path), \
+                 patch.object(generate_visuals, "resolve_image_path", side_effect=resolve_saved), \
+                 patch.object(generate_visuals, "validate_png", side_effect=verify_saved):
+                previous = generate_visuals.load_previous_progress()
+                rebuilt = generate_visuals.build_progress(jobs, previous, source_fp, config_sig)
+            self.assertEqual(rebuilt["completed_jobs"], 12)
+            self.assertEqual(rebuilt["remaining_jobs"], 0)
 
     def test_hash_mismatch_is_not_restored(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = self._candidate(root, corrupt_hash=True)
+            source, _, _, _ = self._candidate(root, corrupt_hash=True, count=12)
             output = root / "output"
             self.assertEqual(
                 checkpoint_manager.restore_partial_visual_images(source, output), 0
