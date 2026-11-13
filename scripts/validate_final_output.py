@@ -60,7 +60,7 @@ STORYBOARD_MANIFEST = OUT / "visuals" / "storyboard_manifest.json"
 RENDER_QUALITY_REPORT = OUT / "quality" / "render_quality_report.json"
 PRODUCTION_REPORT = OUT / "production_report.json"
 
-VERSION = "final-validator-v106-pathlike-output-paths-merge-legal-contract"
+VERSION = "final-validator-v107-rendered-vs-measured-tts-duration-reconciliation"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
@@ -1632,6 +1632,42 @@ def validate_render(
         DURATION_TOLERANCE, len(mapping) * 0.05
     ):
         fail("Part video duration differs from the sum of rendered role clips")
+
+    # Reconcile the final rendered timeline against measured TTS media, not
+    # estimates or manifest-only sums. Per-scene duration is also checked by
+    # render_video.py before any Part can be assembled.
+    narration_data = read_json(AUDIO)
+    narration_rows = rows_from(narration_data, "jobs", "audio_jobs", "scenes")
+    measured_audio_total = 0.0
+    for index, audio_row in enumerate(narration_rows, 1):
+        audio_path = safe_output(
+            first_path(audio_row, "audio_path", "audio_file", "path", "file", "audio"),
+            f"Narration duration reconciliation {index}",
+            MIN_AUDIO_BYTES,
+        )
+        audio_info = media_info(audio_path)
+        if not audio_info["has_audio"]:
+            fail(f"Narration duration reconciliation {index}: audio stream missing")
+        declared_audio_hash = clean(audio_row.get("sha256") or audio_row.get("audio_sha256"))
+        if declared_audio_hash and declared_audio_hash != digest_file(audio_path):
+            fail(f"Narration duration reconciliation {index}: SHA256 mismatch")
+        measured_audio_total += audio_info["duration"]
+
+    reconciliation_tolerance = max(0.25, len(narration_rows) * 0.05)
+    if abs(scene_duration_total - measured_audio_total) > reconciliation_tolerance:
+        fail(
+            "Rendered scene duration total does not match measured narration total: "
+            f"rendered={scene_duration_total:.4f}s, "
+            f"narration={measured_audio_total:.4f}s, "
+            f"tolerance={reconciliation_tolerance:.4f}s"
+        )
+    if abs(part_duration_total - measured_audio_total) > reconciliation_tolerance:
+        fail(
+            "Final Part video duration total does not match measured narration total: "
+            f"parts={part_duration_total:.4f}s, "
+            f"narration={measured_audio_total:.4f}s, "
+            f"tolerance={reconciliation_tolerance:.4f}s"
+        )
 
     for field, expected in (
         ("all_completed_scene_count", len(mapping)),
