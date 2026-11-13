@@ -2690,7 +2690,7 @@ def check_workflow_structure(source: str) -> list[dict]:
         "checkpoint_manager_invocation": (
             r"(?s)Restore matching resumable checkpoint.*?"
             r"python scripts/checkpoint_manager\.py restore.*?"
-            r"--limit\s+30"
+            r"--limit\s+0"
         ),
         "checkpoint_save": (
             r"(?m)^\s{6}-\s+name:\s*"
