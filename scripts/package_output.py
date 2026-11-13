@@ -750,7 +750,7 @@ def has_story_disclaimer(description: str) -> bool:
 def has_katha_lok_ai_copyright(description: str) -> bool:
     """Accept the canonical year-qualified notice and the legacy label."""
     return bool(
-        re.search(r"©\\s*(?:(?:19|20)\\d{2}\\s+)?Katha Lok AI", description)
+        re.search(r"©\s*(?:(?:19|20)\d{2}\s+)?Katha Lok AI", description)
     )
 
 
