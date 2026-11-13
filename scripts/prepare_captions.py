@@ -239,7 +239,7 @@ def find_nested_caption(container: Any, mode: str) -> tuple[str, str]:
 
 def romanize_hindi_to_hinglish(value: str) -> str:
     """Convert Devanagari Hindi to ASCII ITRANS Hinglish without translating meaning."""
-    if not re.search(r"[\\u0900-\\u097F]", value):
+    if not re.search(r"[\u0900-\u097F]", value):
         return value
     try:
         from indic_transliteration import sanscript
