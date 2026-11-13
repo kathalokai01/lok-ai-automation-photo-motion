@@ -835,7 +835,7 @@ def split_text(
     for chunk in chunks:
         if (
             merged
-            and len(chunk) < min_chars
+            and len(chunk) < breath_min_chars
             and len(merged[-1]) + len(chunk) + 1 <= breath_max_chars and len((merged[-1] + " " + chunk).split()) <= 24
         ):
             merged[-1] += " " + chunk
