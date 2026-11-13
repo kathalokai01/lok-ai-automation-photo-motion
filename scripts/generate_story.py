@@ -2225,6 +2225,27 @@ def validate_story(
     ):
         raise RuntimeError("Story selected Part count is outside its configured range.")
 
+    if selection.get("final_part_merged") is True:
+        pre_merge = selection.get("pre_merge_selected_parts")
+        reduced = selection.get("merge_reduced_part_count")
+        if (
+            isinstance(pre_merge, bool)
+            or not isinstance(pre_merge, int)
+            or isinstance(reduced, bool)
+            or not isinstance(reduced, int)
+            or pre_merge <= expected_parts
+            or reduced != pre_merge - expected_parts
+            or not parts[-1].get("final_part_merged")
+            or any(part.get("final_part_merged") for part in parts[:-1])
+        ):
+            raise RuntimeError(
+                "Final-Part merge exception lacks proof of a real Part-count reduction."
+            )
+    elif any(part.get("final_part_merged") for part in parts):
+        raise RuntimeError(
+            "A Part is marked merged while story selection says no merge occurred."
+        )
+
     if story.get("parts_count") != expected_parts:
         raise RuntimeError("Story Parts-count metadata mismatch.")
 
