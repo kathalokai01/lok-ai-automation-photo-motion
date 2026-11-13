@@ -45,7 +45,7 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
 CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v36-tonal-ambient-fallback"
+VERSION = "photo-motion-sound-design-v37-recognizable-event-sfx"
 RATE = 22050
 SFX_SECONDS = 8.0
 DEFAULT_VISUAL_SCENE_SECONDS = 6.0
@@ -61,7 +61,7 @@ ROLE_ORDER = {
 SFX_TYPES = (
     "whoosh", "impact", "footsteps", "vehicle", "door",
     "weather", "water", "fire", "heartbeat", "phone",
-    "crowd", "mystery", "chime",
+    "crowd", "mystery", "chime", "ring", "siren",
 )
 
 # Cue gain is later multiplied by render_video.py's 1.65 factor.
@@ -77,9 +77,11 @@ SFX_GAINS = {
     "fire": 0.78,
     "heartbeat": 0.80,
     "phone": 0.88,
-    "crowd": 0.82,
-    "mystery": 0.82,
+    "crowd": 0.90,
+    "mystery": 0.86,
     "chime": 0.90,
+    "ring": 0.92,
+    "siren": 0.88,
 }
 
 EVENT_WORDS = {
@@ -136,8 +138,16 @@ EVENT_WORDS = {
         "परछाई", "परछाईं", "गायब", "रहस्यमय",
     ),
     "chime": (
-        "bell", "chime", "ring", "घंटी", "मंदिर",
+        "chime", "temple bell", "घंटी", "मंदिर",
         "शुभ समाचार", "खुशी की खबर", "सफलता की खबर",
+    ),
+    "ring": (
+        "ring", "bell ringing", "doorbell", "phone bell",
+        "घंटी बजी", "रिंग बजी", "बेल",
+    ),
+    "siren": (
+        "siren", "ambulance", "police siren", "emergency vehicle",
+        "सायरन", "एम्बुलेंस", "पुलिस की गाड़ी", "आपातकालीन वाहन",
     ),
 }
 
@@ -376,86 +386,114 @@ def envelope(t, duration, attack=0.08, release=0.5):
 
 
 def sfx_samples(kind, duration=SFX_SECONDS, seed=771):
-    # Deterministic tonal/transient design replaces the previous broadband
-    # noise-heavy whoosh/ambient cues that sounded like continuous hiss.
+    """Create recognizable, event-shaped procedural effects (not generic sine tones)."""
     count = int(round(RATE * duration))
-    phase = random.Random(seed).random() * math.tau
+    rng = random.Random(seed)
+    phase = rng.random() * math.tau
+    noise_state = 0.0
+    bell_partials = (1.0, 2.76, 5.40, 8.93)
     for index in range(count):
         t = index / RATE
         progress = index / max(1, count - 1)
-        fade = envelope(t, duration, 0.035, 0.65)
+        fade = envelope(t, duration, 0.025, 0.45)
+        noise = rng.uniform(-1.0, 1.0)
 
         if kind == "whoosh":
-            swell = math.sin(math.pi * progress) ** 1.6
-            frequency = 95.0 + 360.0 * progress
-            value = swell * (
-                0.30 * math.sin(2 * math.pi * frequency * t)
-                + 0.10 * math.sin(2 * math.pi * frequency * 0.5 * t)
-            )
+            swell = math.sin(math.pi * progress) ** 1.5
+            noise_state = 0.94 * noise_state + 0.06 * noise
+            value = swell * (0.48 * noise_state + 0.18 * math.sin(2 * math.pi * (90 + 260 * progress) * t))
         elif kind == "impact":
-            decay = math.exp(-3.2 * t)
-            value = 0.62 * math.sin(2 * math.pi * 52 * t) * decay
-            value += 0.12 * math.sin(2 * math.pi * 104 * t) * math.exp(-5 * t)
+            decay = math.exp(-5.0 * t)
+            value = 0.72 * math.sin(2 * math.pi * (48 - 12 * progress) * t) * decay
+            value += 0.24 * noise * math.exp(-42 * t)
+            value += 0.12 * math.sin(2 * math.pi * 113 * t) * math.exp(-12 * t)
         elif kind == "footsteps":
-            phase_step = (t * 2.0) % 1.0
-            thump = math.exp(-((phase_step - 0.08) / 0.055) ** 2)
-            value = 0.48 * thump * math.sin(2 * math.pi * 72 * t)
-            value += 0.08 * thump * math.sin(2 * math.pi * 144 * t)
+            step = (t * 2.1) % 1.0
+            thump = math.exp(-((step - 0.07) / 0.045) ** 2)
+            scuff = math.exp(-((step - 0.17) / 0.10) ** 2)
+            value = 0.62 * thump * math.sin(2 * math.pi * 58 * t)
+            value += 0.20 * scuff * (0.5 * noise + 0.5 * math.sin(2 * math.pi * 180 * t))
         elif kind == "vehicle":
-            frequency = 58.0 + 70.0 * progress
-            value = 0.30 * math.sin(2 * math.pi * frequency * t)
-            value += 0.12 * math.sin(2 * math.pi * frequency * 2.0 * t + phase)
+            # Engine revs up, passes the listener, then recedes.
+            rev = 66 + 95 * math.sin(math.pi * progress) ** 1.2
+            passby = 0.20 + 0.80 * math.exp(-((progress - 0.48) / 0.30) ** 2)
+            value = passby * (0.34 * math.sin(2 * math.pi * rev * t)
+                + 0.19 * math.sin(2 * math.pi * rev * 2.02 * t + phase)
+                + 0.10 * math.sin(2 * math.pi * rev * 3.01 * t))
+            value += passby * 0.08 * noise
         elif kind == "door":
-            value = 0.42 * math.sin(2 * math.pi * 88 * t) * math.exp(-2.5 * t)
-            value += 0.16 * math.sin(2 * math.pi * 176 * t) * math.exp(-3.5 * t)
+            latch = math.exp(-((t - 0.12) / 0.018) ** 2)
+            close = math.exp(-((t - 0.72) / 0.028) ** 2)
+            creak_gate = 1.0 if 0.25 < t < 0.68 else 0.0
+            creak = math.sin(2 * math.pi * (190 - 95 * progress) * t)
+            value = 0.60 * latch * (noise + math.sin(2 * math.pi * 1450 * t))
+            value += 0.23 * creak_gate * creak
+            value += 0.55 * close * (noise + math.sin(2 * math.pi * 92 * t))
         elif kind == "weather":
-            # Soft low-mid wind bed, deliberately no high-frequency hiss.
-            modulation = 0.65 + 0.35 * math.sin(2 * math.pi * 0.12 * t + phase)
-            value = modulation * (
-                0.16 * math.sin(2 * math.pi * 54 * t)
-                + 0.10 * math.sin(2 * math.pi * 81 * t + phase)
-            )
+            # Continuous rain texture with distant low thunder rolls.
+            noise_state = 0.975 * noise_state + 0.025 * noise
+            rain = 0.24 * noise_state + 0.07 * noise
+            thunder_gate = math.exp(-((progress - 0.62) / 0.20) ** 2)
+            thunder = thunder_gate * (0.34 * math.sin(2 * math.pi * 34 * t)
+                + 0.18 * math.sin(2 * math.pi * 49 * t + phase))
+            value = rain + thunder
         elif kind == "water":
-            value = 0.16 * math.sin(2 * math.pi * 92 * t)
-            value += 0.10 * math.sin(2 * math.pi * 138 * t + phase)
-            value += 0.05 * math.sin(2 * math.pi * 184 * t)
+            # Flowing water: filtered rushing noise plus irregular small splashes.
+            noise_state = 0.91 * noise_state + 0.09 * noise
+            ripple = 0.5 + 0.5 * math.sin(2 * math.pi * (1.1 + 0.25 * math.sin(t)) * t + phase)
+            value = 0.34 * noise_state + 0.13 * noise + 0.08 * ripple * math.sin(2 * math.pi * 310 * t)
         elif kind == "fire":
-            flicker = 0.75 + 0.25 * math.sin(2 * math.pi * 2.7 * t + phase)
-            value = flicker * (
-                0.12 * math.sin(2 * math.pi * 68 * t)
-                + 0.07 * math.sin(2 * math.pi * 102 * t)
-            )
+            crack = 1.0 if rng.random() < 0.0018 else 0.0
+            noise_state = 0.88 * noise_state + 0.12 * noise
+            value = 0.16 * noise_state + crack * noise * 0.9
+            value += 0.06 * math.sin(2 * math.pi * 72 * t)
         elif kind == "heartbeat":
-            phase_beat = (t * 1.05) % 1.0
-            pulse = (
-                0.82 * math.exp(-((phase_beat - 0.10) / 0.06) ** 2)
-                + 0.45 * math.exp(-((phase_beat - 0.28) / 0.075) ** 2)
-            )
-            value = pulse * math.sin(2 * math.pi * 48 * t)
+            beat = (t * 1.05) % 1.0
+            pulse = 0.95 * math.exp(-((beat - 0.10) / 0.055) ** 2) + 0.48 * math.exp(-((beat - 0.29) / 0.075) ** 2)
+            value = pulse * (0.68 * math.sin(2 * math.pi * 48 * t) + 0.18 * math.sin(2 * math.pi * 96 * t))
         elif kind == "phone":
-            pulse = 1.0 if int(t * 2.0) % 2 == 0 else 0.0
-            value = pulse * (
-                0.22 * math.sin(2 * math.pi * 620 * t)
-                + 0.12 * math.sin(2 * math.pi * 780 * t)
-            )
+            cadence = (t % 1.8)
+            ringing = 1.0 if cadence < 0.85 else 0.0
+            value = ringing * (0.30 * math.sin(2 * math.pi * 440 * t)
+                + 0.27 * math.sin(2 * math.pi * 480 * t)
+                + 0.10 * math.sin(2 * math.pi * 960 * t))
         elif kind == "crowd":
-            value = (
-                0.09 * math.sin(2 * math.pi * 110 * t)
-                + 0.07 * math.sin(2 * math.pi * 147 * t + phase)
-                + 0.05 * math.sin(2 * math.pi * 196 * t)
-            )
+            # Several independent voice-like harmonic bands with changing levels.
+            voices = ((118, 1.0), (147, 0.8), (184, 0.7), (213, 0.55), (262, 0.45))
+            value = 0.0
+            for voice_index, (base, level) in enumerate(voices):
+                wobble = 1.0 + 0.025 * math.sin(2 * math.pi * (0.17 + voice_index * 0.04) * t + phase * (voice_index + 1))
+                syllable = 0.35 + 0.65 * abs(math.sin(2 * math.pi * (1.7 + voice_index * 0.23) * t + phase))
+                formants = (math.sin(2 * math.pi * base * wobble * t)
+                    + 0.48 * math.sin(2 * math.pi * base * 2.1 * t)
+                    + 0.20 * math.sin(2 * math.pi * base * 3.4 * t))
+                value += level * syllable * formants * 0.045
+            noise_state = 0.94 * noise_state + 0.06 * noise
+            value += 0.10 * noise_state
         elif kind == "mystery":
-            wobble = 4 * math.sin(2 * math.pi * 0.3 * t)
-            value = 0.28 * math.sin(2 * math.pi * (110 + wobble) * t)
-            value += 0.13 * math.sin(2 * math.pi * 164.81 * t)
+            wobble = 7 * math.sin(2 * math.pi * 0.22 * t + phase)
+            pulse = 0.70 + 0.30 * math.sin(2 * math.pi * 0.11 * t)
+            value = pulse * (0.32 * math.sin(2 * math.pi * (72 + wobble) * t)
+                + 0.18 * math.sin(2 * math.pi * 108 * t)
+                + 0.08 * math.sin(2 * math.pi * 162 * t))
+        elif kind in {"chime", "ring"}:
+            strike_times = (0.10, 1.9, 3.7, 5.5) if kind == "ring" else (0.12, 2.8, 5.2)
+            value = 0.0
+            for strike in strike_times:
+                age = t - strike
+                if age >= 0:
+                    decay = math.exp(-age * (1.9 if kind == "ring" else 1.25))
+                    fundamental = 660 if kind == "ring" else 784
+                    for partial_index, ratio in enumerate(bell_partials):
+                        value += (0.12 / (partial_index + 1)) * decay * math.sin(2 * math.pi * fundamental * ratio * age)
+        elif kind == "siren":
+            sweep = 650 + 520 * (0.5 + 0.5 * math.sin(2 * math.pi * 0.42 * t))
+            value = 0.38 * math.sin(2 * math.pi * sweep * t)
+            value += 0.17 * math.sin(2 * math.pi * (sweep * 1.5) * t)
         else:
-            decay = math.exp(-1.0 * t)
-            value = decay * (
-                0.26 * math.sin(2 * math.pi * 523.25 * t)
-                + 0.16 * math.sin(2 * math.pi * 659.25 * t)
-                + 0.09 * math.sin(2 * math.pi * 783.99 * t)
-            )
-        yield value * fade
+            value = 0.18 * math.sin(2 * math.pi * 523.25 * t) * math.exp(-0.8 * t)
+
+        yield max(-0.92, min(0.92, value * fade))
 
 
 def music_samples(duration, seed=2718):
@@ -1127,12 +1165,14 @@ def create_cue(audio, scene_row, tracks):
         "vehicle": 7.5, "door": 2.8, "weather": 8.0,
         "water": 7.5, "fire": 7.0, "heartbeat": 7.0,
         "phone": 3.5, "crowd": 7.5, "mystery": 8.0, "chime": 2.8,
+        "ring": 4.5, "siren": 7.5,
     }
     fractions = {
         "whoosh": 0.12, "impact": 0.20, "footsteps": 0.36,
         "vehicle": 0.40, "door": 0.22, "weather": 0.42,
         "water": 0.40, "fire": 0.38, "heartbeat": 0.36,
         "phone": 0.25, "crowd": 0.40, "mystery": 0.40, "chime": 0.22,
+        "ring": 0.22, "siren": 0.35,
     }
 
     narration_duration = audio["duration"]
