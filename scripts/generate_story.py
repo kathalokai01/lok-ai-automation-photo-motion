@@ -584,7 +584,7 @@ def _partition_short_story(
 
             merged_text = (
                 pre_merge_groups[-2].rstrip()
-                + "\\n"
+                + "\n"
                 + pre_merge_groups[-1].lstrip()
             )
             if word_count(merged_text) != merged_words:
@@ -593,7 +593,7 @@ def _partition_short_story(
                 )
 
             merged_groups = pre_merge_groups[:-2] + [merged_text]
-            if clean("\\n\\n".join(merged_groups)) != clean(story_text):
+            if clean("\n\n".join(merged_groups)) != clean(story_text):
                 raise RuntimeError(
                     "Final-Part merge changed, omitted or reordered story text."
                 )
