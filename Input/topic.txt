@@ -20,6 +20,12 @@ AUDIENCE = "adult"                 # adult | kids; narration tone and content su
 # ============================================================
 # NARRATION VOICE AND EMOTION
 # ============================================================
+# TTS_PROFILE = voice personality preset; auto selects from audience/story requirements.
+# CHARACTER_VOICES = keep a stable, distinct voice for each speaking character.
+# TTS_EMOTION_CONTROL / TTS_EMOTION_STRENGTH = enable and control expressive delivery.
+# TTS_CHILD_FRIENDLY = apply child-safe delivery only when appropriate.
+# TTS_VOICE_ID* = optional provider-specific voice IDs; blank means automatic selection.
+# TTS_PITCH = voice pitch multiplier; 1.0 is neutral.
 TTS_PROFILE = "auto"              # auto | child_friendly | female_storyteller | male_storyteller
 CHARACTER_VOICES = true            # अलग किरदारों की अलग स्थायी voice identity
 TTS_EMOTION_CONTROL = true
@@ -35,6 +41,11 @@ TTS_EMOTION_STRENGTH = 0.65
 # ============================================================
 # MUSIC PROVIDERS AND MIXING
 # ============================================================
+# MUSIC_PROVIDER_ORDER = ordered provider fallback list; do not reorder unless intended.
+# MUSIC_FALLBACK_ENABLED = try the next configured provider after failure.
+# MUSIC_ALLOW_PAID = allow billable music providers.
+# MUSIC_GENRE / MUSIC_INTENSITY = score genre and energy progression.
+# MUSIC_SCENE_ADAPTIVE = adapt score to scene emotion; MUSIC_DUCKING lowers music under speech.
 MUSIC_PROVIDER_ORDER = "eleven_music,lyria,stable_audio,local"
 MUSIC_FALLBACK_ENABLED = true
 MUSIC_ALLOW_PAID = true
@@ -44,12 +55,6 @@ MUSIC_GAIN = 0.35                # background music level; narration remains dom
 MUSIC_SCENE_ADAPTIVE = true
 MUSIC_DUCKING = true
 MUSIC_DUCKING_DB = -10.0         # lower music by this amount while narration is active
-
-# ============================================================
-# TITLE AND STORY INPUT
-# ============================================================
-
-
 
 # ============================================================
 # STORY STRUCTURE
@@ -85,6 +90,11 @@ STORY_LENGTH = "auto"
 # auto | fixed
 SCENE_DURATION = "auto"
 
+# STORY_LENGTH = automatic or requested story length policy; not a fixed scene duration.
+# SCENE_DURATION = auto follows each narration audio duration; fixed is legacy/manual mode.
+# PART_HOOK = add a separate opening hook narration record to each Part.
+# PART_SUSPENSE = add suspense beat to non-final Parts; final Part uses resolution.
+# FINAL_RESOLUTION = include the story's ending/resolution as a separate narration record.
 PART_HOOK = true
 PART_SUSPENSE = true
 FINAL_RESOLUTION = true
@@ -106,6 +116,10 @@ SPEED = "+0%"                      # speaking rate: negative slower, positive fa
 # हर कहानी के लिए नीचे दिए गए तीन प्राथमिक मॉडल पहले चलेंगे।
 # तीनों असफल होने पर fallback सूची के शेष मॉडल इसी क्रम में चलेंगे।
 # प्राथमिक मॉडल fallback सूची में दोबारा नहीं चलेंगे।
+# TTS_MAIN_1/2/3 = first-choice voice providers in exact order.
+# TTS_FALLBACK_ORDER = remaining provider order; already-tried primary providers are not repeated.
+# TTS_ALLOW_PAID / ALLOW_BILLABLE_PROVIDERS = permit paid API usage.
+# TTS_CHUNK_* = safe text chunk sizing, checkpointing and audio validation controls.
 TTS_MAIN_1 = "elevenlabs"
 TTS_MAIN_2 = "fish_audio"
 TTS_MAIN_3 = "cartesia"
@@ -131,6 +145,10 @@ TTS_MAX_PROVIDER_ATTEMPTS = 2
 # ============================================================
 
 # Provider order को बदले बिना इसी क्रम में fallback होगा।
+# IMAGE_PROVIDER_ORDER = image provider fallback sequence; order is intentional.
+# IMAGE_FALLBACK_ENABLED = continue to the next provider after a failure.
+# IMAGE_ALLOW_BILLABLE = permit billable image providers.
+# Model/Space fields below pin provider-specific models and fallback choices.
 IMAGE_PROVIDER_ORDER = "huggingface,cloudflare_schnell,ovhcloud,aihorde,pollinations,cloudflare_klein,replicate"
 IMAGE_FALLBACK_ENABLED = true
 IMAGE_ALLOW_BILLABLE = true
@@ -150,6 +168,9 @@ AIHORDE_IMAGE_MODEL = "stable_diffusion_xl"
 # CAPTIONS
 # ============================================================
 
+# CAPTIONS = output script: hindi (Devanagari), english, or hinglish (Roman Hindi).
+# Explicit language-specific caption text in the narration record is used verbatim.
+# If Hinglish is selected and only Devanagari narration exists, it is romanized without translation.
 CAPTIONS = "hinglish"              # hindi = Devanagari; english = English; hinglish = Roman Hindi/Hinglish. Existing explicit caption text is preserved.
 
 # Noto Sans Devanagari | Mukta | Hind | Tiro Devanagari Hindi
@@ -170,6 +191,10 @@ VISUAL_STYLE = "cinematic_realistic" # visual rendering style applied consistent
 
 REALISM = "high"
 
+# CHARACTER_BIBLE = extract canonical character appearance/identity from the full story.
+# CHARACTER_CONSISTENCY = preserve the same character identity in every scene.
+# WORLD_CONSISTENCY = preserve locations, objects, architecture and visual world.
+# SCENE_CONTINUITY = maintain continuity between adjacent scenes.
 CHARACTER_BIBLE = true
 CHARACTER_CONSISTENCY = true
 WORLD_CONSISTENCY = true
@@ -193,9 +218,11 @@ PHOTO_MOTION_PARALLAX = true
 PHOTO_MOTION_PARALLAX_STRENGTH = 0.045 # depth displacement strength; increase cautiously to avoid edge distortion
 
 # slow | normal | fast | very_fast
+# PHOTO_MOTION_SPEED = motion pace; movement is only still-image zoom/pan/parallax.
 PHOTO_MOTION_SPEED = "fast"
 
 # low | medium | high
+# PHOTO_MOTION_VARIATION = amount of movement variation across still-image scenes.
 PHOTO_MOTION_VARIATION = "high"
 
 PHOTO_MOTION_PRESERVE_SUBJECT = true
@@ -204,6 +231,10 @@ PHOTO_MOTION_PRESERVE_SUBJECT = true
 # CAMERA / LIGHTING / MOOD
 # ============================================================
 
+# CINEMATIC_CAMERA = include cinematic camera-language guidance in image prompts.
+# CAMERA_STYLE = framing/lens/composition approach (e.g. cinematic, documentary, close-up).
+# LIGHTING = light direction, softness, contrast, time-of-day and practical sources.
+# MOOD = emotional atmosphere for visual and sound design (e.g. tense, hopeful, dramatic).
 CINEMATIC_CAMERA = true
 CAMERA_STYLE = "cinematic"        # camera framing/movement language for still-image composition
 LIGHTING = "cinematic"             # light source, direction, contrast and time-of-day treatment
@@ -227,6 +258,10 @@ REALISTIC_LIGHTING = true
 # MUSIC / SFX / AMBIENT
 # ============================================================
 
+# MUSIC = enable a continuous background score.
+# MUSIC_STYLE = desired score character; provider order is configured above.
+# SFX = add meaningful scene-synchronized effects (not arbitrary beeps or hiss).
+# AMBIENT_SOUND = add restrained environmental beds; never overpower narration or music.
 MUSIC = true
 MUSIC_STYLE = "cinematic"         # background score character; MUSIC_PROVIDER_ORDER controls provider fallback
 
@@ -237,6 +272,8 @@ AMBIENT_SOUND = true              # low-level location/weather ambience; must no
 # EDITING
 # ============================================================
 
+# TRANSITIONS = edit transition style between scene clips (cinematic, cut, dissolve etc.).
+# Rendered scene duration follows the measured narration audio; no fixed scene duration.
 TRANSITIONS = "cinematic"         # edit transition style between scene clips
 
 # ============================================================
@@ -269,6 +306,7 @@ MAX_RETRIES = 3                  # retry count before failure policy is applied
 SAVE_CHECKPOINT_AFTER_EACH_SCENE = true # persist verified scene work after each scene
 SKIP_COMPLETED_SCENES = true     # reuse only completed artifacts whose signatures and hashes still match
 
+# FAILURE_POLICY = retry_then_checkpoint, skip, or stop after MAX_RETRIES.
 FAILURE_POLICY = "retry_then_checkpoint"
 # retry_then_checkpoint | skip | stop
 
