@@ -1618,7 +1618,7 @@ def _partition_and_revise(
                 "part": number,
                 "words": word_count(part),
                 "sha256": sha256(part),
-                "revision_evidence": None,
+                "revision_evidence": next((row.get("revision_evidence") for row in revision_summaries if row.get("part") == number), None),
                 "final_part_merged": bool(merged_fallback and number == selected_count),
             }
             for number, part in enumerate(groups, 1)
@@ -1629,7 +1629,7 @@ def _partition_and_revise(
         {
             "part": number,
             "narration": part,
-            "revision_evidence": None,
+            "revision_evidence": next((row.get("revision_evidence") for row in revision_summaries if row.get("part") == number), None),
             "final_part_merged": bool(merged_fallback and number == selected_count),
         }
         for number, part in enumerate(groups, 1)
