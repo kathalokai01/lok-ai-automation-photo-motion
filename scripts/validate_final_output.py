@@ -60,7 +60,7 @@ STORYBOARD_MANIFEST = OUT / "visuals" / "storyboard_manifest.json"
 RENDER_QUALITY_REPORT = OUT / "quality" / "render_quality_report.json"
 PRODUCTION_REPORT = OUT / "production_report.json"
 
-VERSION = "final-validator-v106-pathlike-output-paths"
+VERSION = "final-validator-v106-pathlike-output-paths-merge-legal-contract"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 100
 MIN_IMAGE_BYTES = 1000
