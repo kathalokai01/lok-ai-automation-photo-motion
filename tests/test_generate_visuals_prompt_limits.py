@@ -61,6 +61,7 @@ class VisualPromptLimitTests(unittest.TestCase):
         self.assertLessEqual(len(prompt), visuals.MAX_PROMPT_LENGTH)
         self.assertIn(visual, prompt)
         self.assertIn(narration, prompt)
+        self.assertTrue(prompt.endswith("मूल कथन "))
         self.assertNotIn("CHRONOLOGICAL CONTINUITY:", prompt)
         self.assertNotIn("WORLD CONTINUITY LOCK:", prompt)
 
