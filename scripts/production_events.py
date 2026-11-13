@@ -26,6 +26,34 @@ def record_event(stage,status,*,error=None,metadata=None,started_at=None):
         tmp=STATE.with_suffix(".tmp"); tmp.write_text(json.dumps(state,ensure_ascii=False,indent=2)+"\n",encoding="utf-8"); tmp.replace(STATE)
     except OSError as exc: print(f"WARNING: production event journal unavailable: {exc}",flush=True)
     return event
+def record_provider_attempt(
+    provider, model, status, billable, *, scene_id=None, attempt_id=None,
+    error=None, http_status=None, actual_cost=None, currency=None, receipt_id=None,
+):
+    """Record one provider request without guessing actual charges."""
+    cost_verified = actual_cost is not None and receipt_id not in (None, "")
+    metadata = {
+        "provider": str(provider),
+        "model": str(model or "unknown"),
+        "scene_id": str(scene_id or ""),
+        "attempt_id": str(attempt_id or ""),
+        "billable_marked": bool(billable),
+        "request_status": str(status),
+        "actual_cost": actual_cost if cost_verified else None,
+        "currency": str(currency) if cost_verified and currency else None,
+        "receipt_id": str(receipt_id) if cost_verified else None,
+        "cost_status": "receipt_verified" if cost_verified else "unknown_without_receipt",
+    }
+    if http_status is not None:
+        metadata["http_status"] = http_status
+    return record_event(
+        "provider_attempt",
+        "failed" if str(status) in {"request_failed", "quality_rejected"} else "completed",
+        error=error,
+        metadata=metadata,
+    )
+
+
 def read_events():
     if not EVENTS.is_file(): return []
     rows=[]
