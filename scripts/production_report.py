@@ -125,6 +125,13 @@ def sound_quality_summary(sound, validation):
 def evaluate_sound_checks(config, music_result, sound, validation):
  music_enabled=enabled(config,"MUSIC","BACKGROUND_MUSIC","MUSIC_ENABLED",default=True)
  sfx_enabled=enabled(config,"SFX","SFX_ENABLED","SOUND_EFFECTS",default=True)
+ music_ok=(not music_enabled or music_result.get("status")=="completed")
+ if not music_ok:
+  return False
+ # Disabled SFX must not require SFX artifacts or coverage metadata.
+ # When SFX is enabled, keep the gate strict and fail closed on missing data.
+ if not sfx_enabled:
+  return True
  sfx=normalized_sfx_validation(validation)
  sfx_rows=sound.get("sfx_cues") if isinstance(sound.get("sfx_cues"),list) else []
  cue_count=sfx["cue_count"]
@@ -137,8 +144,7 @@ def evaluate_sound_checks(config, music_result, sound, validation):
   missing=int(sfx["scenes_without_sfx"])
  except (TypeError,ValueError):
   return False
- music_ok=(not music_enabled or music_result.get("status")=="completed")
- sfx_ok=(not sfx_enabled or (
+ return bool(
   sound.get("status")=="completed"
   and sfx["status"]=="completed"
   and missing==0
@@ -146,8 +152,7 @@ def evaluate_sound_checks(config, music_result, sound, validation):
   and not sfx["invalid_cues"]
   and not sfx["timing_errors"]
   and not sfx["failed_checks"]
- ))
- return bool(music_ok and sfx_ok)
+ )
 
 def main():
  config_data=load_and_validate(ROOT/"Input"/"topic.txt")
