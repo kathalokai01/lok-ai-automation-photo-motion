@@ -19,7 +19,6 @@ class GenerateVisualsResumeTests(unittest.TestCase):
                 checkpoint_manager.restore_partial_visual_images(source, output), 12
             )
             progress_path = output / "checkpoints" / "visual_jobs_progress.json"
-            rows = generate_visuals.load_previous_progress if False else None
             jobs = []
             saved = __import__("json").loads(progress_path.read_text(encoding="utf-8"))
             for index, row in enumerate(saved["scene_progress"], 1):
