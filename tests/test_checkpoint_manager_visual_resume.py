@@ -96,6 +96,33 @@ class CheckpointManagerVisualResumeTests(unittest.TestCase):
             self.assertEqual(progress["completed_jobs"], 11)
             self.assertEqual(progress["remaining_jobs"], 1)
 
+    def test_partial_audio_asset_is_copied_only_after_sha256_verification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "saved"
+            sound_dir = source / "sound_design"
+            sound_dir.mkdir(parents=True)
+            asset = sound_dir / "vehicle_sfx.wav"
+            asset.write_bytes(b"verified-audio-artifact")
+            checksum = hashlib.sha256(asset.read_bytes()).hexdigest()
+            checkpoint_dir = source / "checkpoints"
+            checkpoint_dir.mkdir()
+            checkpoint = {
+                "source_fingerprint": "a" * 64,
+                "tracks": [{
+                    "path": "output/sound_design/vehicle_sfx.wav",
+                    "sha256": checksum,
+                }],
+            }
+            (checkpoint_dir / "sound_design_progress.json").write_text(
+                json.dumps(checkpoint), encoding="utf-8"
+            )
+            output = root / "output"
+            checkpoint_manager.merge_progress_checkpoints(source, output)
+            restored = output / "sound_design" / "vehicle_sfx.wav"
+            self.assertTrue(restored.is_file())
+            self.assertEqual(hashlib.sha256(restored.read_bytes()).hexdigest(), checksum)
+
     def test_run_enumerator_includes_success_failure_and_cancelled(self):
         payload = json.dumps([
             {"databaseId": 11, "status": "completed", "conclusion": "success"},
