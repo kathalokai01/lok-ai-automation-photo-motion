@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from gemini_http import http_status, http_error_body, retry_after_seconds
+from production_events import record_provider_attempt
 from voice_profiles import resolve_voice_profile
 from input_config import (
     load_and_validate,
@@ -41,7 +42,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 23
+VERSION = 24
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -2040,6 +2041,7 @@ def synthesize_chunk_with_fallback(
     max_retries: int,
     blocked_paid_providers: set[str],
     voice_profile: dict | None = None,
+    scene_id: str = "",
 ) -> tuple[dict, str]:
     failures = []
 
@@ -2069,6 +2071,15 @@ def synthesize_chunk_with_fallback(
         )
 
         for attempt in range(1, max_retries + 1):
+            attempt_id = (
+                f"{scene_id or 'unknown-scene'}:{hashlib.sha256(chunk.encode('utf-8')).hexdigest()[:12]}:{attempt}"
+            )
+            response_received = False
+            billable = provider in BILLABLE_PROVIDERS
+            record_provider_attempt(
+                provider, provider, "request_started", billable,
+                scene_id=scene_id, attempt_id=attempt_id,
+            )
             try:
                 info = synthesize_provider(
                     provider,
@@ -2078,6 +2089,11 @@ def synthesize_chunk_with_fallback(
                     speed,
                     voice,
                     voice_profile,
+                )
+                response_received = True
+                record_provider_attempt(
+                    provider, provider, "response_received", billable,
+                    scene_id=scene_id, attempt_id=attempt_id,
                 )
 
                 verified = validate_audio(provider_output)
@@ -2097,10 +2113,24 @@ def synthesize_chunk_with_fallback(
                         "Final audio SHA256 mismatch."
                     )
 
+                record_provider_attempt(
+                    provider, provider, "accepted", billable,
+                    scene_id=scene_id, attempt_id=attempt_id,
+                )
                 return final_info, provider
 
             except Exception as exc:
                 classification = classify_provider_error(exc)
+                record_provider_attempt(
+                    provider,
+                    provider,
+                    "response_received_validation_failed" if response_received else "request_failed",
+                    billable,
+                    scene_id=scene_id,
+                    attempt_id=attempt_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                    http_status=getattr(exc, "code", None),
+                )
 
                 failures.append({
                     "provider": provider,
@@ -2798,6 +2828,7 @@ def main() -> int:
                         max_retries,
                         blocked_paid_providers,
                         job.get("voice_profile") or {},
+                        job.get("scene_id", ""),
                     )
                 )
                 manifest["summary"]["generated_chunks"] += 1
