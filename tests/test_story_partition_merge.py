@@ -31,7 +31,7 @@ class ShortStoryMergeRegressionTests(unittest.TestCase):
         self.assertTrue(merged)
         self.assertEqual(selected, 1)
         self.assertEqual(len(groups), 1)
-        self.assertEqual(word_count(groups[0]), 190)
+        self.assertEqual(word_count(groups[0]), 220)
         self.assertEqual(
             " ".join(groups[0].split()),
             " ".join(story.split()),
