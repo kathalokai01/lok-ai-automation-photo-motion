@@ -2,11 +2,19 @@
 # KATHA LOK AI — PHOTO MOTION INPUT CONFIGURATION
 # ============================================================
 
+# HEADING / TOPIC
+# TITLE = वीडियो का मुख्य शीर्षक। खाली होने पर पूरी कहानी के सार से बनाया जाएगा।
+# TOPIC = कहानी का विषय/मुख्य पात्र/केंद्रीय विचार।
+TITLE = "लालच का टावर और कुदरत का न्याय"
+TOPIC = "अयान, Orion-9 और विक्रांत मेहरा की कहानी"
+
+# INPUT
+# नीचे सभी उत्पादन सेटिंग्स हैं। किसी विकल्प को बदलने से पहले उसका विवरण पढ़ें।
 # VIDEO MODE
 # short = केवल vertical Shorts output
 # full  = केवल landscape full-length output
-FORMAT = "short"
-AUDIENCE = "adult"                 # adult | kids
+FORMAT = "short"                  # short = vertical Shorts only; full = landscape full video only
+AUDIENCE = "adult"                 # adult | kids; narration tone and content suitability
 
 
 # ============================================================
@@ -32,27 +40,16 @@ MUSIC_FALLBACK_ENABLED = true
 MUSIC_ALLOW_PAID = true
 MUSIC_GENRE = "original cinematic score"
 MUSIC_INTENSITY = "evolving"
-MUSIC_GAIN = 0.35
+MUSIC_GAIN = 0.35                # background music level; narration remains dominant
 MUSIC_SCENE_ADAPTIVE = true
 MUSIC_DUCKING = true
-MUSIC_DUCKING_DB = -10.0
+MUSIC_DUCKING_DB = -10.0         # lower music by this amount while narration is active
 
 # ============================================================
 # TITLE AND STORY INPUT
 # ============================================================
 
-TITLE = "लालच का टावर और कुदरत का न्याय"
-TOPIC = "अयान, Orion-9 और विक्रांत मेहरा की कहानी"
 
-# STORY_TEXT में दी गई कहानी मूल स्रोत है।
-# उसके पात्र, घटनाएँ, संबंध, क्रम और अंत नहीं बदलने हैं।
-# पहले वर्तनी, मात्रा, व्याकरण और विराम-चिह्न सुधारें।
-# उसके बाद ही शब्द-गणना और PARTS में विभाजन करें।
-PRESERVE_STORY_TEXT = true
-
-STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिला 'सिटैडल टावर्स' के चीफ इंजीनियर अयान को लॉन्च की रात अपने एआई सिस्टम 'ओरियन-9' में एक खतरनाक बग मिला। तेज तूफान में बिल्डिंग के ऊपरी हिस्से गिर सकते थे। प्रोजेक्ट के मालिक विक्रांत मेहरा ने उद्घाटन रोकने से मना कर दिया और अयान के खाते में 5 मिलियन डॉलर ट्रांसफर कर कोड छिपाने को कहा। लालच में आकर अयान ने उस खामी को बाईपास कर दिया।
-अगले दिन ग्रैंड पार्टी के दौरान शहर में भयानक चक्रवाती तूफान आ गया और 'ओरियन-9' सिस्टम क्रैश हो गया। तभी सिक्योरिटी हेड का फोन आया कि अयान की बूढ़ी मां और बेटा रियान उसी फॉल्टी जोन की लिफ्ट में फंस गए हैं, और विक्रांत हेलीकॉप्टर से भाग चुका है।
-पछतावे से भरा अयान जान की बाजी लगाकर सर्वर रूम पहुंचा और आखिरी सेकंड में नया कोड डालकर अपने परिवार को बचा लिया। उधर छत से भागते विक्रांत के पैरों पर उसी कमजोर हिस्से का भारी स्लैब गिर गया, जिससे उसके दोनों पैर कट गए। अयान ने पुलिस को सारे सबूत सौंप दिए। विक्रांत व्हीलचेयर पर उम्रकैद के लिए जेल गया, और अयान ने अपना अपराध कबूल कर अपनी भूल का प्रायश्चित किया। """
 
 # ============================================================
 # STORY STRUCTURE
@@ -63,7 +60,7 @@ STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिल�
 # Inclusive range examples: "2-8", "4-6", "7-11", "12-18"
 # Range selection is finalized from corrected story word count.
 # Reversed ranges such as "11-8" are invalid.
-PARTS = "1-4"
+PARTS = "1-4"                    # fixed count or inclusive min-max range; story policy selects actual Parts
 
 # SCENES:
 # Min-Max range per story Part.
@@ -78,7 +75,7 @@ PARTS = "1-4"
 # Maximum से अधिक Scene-worthy Units होने पर शेष पूरे वाक्य
 # अगले Part में कहानी के क्रम से भेजे जाएँगे।
 # FULL Mode में पूरी कहानी एक ही Part होगी।
-SCENES = 5-20
+SCENES = 5-20                    # inclusive minimum-maximum scene count per Part
 SCENES_MIN = 5
 SCENES_MAX = 20
 
@@ -96,8 +93,8 @@ FINAL_RESOLUTION = true
 # VOICE / NARRATION
 # ============================================================
 
-VOICE = "female"                   # male | female
-SPEED = "+0%"                      # -10% slow | +0% normal | +10% fast
+VOICE = "female"                   # male | female; default narration voice when provider supports it
+SPEED = "+0%"                      # speaking rate: negative slower, positive faster
 
 # ============================================================
 # TTS MODEL SELECTION
@@ -153,19 +150,19 @@ AIHORDE_IMAGE_MODEL = "stable_diffusion_xl"
 # CAPTIONS
 # ============================================================
 
-CAPTIONS = "hinglish"              # hindi | english | hinglish
+CAPTIONS = "hinglish"              # hindi = Devanagari; english = English; hinglish = Roman Hindi/Hinglish. Existing explicit caption text is preserved.
 
 # Noto Sans Devanagari | Mukta | Hind | Tiro Devanagari Hindi
 CAPTION_FONT = "mukta"
 
 # auto या 16 से 64 के बीच integer
-CAPTION_FONT_SIZE = 20
+CAPTION_FONT_SIZE = 20           # caption font size; valid configured range is 16–64 or auto
 
 # ============================================================
 # VISUAL STYLE AND CONSISTENCY
 # ============================================================
 
-VISUAL_STYLE = "cinematic_realistic"
+VISUAL_STYLE = "cinematic_realistic" # visual rendering style applied consistently across scenes
 # cinematic_realistic | realistic_3d | cinematic_2d
 # indian_folk | storybook | historical | fantasy
 # dark_fantasy | anime_cinematic | clay_animation
@@ -190,10 +187,10 @@ SCENE_CONTINUITY = true
 # parallax = depth-map आधारित 2.5D movement
 # dynamic = varied zoom, pan और cinematic movement
 # static = बिना motion
-PHOTO_MOTION_STYLE = "dynamic"
+PHOTO_MOTION_STYLE = "dynamic"   # still-image-only zoom/pan/parallax motion; no body or face animation
 
 PHOTO_MOTION_PARALLAX = true
-PHOTO_MOTION_PARALLAX_STRENGTH = 0.045
+PHOTO_MOTION_PARALLAX_STRENGTH = 0.045 # depth displacement strength; increase cautiously to avoid edge distortion
 
 # slow | normal | fast | very_fast
 PHOTO_MOTION_SPEED = "fast"
@@ -208,16 +205,16 @@ PHOTO_MOTION_PRESERVE_SUBJECT = true
 # ============================================================
 
 CINEMATIC_CAMERA = true
-CAMERA_STYLE = "cinematic"
-LIGHTING = "cinematic"
-MOOD = "dramatic"
+CAMERA_STYLE = "cinematic"        # camera framing/movement language for still-image composition
+LIGHTING = "cinematic"             # light source, direction, contrast and time-of-day treatment
+MOOD = "dramatic"                 # emotional tone of visuals and sound
 
 # ============================================================
 # VISUAL QUALITY
 # ============================================================
 
-QUALITY = "high"
-FPS = 24
+QUALITY = "high"                 # image/render quality preset
+FPS = 24                         # output frame rate
 
 NEGATIVE_PROMPT = true
 AVOID_CARTOON_LOOK = true
@@ -231,33 +228,46 @@ REALISTIC_LIGHTING = true
 # ============================================================
 
 MUSIC = true
-MUSIC_STYLE = "cinematic"
+MUSIC_STYLE = "cinematic"         # background score character; MUSIC_PROVIDER_ORDER controls provider fallback
 
-SFX = true
-AMBIENT_SOUND = true
+SFX = true                       # scene-synced sound effects; disable only to omit effects
+AMBIENT_SOUND = true              # low-level location/weather ambience; must not become hiss or overpower narration
 
 # ============================================================
 # EDITING
 # ============================================================
 
-TRANSITIONS = "cinematic"
+TRANSITIONS = "cinematic"         # edit transition style between scene clips
 
 # ============================================================
 # BRANDING
 # ============================================================
 
-WATERMARK = false
-LOGO = false
+WATERMARK = false                # add project watermark only when true
+LOGO = false                     # add configured logo only when true
+
+# ============================================================
+# DESCRIPTION
+# ============================================================
+# STORY_TEXT = पूरी कहानी का मूल पाठ। यही story, narration और scene विभाजन का स्रोत है।
+# PRESERVE_STORY_TEXT = true रखने पर घटनाएँ, पात्र, संबंध, क्रम और अंत नहीं बदलेंगे;
+# केवल आवश्यक भाषा/वर्तनी/मात्रा/व्याकरण/विराम-चिह्न सुधार स्वीकार होंगे।
+# Caption का output वही भाषा/लिपि रखेगा जो source caption में दी गई है;
+# CAPTIONS=hinglish होने पर हिंदी narration का fallback Roman Hinglish होगा।
+PRESERVE_STORY_TEXT = true
+STORY_TEXT = """  न्यू-टेक सिटी के 50-मंजिला 'सिटैडल टावर्स' के चीफ इंजीनियर अयान को लॉन्च की रात अपने एआई सिस्टम 'ओरियन-9' में एक खतरनाक बग मिला। तेज तूफान में बिल्डिंग के ऊपरी हिस्से गिर सकते थे। प्रोजेक्ट के मालिक विक्रांत मेहरा ने उद्घाटन रोकने से मना कर दिया और अयान के खाते में 5 मिलियन डॉलर ट्रांसफर कर कोड छिपाने को कहा। लालच में आकर अयान ने उस खामी को बाईपास कर दिया।
+अगले दिन ग्रैंड पार्टी के दौरान शहर में भयानक चक्रवाती तूफान आ गया और 'ओरियन-9' सिस्टम क्रैश हो गया। तभी सिक्योरिटी हेड का फोन आया कि अयान की बूढ़ी मां और बेटा रियान उसी फॉल्टी जोन की लिफ्ट में फंस गए हैं, और विक्रांत हेलीकॉप्टर से भाग चुका है।
+पछतावे से भरा अयान जान की बाजी लगाकर सर्वर रूम पहुंचा और आखिरी सेकंड में नया कोड डालकर अपने परिवार को बचा लिया। उधर छत से भागते विक्रांत के पैरों पर उसी कमजोर हिस्से का भारी स्लैब गिर गया, जिससे उसके दोनों पैर कट गए। अयान ने पुलिस को सारे सबूत सौंप दिए। विक्रांत व्हीलचेयर पर उम्रकैद के लिए जेल गया, और अयान ने अपना अपराध कबूल कर अपनी भूल का प्रायश्चित किया। """
 
 # ============================================================
 # ERROR RECOVERY / RESUME
 # ============================================================
 
 RESUME_ENABLED = true
-MAX_RETRIES = 3
+MAX_RETRIES = 3                  # retry count before failure policy is applied
 
-SAVE_CHECKPOINT_AFTER_EACH_SCENE = true
-SKIP_COMPLETED_SCENES = true
+SAVE_CHECKPOINT_AFTER_EACH_SCENE = true # persist verified scene work after each scene
+SKIP_COMPLETED_SCENES = true     # reuse only completed artifacts whose signatures and hashes still match
 
 FAILURE_POLICY = "retry_then_checkpoint"
 # retry_then_checkpoint | skip | stop
