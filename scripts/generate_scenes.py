@@ -32,8 +32,8 @@ OUTPUT_DIR = ROOT / "output" / "scenes"
 OUTPUT_FILE = OUTPUT_DIR / "scenes.json"
 CHECKPOINT_FILE = ROOT / "output" / "checkpoints" / "scenes_progress.json"
 
-VERSION = "photo-motion-scenes-v16-transition-default-contract"
-PROMPT_VERSION = 14
+VERSION = "photo-motion-scenes-v17-single-source-continuity-context"
+PROMPT_VERSION = 15
 
 ROLE_ORDER = {
     "hook": 0,
@@ -828,6 +828,14 @@ def build_visual_prompt(
     previous_scene: dict | None,
     role: str,
 ) -> str:
+    """
+    Build only the scene-local visual instruction.
+
+    Character Bible, world continuity and previous-scene continuity are
+    intentionally NOT serialized here. generate_visuals.py adds those once
+    from the authoritative Bible and scene mapping. Embedding full dossiers
+    here duplicated thousands of characters into every scene prompt.
+    """
     visual = clean(source.get("visual_prompt"))
     if len(visual) < 24:
         raise RuntimeError(
@@ -844,21 +852,20 @@ def build_visual_prompt(
         ),
     ]
 
+    # These are scene-local facts only. Character and world identity data
+    # are added once by the downstream visual prompt builder.
     context_fields = (
         ("story_anchor", "Exact story moment"),
         ("beat", "Story beat"),
         ("purpose", "Scene purpose"),
         ("action", "Visible action"),
         ("location", "Exact story location"),
-        ("world_context", "Story world"),
         ("time_period", "Story time period"),
         ("objects", "Story-specific objects"),
         ("animals", "Story-specific animals"),
         ("vehicles", "Story-specific vehicles"),
         ("clothing", "Story-specific clothing"),
         ("dialogue", "Dialogue context"),
-        ("camera_prompt", "Camera direction"),
-        ("lighting_prompt", "Lighting direction"),
     )
 
     for field, label in context_fields:
@@ -867,6 +874,8 @@ def build_visual_prompt(
             value = ", ".join(clean(item) for item in value if clean(item))
         value = clean(value)
         if value:
+            # Prevent model-generated metadata from dominating the prompt.
+            value = value[:1200]
             pieces.append(f"{label}: {value}")
 
     pieces.append(
@@ -874,69 +883,23 @@ def build_visual_prompt(
         + (clean(source.get("mood")) or settings["mood"])
     )
 
-    if settings["cinematic_camera"] and not clean(
-        source.get("camera_prompt") or source.get("camera")
-    ):
+    camera = clean(source.get("camera_prompt") or source.get("camera"))
+    lighting = clean(source.get("lighting_prompt") or source.get("lighting"))
+    if camera:
+        pieces.append("Camera direction: " + camera[:500])
+    elif settings["cinematic_camera"]:
         pieces.append(
             "Use intentional cinematic framing and physically plausible "
             "camera perspective."
         )
 
-    if settings["realistic_lighting"] and not clean(
-        source.get("lighting_prompt") or source.get("lighting")
-    ):
+    if lighting:
+        pieces.append("Lighting direction: " + lighting[:500])
+    elif settings["realistic_lighting"]:
         pieces.append(
             "Use motivated realistic lighting, natural skin tones "
             "and physically plausible shadows."
         )
-
-    if settings["character_consistency"] and characters:
-        pieces.append(
-            "CHARACTER IDENTITY LOCK. Preserve established face, age, "
-            "gender evidence, skin tone, hair, eyes, body proportions, "
-            "distinctive features and source-supported clothing continuity. "
-            "Do not swap, merge or redesign characters. Character records: "
-            + json.dumps(
-                character_summary(characters),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
-
-    if settings["world_consistency"] and world:
-        pieces.append(
-            "WORLD CONTINUITY LOCK. Preserve story era, location, "
-            "architecture and environment. Apply only relevant details: "
-            + json.dumps(
-                compact_world_context(world),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
-
-    if settings["scene_continuity"] and previous_scene:
-        previous_context = []
-
-        for field, label in (
-            ("world_context", "Previous location"),
-            ("time_period", "Previous time period"),
-            ("story_anchor", "Previous story moment"),
-            ("character_ids", "Previous character IDs"),
-        ):
-            value = previous_scene.get(field)
-            if isinstance(value, list):
-                value = ", ".join(clean(item) for item in value if clean(item))
-            value = clean(value)
-            if value:
-                previous_context.append(f"{label}: {value}")
-
-        if previous_context:
-            pieces.append(
-                "CHRONOLOGICAL CONTINUITY: "
-                + " ".join(previous_context)
-                + ". Continue the established timeline without repeating "
-                "or contradicting the previous event."
-            )
 
     if settings["natural_motion"]:
         pieces.append(
@@ -954,7 +917,6 @@ def build_visual_prompt(
     )
 
     return "\n".join(pieces).strip()
-
 
 def build_scene_record(
     item: dict,
