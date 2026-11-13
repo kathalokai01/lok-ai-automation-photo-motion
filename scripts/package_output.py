@@ -736,6 +736,17 @@ def parse_tags(value: str) -> list[str]:
     return result
 
 
+def has_story_disclaimer(description: str) -> bool:
+    """Accept current canonical Hindi and legacy generic disclaimer labels."""
+    return any(
+        marker in description
+        for marker in (
+            "कहानी संबंधी अस्वीकरण (Story Disclaimer):",
+            "अस्वीकरण (Disclaimer):",
+        )
+    )
+
+
 def validate_metadata(mode: str, title: str) -> tuple[Path, Path, Path, dict]:
     text_path = safe_output(
         "output/youtube_metadata.txt", "Metadata text", MIN_TEXT_BYTES
@@ -775,16 +786,7 @@ def validate_metadata(mode: str, title: str) -> tuple[Path, Path, Path, dict]:
         fail("Metadata title does not match the story title")
     if len(text_title) > 100 or len(description) > 5000:
         fail("Metadata exceeds YouTube title/description limits")
-    # The metadata generator's canonical Hindi label is
-    # "कहानी संबंधी अस्वीकरण (Story Disclaimer):". Accept the older
-    # generic label as well so existing verified metadata remains usable.
-    if not any(
-        marker in description
-        for marker in (
-            "कहानी संबंधी अस्वीकरण (Story Disclaimer):",
-            "अस्वीकरण (Disclaimer):",
-        )
-    ):
+    if not has_story_disclaimer(description):
         fail("YouTube description is missing the required story disclaimer")
     if "© Katha Lok AI" not in description:
         fail("YouTube description is missing the Katha Lok AI copyright notice")
