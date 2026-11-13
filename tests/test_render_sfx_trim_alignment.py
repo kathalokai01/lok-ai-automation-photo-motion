@@ -50,7 +50,7 @@ def test_renderer_rejects_unvalidated_or_inconsistent_trim_metadata():
 
 def test_renderer_exposes_current_sfx_timeline_contract():
     source = (ROOT / "scripts" / "render_video.py").read_text(encoding="utf-8")
-    assert 'VERSION = "render-video-v73-music-forward-low-ambient-hiss"' in source
+    assert f'VERSION = "{render_video.VERSION}"' in source
     assert "def validated_sfx_timing(" in source
     assert 'SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"' in source
 
@@ -61,7 +61,7 @@ def test_renderer_emits_part_videos_only_without_combined_intermediate():
     assert "PRE_CAPTION_VIDEO" not in source
     assert "pre_caption_video" not in source
     assert "ordered_part_paths" not in source
-    assert 'VERSION = "render-video-v73-music-forward-low-ambient-hiss"' in source
+    assert f'VERSION = "{render_video.VERSION}"' in source
 
 
 def test_audio_filter_splits_narration_for_sidechain_and_final_mix():
