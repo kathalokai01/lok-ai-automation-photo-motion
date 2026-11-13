@@ -882,8 +882,16 @@ def _merge_progress_document(existing: dict, incoming: dict) -> dict | None:
 
 def _copy_verified_progress_artifacts(document: dict, source: Path, output: Path) -> int:
     """Restore individual files referenced by resumable records after SHA256 verification."""
-    path_keys = ("image_path", "audio_path", "video_path", "video", "file", "path", "output")
-    hash_keys = ("image_sha256", "audio_sha256", "video_sha256", "sha256", "file_sha256")
+    path_keys = (
+        "image_path", "audio_path", "video_path", "depth_path",
+        "caption_path", "font_path", "thumbnail_path", "output_path",
+        "srt_path", "wav_path", "video", "file", "path", "output",
+    )
+    hash_keys = (
+        "image_sha256", "audio_sha256", "video_sha256", "depth_sha256",
+        "caption_sha256", "font_sha256", "thumbnail_sha256",
+        "source_sha256", "manifest_sha256", "sha256", "file_sha256",
+    )
     copied = 0
     stack = [document]
     while stack:
