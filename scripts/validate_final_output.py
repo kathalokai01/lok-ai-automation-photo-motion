@@ -662,6 +662,27 @@ def validate_story(
     if policy.get("final_part_merged") is not bool(merged_parts):
         fail("Story final merge policy does not match Part records")
 
+    selection = story.get("parts_selection")
+    if not isinstance(selection, dict):
+        fail("Story Part-selection evidence is missing")
+    if merged_parts:
+        pre_merge = selection.get("pre_merge_selected_parts")
+        reduced = selection.get("merge_reduced_part_count")
+        if (
+            isinstance(pre_merge, bool)
+            or not isinstance(pre_merge, int)
+            or isinstance(reduced, bool)
+            or not isinstance(reduced, int)
+            or pre_merge <= len(parts)
+            or reduced != pre_merge - len(parts)
+            or merged_parts != [part_numbers[-1]]
+        ):
+            fail("Final-Part merge exception has no proof of a real Part-count reduction")
+    elif selection.get("final_part_merged") is True:
+        fail("Part selection claims a merge that no final Part records")
+    elif any(part.get("final_part_merged") is True for part in parts):
+        fail("A Part claims a final merge but the selection does not")
+
     return scene_counts, {
         "status": "valid",
         "title": title,
