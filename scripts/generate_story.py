@@ -1567,7 +1567,7 @@ def _partition_and_revise(
         for number, part in enumerate(groups, 1):
             amount = word_count(part)
             is_final_merged = bool(merged_fallback and number == selected_count)
-            maximum = SHORT_MERGED_MAX if is_final_merged else SHORT_MAX
+            maximum = SHORT_MERGED_MAX if is_final_merged else SHORT_HARD_MAX
             if amount < SHORT_MIN or amount > maximum:
                 raise RuntimeError(
                     f"SHORT Part {number} has {amount} words; "
