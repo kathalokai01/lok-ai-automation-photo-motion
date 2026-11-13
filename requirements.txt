@@ -17,3 +17,4 @@ sentencepiece==0.2.1
 soundfile==0.13.1
 librosa==0.11.0
 pytest==8.4.1
+indic-transliteration==2.3.75
