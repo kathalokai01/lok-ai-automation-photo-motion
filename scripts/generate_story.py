@@ -532,23 +532,13 @@ def _partition_short_story(
             if groups is not None:
                 return groups, part_count, False
 
-    # A 151-239 word final Part is not automatically a merge exception.
-    # Only the later reduced-Part-count path may mark a real final merge.
-    # Merge exactly one final leftover Part into its immediate
-    # predecessor. Do not collapse multiple Parts to reach the 239-word cap.
-    merged_candidates = (
-        [preferred_count - 1]
-        if preferred_count > 1
-        and preferred_count - 1 >= max(1, minimum_parts - 1)
-        and preferred_count - 1 <= maximum_parts
-        and (preferred_count - 1) * scenes_max <= MAX_TOTAL_SCENES
-        else []
-    )
-
-    for units_source in variants:
-        for part_count in merged_candidates:
+    # The 239-word exception is valid only after a real pre-merge
+    # partition produced a short final Part. Never repartition the entire
+    # story directly into fewer Parts and label that result a merge.
+    if preferred_count > 1:
+        for units_source in variants:
             units = list(units_source)
-            required = part_count * scenes_min
+            required = preferred_count * scenes_min
 
             if len(units) < required:
                 try:
@@ -557,20 +547,58 @@ def _partition_short_story(
                     last_errors.append(str(exc))
                     continue
 
-            if len(units) > part_count * scenes_max:
+            if len(units) > preferred_count * scenes_max:
                 continue
 
-            groups = _balanced_unit_partition(
+            pre_merge_groups = _balanced_unit_partition(
                 units,
-                part_count,
+                preferred_count,
                 scenes_min,
                 scenes_max,
-                allow_final_short=False,
-                final_max=SHORT_MERGED_MAX,
+                allow_final_short=True,
+                final_max=SHORT_MIN - 1,
             )
+            if pre_merge_groups is None or len(pre_merge_groups) < 2:
+                continue
 
-            if groups is not None:
-                return groups, part_count, True
+            final_words = word_count(pre_merge_groups[-1])
+            if not 1 <= final_words < SHORT_MIN:
+                continue
+
+            preceding_words = word_count(pre_merge_groups[-2])
+            merged_words = preceding_words + final_words
+            if merged_words > SHORT_MERGED_MAX:
+                last_errors.append(
+                    f"Final-Part merge would create {merged_words} words; "
+                    f"maximum is {SHORT_MERGED_MAX}."
+                )
+                continue
+
+            preceding_scene_units = len(pre_merge_groups[-2].splitlines())
+            final_scene_units = len(pre_merge_groups[-1].splitlines())
+            if preceding_scene_units + final_scene_units > scenes_max:
+                last_errors.append(
+                    "Final-Part merge would exceed the configured SCENES maximum."
+                )
+                continue
+
+            merged_text = (
+                pre_merge_groups[-2].rstrip()
+                + "\\n"
+                + pre_merge_groups[-1].lstrip()
+            )
+            if word_count(merged_text) != merged_words:
+                raise RuntimeError(
+                    "Final-Part merge changed the exact word count."
+                )
+
+            merged_groups = pre_merge_groups[:-2] + [merged_text]
+            if clean("\\n\\n".join(merged_groups)) != clean(story_text):
+                raise RuntimeError(
+                    "Final-Part merge changed, omitted or reordered story text."
+                )
+
+            return merged_groups, len(merged_groups), True
 
     detail = " | ".join(last_errors[-3:])
     raise RuntimeError(
