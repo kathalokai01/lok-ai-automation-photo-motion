@@ -38,6 +38,14 @@ class VisualPromptLimitTests(unittest.TestCase):
         self.assertLessEqual(len(value), 1400)
         self.assertTrue(value.startswith("महत्वपूर्ण घटना"))
 
+    def test_story_required_visible_text_is_never_truncated(self):
+        exact_text = "कहानी में अनिवार्य लिखा हुआ संदेश " * 300
+        value = visuals.scene_detail(
+            {"required_visible_text": exact_text},
+            "required_visible_text",
+        )
+        self.assertEqual(value, exact_text)
+
     def test_optional_context_is_removed_before_locked_scene_text(self):
         visual = "EXACT STORY EVENT: " + ("मूल दृश्य निर्देश " * 100)
         narration = "LOCKED NARRATION: " + ("मूल कथन " * 100)
