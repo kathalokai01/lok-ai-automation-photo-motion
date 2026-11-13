@@ -45,7 +45,7 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
 CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v34-all-role-measured-tts-timeline"
+VERSION = "photo-motion-sound-design-v35-tonal-music-scene-sfx"
 RATE = 22050
 SFX_SECONDS = 8.0
 DEFAULT_VISUAL_SCENE_SECONDS = 6.0
