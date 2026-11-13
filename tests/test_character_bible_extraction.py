@@ -19,7 +19,7 @@ class CharacterNameExtractionTests(unittest.TestCase):
         names = bible.extract_story_names(source)
 
         self.assertIn("अयान", names)
-        self.assertIn("विक्रांत मेहरा", names)
+        self.assertIn("विक्रांत", names)
         self.assertIn("रियान", names)
 
     def test_repeated_english_proper_names_are_detected(self):
