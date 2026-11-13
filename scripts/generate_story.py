@@ -501,7 +501,7 @@ def _partition_short_story(
     ):
         variants.append(expanded_units)
 
-    # First prefer the strict 120-150 word range for every Part.
+    # Prefer 120-150 words; allow 151-180 only as a revision candidate.\n    # The revision loop below requires verified changed-text evidence.
     for units_source in variants:
         for part_count in candidates:
             units = list(units_source)
