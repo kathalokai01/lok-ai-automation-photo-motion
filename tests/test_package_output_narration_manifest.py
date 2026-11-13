@@ -50,14 +50,14 @@ class PackageNarrationManifestTests(unittest.TestCase):
     def test_canonical_hindi_story_disclaimer_is_accepted(self):
         self.assertTrue(
             package_output.has_story_disclaimer(
-                "विवरण।\\n\\nकहानी संबंधी अस्वीकरण (Story Disclaimer): काल्पनिक कहानी।"
+                "विवरण।\n\nकहानी संबंधी अस्वीकरण (Story Disclaimer): काल्पनिक कहानी।"
             )
         )
 
     def test_legacy_story_disclaimer_is_still_accepted(self):
         self.assertTrue(
             package_output.has_story_disclaimer(
-                "विवरण।\\n\\nअस्वीकरण (Disclaimer): काल्पनिक कहानी।"
+                "विवरण।\n\nअस्वीकरण (Disclaimer): काल्पनिक कहानी।"
             )
         )
 
