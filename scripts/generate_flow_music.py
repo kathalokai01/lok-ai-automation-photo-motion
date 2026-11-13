@@ -35,7 +35,7 @@ CHECKPOINT = ROOT / "output" / "checkpoints" / "flow_music_progress.json"
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 DEFAULT_MODEL = "lyria-3.5"
-VERSION = "photo-motion-multi-provider-music-v22-zero-quota-no-retry"
+VERSION = "photo-motion-multi-provider-music-v23-provider-attempt-audit"
 
 REQUEST_TIMEOUT = (10, 90)
 RETRY_DELAYS = (3,)
@@ -651,8 +651,11 @@ def extract_audio(data):
     raise RuntimeError("Google response contains no valid audio data.")
 
 
-def request_music(api_key, model, prompt, destination):
-    global API_CALLS
+def request_music(
+    api_key, model, prompt, destination, *,
+    billable=False, scene_id="", attempt_id_prefix="lyria",
+):
+    global API_CALLS, PAID_PROVIDER_CALLS
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
     payload = {
         "model": model,
@@ -661,14 +664,24 @@ def request_music(api_key, model, prompt, destination):
     }
     last_error = "Unknown Google Lyria API error."
     for attempt in range(len(RETRY_DELAYS) + 1):
+        attempt_id = f"{attempt_id_prefix}:{attempt + 1}"
         try:
             API_CALLS += 1
+            if billable:
+                PAID_PROVIDER_CALLS += 1
             response = SESSION.post(
                 API_URL, headers=headers, json=payload,
                 timeout=REQUEST_TIMEOUT,
             )
             status = int(response.status_code)
             response_text = str(response.text or "")
+            record_provider_attempt(
+                "lyria", model,
+                "request_failed" if status >= 400 else "response_received",
+                billable, scene_id=scene_id, attempt_id=attempt_id,
+                http_status=status,
+                error=(response_text[:500] if status >= 400 else None),
+            )
             response_lower = response_text.lower()
 
             if status == 404:
@@ -742,13 +755,38 @@ def request_music(api_key, model, prompt, destination):
                 os.replace(temporary, destination)
             finally:
                 temporary.unlink(missing_ok=True)
-            return probe_audio(destination, MIN_AUDIO_DURATION)
+            info = probe_audio(destination, MIN_AUDIO_DURATION)
+            record_provider_attempt(
+                "lyria", model, "accepted", billable,
+                scene_id=scene_id, attempt_id=attempt_id,
+            )
+            return info
         except requests.Timeout as exc:
             last_error = f"Google music request timed out: {exc}"
+            record_provider_attempt(
+                "lyria", model, "request_failed", billable,
+                scene_id=scene_id, attempt_id=attempt_id, error=last_error,
+            )
         except requests.ConnectionError as exc:
             last_error = f"Google music connection failed: {exc}"
+            record_provider_attempt(
+                "lyria", model, "request_failed", billable,
+                scene_id=scene_id, attempt_id=attempt_id, error=last_error,
+            )
         except requests.RequestException as exc:
+            record_provider_attempt(
+                "lyria", model, "request_failed", billable,
+                scene_id=scene_id, attempt_id=attempt_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"Google music request failed: {exc}") from exc
+        except Exception as exc:
+            record_provider_attempt(
+                "lyria", model, "response_received_validation_failed", billable,
+                scene_id=scene_id, attempt_id=attempt_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         if attempt < len(RETRY_DELAYS):
             time.sleep(RETRY_DELAYS[attempt])
     raise RuntimeError(last_error)
@@ -995,8 +1033,9 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                     )
                     if not os.getenv(required_key, "").strip():
                         raise MusicProviderError(f"{required_key} is missing.")
-                    # Count and journal the paid request attempt even on HTTP failure.
+                    # Count each actual provider request attempt, including failures.
                     PAID_PROVIDER_CALLS += 1
+                    API_CALLS += 1
                     record_provider_attempt(
                         provider, model, "request_started", True,
                         scene_id=role, attempt_id=attempt_id,
@@ -1013,39 +1052,32 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                         scene_id=role, attempt_id=attempt_id,
                     )
                     source_duration = probe_audio(source, MIN_AUDIO_DURATION)
-                    API_CALLS += 1
 
                 elif provider == "lyria":
                     if not api_key:
                         raise RuntimeError(
                             "GEMINI_API_KEY/GOOGLE_API_KEY is missing for Lyria"
                         )
-                    record_provider_attempt(
-                        provider, model, "request_started", provider_billable,
-                        scene_id=role, attempt_id=attempt_id,
-                    )
                     source_duration = request_music(
-                        api_key, model, prompts[role], source
+                        api_key, model, prompts[role], source,
+                        billable=provider_billable,
+                        scene_id=role,
+                        attempt_id_prefix=attempt_id,
                     )
                     provider_response_received = True
-                    record_provider_attempt(
-                        provider, model, "response_received", provider_billable,
-                        scene_id=role, attempt_id=attempt_id,
-                    )
 
                 selected_provider = provider
-                record_provider_attempt(
-                    provider, model, "accepted", provider_billable,
-                    scene_id=role, attempt_id=attempt_id,
-                )
+                if provider != "lyria":
+                    record_provider_attempt(
+                        provider, model, "accepted", provider_billable,
+                        scene_id=role, attempt_id=attempt_id,
+                    )
                 log("MUSIC PROVIDER SUCCESS:", provider, role)
                 break
 
             except Exception as provider_error:
                 error_text = str(provider_error)
-                if provider in {"eleven_music", "stable_audio"} or (
-                    provider == "lyria" and api_key
-                ):
+                if provider in {"eleven_music", "stable_audio"}:
                     record_provider_attempt(
                         provider,
                         model,
