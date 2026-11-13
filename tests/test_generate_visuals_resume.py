@@ -40,7 +40,11 @@ class GenerateVisualsResumeTests(unittest.TestCase):
             def verify_saved(path, width, height):
                 return {"sha256": hashes[Path(path).name], "integrity": "verified"}
 
+            # Simulate a failed run that restored image manifests but did not
+            # restore/write the progress JSON. The generator must reconstruct it.
+            progress_path.unlink()
             with patch.object(generate_visuals, "CHECKPOINT_FILE", progress_path), \
+                 patch.object(generate_visuals, "VISUALS_DIR", output / "visuals"), \
                  patch.object(generate_visuals, "resolve_image_path", side_effect=resolve_saved), \
                  patch.object(generate_visuals, "validate_png", side_effect=verify_saved):
                 previous = generate_visuals.load_previous_progress()
