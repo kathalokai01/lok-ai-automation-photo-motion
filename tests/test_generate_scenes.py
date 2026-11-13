@@ -467,5 +467,46 @@ class FreeFirstImageProviderOrderTests(unittest.TestCase):
         )
 
 
+class SceneTransitionDefaultTests(unittest.TestCase):
+    def _build(self, source):
+        settings = scenes.build_settings({})
+        item = {
+            "source": {
+                "scene_id": "part_01_scene_01",
+                "role": "main",
+                "visual_prompt": "A detailed story-specific cinematic scene with a named character.",
+                **source,
+            },
+            "part": 1,
+            "scene": 1,
+            "role": "main",
+            "scene_id": "part_01_scene_01",
+            "part_data": {"scene_duration": "auto"},
+            "narration": "कहानी का पूरा वाक्य।",
+            "global_scene_number": 1,
+        }
+        with (
+            patch.object(scenes, "scene_character_references", return_value=[]),
+            patch.object(scenes, "find_character_records", return_value=[]),
+            patch.object(
+                scenes,
+                "build_visual_prompt",
+                return_value="A detailed story-specific cinematic still image prompt.",
+            ),
+        ):
+            return scenes.build_scene_record(
+                item, settings, {"world": {}}, None
+            )
+
+    def test_missing_transition_uses_neutral_cut_without_input_setting(self):
+        record = self._build({})
+        self.assertEqual(record["transition"], "cut")
+
+    def test_explicit_source_transition_is_preserved(self):
+        record = self._build({"transition": "crossfade"})
+        self.assertEqual(record["transition"], "crossfade")
+
+
+
 if __name__ == "__main__":
     unittest.main()
