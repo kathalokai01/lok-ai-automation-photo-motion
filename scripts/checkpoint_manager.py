@@ -1049,8 +1049,9 @@ def get_expected_context() -> dict:
 
 
 def list_runs(repository: str, workflow: str, branch: str, limit: int) -> list[int]:
-    # --paginate + --slurp walks every page, not merely the newest 30/100 runs.
-    # GitHub's status=completed includes successful, failed and cancelled conclusions.
+    # gh api does not allow --slurp together with --jq. Apply jq to each
+    # paginated response and parse one run ID per output line instead.
+    # status=completed includes success, failure and cancelled conclusions.
     query = ["status=completed", "per_page=100"]
     if branch and branch.casefold() not in {"all", "*"}:
         query.insert(0, f"branch={branch}")
@@ -1059,26 +1060,33 @@ def list_runs(repository: str, workflow: str, branch: str, limit: int) -> list[i
         + "&".join(query)
     )
     command = [
-        "gh", "api", "--paginate", "--slurp", "--jq",
-        "[.[].workflow_runs[] | {databaseId: .id, status: .status, conclusion: .conclusion}]",
+        "gh", "api", "--paginate", "--jq",
+        '.workflow_runs[] | select(.status == "completed") | .id',
         endpoint,
     ]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode:
         log("Checkpoint search unavailable; continuing without cross-run restore:", result.stderr.strip())
         return []
-    try:
-        records = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        log("Checkpoint run list was invalid; continuing without cross-run restore:", exc)
-        return []
-    run_ids = [
-        int(row["databaseId"])
-        for row in records
-        if isinstance(row, dict)
-        and row.get("status") == "completed"
-        and row.get("databaseId")
-    ]
+
+    run_ids = []
+    malformed = []
+    for line in (result.stdout or "").splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        try:
+            run_id = int(value)
+        except ValueError:
+            malformed.append(value[:120])
+            continue
+        if run_id > 0 and run_id not in run_ids:
+            run_ids.append(run_id)
+    if malformed:
+        log(
+            "Checkpoint run list contained non-numeric output; ignored:",
+            "; ".join(malformed[:5]),
+        )
     return run_ids[:limit] if limit else run_ids
 
 
