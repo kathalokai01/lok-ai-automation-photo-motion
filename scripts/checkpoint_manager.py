@@ -963,7 +963,7 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
             )
             if not has_stage_identity:
                 continue
-            copied += _copy_verified_progress_artifacts(data, source, output)
+            changed += _copy_verified_progress_artifacts(data, source, output)
             relative = candidate.relative_to(source)
             destination = output / relative
             if not destination.exists():
