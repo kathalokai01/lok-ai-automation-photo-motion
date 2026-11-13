@@ -2272,10 +2272,55 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
             "billable_permission",
             billable is True,
             (
-                "ALLOW_BILLABLE_PROVIDERS=true."
+                "ALLOW_BILLABLE_PROVIDERS=true; billable provider use may incur charges, and actual charges remain unknown without provider receipts."
                 if billable
                 else "ALLOW_BILLABLE_PROVIDERS must be true."
             ),
+        )
+
+        vision_value = config.get("IMAGE_QUALITY_VISION_ENABLED", True)
+        vision_enabled = (
+            vision_value if isinstance(vision_value, bool)
+            else str(vision_value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        )
+        try:
+            vision_minimum_score = int(config.get("IMAGE_QUALITY_MIN_SCORE", 7))
+        except (TypeError, ValueError):
+            vision_minimum_score = 0
+        add(
+            "mandatory_visual_quality_gate",
+            vision_enabled and vision_minimum_score >= 7,
+            f"IMAGE_QUALITY_VISION_ENABLED={vision_enabled}; minimum quality score={vision_minimum_score} (required >=7).",
+        )
+
+        checkpoint_source = (ROOT / "scripts" / "checkpoint_manager.py").read_text(encoding="utf-8")
+        add(
+            "all_run_checkpoint_restore",
+            "--paginate" in checkpoint_source and "_copy_verified_progress_artifacts" in checkpoint_source,
+            "All completed workflow runs and SHA256-verified partial artifacts are included in restore.",
+        )
+
+        provider_source = (ROOT / "scripts" / "free_image_generator.py").read_text(encoding="utf-8")
+        event_source = (ROOT / "scripts" / "production_events.py").read_text(encoding="utf-8")
+        add(
+            "provider_attempt_accounting",
+            "record_provider_attempt" in provider_source and "unknown_without_receipt" in event_source,
+            "Provider attempts, billable flags and receipt-based cost status are recorded.",
+        )
+
+        sound_source = (ROOT / "scripts" / "generate_sound_design.py").read_text(encoding="utf-8")
+        required_sfx = {"vehicle", "crowd", "weather", "phone", "water", "mystery", "ring", "heartbeat", "footsteps", "door", "siren"}
+        add(
+            "story_event_sfx_coverage",
+            all(f'"{kind}"' in sound_source for kind in required_sfx),
+            "Event SFX coverage includes vehicle, crowd, weather, phone, water, mystery, ring, heartbeat, footsteps, door and siren.",
+        )
+
+        caption_source = (ROOT / "scripts" / "prepare_captions.py").read_text(encoding="utf-8")
+        add(
+            "hinglish_english_token_preservation",
+            "HINGLISH_ENGLISH_WORDS" in caption_source and "normalize_roman_case" in caption_source,
+            "English words remain English and accidental mixed casing is normalized.",
         )
 
         add("caption_font", bool(font), f"CAPTION_FONT={font}.")
