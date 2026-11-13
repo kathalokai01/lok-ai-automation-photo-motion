@@ -2304,6 +2304,8 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
         tts_source = (ROOT / "scripts" / "generate_tts.py").read_text(encoding="utf-8")
         music_source = (ROOT / "scripts" / "generate_flow_music.py").read_text(encoding="utf-8")
         llm_source = (ROOT / "scripts" / "llm_provider_client.py").read_text(encoding="utf-8")
+        story_source = (ROOT / "scripts" / "generate_story.py").read_text(encoding="utf-8")
+        metadata_source = (ROOT / "scripts" / "generate_youtube_metadata.py").read_text(encoding="utf-8")
         report_source = (ROOT / "scripts" / "production_report.py").read_text(encoding="utf-8")
         event_source = (ROOT / "scripts" / "production_events.py").read_text(encoding="utf-8")
         add(
@@ -2313,6 +2315,8 @@ def check_input_configuration() -> tuple[dict, list[dict], dict]:
                 and "record_provider_attempt" in tts_source
                 and "record_provider_attempt" in music_source
                 and "record_provider_attempt" in llm_source
+                and "record_provider_attempt" in story_source
+                and "record_provider_attempt" in metadata_source
                 and "provider_summary" in report_source
                 and "unknown_without_receipt" in event_source
             ),
