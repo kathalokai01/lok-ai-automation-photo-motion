@@ -266,12 +266,16 @@ def normalize_roman_case(value: str) -> str:
                 sentence_start = True
             continue
         prefix, word, suffix = match.groups()
-        if word.isupper() and len(word) > 1:
+        if word.casefold() == "iphone":
+            normalized = "iPhone"
+        elif word.isupper() and len(word) > 1:
             normalized = word
-        else:
+        elif any(character.isupper() for character in word[1:]) or word[0].islower() and any(character.isupper() for character in word):
             normalized = word.lower()
-            if sentence_start:
-                normalized = normalized[:1].upper() + normalized[1:]
+        else:
+            normalized = word
+        if sentence_start and normalized and normalized[0].islower():
+            normalized = normalized[:1].upper() + normalized[1:]
         output.append(prefix + normalized + suffix)
         sentence_start = bool(re.search(r"[.!?।]$", suffix))
     return clean_text(" ".join(output))
