@@ -346,30 +346,26 @@ def validate_scene_image(
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", model):
         raise ValueError("IMAGE_QUALITY_VISION_MODEL contains invalid characters.")
 
-    # Technical integrity is always mandatory. When Vision is enabled, semantic
-    # scene match, character continuity and minimum clarity score are also gates.
-    # An unavailable Vision service keeps the generated candidate/checkpoint so a
-    # later run can verify it without paying for another image-generation request.
+    # Technical integrity is mandatory. Gemini Vision is advisory: its result
+    # may add verified semantic evidence or a warning, but must not discard a
+    # technically valid generated image or stop the pipeline when unavailable.
     vision = None
     vision_error = None
     if enabled:
         key = _clean(api_key or os.getenv("GEMINI_API_KEY"))
         if not key:
-            raise VisionVerificationUnavailable(
-                "GEMINI_API_KEY is missing; image quality cannot be verified."
-            )
-        try:
-            vision = _vision_check(
-                path, prompt, model, key, max(10, min(30, int(timeout))),
-                [Path(value) for value in (reference_image_paths or [])[:2]],
-                scene_id=_clean(scene_id),
-            )
-        except VisionVerificationUnavailable:
-            raise
-        except Exception as exc:
-            raise VisionVerificationUnavailable(
-                f"Visual quality verification failed: {type(exc).__name__}: {exc}"
-            ) from exc
+            vision_error = "GEMINI_API_KEY is missing; semantic image verification was not performed."
+        else:
+            try:
+                vision = _vision_check(
+                    path, prompt, model, key, max(10, min(30, int(timeout))),
+                    [Path(value) for value in (reference_image_paths or [])[:2]],
+                    scene_id=_clean(scene_id),
+                )
+            except Exception as exc:
+                vision_error = (
+                    f"Vision verification unavailable: {type(exc).__name__}: {exc}"
+                )
     else:
         vision_error = "Vision verification is disabled by configuration."
 
@@ -377,25 +373,35 @@ def validate_scene_image(
         isinstance(vision, dict)
         and vision.get("prompt_match") is True
         and vision.get("character_consistency") is True
-        and vision.get("quality_score", 0) >= max(7, min(10, int(minimum_score)))
+        and isinstance(vision.get("quality_score"), (int, float))
+        and not isinstance(vision.get("quality_score"), bool)
+        and vision.get("quality_score") >= max(7, min(10, int(minimum_score)))
     )
-    accepted = vision_accepted if enabled else True
+    vision_rejected = isinstance(vision, dict) and not vision_accepted
+    if vision_rejected:
+        details = "; ".join(vision.get("issues", [])[:4]) if isinstance(
+            vision.get("issues"), list
+        ) else ""
+        vision_error = "Vision advisory warning: scene match, continuity or score did not meet the preferred threshold."
+        if details:
+            vision_error += " " + details[:500]
+
+    # A passing technical check is sufficient for pipeline acceptance. Never
+    # label semantic match as verified unless the Vision evidence actually passed.
     return {
         "status": (
             "passed" if vision_accepted
-            else "rejected" if enabled
+            else "accepted_with_warning" if vision_error
             else "accepted_without_vision"
         ),
-        "accepted": accepted,
+        "accepted": True,
         "vision_accepted": vision_accepted,
         "technical": technical,
         "vision": vision,
-        "verification_warning": vision_error or (
-            None if vision_accepted else "Vision rejected the scene match, character continuity or clarity score."
-        ),
+        "verification_warning": vision_error,
         "semantic_story_match": "verified" if vision_accepted else "not_verified",
         "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "verification_contract": "mandatory_technical_integrity+mandatory_vision_gate_when_enabled",
+        "verification_contract": "mandatory_technical_integrity+advisory_vision",
     }
 
 
