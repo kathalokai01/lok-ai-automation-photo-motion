@@ -696,8 +696,10 @@ def make_prompt(item):
         str(item.get("visual_prompt") or ""),
     ]).casefold()
     if any(token in story_context for token in (
-        "police", "inspector", "officer", "constable", "cop",
+        "police", "inspector", "officer", "constable", "cop", "ips", "sp",
+        "acp", "si", "sub inspector", "commissioner", "magistrate", "collector",
         "थाना", "पुलिस", "दरोगा", "इंस्पेक्टर", "अधिकारी", "सिपाही",
+        "जिलाधिकारी", "कलेक्टर", "एसपी", "एसीपी", "आईपीएस",
     )):
         sections.append(
             "Every police or government official must look authentically Indian "
