@@ -81,6 +81,27 @@ class ProductionReportSoundGateTests(unittest.TestCase):
             config, self.music, self.sound, {"status": "missing"}
         ))
 
+    def test_disabled_sfx_ignores_malformed_sfx_metadata(self):
+        config = {"MUSIC": "true", "SFX": "false"}
+        validation = {
+            "status": "failed",
+            "sfx": {
+                "status": "failed",
+                "cue_count": "not-a-number",
+                "scenes_without_sfx": None,
+                "timing_errors": 99,
+            },
+        }
+        self.assertTrue(production_report.evaluate_sound_checks(
+            config, self.music, self.sound, validation
+        ))
+
+    def test_disabled_sfx_still_requires_music_when_music_enabled(self):
+        config = {"MUSIC": "true", "SFX": "false"}
+        self.assertFalse(production_report.evaluate_sound_checks(
+            config, {"status": "unavailable"}, self.sound, {"status": "missing"}
+        ))
+
     def test_music_unavailable_without_fallback_still_fails(self):
         music = {"status": "unavailable"}
         validation = {
