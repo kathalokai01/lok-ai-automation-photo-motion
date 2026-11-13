@@ -1013,6 +1013,15 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
                 continue
             existing = read_json(destination)
             if not isinstance(existing, dict):
+                # A prior buggy checkpoint writer may have left concatenated
+                # JSON documents. The incoming source is already parsed and
+                # has a stage identity; replace the corrupt destination with
+                # this valid checkpoint instead of silently retaining damage.
+                destination.write_text(
+                    json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                changed += 1
                 continue
             merged = _merge_progress_document(existing, data)
             if merged is None:
