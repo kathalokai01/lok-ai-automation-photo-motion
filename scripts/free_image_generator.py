@@ -2241,11 +2241,6 @@ def run_provider_attempts(
                     provider_name, provider_key, "response_received", billable,
                     scene_id=item["scene_id"], attempt_id=attempt_id,
                 )
-                record_provider_attempt(
-                    provider_name, provider_key, "accepted", billable,
-                    scene_id=item["scene_id"], attempt_id=attempt_id,
-                )
-
                 quality = validate_scene_image(
                     destination,
                     prompt,
@@ -2262,6 +2257,10 @@ def run_provider_attempts(
                         json.dumps(quality, ensure_ascii=False)[:1200]
                     )
 
+                record_provider_attempt(
+                    provider_name, provider_key, "accepted", billable,
+                    scene_id=item["scene_id"], attempt_id=attempt_id,
+                )
                 integrity = image_integrity(destination, item["size"])
                 success_attempts = list(record.get("attempts", []))
                 vision_score = vision_quality_score(quality)
@@ -2336,7 +2335,22 @@ def run_provider_attempts(
 
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                if not provider_response_received:
+                if provider_response_received:
+                    record_provider_attempt(
+                        provider_name,
+                        provider_key,
+                        (
+                            "response_received_quality_rejected"
+                            if isinstance(exc, ImageQualityRejected)
+                            else "response_received_validation_failed"
+                        ),
+                        billable,
+                        scene_id=item["scene_id"],
+                        attempt_id=attempt_id,
+                        error=last_error,
+                        http_status=getattr(getattr(exc, "response", None), "status_code", None),
+                    )
+                else:
                     record_provider_attempt(
                         provider_name, provider_key, "request_failed", billable,
                         scene_id=item["scene_id"], attempt_id=attempt_id,
