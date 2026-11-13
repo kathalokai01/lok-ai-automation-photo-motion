@@ -36,7 +36,7 @@ MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
 VERSION = "photo-motion-visual-jobs-v15-generator-defect-prevention"
-PROMPT_VERSION = 15
+PROMPT_VERSION = 16
 
 ROLE_ORDER = {
     "hook": 0,
@@ -561,6 +561,23 @@ def load_character_bible(config: dict) -> dict:
 
         known_ids.add(identifier.casefold())
         known_names.add(name.casefold())
+
+        if as_bool(config.get("CHARACTER_BIBLE"), True):
+            identity = clean(character.get("visual_identity"))
+            rules = character.get("consistency_rules")
+            if not identity:
+                raise RuntimeError(
+                    f"Character Bible identity description is missing for {name}."
+                )
+            if not isinstance(rules, list) or not rules:
+                raise RuntimeError(
+                    f"Character Bible consistency rules are missing for {name}."
+                )
+
+    if enabled and not characters:
+        raise RuntimeError(
+            "CHARACTER_BIBLE is enabled but the completed Bible contains no characters."
+        )
 
     for label, mappings in (
         ("scene_character_map", scene_map),
