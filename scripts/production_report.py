@@ -18,7 +18,8 @@ SOURCES={
  "render_quality":OUT/"quality"/"render_quality_report.json",
  "audio":OUT/"narration"/"audio_jobs.json",
  "music":OUT/"music"/"flow_music_manifest.json",
- "sound":OUT/"sound_design"/"sound_design_manifest.json",\n "sfx_validation":OUT/"sound_design"/"sfx_timing_validation.json",
+ "sound":OUT/"sound_design"/"sound_design_manifest.json",
+ "sfx_validation":OUT/"sound_design"/"sfx_timing_validation.json",
 }
 def digest(path):
  return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -186,7 +187,9 @@ def main():
    "reused_chunks":audio_summary.get("reused_chunks",0),
    "generated_chunks":audio_summary.get("generated_chunks",0),
   },
-  "music_status":music_result["status"],\n  "sound_quality":sound_quality,\n  "sound_checks_passed":sound_checks_passed,
+  "music_status":music_result["status"],
+  "sound_quality":sound_quality,
+  "sound_checks_passed":sound_checks_passed,
   "music_reason":music_result["reason"],
   "music_external_provider_status":music_result["external_status"],
   "music_external_provider_reason":music_result["external_reason"],
