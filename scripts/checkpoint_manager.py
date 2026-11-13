@@ -887,14 +887,16 @@ def get_expected_context() -> dict:
 
 
 def list_runs(repository: str, workflow: str, branch: str, limit: int) -> list[int]:
+    # --paginate + --slurp walks every page, not merely the newest 30/100 runs.
+    # GitHub's status=completed includes successful, failed and cancelled conclusions.
+    endpoint = (
+        f"repos/{repository}/actions/workflows/{workflow}/runs"
+        f"?branch={branch}&status=completed&per_page=100"
+    )
     command = [
-        "gh", "run", "list",
-        "--repo", repository,
-        "--workflow", workflow,
-        "--branch", branch,
-        "--status", "completed",
-        "--limit", str(limit),
-        "--json", "databaseId,status",
+        "gh", "api", "--paginate", "--slurp", "--jq",
+        "[.[].workflow_runs[] | {databaseId: .id, status: .status, conclusion: .conclusion}]",
+        endpoint,
     ]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode:
@@ -905,11 +907,14 @@ def list_runs(repository: str, workflow: str, branch: str, limit: int) -> list[i
     except json.JSONDecodeError as exc:
         log("Checkpoint run list was invalid; continuing without cross-run restore:", exc)
         return []
-    return [
+    run_ids = [
         int(row["databaseId"])
         for row in records
-        if row.get("status") == "completed" and row.get("databaseId")
+        if isinstance(row, dict)
+        and row.get("status") == "completed"
+        and row.get("databaseId")
     ]
+    return run_ids[:limit] if limit else run_ids
 
 
 def download_run(repository: str, run_id: int, destination: Path) -> Path | None:
@@ -990,7 +995,7 @@ def restore(args: argparse.Namespace) -> int:
     report = {
         "status": "completed",
         "runs_examined": examined,
-        "run_limit": args.limit,
+        "run_limit": args.limit if args.limit else "all",
         "restored_stages": restored,
         "restored_stage_count": len(restored),
         "progress_checkpoint_files_merged": progress_checkpoints,
@@ -1014,12 +1019,12 @@ def parse_args() -> argparse.Namespace:
     command.add_argument("--repository", required=True)
     command.add_argument("--workflow", default="generate-photo-motion-video.yml")
     command.add_argument("--branch", required=True)
-    command.add_argument("--limit", type=int, default=30)
+    command.add_argument("--limit", type=int, default=0, help="Maximum runs to inspect; 0 inspects every paginated run.")
     command.add_argument("--input-hash", required=True)
     command.add_argument("--output", default=str(DEFAULT_OUTPUT))
     args = parser.parse_args()
-    if not 1 <= args.limit <= 100:
-        parser.error("--limit must be between 1 and 100")
+    if args.limit < 0:
+        parser.error("--limit must be zero (all runs) or a positive integer")
     return args
 
 
