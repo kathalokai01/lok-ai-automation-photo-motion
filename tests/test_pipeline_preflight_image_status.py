@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -85,6 +87,113 @@ class CompletedTTSIntegrityRetryTests(unittest.TestCase):
                 self.manifest
             )
         )
+
+    def test_completed_manifest_with_missing_scene_rows_is_retryable(self):
+        self.manifest["summary"]["total_jobs"] = 3
+        self.assertTrue(
+            pipeline_preflight.is_retryable_completed_tts_integrity_issue(
+                self.manifest
+            )
+        )
+
+    def test_duplicate_scene_ids_are_not_retryable(self):
+        self.manifest["jobs"][1]["scene_id"] = self.manifest["jobs"][0]["scene_id"]
+        self.assertFalse(
+            pipeline_preflight.is_retryable_completed_tts_integrity_issue(
+                self.manifest
+            )
+        )
+
+
+class InProgressImageManifestRetryTests(unittest.TestCase):
+    def test_identity_matched_partial_image_manifest_is_retryable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_out = pipeline_preflight.OUT
+            try:
+                pipeline_preflight.OUT = Path(temporary)
+                visual_dir = Path(temporary) / "visuals"
+                visual_dir.mkdir(parents=True)
+                source = "a" * 64
+                config = "b" * 64
+                jobs = [
+                    {"scene_id": "part_01_hook"},
+                    {"scene_id": "part_01_scene_01"},
+                ]
+                (visual_dir / "visual_jobs_manifest.json").write_text(
+                    json.dumps({
+                        "source_fingerprint": source,
+                        "config_signature": config,
+                        "format": "short",
+                        "total_jobs": 2,
+                        "scene_order": jobs,
+                    }),
+                    encoding="utf-8",
+                )
+                manifest = {
+                    "status": "in_progress",
+                    "source_fingerprint": source,
+                    "config_signature": config,
+                    "format": "short",
+                    "total_scenes": 2,
+                    "images_required": 2,
+                    "images_ready": 1,
+                    "images_failed": 0,
+                    "images_pending": 1,
+                    "scenes": [
+                        {"scene_id": row["scene_id"], "source_fingerprint": source,
+                         "config_signature": config, "status": "generated"}
+                        for row in jobs
+                    ],
+                }
+                self.assertTrue(
+                    pipeline_preflight.is_retryable_in_progress_image_manifest(
+                        manifest
+                    )
+                )
+            finally:
+                pipeline_preflight.OUT = original_out
+
+    def test_image_manifest_with_wrong_source_identity_is_not_retryable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_out = pipeline_preflight.OUT
+            try:
+                pipeline_preflight.OUT = Path(temporary)
+                visual_dir = Path(temporary) / "visuals"
+                visual_dir.mkdir(parents=True)
+                (visual_dir / "visual_jobs_manifest.json").write_text(
+                    json.dumps({
+                        "source_fingerprint": "a" * 64,
+                        "config_signature": "b" * 64,
+                        "format": "short",
+                        "total_jobs": 1,
+                        "scene_order": [{"scene_id": "part_01_scene_01"}],
+                    }),
+                    encoding="utf-8",
+                )
+                manifest = {
+                    "status": "in_progress",
+                    "source_fingerprint": "c" * 64,
+                    "config_signature": "b" * 64,
+                    "format": "short",
+                    "total_scenes": 1,
+                    "images_required": 1,
+                    "images_ready": 0,
+                    "images_failed": 0,
+                    "images_pending": 1,
+                    "scenes": [{
+                        "scene_id": "part_01_scene_01",
+                        "source_fingerprint": "c" * 64,
+                        "config_signature": "b" * 64,
+                        "status": "pending",
+                    }],
+                }
+                self.assertFalse(
+                    pipeline_preflight.is_retryable_in_progress_image_manifest(
+                        manifest
+                    )
+                )
+            finally:
+                pipeline_preflight.OUT = original_out
 
 
 if __name__ == "__main__":
