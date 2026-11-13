@@ -530,7 +530,7 @@ def generate_text(
         f"llm:{provider}:{selected_model}:"
         f"{hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:12]}:{time.time_ns()}"
     )
-    billable_marked = True
+    billable_marked = provider in {"openai", "openrouter"}
     record_provider_attempt(
         provider, selected_model, "request_started", billable_marked,
         scene_id="llm_text_generation", attempt_id=attempt_id,
