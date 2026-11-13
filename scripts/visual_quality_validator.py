@@ -362,7 +362,7 @@ def validate_scene_image(
             vision = _vision_check(
                 path, prompt, model, key, max(10, min(30, int(timeout))),
                 [Path(value) for value in (reference_image_paths or [])[:2]],
-                scene_id=clean(scene_id),
+                scene_id=_clean(scene_id),
             )
         except VisionVerificationUnavailable:
             raise
