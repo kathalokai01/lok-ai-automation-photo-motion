@@ -165,6 +165,11 @@ class PhotoMotionAndCaptionTests(unittest.TestCase):
             "Jaise, example, addi. Ayaan uses iPhone.",
         )
 
+    def test_devanagari_english_loanwords_remain_english(self):
+        converted = prepare_captions.romanize_hindi_to_hinglish("मेरा कंप्यूटर और एआई")
+        self.assertIn("computer", converted)
+        self.assertIn("AI", converted)
+
     def test_event_sound_types_include_ring_and_siren(self):
         self.assertIn("ring", generate_sound_design.SFX_TYPES)
         self.assertIn("siren", generate_sound_design.SFX_TYPES)
