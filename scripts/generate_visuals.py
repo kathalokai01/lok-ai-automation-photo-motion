@@ -789,7 +789,8 @@ def fit_prompt_sections(sections: list[str], scene_id: str) -> str:
     active = [section for section in sections if section]
 
     def render() -> str:
-        return "\n\n".join(active).strip()
+        # Preserve intentional trailing whitespace in the final narration/text section.
+        return "\n\n".join(active)
 
     prompt = render()
     if len(prompt) <= MAX_PROMPT_LENGTH:
@@ -1077,14 +1078,22 @@ def build_negative_prompt(
 
 def scene_detail(source: dict, key: str) -> str:
     value = source.get(key)
+    if key == "required_visible_text":
+        # Preserve every character, including deliberate leading/trailing spaces.
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return str(value)
+
     if isinstance(value, (dict, list)):
         rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     else:
         rendered = clean(value)
-    # Story-required visible wording must remain exact. Other supplemental
-    # metadata is bounded; visual_prompt and narration are never truncated.
-    if key == "required_visible_text":
-        return rendered
+    # Other supplemental metadata is bounded; visual_prompt and narration
+    # are never truncated or normalized here.
     return rendered[:1400] if rendered else ""
 
 
