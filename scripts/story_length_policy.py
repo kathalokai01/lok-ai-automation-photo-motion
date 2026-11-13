@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-POLICY_VERSION = "story-length-policy-v14-nonempty-merge-proof"
+POLICY_VERSION = "story-length-policy-v15-verified-final-merge-evidence"
 
 SHORT_MIN_WORDS_PER_PART = 120
 SHORT_TARGET_WORDS_PER_PART = 135
