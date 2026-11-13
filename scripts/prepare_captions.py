@@ -255,7 +255,7 @@ HINGLISH_ENGLISH_WORDS = {
 
 def normalize_roman_case(value: str) -> str:
     """Remove accidental mixed casing while retaining acronyms and sentence case."""
-    tokens = re.findall(r"\\S+", value)
+    tokens = re.findall(r"\S+", value)
     output = []
     sentence_start = True
     for token in tokens:
@@ -283,7 +283,7 @@ def normalize_roman_case(value: str) -> str:
 
 def romanize_hindi_to_hinglish(value: str) -> str:
     """Romanize Hindi, preserve existing English words, and keep common loanwords English."""
-    if not re.search(r"[\\u0900-\\u097F]", value):
+    if not re.search(r"[\u0900-\u097F]", value):
         return normalize_roman_case(value)
 
     protected = {}
@@ -292,7 +292,7 @@ def romanize_hindi_to_hinglish(value: str) -> str:
         protected[key] = match.group(0)
         return key
 
-    source = re.sub(r"(?<![\\w])[A-Za-z][A-Za-z0-9'’-]*(?![\\w])", protect, value)
+    source = re.sub(r"(?<![\w])[A-Za-z][A-Za-z0-9'’-]*(?![\w])", protect, value)
     for hindi, english in HINGLISH_ENGLISH_WORDS.items():
         source = re.sub(re.escape(hindi), english, source, flags=re.IGNORECASE)
 
