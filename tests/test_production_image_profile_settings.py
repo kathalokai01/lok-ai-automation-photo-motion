@@ -15,7 +15,7 @@ class ProductionImageProfileTests(unittest.TestCase):
     def test_missing_profile_defaults_to_no_processing(self):
         self.assertEqual(
             input_config.get_production_settings({}),
-            {"image_profile": "none"},
+            {"image_profile": "none", "render_template": "documentary"},
         )
 
     def test_supported_profiles_are_preserved(self):
@@ -35,6 +35,22 @@ class ProductionImageProfileTests(unittest.TestCase):
             )["image_profile"],
             "cinematic",
         )
+
+    def test_render_templates_are_validated_and_returned(self):
+        for template in ("documentary", "cinematic", "minimal"):
+            with self.subTest(template=template):
+                self.assertEqual(
+                    input_config.get_production_settings(
+                        {"RENDER_TEMPLATE": template}
+                    )["render_template"],
+                    template,
+                )
+
+    def test_unsupported_render_template_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "RENDER_TEMPLATE"):
+            input_config.get_production_settings(
+                {"RENDER_TEMPLATE": "unknown"}
+            )
 
     def test_unsupported_profile_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "IMAGE_PROCESSING_PROFILE"):
