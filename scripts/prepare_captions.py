@@ -291,7 +291,11 @@ def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
     if mode == "hinglish" and source:
         has_devanagari = bool(re.search(r"[\u0900-\u097F]", source))
         if source_language in {"", "hindi", "hinglish"} or has_devanagari:
-            return source, "source-narration", "original-mixed-narration"
+            return (
+                romanize_hindi_to_hinglish(source),
+                "source-narration",
+                "romanized-source-hindi" if has_devanagari else "original-roman-hinglish",
+            )
 
     return "", "", "requested-language-caption-not-provided"
 
