@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 import sys
@@ -138,6 +139,89 @@ class VisionRetryTests(unittest.TestCase):
                         (256, 256), enabled=True, minimum_score=5,
                         api_key="test-key",
                     )
+
+    def test_configured_vision_model_fallback_is_used_after_primary_outage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            success = {
+                "prompt_match": True,
+                "character_consistency": True,
+                "quality_score": 9,
+                "issues": [],
+                "reason": "matches",
+            }
+            unavailable = validator.VisionVerificationUnavailable("HTTP 429")
+            with patch.dict(
+                os.environ,
+                {"GEMINI_MODEL_FALLBACKS": "gemini-2.5-flash,gemini-2.5-pro"},
+            ), patch.object(
+                validator,
+                "_vision_check",
+                side_effect=[unavailable, success],
+            ) as vision_check:
+                result = validator.validate_scene_image(
+                    image_path,
+                    "A sufficiently detailed complete scene prompt.",
+                    (256, 256),
+                    enabled=True,
+                    minimum_score=7,
+                    model="gemini-3.8-flash",
+                    api_key="test-key",
+                )
+            self.assertTrue(result["accepted"])
+            self.assertEqual(result["vision"]["quality_score"], 9)
+            self.assertEqual(vision_check.call_count, 2)
+            self.assertEqual(
+                vision_check.call_args_list[0].args[2],
+                "gemini-3.8-flash",
+            )
+            self.assertEqual(
+                vision_check.call_args_list[1].args[2],
+                "gemini-2.5-flash",
+            )
+            self.assertEqual(
+                vision_check.call_args_list[1].kwargs["max_attempts"],
+                2,
+            )
+
+    def test_vision_fallback_models_are_deduplicated_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            unavailable = validator.VisionVerificationUnavailable("HTTP 429")
+            with patch.dict(
+                os.environ,
+                {
+                    "GEMINI_MODEL_FALLBACKS":
+                        "gemini-3.8-flash,gemini-2.5-flash,gemini-2.5-pro,"
+                        "gemini-2.5-flash,invalid/model,gemini-2.0-flash"
+                },
+            ), patch.object(
+                validator,
+                "_vision_check",
+                side_effect=unavailable,
+            ) as vision_check:
+                with self.assertRaises(
+                    validator.VisionVerificationUnavailable
+                ):
+                    validator.validate_scene_image(
+                        image_path,
+                        "A sufficiently detailed complete scene prompt.",
+                        (256, 256),
+                        enabled=True,
+                        api_key="test-key",
+                    )
+            self.assertEqual(vision_check.call_count, 4)
+            self.assertEqual(
+                [call.args[2] for call in vision_check.call_args_list],
+                [
+                    "gemini-3.8-flash",
+                    "gemini-2.5-flash",
+                    "gemini-2.5-pro",
+                    "gemini-2.0-flash",
+                ],
+            )
 
     def test_missing_or_corrupt_image_still_fails_technical_gate(self):
         with tempfile.TemporaryDirectory() as directory:
