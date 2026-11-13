@@ -300,14 +300,22 @@ def romanize_hindi_to_hinglish(value: str) -> str:
         return normalize_roman_case(value)
 
     protected = {}
-    def protect(match):
+    def protect_value(text):
         key = f"QXZLATIN{len(protected):04d}ZXQ"
-        protected[key] = match.group(0)
+        protected[key] = text
         return key
+
+    def protect(match):
+        return protect_value(match.group(0))
 
     source = re.sub(r"(?<![\w])[A-Za-z][A-Za-z0-9'’-]*(?![\w])", protect, value)
     for hindi, english in HINGLISH_ENGLISH_WORDS.items():
-        source = re.sub(re.escape(hindi), english, source, flags=re.IGNORECASE)
+        source = re.sub(
+            re.escape(hindi),
+            lambda _match, replacement=english: protect_value(replacement),
+            source,
+            flags=re.IGNORECASE,
+        )
 
     try:
         from indic_transliteration import sanscript
