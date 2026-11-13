@@ -130,9 +130,11 @@ def sound_checks_passed(config, music_result, sound, validation):
  cue_count=sfx["cue_count"]
  if cue_count is None:
   cue_count=len(sfx_rows) if sfx_rows else sound.get("sfx_cue_count",0)
+ if sfx["scenes_without_sfx"] is None or cue_count is None:
+  return False
  try:
-  cue_count=int(cue_count or 0)
-  missing=int(sfx["scenes_without_sfx"] or 0)
+  cue_count=int(cue_count)
+  missing=int(sfx["scenes_without_sfx"])
  except (TypeError,ValueError):
   return False
  music_ok=(not music_enabled or music_result.get("status")=="completed")
