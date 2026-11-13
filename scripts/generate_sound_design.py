@@ -96,8 +96,10 @@ EVENT_WORDS = {
         "दौड़ पड़ा", "दौड़ने लगा", "पैरों की आहट",
     ),
     "vehicle": (
-        "car", "truck", "bus", "train", "motorcycle",
-        "vehicle", "engine", "horn", "कार", "ट्रक",
+        "car", "truck", "bus", "train", "motorcycle", "bike",
+        "scooter", "jeep", "van", "taxi", "auto rickshaw",
+        "vehicle", "engine", "horn", "कार", "ट्रक", "बाइक",
+        "स्कूटर", "जीप", "वैन", "टैक्सी", "ऑटो", "रिक्शा",
         "बस", "ट्रेन", "मोटरसाइकिल", "गाड़ी", "वाहन",
         "इंजन", "हॉर्न",
     ),
@@ -129,8 +131,10 @@ EVENT_WORDS = {
         "घंटी बजी", "अलार्म", "संदेश आया",
     ),
     "crowd": (
-        "crowd", "audience", "people shouting", "cheering",
-        "भीड़", "लोग चिल्लाए", "तालियां", "तालियाँ", "नारे",
+        "crowd", "crowded", "crowd talking", "audience",
+        "many people", "people shouting", "cheering",
+        "भीड़", "भीड़भाड़", "लोगों की भीड़", "जमावड़ा",
+        "लोग चिल्लाए", "तालियां", "तालियाँ", "नारे",
     ),
     "mystery": (
         "mystery", "secret", "ghost", "shadow", "unknown voice",
