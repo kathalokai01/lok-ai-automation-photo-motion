@@ -35,8 +35,8 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v17-exact-prompt-preservation"
-PROMPT_VERSION = 18
+VERSION = "photo-motion-visual-jobs-v18-single-source-continuity-context"
+PROMPT_VERSION = 19
 
 ROLE_ORDER = {
     "hook": 0,
