@@ -162,6 +162,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "LIGHTING": "cinematic",
     "MOOD": "dramatic",
     "QUALITY": "high",
+    "IMAGE_PROCESSING_PROFILE": "none",
     "FPS": 24,
     "NEGATIVE_PROMPT": True,
     "AVOID_CARTOON_LOOK": True,
@@ -1245,6 +1246,24 @@ def get_global_billable_permission(config: dict[str, Any]) -> bool:
     )
 
 
+
+def get_production_settings(
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Return validated production-only image finishing settings."""
+    profile = str(
+        config.get("IMAGE_PROCESSING_PROFILE", "none")
+    ).strip().lower()
+    allowed = {"none", "natural", "cinematic", "soft"}
+    if profile not in allowed:
+        raise ValueError(
+            "IMAGE_PROCESSING_PROFILE must be one of: "
+            + ", ".join(sorted(allowed))
+        )
+    return {"image_profile": profile}
+
+
+
 def get_image_provider_settings(
     config: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1528,6 +1547,7 @@ def _validate_general_settings(config: dict[str, Any]) -> None:
     if quality not in {"draft", "standard", "high"}:
         raise ValueError("QUALITY must be draft, standard or high.")
     config["QUALITY"] = quality
+    config["IMAGE_PROCESSING_PROFILE"] = get_production_settings(config)["image_profile"]
 
     for key in (
         "VISUAL_STYLE",
