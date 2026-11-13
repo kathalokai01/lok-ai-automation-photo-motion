@@ -261,7 +261,7 @@ MOOD = "dramatic"  # Text mood prompt; उदाहरण "dramatic", "hopeful",
 
 QUALITY = "high"
 
-IMAGE_PROCESSING_PROFILE = "none"  # Optional image finishing: none, natural, cinematic, soft.  # Text quality prompt/preset; वर्तvalue "high"। यह prompt निर्देश है, output resolution/quality की गारंटी नहीं।
+
 
 
 FPS = 24  # Positive integer frames per second; वर्तvalue 24। सामान्य विकल्प 24, 25, 30, 60; अधिक FPS से render size/time बढ़ सकता है।
@@ -328,7 +328,9 @@ SAVE_CHECKPOINT_AFTER_EACH_SCENE = true  # Boolean। true पर हर scene �
 SKIP_COMPLETED_SCENES = true  # Boolean। true पर केवल सत्यापित पहचान/hash/signature वाले पूर्ण scene artifacts reuse; false पर पुराने completed scenes reuse न करें।
 
 
-IMAGE_PROCESSING_PROFILE ="none"  # Text profile। "none" = कोई अतिरिक्त image processing profile नहीं; अन्य नाम केवल तभी दें जब संबंधित processor में profile लागू हो।
+RENDER_TEMPLATE = "documentary"  # Render composition: documentary, cinematic or minimal.
+
+IMAGE_PROCESSING_PROFILE ="none"  # Optional finishing: none, natural, cinematic or soft.  # Text profile। "none" = कोई अतिरिक्त image processing profile नहीं; अन्य नाम केवल तभी दें जब संबंधित processor में profile लागू हो।
 
 
 ASSET_APPROVAL_REQUIRED =false  # Boolean। false पर approval gate अनिवार्य नहीं; true पर हर generated image के लिए matching SHA256 के साथ Input/asset_approval.json में approved decision आवश्यक।
