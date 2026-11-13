@@ -16,6 +16,7 @@ from scripts import photo_motion
 from scripts import prepare_captions
 from scripts import generate_sound_design
 from scripts import visual_quality_validator
+from scripts import production_events
 from scripts.story_length_policy import verify_final_merge_evidence
 
 
@@ -172,6 +173,24 @@ class PhotoMotionAndCaptionTests(unittest.TestCase):
             samples = list(generate_sound_design.sfx_samples(kind, duration=0.25, seed=7))
             self.assertTrue(samples)
             self.assertGreater(max(samples) - min(samples), 0.01, kind)
+
+
+class ProviderAccountingTests(unittest.TestCase):
+    def test_cost_stays_unknown_without_provider_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(production_events, "EVENTS", root / "events.jsonl"), \
+                 patch.object(production_events, "STATE", root / "state.json"):
+                production_events.record_provider_attempt(
+                    "test-provider", "test-model", "accepted", True,
+                    scene_id="scene-1", attempt_id="attempt-1",
+                )
+                summary = production_events.provider_summary()
+            self.assertEqual(summary["attempt_count"], 1)
+            self.assertEqual(summary["billable_marked_attempts"], 1)
+            self.assertEqual(summary["accepted_attempts"], 1)
+            self.assertIsNone(summary["actual_cost_total"])
+            self.assertEqual(summary["actual_cost_status"], "unknown_no_provider_receipts")
 
 
 class StoryMergeEvidenceTests(unittest.TestCase):
