@@ -35,7 +35,7 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v18-single-source-continuity-context"
+VERSION = "photo-motion-visual-jobs-v19-architecture-object-continuity"
 PROMPT_VERSION = 19
 
 ROLE_ORDER = {
@@ -937,6 +937,38 @@ def scene_continuity_context(
             f"Current location: {current_location}."
         )
 
+    if previous_location and current_location and previous_location.casefold() == current_location.casefold():
+        details.append(
+            "SAME PHYSICAL LOCATION LOCK: This scene remains at the exact same "
+            "physical location as the preceding scene. Preserve the same building "
+            "silhouette, number of floors, facade, roofline, window and door layout, "
+            "entrance position, materials, dominant colors, street orientation and "
+            "surrounding landmarks. Change only what the current story event requires."
+        )
+
+    def entity_names(row):
+        values = []
+        for key in ("buildings", "building", "structures", "named_entities"):
+            value = row.get(key)
+            if isinstance(value, str):
+                values.append(value)
+            elif isinstance(value, list):
+                values.extend(str(item.get("name") or item) if isinstance(item, dict) else str(item) for item in value)
+            elif isinstance(value, dict):
+                values.extend(str(item) for item in value.values())
+        return sorted({clean(value) for value in values if clean(value)})
+
+    previous_entities = entity_names(previous_main)
+    current_entities = entity_names(scene)
+    recurring_buildings = sorted(set(previous_entities).intersection(current_entities))
+    if recurring_buildings:
+        details.append(
+            "RECURRING BUILDING/STRUCTURE IDENTITY LOCK: "
+            + ", ".join(recurring_buildings)
+            + ". Reproduce the same architecture and proportions in every scene; "
+            "do not redesign, tilt, stretch, bend, duplicate or replace it."
+        )
+
     recurring = sorted(
         set(previous_characters).intersection(current_characters)
     )
@@ -1211,8 +1243,19 @@ def build_prompt(
             "still with a clearly focused key subject, natural proportions, stable "
             "perspective, straight architecture where appropriate, coherent object "
             "geometry, consistent lighting, realistic contact shadows and reflections. "
-            "Avoid blur, pixelation, smearing, ghosting, warped edges, melted details, "
-            "double exposure, excessive smoothing and artificial sharpening."
+            "The central action and every story-critical object must be unobstructed "
+            "and immediately recognizable. Avoid blur, pixelation, smearing, ghosting, "
+            "warped edges, melted details, double exposure, excessive smoothing and "
+            "artificial sharpening."
+        ),
+        (
+            "OBJECT AND ARCHITECTURE INTEGRITY: Keep every object physically complete "
+            "and correctly constructed. A computer keyboard must have individually "
+            "visible, correctly spaced keycaps when shown; screens must remain flat and "
+            "rectangular; buildings must have straight verticals, stable floors, aligned "
+            "windows and a coherent roofline; vehicles must have complete wheels and "
+            "body panels. Never merge a face or body into a computer, desk, wall, vehicle "
+            "or other object. Keep clear physical separation between people and props."
         ),
         (
             "ONE SCENE ONLY: Create one coherent continuous cinematic frame at the "
