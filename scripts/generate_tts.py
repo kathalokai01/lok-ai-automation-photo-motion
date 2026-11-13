@@ -41,7 +41,7 @@ OUTPUT_DIR = ROOT / "output/narration/audio"
 MANIFEST_FILE = ROOT / "output/narration/audio_jobs.json"
 CHECKPOINT_FILE = ROOT / "output/checkpoints/tts_progress.json"
 
-VERSION = 19
+VERSION = 20
 MIN_AUDIO_BYTES = 1000
 REQUEST_TIMEOUT = 180
 MAX_TEXT_CHARS = 100000
@@ -731,7 +731,7 @@ def split_text(
     units = []
 
     for sentence in sentences:
-        if len(sentence) <= max_chars:
+        if len(sentence) <= breath_max_chars and len(sentence.split()) <= 24:
             units.append(sentence)
             continue
 
@@ -757,18 +757,18 @@ def split_text(
     current = ""
 
     for unit in units:
-        if len(unit) > max_chars:
+        if len(unit) > breath_max_chars or len(unit.split()) > 24:
             words = re.findall(r"\S+", unit)
 
             for word in words:
-                if len(word) > max_chars:
+                if len(word) > breath_max_chars:
                     raise RuntimeError(
                         "One narration token exceeds chunk limit."
                     )
 
                 candidate = f"{current} {word}".strip()
 
-                if current and len(candidate) > max_chars:
+                if current and (len(candidate) > breath_max_chars or len(candidate.split()) > 24):
                     chunks.append(current)
                     current = word
                 else:
@@ -778,7 +778,7 @@ def split_text(
 
         candidate = f"{current} {unit}".strip()
 
-        if current and len(candidate) > max_chars:
+        if current and (len(candidate) > breath_max_chars or len(candidate.split()) > 24):
             chunks.append(current)
             current = unit
         else:
