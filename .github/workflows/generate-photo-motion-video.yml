@@ -321,7 +321,7 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --workflow generate-photo-motion-video.yml \
             --branch "$GITHUB_REF_NAME" \
-            --limit 100 \
+            --limit 0 \
             --input-hash "$CURRENT_INPUT_HASH" \
             --output output
 
