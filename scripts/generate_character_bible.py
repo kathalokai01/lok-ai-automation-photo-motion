@@ -21,7 +21,7 @@ AI_STORY_FILE = STORY_DIR / "ai_story.json"
 SOURCE_STORY_FILE = STORY_DIR / "story.json"
 OUTPUT_FILE = STORY_DIR / "character_bible.json"
 
-VERSION = "character-bible-v11-person-name-filtered-proper-nouns"
+VERSION = "character-bible-v12-devanagari-and-scene-name-detection"
 
 ROLE_FIELDS = (
     ("hook_scene", "hook"),
@@ -62,6 +62,12 @@ HINDI_NAME_PATTERNS = (
     re.compile(
         rf"(?:श्री|श्रीमती|सुश्री|डॉ\.?|डॉक्टर|मिस्टर|मिस|"
         rf"कप्तान|इंस्पेक्टर|प्रोफेसर)\s+"
+        rf"({DEVANAGARI}(?:\s+{DEVANAGARI}){{0,2}})"
+    ),
+    re.compile(
+        rf"(?:चीफ\s+इंजीनियर|इंजीनियर|सिक्योरिटी\s+हेड|हेड|"
+        rf"मालिक|बेटा|बेटी|पुत्र|पुत्री|दोस्त|मित्र|पड़ोसी|पडोसी|"
+        rf"ड्राइवर|गार्ड|कर्मचारी|मैनेजर|अधिकारी)\s+"
         rf"({DEVANAGARI}(?:\s+{DEVANAGARI}){{0,2}})"
     ),
 )
@@ -557,8 +563,8 @@ def extract_story_names(text: str) -> list[str]:
     # Recover repeated proper-name forms while excluding common sentence
     # openers and generic words. Requiring repetition reduces false cast IDs.
     proper_pattern = re.compile(
-        r"\\b[A-Z][a-z]{2,}(?:[-'][A-Za-z0-9]+)?"
-        r"(?:\\s+[A-Z][a-z]{2,}){0,2}\\b"
+        r"\b[A-Z][a-z]{2,}(?:[-'][A-Za-z0-9]+)?"
+        r"(?:\s+[A-Z][a-z]{2,}){0,2}\b"
     )
     for match in proper_pattern.finditer(source):
         name = normalize_name(match.group(0))
@@ -575,7 +581,7 @@ def extract_story_names(text: str) -> list[str]:
         if first in GENERIC_ENGLISH:
             continue
         occurrences = len(re.findall(
-            r"(?<![\\w])" + re.escape(name) + r"(?![\\w])",
+            r"(?<![\w])" + re.escape(name) + r"(?![\w])",
             source,
             flags=re.IGNORECASE,
         ))
@@ -887,6 +893,15 @@ def aggregate_characters(
     # Discover names from the complete corrected source story.
     full_story_text = collect_story_text(supplemental_story)
     story_names = extract_story_names(full_story_text)
+
+    # Some story artifacts contain only segmented scene narration and omit
+    # the complete source story. Scan all canonical scene text together so
+    # recurring names can still be recognized across scene boundaries.
+    combined_scene_text = "\n".join(
+        source_text(row) for row in scenes
+    )
+    story_names.extend(extract_story_names(combined_scene_text))
+    story_names = list(dict.fromkeys(story_names))
 
     for name in story_names:
         key = name.casefold()
@@ -1663,15 +1678,11 @@ def build_bible(
         warnings.append(
             "No reliable character names or explicit cast records were found."
         )
-        if any(
-            extract_story_names(collect_story_text(candidate))
-            for candidate in (story, supplemental_story)
-            if isinstance(candidate, dict)
-        ) or any(extract_explicit_names(row) for row in scenes):
-            raise RuntimeError(
-                "Character Bible is empty although named characters are present "
-                "in the complete story or scene narration."
-            )
+        raise RuntimeError(
+            "CHARACTER_BIBLE is enabled but no reliable character names "
+            "or explicit cast records were detected. Refusing to mark an "
+            "empty Character Bible as completed."
+        )
 
     if any(item["gender"] == "unspecified" for item in characters):
         warnings.append(
