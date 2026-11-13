@@ -668,6 +668,66 @@ def restore_partial_visual_images(source: Path, output: Path) -> int:
     return verified
 
 
+def restore_partial_tts_chunks(source: Path, output: Path) -> int:
+    """Restore individually verified TTS chunk files from an interrupted run."""
+    checkpoint = source / "checkpoints" / "tts_progress.json"
+    data = read_json(checkpoint)
+    if not isinstance(data, dict):
+        return 0
+
+    # generate_tts.py writes these exact SHA256 field names. They must be
+    # recognized independently of a completed narration-stage manifest.
+    for key in ("input_sha256", "config_sha256"):
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", str(data.get(key) or "")):
+            return 0
+
+    records = data.get("completed_chunks")
+    if not isinstance(records, list):
+        return 0
+
+    restored = 0
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        job_id = str(record.get("job_id") or "").strip()
+        digest = str(record.get("sha256") or "").strip().lower()
+        if not job_id or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            continue
+        try:
+            duration = float(record.get("duration"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not (0.0 < duration < 3600.0):
+            continue
+
+        source_file = _checkpoint_output_file(source, record.get("output_path"))
+        if source_file is None or _sha256_file(source_file).lower() != digest:
+            continue
+
+        try:
+            relative = source_file.relative_to(source.resolve())
+        except ValueError:
+            continue
+        destination_file = output / relative
+        if destination_file.exists():
+            if destination_file.is_symlink() or not destination_file.is_file():
+                continue
+            if _sha256_file(destination_file).lower() != digest:
+                continue
+            continue
+
+        destination_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, destination_file)
+        if _sha256_file(destination_file).lower() != digest:
+            destination_file.unlink(missing_ok=True)
+            continue
+        restored += 1
+
+    if restored:
+        log(f"Restored {restored} individually SHA256-verified partial TTS chunks.")
+    return restored
+
+
 def merge_progress_checkpoints(source: Path, output: Path) -> int:
     roots = (
         "checkpoints",
@@ -830,6 +890,7 @@ def restore(args: argparse.Namespace) -> int:
                 continue
 
             restored_partial_images += restore_partial_visual_images(saved, output)
+            restored_tts_chunks = restore_partial_tts_chunks(saved, output)
             progress_checkpoints += merge_progress_checkpoints(saved, output)
             accepted = []
             for stage, _ in STAGES:
