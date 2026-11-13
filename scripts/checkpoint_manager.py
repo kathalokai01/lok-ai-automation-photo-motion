@@ -1017,11 +1017,37 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
             merged = _merge_progress_document(existing, data)
             if merged is None:
                 continue
-            encoded = json.dumps(merged, ensure_ascii=False, sort_keys=True, indent=2) + "\\n"
+            encoded = json.dumps(merged, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
             if destination.read_text(encoding="utf-8-sig") != encoded:
                 destination.write_text(encoded, encoding="utf-8")
                 changed += 1
     return changed
+
+
+def quarantine_invalid_json_files(output: Path) -> int:
+    """Keep corrupt restored JSON for diagnosis but prevent unsafe reuse."""
+    quarantined = 0
+    if not output.is_dir():
+        return 0
+    for path in sorted(output.rglob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            json.loads(path.read_text(encoding="utf-8-sig"))
+            continue
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+        digest = _sha256_file(path)[:12]
+        target = path.with_name(path.name + f".invalid-{digest}")
+        if target.exists():
+            continue
+        try:
+            path.replace(target)
+            quarantined += 1
+            log("Quarantined invalid checkpoint JSON:", path, "->", target.name)
+        except OSError as exc:
+            log("Could not quarantine invalid checkpoint JSON:", path, exc)
+    return quarantined
 
 
 def get_expected_context() -> dict:
@@ -1200,6 +1226,8 @@ def restore(args: argparse.Namespace) -> int:
             if len(restored) == len(STAGES):
                 break
 
+    quarantined_json = quarantine_invalid_json_files(output)
+
     report = {
         "status": "completed",
         "runs_examined": examined,
@@ -1207,6 +1235,7 @@ def restore(args: argparse.Namespace) -> int:
         "restored_stages": restored,
         "restored_stage_count": len(restored),
         "progress_checkpoint_files_merged": progress_checkpoints,
+        "invalid_json_quarantined": quarantined_json,
         "restored_partial_visual_images": restored_partial_images,
         "rejected_candidates": rejected,
         "pipeline_hash_policy": "not used as a global restore gate; stage manifests validate reuse",
