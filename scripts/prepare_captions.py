@@ -30,7 +30,7 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v17-all-narration-role-captions"
+VERSION = "prepare-captions-v18-source-script-preserving-roman-hinglish"
 MIN_AUDIO_BYTES = 1000
 DURATION_TOLERANCE = 0.15
 
@@ -235,6 +235,23 @@ def find_nested_caption(container: Any, mode: str) -> tuple[str, str]:
                     return value, f"list-entry-{index}"
 
     return "", ""
+
+
+def romanize_hindi_to_hinglish(value: str) -> str:
+    """Convert Devanagari Hindi to ASCII ITRANS Hinglish without translating meaning."""
+    if not re.search(r"[\\u0900-\\u097F]", value):
+        return value
+    try:
+        from indic_transliteration import sanscript
+        from indic_transliteration.sanscript import transliterate
+    except ImportError as exc:
+        raise RuntimeError(
+            "CAPTIONS=hinglish requires indic-transliteration; install requirements.txt. "
+            "Hindi-script captions are not allowed to silently pass as Hinglish."
+        ) from exc
+    converted = transliterate(value, sanscript.DEVANAGARI, sanscript.ITRANS)
+    converted = converted.replace("~N", "n").replace("~n", "n")
+    return clean_text(converted)
 
 
 def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
@@ -934,7 +951,7 @@ def main() -> int:
         "audio_source_sha256": audio_manifest_hash,
         "model": "existing-caption-text",
         "api_calls": 0,
-        "translation_performed": False,
+        "translation_performed": False,\n        "transliteration_performed": mode == "hinglish" and any(\n            record.get("selection_method") == "romanized-source-hindi"\n            for record in prepared_main + prepared_extras\n        ),
         "translation_note": (
             "Uses existing language-specific caption fields or the original "
             "narration when its language matches. No translation is claimed."
