@@ -2285,7 +2285,7 @@ def validate_story(
             maximum = (
                 SHORT_MERGED_MAX
                 if merged and number == expected_parts
-                else SHORT_MAX
+                else SHORT_HARD_MAX
             )
 
             if count < SHORT_MIN or count > maximum:
