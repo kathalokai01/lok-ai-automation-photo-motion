@@ -37,6 +37,7 @@ from gemini_http import (
     http_status, http_error_body, retry_after_seconds,
     classify_generation_failure,
 )
+from production_events import record_provider_attempt
 from generate_story_plan import (
     build_plan as build_story_plan,
     validate_plan as validate_story_plan,
@@ -872,6 +873,16 @@ def call_model(
             if selected in blocked_models:
                 continue
             provider, candidate_model = selected.split("|", 1)
+            attempt_id = (
+                f"story:{provider}:{candidate_model}:{retry_round}:"
+                f"{hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:12]}"
+            )
+            gemini_response_received = False
+            if provider == "gemini":
+                record_provider_attempt(
+                    provider, candidate_model, "request_started", True,
+                    scene_id="story_generation", attempt_id=attempt_id,
+                )
             try:
                 if provider == "gemini":
                     url = (
@@ -892,6 +903,11 @@ def call_model(
                         response_data = json.loads(
                             response.read().decode("utf-8", errors="replace")
                         )
+                    gemini_response_received = True
+                    record_provider_attempt(
+                        provider, candidate_model, "response_received", True,
+                        scene_id="story_generation", attempt_id=attempt_id,
+                    )
                     candidates = response_data.get("candidates") or []
                     if not candidates:
                         raise ModelError("Gemini returned no response candidate.")
@@ -921,6 +937,11 @@ def call_model(
                 parsed["_katha_model_used"] = candidate_model
                 parsed["_katha_provider_used"] = provider
                 parsed["_katha_generation_method"] = method
+                if provider == "gemini":
+                    record_provider_attempt(
+                        provider, candidate_model, "accepted", True,
+                        scene_id="story_generation", attempt_id=attempt_id,
+                    )
                 save_story_model_cursor(
                     model_order, model_index, stage="story_correction",
                     status="succeeded",
@@ -931,6 +952,17 @@ def call_model(
 
             except Exception as exc:
                 status = http_status(exc)
+                if provider == "gemini":
+                    record_provider_attempt(
+                        provider,
+                        candidate_model,
+                        "response_received_validation_failed" if gemini_response_received else "request_failed",
+                        True,
+                        scene_id="story_generation",
+                        attempt_id=attempt_id,
+                        error=f"{type(exc).__name__}: {exc}",
+                        http_status=status,
+                    )
                 failure_class = classify_generation_failure(exc)
                 if failure_class in {"auth_blocked", "model_or_request_unavailable", "quota_blocked"}:
                     blocked_models.add(selected)
