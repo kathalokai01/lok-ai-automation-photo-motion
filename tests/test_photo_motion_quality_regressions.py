@@ -189,7 +189,7 @@ class PhotoMotionAndCaptionTests(unittest.TestCase):
             "mystery": "A mysterious shadow appears.",
             "ring": "A bell rings loudly.",
             "heartbeat": "His heartbeat becomes faster.",
-            "footsteps": "Footsteps approach the door.",
+            "footsteps": "Footsteps approach through the hallway.",
             "door": "She opens the door.",
             "siren": "An ambulance siren sounds.",
         }
