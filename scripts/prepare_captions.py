@@ -30,7 +30,7 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v19-normalized-hinglish-english-token-preservation"
+VERSION = "prepare-captions-v20-common-english-loanword-dictionary"
 MIN_AUDIO_BYTES = 1000
 DURATION_TOLERANCE = 0.15
 
