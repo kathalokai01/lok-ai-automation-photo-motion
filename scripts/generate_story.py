@@ -57,7 +57,7 @@ TITLE_CACHE_FILE = STORY_DIR / "title_cache.json"
 POLICY_FILE = STORY_DIR / "story_length_policy.json"
 MODEL_FILE = ROOT / "output" / "config" / "selected_model.json"
 
-VERSION = "story-builder-v42-revise-all-151-180-short-parts"
+VERSION = "story-builder-v43-revision-evidence-and-merge-contract"
 SHORT_MIN = 120
 SHORT_TARGET = 135
 SHORT_MAX = 150
