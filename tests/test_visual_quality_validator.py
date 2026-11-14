@@ -47,6 +47,50 @@ class VisionRetryTests(unittest.TestCase):
             self.assertEqual(post.call_count, 1)
             self.assertEqual(result["quality_score"], 9)
 
+    def test_hard_free_tier_quota_stops_retries_and_model_fallbacks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((64, 64), 80).convert("RGB").save(image_path)
+            exhausted = response(429, {"error": {"message": (
+                "Rate limit exceeded for model (limit: 0 input tokens "
+                "per minute on Free Tier)"
+            )}})
+            with patch.object(
+                validator.requests, "post", return_value=exhausted
+            ) as post, patch.object(validator.time, "sleep") as sleep:
+                with self.assertRaises(validator.VisionQuotaExhausted):
+                    validator._vision_check(
+                        image_path, "A sufficiently detailed complete scene prompt.",
+                        "gemini-3.8-flash", "test-key", 20,
+                    )
+            self.assertEqual(post.call_count, 1)
+            self.assertEqual(sleep.call_count, 0)
+
+    def test_ordinary_http_429_without_quota_evidence_remains_retryable(self):
+        self.assertFalse(validator.is_hard_vision_quota_error(
+            429, "Too many requests; retry after 20 seconds"
+        ))
+        self.assertTrue(validator.is_hard_vision_quota_error(
+            429, "limit: 0 input tokens per minute on Free Tier"
+        ))
+
+    def test_hard_quota_does_not_try_other_gemini_vision_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            with patch.dict(os.environ, {
+                "GEMINI_VISION_MODEL_FALLBACKS": "gemini-4-argon,gemini-3.6-flash"
+            }), patch.object(
+                validator, "_vision_check",
+                side_effect=validator.VisionQuotaExhausted("free tier limit: 0"),
+            ) as check:
+                with self.assertRaises(validator.VisionVerificationUnavailable):
+                    validator.validate_scene_image(
+                        image_path, "A sufficiently detailed complete scene prompt.",
+                        (256, 256), enabled=True, api_key="test-key",
+                    )
+            self.assertEqual(check.call_count, 1)
+
     def test_transient_503_retries_then_accepts_success(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "candidate.png"
