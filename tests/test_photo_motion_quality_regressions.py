@@ -17,7 +17,34 @@ from scripts import prepare_captions
 from scripts import generate_sound_design
 from scripts import visual_quality_validator
 from scripts import production_events
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import production_report
 from scripts.story_length_policy import verify_final_merge_evidence
+
+
+class ProductionReportAccountingTests(unittest.TestCase):
+    def test_current_image_provider_attempts_excludes_non_image_models(self):
+        usage = {
+            "by_provider": {
+                "gemini_vision": {"attempts": 45, "failed": 38, "accepted": 7},
+                "cartesia": {"attempts": 14, "failed": 0, "accepted": 14},
+                "OVHcloud SDXL: stabilityai/stable-diffusion-xl-base-1.0": {
+                    "attempts": 5, "failed": 3, "accepted": 2, "pending": 0,
+                },
+                "Cloudflare Workers AI Schnell: @cf/black-forest-labs/flux-1-schnell": {
+                    "attempts": 1, "failed": 1, "accepted": 0, "pending": 0,
+                },
+            }
+        }
+        result = production_report.current_image_provider_attempts(usage)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(
+            result["OVHcloud SDXL: stabilityai/stable-diffusion-xl-base-1.0"]["attempts"],
+            5,
+        )
+        self.assertNotIn("gemini_vision", result)
+        self.assertNotIn("cartesia", result)
 
 
 class CheckpointRestoreTests(unittest.TestCase):
