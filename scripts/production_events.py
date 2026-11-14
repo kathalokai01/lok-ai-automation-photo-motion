@@ -76,15 +76,27 @@ def read_events():
     return rows
 def provider_summary():
     latest = {}
+    current_run_id = str(
+        os.getenv("GITHUB_RUN_ID") or os.getenv("RUN_ID") or "local"
+    )
     for event in read_events():
         if event.get("stage") != "provider_attempt":
+            continue
+        # Checkpoint restoration can carry event journals from earlier runs.
+        # Production reports must describe this workflow run only.
+        event_run_id = str(event.get("run_id") or "local")
+        if event_run_id != current_run_id:
             continue
         metadata = event.get("metadata")
         if not isinstance(metadata, dict):
             continue
         attempt_id = str(metadata.get("attempt_id") or "")
+        provider = str(metadata.get("provider") or "unknown")
         if attempt_id:
-            latest[attempt_id] = metadata
+            # Fallback providers can share a logical TTS/music job attempt ID.
+            # Include provider identity so each actual provider request remains
+            # separately accounted while lifecycle events update that request.
+            latest[(event_run_id, provider, attempt_id)] = metadata
 
     by_provider = {}
     billable_marked = 0
