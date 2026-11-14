@@ -23,6 +23,30 @@ class VisionVerificationUnavailable(RuntimeError):
     """Raised when visual verification cannot be completed reliably."""
 
 
+class VisionQuotaExhausted(VisionVerificationUnavailable):
+    """Raised when the Gemini project has no usable Vision quota."""
+
+
+def is_hard_vision_quota_error(status: int | None, response_text: str) -> bool:
+    """Detect exhausted project/tier quota without treating ordinary 429s as permanent."""
+    if status not in {403, 429}:
+        return False
+    message = _clean(response_text).casefold()
+    hard_quota_markers = (
+        "limit: 0",
+        "limit : 0",
+        "free tier",
+        "quota exceeded",
+        "resource_exhausted",
+        "resource exhausted",
+        "billing account",
+        "billing is disabled",
+        "requests per day",
+        "daily quota",
+    )
+    return any(marker in message for marker in hard_quota_markers)
+
+
 def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -224,6 +248,19 @@ def _vision_check(
                     True, scene_id=scene_id, attempt_id=attempt_id,
                     error=f"{type(exc).__name__}: {exc}", http_status=status,
                 )
+            response_text = ""
+            error_response = getattr(exc, "response", None)
+            if error_response is not None:
+                response_text = _clean(
+                    getattr(error_response, "text", "")
+                    or getattr(error_response, "content", "")
+                )
+            if is_hard_vision_quota_error(status, response_text):
+                raise VisionQuotaExhausted(
+                    "Gemini Vision project/tier quota is exhausted; "
+                    f"HTTP {status}. Further models share this project quota."
+                ) from exc
+
             transient_transport = isinstance(
                 exc, (requests.Timeout, requests.ConnectionError)
             )
@@ -402,6 +439,16 @@ def validate_scene_image(
                     ),
                 )
                 model = vision_model
+                break
+            except VisionQuotaExhausted as exc:
+                vision_errors.append(
+                    f"{vision_model}: {type(exc).__name__}: {exc}"
+                )
+                print(
+                    "Gemini Vision project quota exhausted; skipping all "
+                    "configured model fallbacks that share this project.",
+                    flush=True,
+                )
                 break
             except VisionVerificationUnavailable as exc:
                 vision_errors.append(
