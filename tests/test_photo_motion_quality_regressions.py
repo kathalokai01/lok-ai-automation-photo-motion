@@ -236,23 +236,23 @@ class ProviderAccountingTests(unittest.TestCase):
     def test_provider_summary_is_run_scoped_and_keeps_fallback_provider_attempts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with patch.object(production_events, "EVENTS", root / "events.jsonl"), \\
-                 patch.object(production_events, "STATE", root / "state.json"):
-                with patch.dict(production_events.os.environ, {"GITHUB_RUN_ID": "old-run"}):
+            with patch.object(production_events, "EVENTS", root / "events.jsonl"):
+                with patch.object(production_events, "STATE", root / "state.json"):
+                    with patch.dict(production_events.os.environ, {"GITHUB_RUN_ID": "old-run"}):
                     production_events.record_provider_attempt(
                         "old-provider", "old-model", "accepted", True,
                         scene_id="scene-1", attempt_id="shared-job-id",
                     )
-                with patch.dict(production_events.os.environ, {"GITHUB_RUN_ID": "current-run"}):
-                    production_events.record_provider_attempt(
-                        "provider-a", "model-a", "request_failed", True,
-                        scene_id="scene-1", attempt_id="shared-job-id",
-                    )
-                    production_events.record_provider_attempt(
-                        "provider-b", "model-b", "accepted", True,
-                        scene_id="scene-1", attempt_id="shared-job-id",
-                    )
-                    summary = production_events.provider_summary()
+                    with patch.dict(production_events.os.environ, {"GITHUB_RUN_ID": "current-run"}):
+                        production_events.record_provider_attempt(
+                            "provider-a", "model-a", "request_failed", True,
+                            scene_id="scene-1", attempt_id="shared-job-id",
+                        )
+                        production_events.record_provider_attempt(
+                            "provider-b", "model-b", "accepted", True,
+                            scene_id="scene-1", attempt_id="shared-job-id",
+                        )
+                        summary = production_events.provider_summary()
             self.assertEqual(summary["attempt_count"], 2)
             self.assertEqual(summary["billable_marked_attempts"], 2)
             self.assertEqual(summary["failed_attempts"], 1)
