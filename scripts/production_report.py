@@ -155,6 +155,30 @@ def evaluate_sound_checks(config, music_result, sound, validation):
   and not sfx["failed_checks"]
  )
 
+def current_image_provider_attempts(provider_usage):
+ by_provider=provider_usage.get("by_provider") if isinstance(provider_usage,dict) else {}
+ if not isinstance(by_provider,dict):
+  return {}
+ prefixes=(
+  "hugging face:",
+  "cloudflare workers ai",
+  "ovhcloud",
+  "ai horde:",
+  "pollinations:",
+  "replicate:",
+ )
+ result={}
+ for name,metrics in by_provider.items():
+  if not str(name).casefold().startswith(prefixes) or not isinstance(metrics,dict):
+   continue
+  result[str(name)]={
+   "attempts":int(metrics.get("attempts",0) or 0),
+   "failed":int(metrics.get("failed",0) or 0),
+   "accepted":int(metrics.get("accepted",0) or 0),
+   "pending":int(metrics.get("pending",0) or 0),
+  }
+ return result
+
 def main():
  config_data=load_and_validate(ROOT/"Input"/"topic.txt")
  configured_provider_order=get_image_provider_order(config_data)
@@ -175,6 +199,12 @@ def main():
  audio_status=Counter(str(row.get("status","unknown")).lower() for row in audio_rows)
  audio_summary=audio_doc.get("summary") if isinstance(audio_doc.get("summary"),dict) else {}
  progression=docs["story_progression"] or {}
+ image_progress=(
+  image_doc.get("model_progression")
+  or (image_doc.get("policy") or {}).get("model_progression")
+  or (docs["images"] or {}).get("model_progression")
+  or {}
+ )
  ai_story=docs["ai_story"] or {}
  story=docs["story"] or {}
  music=docs["music"] or {}
@@ -196,6 +226,7 @@ def main():
  input_path=ROOT/"Input"/"topic.txt"
  image_reused=sum(value for key,value in image_status.items() if key in {"existing","reused"})
  image_generated=image_status.get("generated",0)
+ current_image_attempts=current_image_provider_attempts(provider_usage)
  report={
   "status":"completed" if image_doc.get("status")=="completed" and stages["render_quality"]["status"] in {"passed","completed"} and sound_checks_passed else "incomplete",
   "version":"production-report-v6-provider-attempt-and-receipt-accounting",
@@ -214,8 +245,8 @@ def main():
    "music_model":music_result["model"],
    "music_external_provider":music_result["external_provider"],
    "music_external_model":music_result["external_model"],
-   "image_progression_cursor":(image_doc.get("model_progression") or {}).get("model_cursor_key") or (image_doc.get("policy") or {}).get("model_cursor_key"),
-   "image_last_successful_model":(image_doc.get("model_progression") or {}).get("last_successful_model"),
+   "image_progression_cursor":image_progress.get("cursor_key") or image_progress.get("model_cursor_key") or (image_doc.get("policy") or {}).get("model_cursor_key"),
+   "image_last_successful_model":image_progress.get("last_successful_model"),
   },
   "image_records":len(image_rows),
   "image_status_counts":dict(image_status),
@@ -224,6 +255,11 @@ def main():
   "image_provider_attempt_counts_scope":"cumulative_checkpoint_history_including_prior_runs",
   "image_provider_attempt_history_total":sum(image_attempts.values()),
   "image_provider_attempt_status_counts":dict(image_attempt_status),
+  "image_provider_attempts_current_run":current_image_attempts,
+  "image_provider_attempt_counts_current_run":{
+   name:metrics["attempts"] for name,metrics in current_image_attempts.items()
+  },
+  "image_provider_attempts_current_run_scope":"production_events_run_id_filtered",
   "external_image_api_calls":image_doc.get("external_api_calls"),
   "billable_image_api_calls":image_doc.get("billable_api_calls"),
   "verified_reused_images":image_reused,
