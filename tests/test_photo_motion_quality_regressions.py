@@ -239,10 +239,10 @@ class ProviderAccountingTests(unittest.TestCase):
             with patch.object(production_events, "EVENTS", root / "events.jsonl"):
                 with patch.object(production_events, "STATE", root / "state.json"):
                     with patch.dict(production_events.os.environ, {"GITHUB_RUN_ID": "old-run"}):
-                    production_events.record_provider_attempt(
-                        "old-provider", "old-model", "accepted", True,
-                        scene_id="scene-1", attempt_id="shared-job-id",
-                    )
+                        production_events.record_provider_attempt(
+                            "old-provider", "old-model", "accepted", True,
+                            scene_id="scene-1", attempt_id="shared-job-id",
+                        )
                     with patch.dict(production_events.os.environ, {"GITHUB_RUN_ID": "current-run"}):
                         production_events.record_provider_attempt(
                             "provider-a", "model-a", "request_failed", True,
