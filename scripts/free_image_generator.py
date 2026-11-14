@@ -1976,16 +1976,16 @@ def classify_provider_error(exc):
     )
 
     explicit_quota = any(term in message for term in quota_terms)
-    rate_limited = status == 429 and (
-        any(term in message for term in (
-            "rate limit", "too many requests", "requests per minute",
-            "requests per second", "per minute", "per second",
-        ))
-        or not explicit_quota
+
+    # requests.HTTPError adds "429 Client Error: Too Many Requests" to
+    # str(exc), even when the provider response body explicitly says that
+    # the account's daily allocation is exhausted.  Explicit quota evidence
+    # must take precedence over that generic HTTP status phrase; otherwise
+    # the same exhausted account is retried for every scene/model.
+    rate_limited = status == 429 and not explicit_quota
+    quota_or_billing = status == 402 or explicit_quota or (
+        status == 429 and not rate_limited
     )
-    quota_or_billing = status == 402 or (
-        explicit_quota and not rate_limited
-    ) or (status == 429 and not rate_limited)
     model_unavailable = status == 404
     authentication = status in {401, 403} or any(
         term in message for term in auth_terms
