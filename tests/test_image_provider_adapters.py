@@ -52,6 +52,27 @@ class ImageProviderAdapterTests(unittest.TestCase):
         self.assertTrue(result["stop_retry"])
         self.assertTrue(result["stop_billable"])
 
+    def test_cloudflare_http_error_wrapper_does_not_hide_daily_quota(self):
+        # requests.HTTPError contributes the generic "Too Many Requests"
+        # phrase even though Cloudflare's response body identifies a hard
+        # daily allocation limit. The explicit quota must win.
+        error = RuntimeError(
+            "429 Client Error: Too Many Requests for url: "
+            "https://api.cloudflare.com/client/v4/accounts/test/ai/run/model"
+        )
+        error.response = SimpleNamespace(
+            status_code=429,
+            text=(
+                "AiError: AiError: you have used up your daily free "
+                "allocation of 10,000 neurons"
+            ),
+            content=b"",
+        )
+        result = image_generator.classify_provider_error(error)
+        self.assertEqual(result["category"], "quota_or_billing")
+        self.assertTrue(result["stop_retry"])
+        self.assertTrue(result["stop_billable"])
+
     def test_ordinary_http_429_remains_a_transient_rate_limit(self):
         error = RuntimeError("HTTP 429: too many requests per minute")
         error.response = SimpleNamespace(
