@@ -221,6 +221,8 @@ def main():
   "image_status_counts":dict(image_status),
   "image_provider_record_counts":dict(image_providers),
   "image_provider_attempt_counts":dict(image_attempts),
+  "image_provider_attempt_counts_scope":"cumulative_checkpoint_history_including_prior_runs",
+  "image_provider_attempt_history_total":sum(image_attempts.values()),
   "image_provider_attempt_status_counts":dict(image_attempt_status),
   "external_image_api_calls":image_doc.get("external_api_calls"),
   "billable_image_api_calls":image_doc.get("billable_api_calls"),
@@ -244,6 +246,7 @@ def main():
   "music_paid_services_used":music_result["paid_services_used"],
   "music_paid_provider_api_calls":music_result["paid_provider_api_calls"],
   "provider_usage":provider_usage,
+  "provider_usage_scope":"current_workflow_run_only",
   "billable_provider_attempts":provider_usage.get("billable_marked_attempts",0),
   "costs":{
    "status":provider_usage.get("actual_cost_status","unknown_no_provider_receipts"),
