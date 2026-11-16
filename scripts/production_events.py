@@ -43,6 +43,7 @@ def record_provider_attempt(
         "currency": str(currency) if cost_verified and currency else None,
         "receipt_id": str(receipt_id) if cost_verified else None,
         "cost_status": "receipt_verified" if cost_verified else "unknown_without_receipt",
+        "usage_context": str(os.getenv("PHOTO_MOTION_USAGE_CONTEXT") or "pipeline"),
     }
     if http_status is not None:
         metadata["http_status"] = http_status
@@ -99,6 +100,7 @@ def provider_summary():
             latest[(event_run_id, provider, attempt_id)] = metadata
 
     by_provider = {}
+    by_model = {}
     billable_marked = 0
     unknown_cost = 0
     verified_costs_by_currency = {}
@@ -113,20 +115,41 @@ def provider_summary():
             "failed": 0, "accepted": 0, "pending": 0,
         })
         item["attempts"] += 1
+        model_name = str(metadata.get("model") or "unknown")
+        model_key = f"{provider}:{model_name}"
+        model_item = by_model.setdefault(model_key, {
+            "provider": provider,
+            "model": model_name,
+            "attempts": 0,
+            "billable_marked": 0,
+            "failed": 0,
+            "accepted": 0,
+            "pending": 0,
+            "usage_contexts": {},
+        })
+        model_item["attempts"] += 1
+        usage_context = str(metadata.get("usage_context") or "pipeline")
+        model_item["usage_contexts"][usage_context] = (
+            model_item["usage_contexts"].get(usage_context, 0) + 1
+        )
         billable = metadata.get("billable_marked") is True
         if billable:
             billable_marked += 1
             item["billable_marked"] += 1
+            model_item["billable_marked"] += 1
         status = str(metadata.get("request_status") or "")
         if status in {"request_failed", "quality_rejected", "response_received_quality_rejected", "response_received_validation_failed"}:
             failed += 1
             item["failed"] += 1
+            model_item["failed"] += 1
         elif status in {"verification_pending", "response_received", "request_started"}:
             pending += 1
             item["pending"] += 1
+            model_item["pending"] += 1
         elif status == "accepted":
             accepted += 1
             item["accepted"] += 1
+            model_item["accepted"] += 1
         cost = metadata.get("actual_cost")
         if metadata.get("cost_status") == "receipt_verified" and isinstance(cost, (int, float)) and not isinstance(cost, bool):
             currency = str(metadata.get("currency") or "unspecified")
@@ -162,6 +185,7 @@ def provider_summary():
         ),
         "unknown_cost_attempts": unknown_cost,
         "by_provider": by_provider,
+        "by_model": by_model,
     }
 
 
