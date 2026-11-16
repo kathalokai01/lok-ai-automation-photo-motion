@@ -965,6 +965,25 @@ def music_provider_order(config):
     return ordered
 
 
+def music_provider_model(provider, lyria_model, config):
+    """Resolve the model actually configured for each music provider."""
+    if provider == "eleven_music":
+        return clean(
+            os.getenv("ELEVEN_MUSIC_MODEL")
+            or config.get("ELEVEN_MUSIC_MODEL")
+            or "music_v2_5"
+        )
+    if provider == "stable_audio":
+        return clean(
+            os.getenv("STABLE_AUDIO_MODEL")
+            or config.get("STABLE_AUDIO_MODEL")
+            or "stable-audio-3"
+        )
+    if provider == "lyria":
+        return clean(lyria_model or DEFAULT_MODEL)
+    return clean(provider or "unknown")
+
+
 def build_role_compositions(api_key, model, prompts, role_durations, role_rows, signature, config):
     global API_CALLS, PAID_PROVIDER_CALLS
     checkpoint = read_json(CHECKPOINT)
@@ -1013,6 +1032,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
         )
 
         for provider_index, provider in enumerate(provider_order):
+            provider_model = music_provider_model(provider, provider_model, config)
             if provider in blocked_providers:
                 provider_errors.append(f"{provider}: skipped after an earlier provider failure")
                 log("MUSIC PROVIDER CIRCUIT OPEN; SKIPPING:", provider, role)
@@ -1046,7 +1066,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                     PAID_PROVIDER_CALLS += 1
                     API_CALLS += 1
                     record_provider_attempt(
-                        provider, model, "request_started", True,
+                        provider, provider_model, "request_started", True,
                         scene_id=role, attempt_id=attempt_id,
                     )
                     generate_music(
@@ -1057,7 +1077,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                     )
                     provider_response_received = True
                     record_provider_attempt(
-                        provider, model, "response_received", True,
+                        provider, provider_model, "response_received", True,
                         scene_id=role, attempt_id=attempt_id,
                     )
                     source_duration = probe_audio(source, MIN_AUDIO_DURATION)
@@ -1078,7 +1098,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                 selected_provider = provider
                 if provider != "lyria":
                     record_provider_attempt(
-                        provider, model, "accepted", provider_billable,
+                        provider, provider_model, "accepted", provider_billable,
                         scene_id=role, attempt_id=attempt_id,
                     )
                 log("MUSIC PROVIDER SUCCESS:", provider, role)
@@ -1089,7 +1109,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
                 if provider in {"eleven_music", "stable_audio"}:
                     record_provider_attempt(
                         provider,
-                        model,
+                        provider_model,
                         "response_received_validation_failed" if provider_response_received else "request_failed",
                         provider_billable,
                         scene_id=role,
