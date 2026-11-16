@@ -1574,7 +1574,17 @@ def can_reuse_image(item, old):
             vision.get("quality_score")
             if isinstance(vision, dict) else None
         )
-        vision_passed = bool(
+        # A technical-only image is reusable only when the exact image hash,
+        # prompt/config signature and explicit degraded-verification receipt match.
+        # It is never relabelled as semantically verified.
+        technical_only_receipt = bool(
+            isinstance(quality, dict)
+            and quality.get("status") == "accepted_without_vision"
+            and quality.get("vision_degraded") is True
+            and quality.get("verification_contract")
+                == "mandatory_technical_integrity+vision_unavailable_degraded"
+        )
+        vision_passed = technical_only_receipt or bool(
             isinstance(vision, dict)
             and vision.get("prompt_match") is True
             and vision.get("character_consistency") is True
@@ -2253,6 +2263,7 @@ def run_provider_attempts(
                     timeout=min(TIMEOUT, 30),
                     reference_image_paths=find_character_reference_images(item, records),
                     scene_id=item["scene_id"],
+                    allow_technical_only_on_vision_unavailable=True,
                 )
                 if not quality.get("accepted"):
                     raise ImageQualityRejected(
