@@ -17,6 +17,7 @@ from scripts import prepare_captions
 from scripts import generate_sound_design
 from scripts import visual_quality_validator
 from scripts import production_events
+from scripts import generate_story
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import production_report
@@ -285,6 +286,16 @@ class ProviderAccountingTests(unittest.TestCase):
             self.assertEqual(summary["failed_attempts"], 1)
             self.assertEqual(summary["accepted_attempts"], 1)
             self.assertEqual(set(summary["by_provider"]), {"provider-a", "provider-b"})
+            self.assertEqual(
+                summary["by_model"]["provider-a:model-a"]["failed"], 1
+            )
+            self.assertEqual(
+                summary["by_model"]["provider-b:model-b"]["accepted"], 1
+            )
+            self.assertEqual(
+                summary["by_model"]["provider-b:model-b"]["usage_contexts"],
+                {"pipeline": 1},
+            )
 
     def test_cost_stays_unknown_without_provider_receipt(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -301,6 +312,20 @@ class ProviderAccountingTests(unittest.TestCase):
             self.assertEqual(summary["accepted_attempts"], 1)
             self.assertIsNone(summary["actual_cost_total"])
             self.assertEqual(summary["actual_cost_status"], "unknown_no_provider_receipts")
+
+
+class StoryProofreadingMetadataTests(unittest.TestCase):
+    def test_final_word_count_replaces_pre_segmentation_count(self):
+        result = generate_story.finalize_proofreading_metadata(
+            {"corrected_story_word_count": 192, "performed": True},
+            "यह अंतिम कहानी है",
+        )
+        self.assertEqual(result["corrected_story_word_count"], 4)
+        self.assertEqual(result["final_story_word_count"], 4)
+        self.assertEqual(
+            result["pre_segmentation_corrected_story_word_count"], 192
+        )
+        self.assertTrue(result["performed"])
 
 
 class StoryMergeEvidenceTests(unittest.TestCase):
