@@ -506,7 +506,7 @@ def validate_scene_image(
         and vision.get("quality_score") >= max(7, min(10, int(minimum_score)))
     )
     accepted = vision_accepted or technical_only_fallback if enabled else True
-    if enabled and not vision_accepted:
+    if enabled and not vision_accepted and not technical_only_fallback:
         issues = vision.get("issues", []) if isinstance(vision, dict) else []
         details = "; ".join(_clean(item) for item in issues[:4] if _clean(item)) if isinstance(issues, list) else ""
         vision_error = (
