@@ -51,6 +51,13 @@ def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _record_vision_provider_attempt(*args, **kwargs):
+    """Keep mocked unit-test requests out of real provider usage accounting."""
+    if os.getenv("PHOTO_MOTION_TEST_MODE", "").strip().lower() in {"1", "true", "yes"}:
+        return None
+    return record_provider_attempt(*args, **kwargs)
+
+
 def _technical_checks(image_path: Path, expected_size: tuple[int, int]) -> dict:
     if image_path.is_symlink() or not image_path.is_file():
         raise RuntimeError("Image file is missing or unsafe.")
@@ -210,7 +217,7 @@ def _vision_check(
             f"{model}:{attempt}"
         )
         response_received = False
-        record_provider_attempt(
+        _record_vision_provider_attempt(
             "gemini_vision", model, "request_started", True,
             scene_id=scene_id, attempt_id=attempt_id,
         )
@@ -224,13 +231,13 @@ def _vision_check(
             response_received = True
             status = int(response.status_code)
             if status >= 400:
-                record_provider_attempt(
+                _record_vision_provider_attempt(
                     "gemini_vision", model, "request_failed", True,
                     scene_id=scene_id, attempt_id=attempt_id,
                     http_status=status, error=str(response.text or "")[:500],
                 )
             else:
-                record_provider_attempt(
+                _record_vision_provider_attempt(
                     "gemini_vision", model, "response_received", True,
                     scene_id=scene_id, attempt_id=attempt_id,
                     http_status=status,
@@ -242,7 +249,7 @@ def _vision_check(
             last_http_error = exc
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status is None or status < 400:
-                record_provider_attempt(
+                _record_vision_provider_attempt(
                     "gemini_vision", model,
                     "response_received_validation_failed" if response_received else "request_failed",
                     True, scene_id=scene_id, attempt_id=attempt_id,
@@ -281,7 +288,7 @@ def _vision_check(
             )
             time.sleep(delay)
         except ValueError as exc:
-            record_provider_attempt(
+            _record_vision_provider_attempt(
                 "gemini_vision", model, "response_received_validation_failed", True,
                 scene_id=scene_id, attempt_id=attempt_id,
                 error=f"{type(exc).__name__}: {exc}",
@@ -352,7 +359,7 @@ def _vision_check(
             "Gemini vision verification omitted character_consistency boolean."
         )
 
-    record_provider_attempt(
+    _record_vision_provider_attempt(
         "gemini_vision", model, "accepted", True,
         scene_id=scene_id, attempt_id=attempt_id,
     )
