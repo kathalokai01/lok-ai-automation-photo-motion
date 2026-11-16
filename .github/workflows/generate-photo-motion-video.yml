@@ -525,6 +525,8 @@ jobs:
           python -m compileall -q scripts tests
 
       - name: Test scene role narration and final scene validation
+        env:
+          PHOTO_MOTION_TEST_MODE: "1"
         shell: bash
         run: |
           set -euo pipefail
@@ -532,6 +534,8 @@ jobs:
           python -m pytest -q tests
 
       - name: Test configured paid and free LLM provider fallback
+        env:
+          PHOTO_MOTION_USAGE_CONTEXT: "provider_smoke_test"
         shell: bash
         run: |
           set -euo pipefail
