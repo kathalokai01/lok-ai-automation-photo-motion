@@ -558,7 +558,7 @@ def configured_provider_model(provider: str, config: dict) -> str:
         "cartesia": ("CARTESIA_TTS_MODEL", "sonic-latest"),
         "gemini_tts": ("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts"),
         "minimax": ("MINIMAX_TTS_MODEL", "speech-02-hd"),
-        "finevoice": ("FINEVOICE_MODEL", "finevoice-default"),
+        "finevoice": ("FINEVOICE_MODEL", "unspecified"),
         "edge_tts": ("EDGE_TTS_MODEL", "edge-tts"),
         "piper": ("PIPER_MODEL", ""),
     }
@@ -2147,7 +2147,7 @@ def synthesize_chunk_with_fallback(
                 classification = classify_provider_error(exc)
                 record_provider_attempt(
                     provider,
-                    provider,
+                    provider_model,
                     "response_received_validation_failed" if response_received else "request_failed",
                     billable,
                     scene_id=scene_id,
