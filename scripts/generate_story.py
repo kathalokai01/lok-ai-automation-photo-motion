@@ -1921,6 +1921,21 @@ def _visual_prompt(
     )
 
 
+def finalize_proofreading_metadata(proofreading: dict, final_story_text: str) -> dict:
+    """Keep proofreading word-count metadata aligned with the locked final story."""
+    result = dict(proofreading) if isinstance(proofreading, dict) else {}
+    final_count = word_count(final_story_text)
+    previous_count = result.get("corrected_story_word_count")
+    if previous_count is not None and previous_count != final_count:
+        result.setdefault(
+            "pre_segmentation_corrected_story_word_count",
+            previous_count,
+        )
+    result["corrected_story_word_count"] = final_count
+    result["final_story_word_count"] = final_count
+    return result
+
+
 def make_story(
     title: str,
     topic: str,
@@ -2178,6 +2193,11 @@ def make_story(
             f"Final plan contains {len(all_scenes)} Main Scenes; "
             f"limit is {MAX_TOTAL_SCENES}."
         )
+
+    proofreading = finalize_proofreading_metadata(
+        proofreading,
+        final_story_text,
+    )
 
     result = {
         "version": VERSION,
