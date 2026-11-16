@@ -1032,7 +1032,7 @@ def build_role_compositions(api_key, model, prompts, role_durations, role_rows, 
         )
 
         for provider_index, provider in enumerate(provider_order):
-            provider_model = music_provider_model(provider, provider_model, config)
+            provider_model = music_provider_model(provider, model, config)
             if provider in blocked_providers:
                 provider_errors.append(f"{provider}: skipped after an earlier provider failure")
                 log("MUSIC PROVIDER CIRCUIT OPEN; SKIPPING:", provider, role)
