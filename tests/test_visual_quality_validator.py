@@ -66,6 +66,15 @@ class VisionRetryTests(unittest.TestCase):
             self.assertEqual(post.call_count, 1)
             self.assertEqual(sleep.call_count, 0)
 
+    def test_test_mode_suppresses_mocked_vision_usage_events(self):
+        with patch.dict(os.environ, {"PHOTO_MOTION_TEST_MODE": "1"}), patch.object(
+            validator, "record_provider_attempt"
+        ) as record:
+            validator._record_vision_provider_attempt(
+                "gemini_vision", "gemini-3.8-flash", "accepted", True
+            )
+        record.assert_not_called()
+
     def test_ordinary_http_429_without_quota_evidence_remains_retryable(self):
         self.assertFalse(validator.is_hard_vision_quota_error(
             429, "Too many requests; retry after 20 seconds"
