@@ -18,6 +18,8 @@ from scripts import generate_sound_design
 from scripts import visual_quality_validator
 from scripts import production_events
 from scripts import generate_story
+from scripts import generate_tts
+from scripts import generate_flow_music
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import production_report
@@ -312,6 +314,51 @@ class ProviderAccountingTests(unittest.TestCase):
             self.assertEqual(summary["accepted_attempts"], 1)
             self.assertIsNone(summary["actual_cost_total"])
             self.assertEqual(summary["actual_cost_status"], "unknown_no_provider_receipts")
+
+
+class ProviderModelResolutionTests(unittest.TestCase):
+    def test_tts_events_resolve_configured_model_ids(self):
+        with patch.dict(generate_tts.os.environ, {
+            "CARTESIA_TTS_MODEL": "sonic-2",
+            "ELEVENLABS_MODEL_ID": "eleven_multilingual_v2",
+            "FISH_TTS_MODEL": "s2.1-pro-free",
+        }):
+            self.assertEqual(
+                generate_tts.configured_provider_model("cartesia", {}),
+                "sonic-2",
+            )
+            self.assertEqual(
+                generate_tts.configured_provider_model("elevenlabs", {}),
+                "eleven_multilingual_v2",
+            )
+            self.assertEqual(
+                generate_tts.configured_provider_model("fish_audio", {}),
+                "s2.1-pro-free",
+            )
+
+    def test_music_events_resolve_each_provider_model(self):
+        with patch.dict(generate_flow_music.os.environ, {
+            "ELEVEN_MUSIC_MODEL": "music_v2_5",
+            "STABLE_AUDIO_MODEL": "stable-audio-3",
+        }):
+            self.assertEqual(
+                generate_flow_music.music_provider_model(
+                    "eleven_music", "lyria-3.5", {}
+                ),
+                "music_v2_5",
+            )
+            self.assertEqual(
+                generate_flow_music.music_provider_model(
+                    "stable_audio", "lyria-3.5", {}
+                ),
+                "stable-audio-3",
+            )
+            self.assertEqual(
+                generate_flow_music.music_provider_model(
+                    "lyria", "lyria-3.5", {}
+                ),
+                "lyria-3.5",
+            )
 
 
 class StoryProofreadingMetadataTests(unittest.TestCase):
