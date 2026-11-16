@@ -849,6 +849,15 @@ jobs:
       - name: Prepare visual generation jobs
         run: python scripts/generate_visuals.py
 
+      - name: Remove stale visual review artifacts from restored checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            output/visuals/storyboard.jpg \
+            output/visuals/storyboard_manifest.json \
+            output/visuals/asset_approval.json
+
       - name: Generate scene images
         run: python scripts/free_image_generator.py
 
