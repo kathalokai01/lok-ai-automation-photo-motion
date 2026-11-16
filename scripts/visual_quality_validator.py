@@ -389,8 +389,9 @@ def validate_scene_image(
     timeout: int = 30,
     reference_image_paths: list[str | Path] | None = None,
     scene_id: str = "",
+    allow_technical_only_on_vision_unavailable: bool = False,
 ) -> dict:
-    """Return accepted quality evidence; never claim semantic success without vision."""
+    """Return quality evidence; technical-only acceptance is explicitly marked."""
     path = Path(image_path)
     prompt = _clean(prompt)
     if len(prompt) < 24:
@@ -474,13 +475,28 @@ def validate_scene_image(
 
         if vision is None:
             details = " | ".join(vision_errors[-4:])
-            raise VisionVerificationUnavailable(
-                "Gemini Vision verification failed on the primary and "
-                f"configured fallback models. {details}"
+            vision_error = (
+                "Gemini Vision unavailable; only technical image integrity "
+                "was verified. Semantic scene match and character continuity "
+                "remain unverified. " + details
+            )
+            if not allow_technical_only_on_vision_unavailable:
+                raise VisionVerificationUnavailable(
+                    "Gemini Vision verification failed on the primary and "
+                    f"configured fallback models. {details}"
+                )
+            print(
+                "WARNING: Gemini Vision unavailable; accepting this image "
+                "only after mandatory technical integrity checks. Semantic "
+                "story match is NOT verified.",
+                flush=True,
             )
     else:
         vision_error = "Vision verification is disabled by configuration."
 
+    technical_only_fallback = bool(
+        enabled and vision is None and allow_technical_only_on_vision_unavailable
+    )
     vision_accepted = bool(
         isinstance(vision, dict)
         and vision.get("prompt_match") is True
@@ -489,7 +505,7 @@ def validate_scene_image(
         and not isinstance(vision.get("quality_score"), bool)
         and vision.get("quality_score") >= max(7, min(10, int(minimum_score)))
     )
-    accepted = vision_accepted if enabled else True
+    accepted = vision_accepted or technical_only_fallback if enabled else True
     if enabled and not vision_accepted:
         issues = vision.get("issues", []) if isinstance(vision, dict) else []
         details = "; ".join(_clean(item) for item in issues[:4] if _clean(item)) if isinstance(issues, list) else ""
@@ -502,11 +518,12 @@ def validate_scene_image(
     return {
         "status": (
             "passed" if vision_accepted
-            else "rejected" if enabled
-            else "accepted_without_vision"
+            else "accepted_without_vision" if technical_only_fallback or not enabled
+            else "rejected"
         ),
         "accepted": accepted,
         "vision_accepted": vision_accepted,
+        "vision_degraded": technical_only_fallback,
         "technical": technical,
         "vision": vision,
         "verification_warning": vision_error,
@@ -514,7 +531,10 @@ def validate_scene_image(
         "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "verification_contract": (
             "mandatory_technical_integrity+mandatory_vision_gate"
-            if enabled else "mandatory_technical_integrity+vision_disabled"
+            if vision_accepted
+            else "mandatory_technical_integrity+vision_unavailable_degraded"
+            if technical_only_fallback
+            else "mandatory_technical_integrity+vision_disabled"
         ),
     }
 
