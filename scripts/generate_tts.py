@@ -550,6 +550,25 @@ def resolve_voice(provider: str, voice: str, voice_profile: dict | None = None) 
     return voice
 
 
+def configured_provider_model(provider: str, config: dict) -> str:
+    """Return the configured model identifier used by a TTS provider."""
+    settings = {
+        "elevenlabs": ("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2"),
+        "fish_audio": ("FISH_TTS_MODEL", "s1"),
+        "cartesia": ("CARTESIA_TTS_MODEL", "sonic-latest"),
+        "gemini_tts": ("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts"),
+        "minimax": ("MINIMAX_TTS_MODEL", "speech-02-hd"),
+        "finevoice": ("FINEVOICE_MODEL", "finevoice-default"),
+        "edge_tts": ("EDGE_TTS_MODEL", "edge-tts"),
+        "piper": ("PIPER_MODEL", ""),
+    }
+    env_name, default = settings.get(provider, ("", provider))
+    value = os.getenv(env_name, "").strip() if env_name else ""
+    if not value and env_name:
+        value = str(config.get(env_name, "") or "").strip()
+    return value or default or provider
+
+
 def provider_order(config: dict) -> list[str]:
     configured = get_tts_provider_order(config)
     normalized = []
@@ -1179,7 +1198,9 @@ def synthesize_provider(
                 payload,
             )
 
-        return write_audio_bytes(output_path, data)
+        info = write_audio_bytes(output_path, data)
+        info["provider_model"] = payload["model_id"]
+        return info
 
 
     if provider == "minimax":
@@ -2070,6 +2091,8 @@ def synthesize_chunk_with_fallback(
             output_path.stem + f".{provider}.mp3"
         )
 
+        provider_model = configured_provider_model(provider, config)
+
         for attempt in range(1, max_retries + 1):
             attempt_id = (
                 f"{scene_id or 'unknown-scene'}:{hashlib.sha256(chunk.encode('utf-8')).hexdigest()[:12]}:{attempt}"
@@ -2077,7 +2100,7 @@ def synthesize_chunk_with_fallback(
             response_received = False
             billable = provider in BILLABLE_PROVIDERS
             record_provider_attempt(
-                provider, provider, "request_started", billable,
+                provider, provider_model, "request_started", billable,
                 scene_id=scene_id, attempt_id=attempt_id,
             )
             try:
@@ -2091,8 +2114,9 @@ def synthesize_chunk_with_fallback(
                     voice_profile,
                 )
                 response_received = True
+                provider_model = str(info.get("provider_model") or provider_model)
                 record_provider_attempt(
-                    provider, provider, "response_received", billable,
+                    provider, provider_model, "response_received", billable,
                     scene_id=scene_id, attempt_id=attempt_id,
                 )
 
@@ -2114,7 +2138,7 @@ def synthesize_chunk_with_fallback(
                     )
 
                 record_provider_attempt(
-                    provider, provider, "accepted", billable,
+                    provider, provider_model, "accepted", billable,
                     scene_id=scene_id, attempt_id=attempt_id,
                 )
                 return final_info, provider
