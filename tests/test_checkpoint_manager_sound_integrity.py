@@ -108,3 +108,50 @@ def test_corrupt_resumable_sound_progress_does_not_claim_verified_reuse(tmp_path
     )
 
     assert not checkpoint_manager.has_resumable_sound_progress(tmp_path)
+
+
+def test_progress_merge_never_copies_published_sound_manifests(tmp_path):
+    source = tmp_path / "saved"
+    output = tmp_path / "output"
+    sound_dir = source / "sound_design"
+    progress_dir = sound_dir / "checkpoints"
+    progress_dir.mkdir(parents=True)
+    (sound_dir / "sfx_cues.json").write_text(
+        json.dumps({
+            "status": "completed",
+            "source_signature": "a" * 64,
+            "cues": [],
+        }),
+        encoding="utf-8",
+    )
+    (sound_dir / "sound_design_manifest.json").write_text(
+        json.dumps({
+            "status": "completed",
+            "source_signature": "a" * 64,
+            "mix_records": [],
+        }),
+        encoding="utf-8",
+    )
+    (sound_dir / "sfx_timing_validation.json").write_text(
+        json.dumps({
+            "status": "completed",
+            "source_signature": "a" * 64,
+            "cues": [],
+        }),
+        encoding="utf-8",
+    )
+    (progress_dir / "sound_progress.json").write_text(
+        json.dumps({
+            "status": "in_progress",
+            "source_signature": "a" * 64,
+            "completed_tracks": [],
+        }),
+        encoding="utf-8",
+    )
+
+    checkpoint_manager.merge_progress_checkpoints(source, output)
+
+    assert not (output / "sound_design" / "sfx_cues.json").exists()
+    assert not (output / "sound_design" / "sound_design_manifest.json").exists()
+    assert not (output / "sound_design" / "sfx_timing_validation.json").exists()
+    assert (output / "sound_design" / "checkpoints" / "sound_progress.json").is_file()
