@@ -2635,7 +2635,25 @@ def main():
     log(
         "All image files passed format, dimensions, integrity and SHA256 checks."
     )
-    log("All accepted images passed mandatory file-integrity and Gemini Vision semantic checks.")
+    quality_rows = [
+        row.get("quality_verification")
+        for row in records
+        if isinstance(row.get("quality_verification"), dict)
+    ]
+    vision_verified = sum(
+        1 for row in quality_rows if row.get("status") == "passed"
+    )
+    vision_degraded = sum(
+        1 for row in quality_rows
+        if row.get("status") == "accepted_without_vision"
+        or row.get("vision_degraded") is True
+    )
+    vision_rejected = sum(
+        1 for row in quality_rows if row.get("status") == "rejected"
+    )
+    log("SEMANTICALLY VERIFIED IMAGES:", vision_verified)
+    log("TECHNICAL-ONLY IMAGES (VISION UNAVAILABLE):", vision_degraded)
+    log("VISION-REJECTED IMAGES:", vision_rejected)
 
     return 0
 
