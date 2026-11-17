@@ -1935,8 +1935,9 @@ def main():
         "background_duration_seconds": round(background_duration, 3),
         "sfx_duration_seconds": SFX_SECONDS,
         "sfx_normalization_target_lufs": -16.0,
-        "sfx_true_peak_ceiling_dbtp": -1.5,
-        "fire_sfx_true_peak_ceiling_dbtp": -3.0,
+        "sfx_sample_peak_ceiling_dbfs": -0.1,
+        "fire_sfx_sample_peak_ceiling_dbfs": -2.5,
+        "fire_sfx_limiter_linear_ceiling": 0.45,
         "mix_gain_policy": {
             "music": 0.38, "ambient": 0.16,
             "sfx_gain_range": [min(SFX_GAINS.values()), max(SFX_GAINS.values())],
