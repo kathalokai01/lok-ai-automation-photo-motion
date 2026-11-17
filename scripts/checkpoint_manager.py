@@ -1081,6 +1081,16 @@ def merge_progress_checkpoints(source: Path, output: Path) -> int:
         for candidate in sorted(source_root.rglob("*.json")):
             if candidate.is_symlink():
                 continue
+            relative = candidate.relative_to(source)
+            # Published sound manifests are not progress checkpoints. They
+            # must only be restored through validate_sound_design_stage(),
+            # which verifies every referenced WAV against its SHA256.
+            if relative.as_posix() in {
+                "sound_design/sound_design_manifest.json",
+                "sound_design/sfx_cues.json",
+                "sound_design/sfx_timing_validation.json",
+            }:
+                continue
             data = read_json(candidate)
             if not isinstance(data, dict):
                 continue
