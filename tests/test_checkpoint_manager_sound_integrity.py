@@ -62,3 +62,49 @@ def test_sound_design_checkpoint_rejects_missing_asset_hash(tmp_path):
     assert not checkpoint_manager.validate_stage(
         "sound_design", tmp_path, {}
     )
+
+
+def test_newer_resumable_sound_progress_blocks_older_stage_restore(tmp_path):
+    asset = tmp_path / "sfx" / "weather.wav"
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    asset.write_bytes(b"newer in-progress weather effect")
+    digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+    checkpoint = tmp_path / "checkpoints" / "sound_design_progress.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text(
+        json.dumps({
+            "status": "in_progress",
+            "source_signature": "a" * 64,
+            "tracks": {
+                "sfx_weather": {
+                    "status": "completed",
+                    "path": "output/sfx/weather.wav",
+                    "sha256": digest,
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    assert checkpoint_manager.has_resumable_sound_progress(tmp_path)
+
+
+def test_corrupt_resumable_sound_progress_does_not_claim_verified_reuse(tmp_path):
+    checkpoint = tmp_path / "checkpoints" / "sound_design_progress.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text(
+        json.dumps({
+            "status": "in_progress",
+            "source_signature": "a" * 64,
+            "tracks": {
+                "sfx_weather": {
+                    "status": "completed",
+                    "path": "output/sfx/weather.wav",
+                    "sha256": "0" * 64,
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    assert not checkpoint_manager.has_resumable_sound_progress(tmp_path)
