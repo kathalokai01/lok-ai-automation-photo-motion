@@ -342,11 +342,84 @@ def validate_scene_render_stage(directory: Path) -> bool:
     return not invalid and checked > 0
 
 
+
+def validate_manifest_assets(directory: Path, manifest_path: Path) -> bool:
+    """Reject a checkpoint manifest when any declared asset hash is stale."""
+    manifest = read_json(manifest_path)
+    if not manifest or str(manifest.get("status", "")).strip().lower() not in SUCCESS_STATES:
+        return False
+
+    path_keys = {
+        "path", "file", "output", "output_path", "image", "image_path",
+        "audio", "audio_path", "video", "video_path", "depth_path",
+        "depth_map", "rendered_video", "source_path",
+    }
+    hash_keys = (
+        "sha256", "image_sha256", "audio_sha256", "video_sha256",
+        "depth_sha256", "file_sha256", "source_sha256",
+    )
+    checked = 0
+    invalid = False
+
+    def visit(value: Any) -> None:
+        nonlocal checked, invalid
+        if invalid:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in path_keys and isinstance(item, str) and item.strip():
+                    asset = _checkpoint_output_file(directory, item)
+                    if asset is None:
+                        invalid = True
+                        return
+                    declared = next(
+                        (
+                            value.get(hash_key)
+                            for hash_key in hash_keys
+                            if isinstance(value.get(hash_key), str)
+                            and value.get(hash_key).strip()
+                        ),
+                        None,
+                    )
+                    if not declared:
+                        invalid = True
+                        return
+                    checked += 1
+                    if _sha256_file(asset).lower() != declared.strip().lower():
+                        invalid = True
+                        return
+                else:
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(manifest)
+    return not invalid and checked > 0
+
+
+def validate_sound_design_stage(directory: Path) -> bool:
+    """Restore sound design only as one hash-consistent published stage."""
+    for relative in (
+        "sound_design/sound_design_manifest.json",
+        "sound_design/sfx_cues.json",
+        "sound_design/sfx_timing_validation.json",
+    ):
+        manifest_path = directory / relative
+        if not manifest_complete(manifest_path):
+            return False
+        if not validate_manifest_assets(directory, manifest_path):
+            return False
+    return True
+
+
 def validate_stage(name: str, directory: Path, expected: dict) -> bool:
     if name == "story":
         return validate_story_stage(directory, expected)
     if name == "scene_renders":
         return validate_scene_render_stage(directory)
+    if name == "sound_design":
+        return validate_sound_design_stage(directory)
     if name == "visuals":
         paths = [directory / item for item in STAGES[3][1]]
         docs = [read_json(path) for path in paths]
