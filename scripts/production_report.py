@@ -20,6 +20,7 @@ SOURCES={
  "audio":OUT/"narration"/"audio_jobs.json",
  "music":OUT/"music"/"flow_music_manifest.json",
  "sound":OUT/"sound_design"/"sound_design_manifest.json",
+ "sound_progress":OUT/"checkpoints"/"sound_design_progress.json",
  "sfx_validation":OUT/"sound_design"/"sfx_timing_validation.json",
 }
 def digest(path):
@@ -99,6 +100,28 @@ def normalized_sfx_validation(validation):
   "timing_errors":field("timing_errors"),
   "failed_checks":field("failed_checks"),
  }
+
+def apply_sound_progress_status(sound, validation, progress):
+ """Prevent an older completed manifest hiding a failed current sound-design attempt."""
+ if not isinstance(progress,dict):
+  return sound,validation
+ progress_status=str(progress.get("status","")).strip().lower()
+ if progress_status not in {"in_progress","failed"}:
+  return sound,validation
+ effective_sound=dict(sound) if isinstance(sound,dict) else {}
+ effective_sound["status"]=progress_status
+ effective_sound["progress_status"]=progress_status
+ progress_tracks=progress.get("tracks")
+ if isinstance(progress_tracks,dict):
+  tracks=dict(effective_sound.get("tracks")) if isinstance(effective_sound.get("tracks"),dict) else {}
+  tracks.update(progress_tracks)
+  effective_sound["tracks"]=tracks
+ effective_validation=dict(validation) if isinstance(validation,dict) else {}
+ nested=dict(effective_validation.get("sfx")) if isinstance(effective_validation.get("sfx"),dict) else {}
+ nested["status"]="not_validated_current_attempt"
+ effective_validation["sfx"]=nested
+ effective_validation["status"]="not_validated_current_attempt"
+ return effective_sound,effective_validation
 
 def sound_quality_summary(sound, validation):
  tracks=sound.get("tracks") if isinstance(sound.get("tracks"),dict) else {}
@@ -210,6 +233,9 @@ def main():
  music=docs["music"] or {}
  sound=docs["sound"] or {}
  sfx_validation=docs["sfx_validation"] or {}
+ sound,sfx_validation=apply_sound_progress_status(
+  sound,sfx_validation,docs["sound_progress"]
+ )
  music_result=effective_music(music,sound)
  provider_usage=provider_summary()
  sound_quality=sound_quality_summary(sound,sfx_validation)
@@ -223,6 +249,8 @@ def main():
   doc=docs[name]
   stages[name]={"status":str(doc.get("status","missing")) if doc else "missing","path":path.relative_to(ROOT).as_posix() if path.is_file() else None,"sha256":digest(path) if path.is_file() else None}
  stages=apply_effective_music_stage(stages,music_result)
+ stages["sound"]["status"]=sound.get("status","missing")
+ stages["sfx_validation"]["status"]=normalized_sfx_validation(sfx_validation)["status"]
  input_path=ROOT/"Input"/"topic.txt"
  image_reused=sum(value for key,value in image_status.items() if key in {"existing","reused"})
  image_generated=image_status.get("generated",0)
