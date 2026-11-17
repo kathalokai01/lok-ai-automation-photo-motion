@@ -1271,6 +1271,33 @@ def download_run(repository: str, run_id: int, destination: Path) -> Path | None
     return archive if archive.is_file() and archive.stat().st_size > 0 else None
 
 
+
+def has_resumable_sound_progress(output: Path) -> bool:
+    """Protect newer partial sound tracks from older completed-stage manifests."""
+    progress = read_json(output / "checkpoints" / "sound_design_progress.json")
+    if not isinstance(progress, dict):
+        return False
+    if str(progress.get("status", "")).strip().lower() not in {"in_progress", "failed"}:
+        return False
+    tracks = progress.get("tracks")
+    if not isinstance(tracks, dict) or not tracks:
+        return False
+
+    verified = 0
+    for record in tracks.values():
+        if not isinstance(record, dict) or str(record.get("status", "")).lower() != "completed":
+            continue
+        asset = _checkpoint_output_file(output, record.get("path"))
+        declared = str(record.get("sha256") or "").strip().lower()
+        if asset is None or not re.fullmatch(r"[a-f0-9]{64}", declared):
+            return False
+        if _sha256_file(asset).lower() != declared:
+            return False
+        verified += 1
+    return verified > 0
+
+
+
 def restore(args: argparse.Namespace) -> int:
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -1316,9 +1343,16 @@ def restore(args: argparse.Namespace) -> int:
             restored_partial_images += restore_partial_visual_images(saved, output)
             restored_tts_chunks = restore_partial_tts_chunks(saved, output)
             progress_checkpoints += merge_progress_checkpoints(saved, output)
+            resumable_sound_progress = has_resumable_sound_progress(output)
             accepted = []
             for stage, _ in STAGES:
                 if stage in restored:
+                    continue
+                # A newer in-progress sound checkpoint owns its verified track
+                # files. Do not pair those files with an older completed
+                # manifest from another run; let generate_sound_design.py
+                # validate/reuse each track and publish a fresh manifest.
+                if stage == "sound_design" and resumable_sound_progress:
                     continue
                 if validate_stage(stage, saved, expected):
                     count = copy_stage(saved, output, stage)
