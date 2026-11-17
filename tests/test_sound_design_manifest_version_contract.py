@@ -25,6 +25,14 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
         accepted_version = assigned_string(validator_tree, "SOUND_DESIGN_VERSION")
         self.assertEqual(accepted_version, generated_version)
 
+    def test_fire_sfx_has_dedicated_peak_safe_profile(self):
+        generator_tree = ast.parse(GENERATOR.read_text(encoding="utf-8"))
+        source = GENERATOR.read_text(encoding="utf-8")
+        self.assertIn('"fire-peak-safe-v2"', source)
+        self.assertIn('loudnorm=I=-16:TP=-3.0:LRA=8', source)
+        self.assertIn('alimiter=limit=0.70:level=disabled', source)
+        self.assertIn('Generated fire SFX failed its dedicated peak ceiling', source)
+
     def test_validator_version_is_explicitly_versioned(self):
         validator_tree = ast.parse(VALIDATOR.read_text(encoding="utf-8"))
         validator_version = assigned_string(validator_tree, "VERSION")
