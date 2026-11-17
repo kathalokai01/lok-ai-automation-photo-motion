@@ -21,6 +21,31 @@ class ProductionReportSoundGateTests(unittest.TestCase):
             },
         }
 
+    def test_in_progress_sound_checkpoint_overrides_stale_completed_manifest(self):
+        sound, validation = production_report.apply_sound_progress_status(
+            {"status": "completed", "tracks": {"music": {"status": "completed"}}},
+            {"status": "completed", "sfx": {"status": "completed"}},
+            {
+                "status": "in_progress",
+                "tracks": {"sfx_fire": {"status": "completed", "loudness": {"peak_volume_db": -0.0}}},
+            },
+        )
+        self.assertEqual(sound["status"], "in_progress")
+        self.assertIn("sfx_fire", sound["tracks"])
+        self.assertEqual(validation["status"], "not_validated_current_attempt")
+        self.assertEqual(validation["sfx"]["status"], "not_validated_current_attempt")
+        self.assertFalse(production_report.evaluate_sound_checks(
+            self.config, self.music, sound, validation
+        ))
+
+    def test_completed_sound_checkpoint_does_not_override_completed_manifest(self):
+        sound, validation = production_report.apply_sound_progress_status(
+            {"status": "completed"}, {"status": "completed"},
+            {"status": "completed"},
+        )
+        self.assertEqual(sound["status"], "completed")
+        self.assertEqual(validation["status"], "completed")
+
     def test_nested_sfx_validation_schema_passes_with_local_music_fallback(self):
         validation = {
             "status": "completed",
