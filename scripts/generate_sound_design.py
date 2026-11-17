@@ -590,7 +590,7 @@ def make_sfx(kind, path, old_record, source_sig):
     if kind == "fire":
         # Invalidate only the known-bad fire WAV. Preserve byte-for-byte
         # signature compatibility for every other existing SFX asset.
-        signature_data["normalization_profile"] = "fire-peak-safe-v2"
+        signature_data["normalization_profile"] = "fire-peak-safe-v3"
     track_signature = signature(signature_data)
     if path.is_file() and isinstance(old_record, dict):
         try:
@@ -620,8 +620,10 @@ def make_sfx(kind, path, old_record, source_sig):
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(path), "-af",
             (
-                "loudnorm=I=-16:TP=-3.0:LRA=8,"
-                "alimiter=limit=0.70:level=disabled"
+                # The fire source contains rare high-amplitude crack transients.
+                # A limiter-only pass avoids loudnorm's post-filter peak rebound
+                # and leaves headroom after 16-bit PCM quantization.
+                "alimiter=limit=0.45:attack=5:release=100:level=disabled"
                 if kind == "fire"
                 else "loudnorm=I=-16:TP=-1.5:LRA=8,alimiter=limit=0.95:level=disabled"
             ),
