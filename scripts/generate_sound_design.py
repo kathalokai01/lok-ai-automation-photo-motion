@@ -576,11 +576,19 @@ def make_local_track(
 
 def make_sfx(kind, path, old_record, source_sig):
     path = Path(path)
+    # Only the fire effect changes profile here. Keeping the profile in the
+    # per-effect signature invalidates that one unsafe cached WAV while all
+    # already-valid SFX, music, ambience, narration, images and motion clips
+    # remain eligible for exact SHA256/signature reuse.
+    normalization_profile = (
+        "fire-peak-safe-v2" if kind == "fire" else "legacy-sfx-profile-v1"
+    )
     track_signature = signature({
         "version": VERSION,
         "kind": kind,
         "duration": SFX_SECONDS,
         "rate": RATE,
+        "normalization_profile": normalization_profile,
         "source_signature": source_sig,
     })
     if path.is_file() and isinstance(old_record, dict):
@@ -610,7 +618,12 @@ def make_sfx(kind, path, old_record, source_sig):
         run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(path), "-af",
-            "loudnorm=I=-16:TP=-1.5:LRA=8,alimiter=limit=0.95:level=disabled",
+            (
+                "loudnorm=I=-16:TP=-3.0:LRA=8,"
+                "alimiter=limit=0.70:level=disabled"
+                if kind == "fire"
+                else "loudnorm=I=-16:TP=-1.5:LRA=8,alimiter=limit=0.95:level=disabled"
+            ),
             "-ac", "1", "-ar", str(RATE), "-c:a", "pcm_s16le",
             str(normalized),
         ], timeout=180)
@@ -622,6 +635,11 @@ def make_sfx(kind, path, old_record, source_sig):
     loudness = audio_loudness(path)
     if loudness.get("mean_volume_db", -999) < -25.0:
         raise RuntimeError(f"Generated {kind} SFX is too quiet after normalization.")
+    if kind == "fire" and loudness.get("peak_volume_db", 0.0) > -2.5:
+        raise RuntimeError(
+            "Generated fire SFX failed its dedicated peak ceiling "
+            "after -3.0 dBTP normalization and limiting."
+        )
     return {
         "status": "completed",
         "path": path.relative_to(ROOT).as_posix(),
@@ -1914,7 +1932,7 @@ def main():
         "background_duration_seconds": round(background_duration, 3),
         "sfx_duration_seconds": SFX_SECONDS,
         "sfx_normalization_target_lufs": -16.0,
-        "sfx_true_peak_ceiling_dbtp": -1.5,
+        "sfx_true_peak_ceiling_dbtp": -3.0,
         "mix_gain_policy": {
             "music": 0.38, "ambient": 0.16,
             "sfx_gain_range": [min(SFX_GAINS.values()), max(SFX_GAINS.values())],
