@@ -34,6 +34,8 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
         self.assertIn('loudnorm=I=-16:TP=-3.0:LRA=8', source)
         self.assertNotIn('"legacy-sfx-profile-v1"', source)
         self.assertIn('alimiter=limit=0.70:level=disabled', source)
+        self.assertIn('"sfx_true_peak_ceiling_dbtp": -1.5', source)
+        self.assertIn('"fire_sfx_true_peak_ceiling_dbtp": -3.0', source)
         self.assertIn('Generated fire SFX failed its dedicated peak ceiling', source)
 
     def test_validator_version_is_explicitly_versioned(self):
