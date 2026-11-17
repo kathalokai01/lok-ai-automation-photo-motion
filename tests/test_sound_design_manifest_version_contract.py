@@ -28,8 +28,11 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
     def test_fire_sfx_has_dedicated_peak_safe_profile(self):
         generator_tree = ast.parse(GENERATOR.read_text(encoding="utf-8"))
         source = GENERATOR.read_text(encoding="utf-8")
+        self.assertIn('if kind == "fire":', source)
         self.assertIn('"fire-peak-safe-v2"', source)
+        self.assertIn('signature_data["normalization_profile"]', source)
         self.assertIn('loudnorm=I=-16:TP=-3.0:LRA=8', source)
+        self.assertNotIn('"legacy-sfx-profile-v1"', source)
         self.assertIn('alimiter=limit=0.70:level=disabled', source)
         self.assertIn('Generated fire SFX failed its dedicated peak ceiling', source)
 
