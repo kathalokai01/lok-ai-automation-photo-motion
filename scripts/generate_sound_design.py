@@ -580,17 +580,18 @@ def make_sfx(kind, path, old_record, source_sig):
     # per-effect signature invalidates that one unsafe cached WAV while all
     # already-valid SFX, music, ambience, narration, images and motion clips
     # remain eligible for exact SHA256/signature reuse.
-    normalization_profile = (
-        "fire-peak-safe-v2" if kind == "fire" else "legacy-sfx-profile-v1"
-    )
-    track_signature = signature({
+    signature_data = {
         "version": VERSION,
         "kind": kind,
         "duration": SFX_SECONDS,
         "rate": RATE,
-        "normalization_profile": normalization_profile,
         "source_signature": source_sig,
-    })
+    }
+    if kind == "fire":
+        # Invalidate only the known-bad fire WAV. Preserve byte-for-byte
+        # signature compatibility for every other existing SFX asset.
+        signature_data["normalization_profile"] = "fire-peak-safe-v2"
+    track_signature = signature(signature_data)
     if path.is_file() and isinstance(old_record, dict):
         try:
             duration = validate_wav(path, SFX_SECONDS)
