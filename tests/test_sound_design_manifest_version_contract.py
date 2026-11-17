@@ -31,6 +31,7 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
         self.assertIn('if kind == "fire":', source)
         self.assertIn('"fire-peak-safe-v3"', source)
         self.assertIn('signature_data["normalization_profile"]', source)
+        self.assertIn('loudnorm=I=-16:TP=-6.0:LRA=8', source)
         self.assertNotIn('loudnorm=I=-16:TP=-3.0:LRA=8', source)
         self.assertNotIn('"legacy-sfx-profile-v1"', source)
         self.assertIn('alimiter=limit=0.45:attack=5:release=100:level=disabled', source)
