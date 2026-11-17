@@ -641,8 +641,8 @@ def make_sfx(kind, path, old_record, source_sig):
         raise RuntimeError(f"Generated {kind} SFX is too quiet after normalization.")
     if kind == "fire" and loudness.get("peak_volume_db", 0.0) > -2.5:
         raise RuntimeError(
-            "Generated fire SFX failed its dedicated peak ceiling "
-            "after -3.0 dBTP normalization and limiting."
+            "Generated fire SFX exceeded the dedicated -2.5 dBFS "
+            "sample-peak ceiling after conservative normalization and limiting."
         )
     return {
         "status": "completed",
