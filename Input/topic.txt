@@ -11,7 +11,7 @@ TOPIC = "अयान, Orion-9 और विक्रांत मेहरा �
 
 # INPUT
 # Video format
-FORMAT = "short"  # Allowed values केवल "short" या "full"। short = केवल vertical Shorts आउटपुट; full = पूरी Story का एक landscape वीडियो। बड़े/छोटे अक्षर या अन्य शब्द न दें।
+FORMAT = "full"  # Allowed values केवल "short" या "full"। short = केवल vertical Shorts आउटपुट; full = पूरी Story का एक landscape वीडियो। बड़े/छोटे अक्षर या अन्य शब्द न दें।
 
 
 AUDIENCE = "adult"  # Common values "kids" या "adult"। kids पर बच्चों के अनुकूल कथन/शब्द-चयन और शब्द-speed लागू होती है; adult सामान्य वयस्क प्रस्तुति है।
