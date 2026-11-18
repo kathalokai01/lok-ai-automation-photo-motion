@@ -36,7 +36,7 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
         generator_tree = ast.parse(GENERATOR.read_text(encoding="utf-8"))
         source = GENERATOR.read_text(encoding="utf-8")
         self.assertIn('if kind == "fire":', source)
-        self.assertIn('"fire-peak-safe-v3"', source)
+        self.assertIn('"fire-peak-safe-v4"', source)
         self.assertIn('signature_data["normalization_profile"]', source)
         self.assertIn('loudnorm=I=-16:TP=-6.0:LRA=8', source)
         self.assertNotIn('loudnorm=I=-16:TP=-3.0:LRA=8', source)
@@ -65,12 +65,16 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
         duration = 8
         rng = random.Random(123456)
         noise_state = 0.0
+        crack_envelope = 0.0
         samples = []
 
         for index in range(rate * duration):
             timestamp = index / rate
             noise = rng.uniform(-1.0, 1.0)
-            crack = 1.0 if rng.random() < 0.0018 else 0.0
+            if rng.random() < 0.00045:
+                crack_envelope = 1.0
+            else:
+                crack_envelope *= 0.997
             noise_state = 0.88 * noise_state + 0.12 * noise
             fade = min(
                 1.0,
@@ -78,9 +82,9 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
                 (duration - timestamp) / 0.45,
             )
             value = (
-                0.16 * noise_state
-                + crack * noise * 0.9
-                + 0.06 * math.sin(2 * math.pi * 72 * timestamp)
+                0.24 * noise_state
+                + crack_envelope * noise * 0.18
+                + 0.09 * math.sin(2 * math.pi * 72 * timestamp)
             ) * max(0.0, fade)
             samples.append(max(-0.92, min(0.92, value)))
 
