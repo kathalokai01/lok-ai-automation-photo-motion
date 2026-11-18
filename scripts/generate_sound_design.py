@@ -447,10 +447,16 @@ def sfx_samples(kind, duration=SFX_SECONDS, seed=771):
             ripple = 0.5 + 0.5 * math.sin(2 * math.pi * (1.1 + 0.25 * math.sin(t)) * t + phase)
             value = 0.34 * noise_state + 0.13 * noise + 0.08 * ripple * math.sin(2 * math.pi * 310 * t)
         elif kind == "fire":
-            crack = 1.0 if rng.random() < 0.0018 else 0.0
+            # A one-sample impulse makes the look-ahead limiter reduce the
+            # entire fire bed and can push its measured mean below the
+            # audible floor. Use short, decaying crackles instead.
+            if rng.random() < 0.00045:
+                crack_envelope = 1.0
+            else:
+                crack_envelope *= 0.997
             noise_state = 0.88 * noise_state + 0.12 * noise
-            value = 0.16 * noise_state + crack * noise * 0.9
-            value += 0.06 * math.sin(2 * math.pi * 72 * t)
+            value = 0.24 * noise_state + crack_envelope * noise * 0.18
+            value += 0.09 * math.sin(2 * math.pi * 72 * t)
         elif kind == "heartbeat":
             beat = (t * 1.05) % 1.0
             pulse = 0.95 * math.exp(-((beat - 0.10) / 0.055) ** 2) + 0.48 * math.exp(-((beat - 0.29) / 0.075) ** 2)
@@ -590,7 +596,7 @@ def make_sfx(kind, path, old_record, source_sig):
     if kind == "fire":
         # Invalidate only the known-bad fire WAV. Preserve byte-for-byte
         # signature compatibility for every other existing SFX asset.
-        signature_data["normalization_profile"] = "fire-peak-safe-v3"
+        signature_data["normalization_profile"] = "fire-peak-safe-v4"
     track_signature = signature(signature_data)
     if path.is_file() and isinstance(old_record, dict):
         try:
