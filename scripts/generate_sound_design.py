@@ -395,6 +395,7 @@ def sfx_samples(kind, duration=SFX_SECONDS, seed=771):
     rng = random.Random(seed)
     phase = rng.random() * math.tau
     noise_state = 0.0
+    crack_envelope = 0.0
     bell_partials = (1.0, 2.76, 5.40, 8.93)
     for index in range(count):
         t = index / RATE
