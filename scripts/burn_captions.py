@@ -1309,16 +1309,65 @@ def srt_time(seconds):
     )
 
 
+def normalize_srt_cues(cues):
+    """Quantize cues to SRT milliseconds and remove every overlap."""
+    prepared = []
+
+    for cue in sorted(
+        cues,
+        key=lambda item: (
+            float(item.get("start", 0.0)),
+            float(item.get("end", 0.0)),
+        ),
+    ):
+        try:
+            start_ms = max(0, int(round(float(cue["start"]) * 1000)))
+            end_ms = max(0, int(round(float(cue["end"]) * 1000)))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+
+        text = clean_text(cue.get("text"))
+        if not text or end_ms <= start_ms:
+            continue
+
+        prepared.append({
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "text": text,
+        })
+
+    normalized = []
+    for index, cue in enumerate(prepared):
+        end_ms = cue["end_ms"]
+        if index + 1 < len(prepared):
+            end_ms = min(end_ms, prepared[index + 1]["start_ms"])
+
+        if end_ms <= cue["start_ms"]:
+            continue
+
+        normalized.append({
+            "start": cue["start_ms"] / 1000.0,
+            "end": end_ms / 1000.0,
+            "text": cue["text"],
+        })
+
+    return normalized
+
+
 def write_srt(path, cues):
     blocks = []
+    normalized = normalize_srt_cues(cues)
 
-    for index, cue in enumerate(cues, 1):
+    for index, cue in enumerate(normalized, 1):
         blocks.extend([
             str(index),
             f"{srt_time(cue['start'])} --> {srt_time(cue['end'])}",
             cue["text"],
             "",
         ])
+
+    if not blocks:
+        raise RuntimeError("Cannot write SRT: no valid non-overlapping cues")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(blocks), encoding="utf-8")
@@ -2181,10 +2230,24 @@ def main():
             "caption_cue_count": len(cues),
         }
 
+        # The encoded captioned clip can be a fraction of a frame shorter
+        # than its source render. Never let a cue extend past the clip whose
+        # measured duration advances the global timeline.
         for cue in cues:
+            local_start = max(
+                0.0,
+                min(info["duration"], float(cue["start"])),
+            )
+            local_end = max(
+                0.0,
+                min(info["duration"], float(cue["end"])),
+            )
+            if local_end <= local_start:
+                continue
+
             final_cues.append({
-                "start": global_cursor + cue["start"],
-                "end": global_cursor + cue["end"],
+                "start": global_cursor + local_start,
+                "end": global_cursor + local_end,
                 "text": cue["text"],
                 "scene_id": sid,
                 "part": row["part"],
