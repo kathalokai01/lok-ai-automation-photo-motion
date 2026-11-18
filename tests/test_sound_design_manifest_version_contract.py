@@ -45,7 +45,9 @@ class SoundDesignManifestVersionContractTests(unittest.TestCase):
         self.assertIn('"sfx_sample_peak_ceiling_dbfs": -0.1', source)
         self.assertIn('"fire_sfx_sample_peak_ceiling_dbfs": -2.5', source)
         self.assertIn('"fire_sfx_limiter_linear_ceiling": 0.45', source)
-        self.assertIn('Generated fire SFX exceeded the dedicated -2.5 dBFS sample-peak ceiling', source)
+        self.assertIn('Generated fire SFX exceeded the dedicated -2.5 dBFS ', source)
+        self.assertIn('sample-peak ceiling after conservative normalization and limiting.', source)
+        self.assertNotIn('Generated fire SFX failed its dedicated peak ceiling', source)
         self.assertNotIn('Generated fire SFX failed its dedicated peak ceiling', source)
 
     def test_validator_version_is_explicitly_versioned(self):
