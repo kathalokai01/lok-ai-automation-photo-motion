@@ -226,7 +226,7 @@ SCENE_CONTINUITY = true  # Boolean। true पर क्रमिक sceneों
 PHOTO_MOTION_STYLE = "dynamic"  # Text motion preset। वर्तvalue value "dynamic"; कैमरा-जैसी zoom/pan/parallax speed का निर्देश। केवल still-image motion, character animation नहीं।
 
 
-PHOTO_MOTION_PARALLAX = true  # Boolean। true पर depth layers से 2.5D parallax; false पर parallax off, zoom/pan रह सकते हैं।
+PHOTO_MOTION_PARALLAX = false  # Parallax off; zoom/pan remain enabled.
 
 
 PHOTO_MOTION_PARALLAX_STRENGTH = 0.045  # Float। parallax displacement strength; वर्तvalue 0.045। छोटा value subtle; बड़ा value edge gaps/distortion का जोखिम बढ़ाता है।
