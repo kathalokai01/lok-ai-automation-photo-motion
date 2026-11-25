@@ -833,15 +833,19 @@ def font_has_devanagari(path: Path) -> bool:
             ["fc-query", "-f", "%{charset}", str(path)],
             check=True, capture_output=True, text=True, timeout=10,
         )
-        ranges = set()
+        intervals = []
         for token in result.stdout.split():
             if "-" in token:
                 left, right = token.split("-", 1)
-                ranges.update(range(int(left, 16), int(right, 16) + 1))
+                intervals.append((int(left, 16), int(right, 16)))
             else:
-                ranges.add(int(token, 16))
+                point = int(token, 16)
+                intervals.append((point, point))
         required = [ord(ch) for ch in "कथा हिंदी कहानी माँ"]
-        return all(codepoint in ranges for codepoint in required)
+        return all(
+            any(start <= point <= end for start, end in intervals)
+            for point in required
+        )
     except Exception:
         return False
 
