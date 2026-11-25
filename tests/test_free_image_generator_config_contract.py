@@ -43,6 +43,24 @@ class FreeImageGeneratorConfigContractTests(unittest.TestCase):
                     free_image_generator.provider_should_be_disabled_for_run(category)
                 )
 
+    def test_image_worker_requires_vision_verification_to_accept_images(self):
+        source = (ROOT / "scripts" / "free_image_generator.py").read_text(encoding="utf-8")
+        self.assertIn("allow_technical_only_on_vision_unavailable=False", source)
+
+    def test_adapter_http_status_text_is_classified(self):
+        for status, category in (
+            (429, "rate_limit"),
+            (402, "quota_or_billing"),
+            (403, "authentication"),
+            (404, "model_unavailable"),
+        ):
+            with self.subTest(status=status):
+                error = RuntimeError(f"ProviderError: HTTP {status} request failed")
+                self.assertEqual(
+                    free_image_generator.classify_provider_error(error)["category"],
+                    category,
+                )
+
     def test_image_worker_preserves_selected_processing_profile(self):
         config = dict(input_config.DEFAULT_CONFIG)
         config["FORMAT"] = "short"

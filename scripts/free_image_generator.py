@@ -1966,12 +1966,23 @@ def provider_should_be_disabled_for_run(category):
 
 
 def classify_provider_error(exc):
-    """Return whether this failure is quota/billing/auth related."""
+    """Classify HTTP failures from response objects and adapter exception text."""
     status = None
     response = getattr(exc, "response", None)
 
     if response is not None:
         status = getattr(response, "status_code", None)
+    if status is None:
+        message_for_status = clean(exc).lower()
+        for code in (429, 402, 403, 401, 404, 408, 425, 500, 502, 503, 504):
+            if (
+                f"http {code}" in message_for_status
+                or f"httperror: {code}" in message_for_status
+                or f"{code} client error" in message_for_status
+                or f"{code} server error" in message_for_status
+            ):
+                status = code
+                break
 
     response_body = ""
     if response is not None:
@@ -2273,7 +2284,7 @@ def run_provider_attempts(
                     timeout=min(TIMEOUT, 30),
                     reference_image_paths=find_character_reference_images(item, records),
                     scene_id=item["scene_id"],
-                    allow_technical_only_on_vision_unavailable=True,
+                    allow_technical_only_on_vision_unavailable=False,
                 )
                 if not quality.get("accepted"):
                     raise ImageQualityRejected(
