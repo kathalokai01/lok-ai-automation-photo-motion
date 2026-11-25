@@ -342,6 +342,7 @@ class ImageGeneratorRegressionTests(unittest.TestCase):
             "prompt": "A cinematic engineer in a server room beside a computer.",
             "narration": "The engineer sees a warning on the monitor.",
             "role": "main",
+            "negative_prompt": "",
         })
         self.assertIn("ABSOLUTE IMAGE RULE", prompt)
         self.assertIn("absolute ban", prompt.casefold())
@@ -351,6 +352,7 @@ class ImageGeneratorRegressionTests(unittest.TestCase):
             "prompt": "A cinematic engineer in a server room.",
             "narration": "The engineer sees a warning.",
             "role": "main",
+            "negative_prompt": "",
         })
         self.assertIn("text", negative.casefold())
 
