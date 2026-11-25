@@ -47,7 +47,7 @@ OUTPUT_FILE = ROOT / "output" / "thumbnail.jpg"
 OUTPUT_DIR = ROOT / "output" / "thumbnail"
 MANIFEST_FILE = OUTPUT_DIR / "thumbnail_manifest.json"
 
-VERSION = "thumbnail-v54-raqm-devanagari-shaping-clean-title"
+VERSION = "thumbnail-v55-verified-devanagari-font-coverage"
 MIN_IMAGE_BYTES = 1000
 SHORT_SIZE = (720, 1280)
 FULL_SIZE = (1280, 720)
@@ -93,9 +93,6 @@ FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf",
     "/usr/share/fonts/truetype/mukta/Mukta-Bold.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
 )
 
 
@@ -829,13 +826,34 @@ def load_thumbnail_font(path: str | Path, size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(str(path), size=size)
 
 
+def font_has_devanagari(path: Path) -> bool:
+    """Require fontconfig charset coverage for actual Devanagari codepoints."""
+    try:
+        result = subprocess.run(
+            ["fc-query", "-f", "%{charset}", str(path)],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        ranges = set()
+        for token in result.stdout.split():
+            if "-" in token:
+                left, right = token.split("-", 1)
+                ranges.update(range(int(left, 16), int(right, 16) + 1))
+            else:
+                ranges.add(int(token, 16))
+        required = [ord(ch) for ch in "कथा हिंदी कहानी माँ"]
+        return all(codepoint in ranges for codepoint in required)
+    except Exception:
+        return False
+
+
 def find_font(size: int) -> ImageFont.FreeTypeFont:
     for candidate in FONT_CANDIDATES:
         path = Path(candidate)
 
         if path.is_file():
             try:
-                return load_thumbnail_font(path, size)
+                if font_has_devanagari(path):
+                    return load_thumbnail_font(path, size)
             except Exception:
                 continue
 
@@ -844,7 +862,6 @@ def find_font(size: int) -> ImageFont.FreeTypeFont:
         "Mukta:style=Bold",
         "Hind:style=Bold",
         "Tiro Devanagari Hindi:style=Bold",
-        "DejaVu Sans:style=Bold",
     ):
         try:
             result = subprocess.run(
@@ -857,7 +874,7 @@ def find_font(size: int) -> ImageFont.FreeTypeFont:
 
             font_path = result.stdout.strip()
 
-            if font_path and Path(font_path).is_file():
+            if font_path and Path(font_path).is_file() and font_has_devanagari(Path(font_path)):
                 return load_thumbnail_font(font_path, size)
         except Exception:
             continue
