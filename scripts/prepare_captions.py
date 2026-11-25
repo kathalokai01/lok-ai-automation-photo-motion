@@ -30,7 +30,7 @@ AUDIO_FILE = ROOT / "output" / "narration" / "audio_jobs.json"
 CAPTION_FILE = ROOT / "output" / "captions" / "captions.json"
 CHECKPOINT_DIR = ROOT / "output" / "checkpoints" / "captions"
 
-VERSION = "prepare-captions-v20-common-english-loanword-dictionary"
+VERSION = "prepare-captions-v21-preserve-universal-english-terms"
 MIN_AUDIO_BYTES = 1000
 DURATION_TOLERANCE = 0.15
 
@@ -263,6 +263,20 @@ HINGLISH_ENGLISH_WORDS = {
     "इमेज": "image", "एआई": "AI", "ईमेल": "email",
     "पासवर्ड": "password", "यूज़र": "user", "लॉगिन": "login",
     "डाउनलोड": "download", "अपलोड": "upload",
+    # Preserve English names, technical vocabulary and universal terms instead
+    # of forcing their Hindi-script phonetic spellings into ITRANS.
+    "न्यू": "new", "नया": "new", "नए": "new", "नयी": "new",
+    "टावर्स": "towers", "इंजीनियर": "engineer", "इंजीनियर्स": "engineers",
+    "टेक": "tech", "टेक्नोलॉजी": "technology", "सिटाडेल": "citadel",
+    "लॉन्च": "launch", "ओरियन": "Orion", "बग": "bug", "सिटी": "city",
+    "चीफ": "chief", "मिलियन्स": "millions", "मिलियन": "million",
+    "डॉलर": "dollar", "कोड": "code", "बायपास": "bypass",
+    "पार्टी": "party", "क्रैश": "crash", "माँ": "Maa",
+    "हेलीकॉप्टर": "helicopter", "सर्वर": "server", "रूम": "room",
+    "स्लैब": "slab", "व्हीलचेयर": "wheelchair", "जेल": "jail",
+    "टेक्स्ट": "text", "सॉफ्टवेयर": "software", "हार्डवेयर": "hardware",
+    "डेटा": "data", "डिजाइन": "design", "सिक्योरिटी": "security",
+    "सर्वर रूम": "server room", "व्हील चेयर": "wheelchair",
 }
 
 
