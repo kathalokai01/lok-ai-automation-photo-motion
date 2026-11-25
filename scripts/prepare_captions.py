@@ -363,6 +363,8 @@ def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
     for container_name in ("caption_texts", "translations", "captions"):
         text, nested_key = find_nested_caption(row.get(container_name), mode)
         if text:
+            if mode == "hinglish" and re.search(r"[\\u0900-\\u097F]", text):
+                text = romanize_hindi_to_hinglish(text)
             return (
                 text,
                 f"{container_name}.{nested_key}",
@@ -376,6 +378,8 @@ def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
         row.get("caption_language", row.get("caption_lang", ""))
     )
     if generic and declared == mode:
+        if mode == "hinglish" and re.search(r"[\\u0900-\\u097F]", generic):
+            generic = romanize_hindi_to_hinglish(generic)
         return generic, generic_field, "declared-generic-caption"
 
     source = narration_text(row)
