@@ -298,6 +298,23 @@ class VisionRetryTests(unittest.TestCase):
                 ],
             )
 
+    def test_offline_ocr_detects_readable_english_and_hindi_words(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            image_path.write_bytes(b"fake-image-for-mocked-ocr")
+            languages = type("Result", (), {"stdout": "List of available languages (2):\\neng\\nhin\\n"})()
+            tsv = type("Result", (), {
+                "stdout": "level\\tpage_num\\tblock_num\\tpar_num\\tline_num\\tword_num\\tleft\\ttop\\twidth\\theight\\tconf\\ttext\\n"
+                          "5\\t1\\t1\\t1\\t1\\t1\\t10\\t10\\t80\\t20\\t91.2\\tOrion\\n"
+            })()
+            with patch.object(validator.shutil, "which", return_value="tesseract"), patch.object(
+                validator.subprocess, "run", side_effect=[languages, tsv]
+            ):
+                found = validator.detect_embedded_text(image_path)
+            self.assertEqual(found[0]["text"], "Orion")
+            self.assertEqual(found[0]["confidence"], 91.2)
+
+
     def test_vision_policy_rejects_any_embedded_readable_text(self):
         source = (
             Path(__file__).resolve().parents[1]
