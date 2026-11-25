@@ -356,14 +356,14 @@ def romanize_hindi_to_hinglish(value: str) -> str:
 def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
     text, field = first_text(row, LANGUAGE_FIELDS[mode])
     if text:
-        if mode == "hinglish" and re.search(r"[\\u0900-\\u097F]", text):
+        if mode == "hinglish" and re.search(r"[\u0900-\u097F]", text):
             text = romanize_hindi_to_hinglish(text)
         return text, field, "explicit-language-field"
 
     for container_name in ("caption_texts", "translations", "captions"):
         text, nested_key = find_nested_caption(row.get(container_name), mode)
         if text:
-            if mode == "hinglish" and re.search(r"[\\u0900-\\u097F]", text):
+            if mode == "hinglish" and re.search(r"[\u0900-\u097F]", text):
                 text = romanize_hindi_to_hinglish(text)
             return (
                 text,
@@ -378,7 +378,7 @@ def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
         row.get("caption_language", row.get("caption_lang", ""))
     )
     if generic and declared == mode:
-        if mode == "hinglish" and re.search(r"[\\u0900-\\u097F]", generic):
+        if mode == "hinglish" and re.search(r"[\u0900-\u097F]", generic):
             generic = romanize_hindi_to_hinglish(generic)
         return generic, generic_field, "declared-generic-caption"
 
