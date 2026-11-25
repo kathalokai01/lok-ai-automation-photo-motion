@@ -340,7 +340,7 @@ class VisionRetryTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("ZERO-TEXT POLICY (mandatory)", source)
         self.assertIn("unwanted_text_in_image", source)
-        self.assertIn("This rule has no story-based exception", source)
+        self.assertIn("rule has no story-based exception", source)
 
     def test_missing_or_corrupt_image_still_fails_technical_gate(self):
         with tempfile.TemporaryDirectory() as directory:
