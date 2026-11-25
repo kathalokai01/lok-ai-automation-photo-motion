@@ -45,7 +45,7 @@ GENERATION_MANIFEST = VISUAL_DIR / "image_generation_manifest.json"
 MODEL_PROGRESS_FILE = ROOT / "output" / "checkpoints" / "image_model_progression.json"
 SELECTED_MODEL_FILE = ROOT / "output" / "config" / "selected_visual_model.json"
 
-VERSION = "photo-motion-image-generator-v43-mandatory-vision-reverification"
+VERSION = "photo-motion-image-generator-v44-zero-text-prompt-policy"
 MIN_IMAGE_BYTES = 1024
 MAX_IMAGE_BYTES = 80 * 1024 * 1024
 MIN_DIMENSION = 256
@@ -689,7 +689,10 @@ def make_prompt(item):
         "PART number, scene number, labels, signs, banners, logos, watermarks, "
         "speech bubbles, typography or text-like glyphs anywhere in the image.",
         "Do not print, copy, quote, typeset or visualize any part of the "
-        "narration, prompt, story paragraph or scene description.",
+        "narration, prompt, story paragraph or scene description. This is an "
+        "absolute ban even when the story mentions a sign, screen, book, paper, "
+        "computer interface, building signboard, logo or written message. Show "
+        "blank, unmarked surfaces instead; never invent glyph-like decoration.",
     ])
     story_context = " ".join([
         str(item.get("narration") or ""),
