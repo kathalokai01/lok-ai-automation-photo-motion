@@ -45,7 +45,7 @@ CUES_PATH = DESIGN_DIR / "sfx_cues.json"
 SFX_VALIDATION_PATH = DESIGN_DIR / "sfx_timing_validation.json"
 CHECKPOINT_PATH = OUT / "checkpoints" / "sound_design_progress.json"
 
-VERSION = "photo-motion-sound-design-v37-recognizable-event-sfx"
+VERSION = "photo-motion-sound-design-v38-lower-sfx-loudness"
 RATE = 22050
 SFX_SECONDS = 8.0
 DEFAULT_VISUAL_SCENE_SECONDS = 6.0
@@ -64,24 +64,24 @@ SFX_TYPES = (
     "crowd", "mystery", "chime", "ring", "siren",
 )
 
-# Cue gain is later multiplied by render_video.py's 1.90 factor.
-# Values are intentionally stronger than the previous v30 values.
+# Render applies an additional conservative 0.55 multiplier. Keep cue
+# levels restrained; narration has priority over every effect.
 SFX_GAINS = {
-    "whoosh": 0.82,
-    "impact": 0.92,
-    "footsteps": 0.82,
-    "vehicle": 0.84,
-    "door": 0.88,
-    "weather": 0.78,
-    "water": 0.76,
-    "fire": 0.78,
-    "heartbeat": 0.80,
-    "phone": 0.88,
-    "crowd": 0.90,
-    "mystery": 0.86,
-    "chime": 0.90,
-    "ring": 0.92,
-    "siren": 0.88,
+    "whoosh": 0.34,
+    "impact": 0.38,
+    "footsteps": 0.30,
+    "vehicle": 0.32,
+    "door": 0.34,
+    "weather": 0.28,
+    "water": 0.28,
+    "fire": 0.28,
+    "heartbeat": 0.30,
+    "phone": 0.32,
+    "crowd": 0.30,
+    "mystery": 0.30,
+    "chime": 0.32,
+    "ring": 0.32,
+    "siren": 0.28,
 }
 
 EVENT_WORDS = {
