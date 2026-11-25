@@ -451,7 +451,7 @@ def load_caption_map(part_numbers, scene_counts):
             row.get("caption_language") or data.get("mode") or "hindi"
         ).casefold()
         if caption_language in {"hinglish", "roman", "romanized"} and re.search(
-            r"[\\u0900-\\u097F]", text
+            r"[\u0900-\u097F]", text
         ):
             raise RuntimeError(
                 f"Hinglish caption still contains Devanagari characters: {(part, scene)}"
