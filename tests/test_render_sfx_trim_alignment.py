@@ -78,8 +78,9 @@ def test_audio_filter_splits_narration_for_sidechain_and_final_mix():
         render_video.MUSIC_DUCKING_ENABLED = old
 
     graph = ";".join(filters)
-    assert "[narr]asplit=2[narr_mix][narr_sc]" in graph
+    assert "[narr]asplit=3[narr_mix][narr_sc][narr_gate]" in graph
     assert "[bed][narr_sc]sidechaincompress=" in graph
+    assert "[sfx_bus][narr_gate]sidechaingate=" in graph
     assert "[narr_mix]" in graph
     assert graph.endswith("[aout]")
 
