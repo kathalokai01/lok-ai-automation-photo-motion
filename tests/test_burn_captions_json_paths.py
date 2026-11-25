@@ -37,6 +37,12 @@ def test_write_json_keeps_rejecting_unhandled_object_types(tmp_path):
     assert not target.with_name(target.name + ".tmp").exists()
 
 
+def test_hinglish_caption_burn_rejects_devanagari_script():
+    source = (ROOT / "scripts" / "burn_captions.py").read_text(encoding="utf-8")
+    assert "Hinglish caption still contains Devanagari characters" in source
+    assert 'caption_language in {"hinglish", "roman", "romanized"}' in source
+
+
 def test_caption_burn_path_serialization_contract_is_present():
     source = (ROOT / "scripts" / "burn_captions.py").read_text(encoding="utf-8")
     assert 'VERSION = "burn-captions-v67-reject-unconverted-hindi-in-hinglish"' in source
