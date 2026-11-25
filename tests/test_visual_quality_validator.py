@@ -163,6 +163,28 @@ class VisionRetryTests(unittest.TestCase):
             self.assertEqual(result["status"], "rejected")
             self.assertEqual(result["semantic_story_match"], "not_verified")
 
+    def test_embedded_text_issue_hard_rejects_candidate_even_if_model_says_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            result = {
+                "prompt_match": True,
+                "character_consistency": True,
+                "quality_score": 9,
+                "issues": ["unwanted_text_in_image"],
+                "reason": "readable text is visible in the image",
+            }
+            with patch.object(validator, "_vision_check", return_value=result):
+                checked = validator.validate_scene_image(
+                    image_path, "A sufficiently detailed complete scene prompt.",
+                    (256, 256), enabled=True, minimum_score=7,
+                    api_key="test-key",
+                )
+            self.assertFalse(checked["accepted"])
+            self.assertFalse(checked["vision_accepted"])
+            self.assertEqual(checked["status"], "rejected")
+
+
     def test_vision_timeout_remains_pending_for_later_reverification(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "candidate.png"
