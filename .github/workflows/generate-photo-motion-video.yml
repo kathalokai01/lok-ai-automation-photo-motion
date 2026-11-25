@@ -360,8 +360,15 @@ jobs:
 
           if ! command -v fc-cache >/dev/null 2>&1 ||
              ! command -v fc-match >/dev/null 2>&1 ||
-             ! command -v fc-scan >/dev/null 2>&1; then
+             ! command -v fc-scan >/dev/null 2>&1 ||
+             ! command -v fc-query >/dev/null 2>&1; then
             missing_packages+=(fontconfig)
+          fi
+
+          if ! command -v tesseract >/dev/null 2>&1 ||
+             ! tesseract --list-langs 2>/dev/null | grep -qx 'eng' ||
+             ! tesseract --list-langs 2>/dev/null | grep -qx 'hin'; then
+            missing_packages+=(tesseract-ocr tesseract-ocr-eng tesseract-ocr-hin)
           fi
 
           if [ "${#missing_packages[@]}" -gt 0 ]; then
@@ -418,6 +425,9 @@ jobs:
           command -v unzip
           fc-cache --version
           fc-match "sans-serif" >/dev/null
+          fc-query --version
+          tesseract --list-langs | grep -qx 'eng'
+          tesseract --list-langs | grep -qx 'hin'
 
       - name: Restore or install Python dependencies
         shell: bash
