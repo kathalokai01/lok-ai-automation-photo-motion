@@ -81,6 +81,7 @@ def test_audio_filter_splits_narration_for_sidechain_and_final_mix():
     assert "[narr]asplit=3[narr_mix][narr_sc][narr_gate]" in graph
     assert "[bed][narr_sc]sidechaincompress=" in graph
     assert "[sfx_bus][narr_gate]sidechaingate=" in graph
+    assert "range=0:makeup=1:mode=upward[sfx_gated]" in graph
     assert "[narr_mix]" in graph
     assert graph.endswith("[aout]")
 
