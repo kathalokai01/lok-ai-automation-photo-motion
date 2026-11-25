@@ -22,7 +22,7 @@ PROJECT_MANIFEST = ROOT / "output" / "fonts" / "font_manifest.json"
 PROJECT_FONT_FILE = ROOT / "output" / "fonts" / "selected_hindi_caption_font.ttf"
 PROJECT_LICENSE_FILE = ROOT / "output" / "fonts" / "OFL-1.1.txt"
 
-VERSION = "caption-font-installer-v9-configured-family-first"
+VERSION = "caption-font-installer-v10-verified-devanagari-coverage"
 MAX_BYTES = 20 * 1024 * 1024
 MIN_BYTES = 1024
 SIGNATURES = {b"\x00\x01\x00\x00", b"OTTO", b"true", b"typ1"}
@@ -217,7 +217,7 @@ def load_manifest():
 
 def require_tools():
     missing = [
-        name for name in ("fc-cache", "fc-match", "fc-scan")
+        name for name in ("fc-cache", "fc-match", "fc-scan", "fc-query")
         if shutil.which(name) is None
     ]
     if missing:
@@ -272,6 +272,28 @@ def scan_family(path):
     return result.stdout.strip()
 
 
+def has_devanagari_coverage(path):
+    result = run(["fc-query", "-f", "%{charset}", str(path)])
+    if result.returncode:
+        return False
+    intervals = []
+    try:
+        for token in result.stdout.split():
+            if "-" in token:
+                left, right = token.split("-", 1)
+                intervals.append((int(left, 16), int(right, 16)))
+            else:
+                point = int(token, 16)
+                intervals.append((point, point))
+    except ValueError:
+        return False
+    required = [ord(ch) for ch in "कथा हिंदी कहानी माँ"]
+    return all(
+        any(start <= point <= end for start, end in intervals)
+        for point in required
+    )
+
+
 def verify_font_file(path, expected_family):
     validate_file(path)
     actual = scan_family(path)
@@ -280,6 +302,10 @@ def verify_font_file(path, expected_family):
         raise RuntimeError(
             f"Font family mismatch: expected {expected_family!r}, "
             f"got {actual!r}"
+        )
+    if not has_devanagari_coverage(path):
+        raise RuntimeError(
+            f"Font lacks required Devanagari glyph coverage: {path.name}"
         )
 
     return {
