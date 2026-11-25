@@ -163,6 +163,24 @@ class VisionRetryTests(unittest.TestCase):
             self.assertEqual(result["status"], "rejected")
             self.assertEqual(result["semantic_story_match"], "not_verified")
 
+    def test_ocr_text_detection_rejects_image_before_vision_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            with patch.object(
+                validator, "detect_embedded_text",
+                return_value=[{"text": "Orion", "confidence": 91.0}],
+            ), patch.object(validator, "_vision_check") as vision:
+                result = validator.validate_scene_image(
+                    image_path, "A sufficiently detailed complete scene prompt.",
+                    (256, 256), enabled=True, api_key="test-key",
+                )
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["text_detection"]["status"], "readable_text_detected")
+            vision.assert_not_called()
+
+
     def test_embedded_text_issue_hard_rejects_candidate_even_if_model_says_match(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "candidate.png"
