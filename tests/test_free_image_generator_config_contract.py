@@ -25,6 +25,24 @@ class FreeImageGeneratorConfigContractTests(unittest.TestCase):
             "none",
         )
 
+    def test_rate_limited_provider_is_disabled_for_remainder_of_run(self):
+        for category in (
+            "rate_limit",
+            "model_unavailable",
+            "authentication",
+            "quota_or_billing",
+        ):
+            with self.subTest(category=category):
+                self.assertTrue(
+                    free_image_generator.provider_should_be_disabled_for_run(category)
+                )
+
+        for category in ("quality_failure", "provider_error", ""):
+            with self.subTest(category=category):
+                self.assertFalse(
+                    free_image_generator.provider_should_be_disabled_for_run(category)
+                )
+
     def test_image_worker_preserves_selected_processing_profile(self):
         config = dict(input_config.DEFAULT_CONFIG)
         config["FORMAT"] = "short"
