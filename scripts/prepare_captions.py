@@ -266,7 +266,8 @@ HINGLISH_ENGLISH_WORDS = {
     # Preserve English names, technical vocabulary and universal terms instead
     # of forcing their Hindi-script phonetic spellings into ITRANS.
     "न्यू": "new", "नया": "new", "नए": "new", "नयी": "new",
-    "टावर्स": "towers", "इंजीनियर": "engineer", "इंजीनियर्स": "engineers",
+    "टावर्स": "towers", "टावरों": "towers", "टॉवर": "tower",
+    "इंजीनियर": "engineer", "इंजीनियर्स": "engineers", "इंजीनियरिंग": "engineering",
     "टेक": "tech", "टेक्नोलॉजी": "technology", "सिटाडेल": "citadel",
     "लॉन्च": "launch", "ओरियन": "Orion", "बग": "bug", "सिटी": "city",
     "चीफ": "chief", "मिलियन्स": "millions", "मिलियन": "million",
