@@ -134,7 +134,7 @@ def detect_embedded_text(image_path: str | Path) -> list[dict]:
         raise RuntimeError(f"Image OCR failed: {exc}") from exc
 
     detections = []
-    reader = csv.DictReader(result.stdout.splitlines(), delimiter="\\t")
+    reader = csv.DictReader(result.stdout.splitlines(), delimiter="\t")
     for row in reader:
         word = _clean(row.get("text"))
         try:
@@ -145,7 +145,7 @@ def detect_embedded_text(image_path: str | Path) -> list[dict]:
             word
             and len(word) >= 2
             and confidence >= 60
-            and re.search(r"[A-Za-z0-9\\u0900-\\u097F]", word)
+            and re.search(r"[A-Za-z0-9\u0900-\u097F]", word)
         ):
             detections.append({
                 "text": word[:80],
