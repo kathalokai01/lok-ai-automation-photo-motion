@@ -1197,7 +1197,7 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         filters.append(
             "[sfx_bus][narr_gate]sidechaingate="
             "threshold=0.008:ratio=20:attack=5:release=80:"
-            "range=0:makeup=1[sfx_gated]"
+            "range=0:makeup=1:mode=upward[sfx_gated]"
         )
         mix_labels.append("[sfx_gated]")
     else:
