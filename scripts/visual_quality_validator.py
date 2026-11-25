@@ -499,8 +499,14 @@ def validate_scene_image(
     technical_only_fallback = bool(
         enabled and vision is None and allow_technical_only_on_vision_unavailable
     )
+    vision_issues = vision.get("issues", []) if isinstance(vision, dict) else []
+    unwanted_text_detected = any(
+        "unwanted_text_in_image" in _clean(item).casefold()
+        for item in vision_issues
+    ) if isinstance(vision_issues, list) else False
     vision_accepted = bool(
         isinstance(vision, dict)
+        and not unwanted_text_detected
         and vision.get("prompt_match") is True
         and vision.get("character_consistency") is True
         and isinstance(vision.get("quality_score"), (int, float))
