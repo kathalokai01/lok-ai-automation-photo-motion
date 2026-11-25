@@ -71,7 +71,7 @@ def test_audio_filter_splits_narration_for_sidechain_and_final_mix():
         _, filters = render_video.build_audio_filter(
             {"video": "scene.mp4", "duration": 4.0, "scene_id": "part_01_hook"},
             {"audio": "voice.wav", "duration": 4.0},
-            {"music": {"path": "music.wav", "duration": 30.0}, "ambient": None, "sfx": {}},
+            {"music": {"path": "music.wav", "duration": 30.0}, "ambient": None, "sfx": {"part_01_hook": [{"path": "effect.wav", "duration": 1.0, "start": 0.0, "gain": 0.3}]}},
             0.0, 720, 1280, 24,
         )
     finally:
