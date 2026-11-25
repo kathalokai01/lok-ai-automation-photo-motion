@@ -1195,7 +1195,10 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
             "dropout_transition=0:normalize=0[sfx_bus]"
         )
         filters.append(
-            "[sfx_bus][narr_gate]sidechaingate="
+            "[sfx_bus]highpass=f=90,lowpass=f=8500:p=2[sfx_filtered]"
+        )
+        filters.append(
+            "[sfx_filtered][narr_gate]sidechaingate="
             "threshold=0.002:ratio=20:attack=5:release=80:"
             "range=0:makeup=1:mode=upward[sfx_gated]"
         )
