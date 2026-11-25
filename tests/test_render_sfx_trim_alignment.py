@@ -80,7 +80,8 @@ def test_audio_filter_splits_narration_for_sidechain_and_final_mix():
     graph = ";".join(filters)
     assert "[narr]asplit=3[narr_mix][narr_sc][narr_gate]" in graph
     assert "[bed][narr_sc]sidechaincompress=" in graph
-    assert "[sfx_bus][narr_gate]sidechaingate=" in graph
+    assert "[sfx_bus]highpass=f=90,lowpass=f=8500:p=2[sfx_filtered]" in graph
+    assert "[sfx_filtered][narr_gate]sidechaingate=" in graph
     assert "range=0:makeup=1:mode=upward[sfx_gated]" in graph
     assert "threshold=0.002:ratio=20:attack=5:release=80:" in graph
     assert "[narr_mix]" in graph
