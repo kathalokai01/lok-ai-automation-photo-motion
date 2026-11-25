@@ -9,6 +9,9 @@ import os
 import re
 import hashlib
 import time
+import csv
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +97,61 @@ def _technical_checks(image_path: Path, expected_size: tuple[int, int]) -> dict:
 
 VISION_HTTP_MAX_ATTEMPTS = 4
 VISION_RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def detect_embedded_text(image_path: str | Path) -> list[dict]:
+    """Offline OCR gate: reject readable text before optional AI vision review."""
+    executable = shutil.which("tesseract")
+    if not executable:
+        raise RuntimeError(
+            "Tesseract OCR is required for the zero-text image gate."
+        )
+    try:
+        languages = subprocess.run(
+            [executable, "--list-langs"],
+            capture_output=True, text=True, timeout=20, check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Cannot inspect Tesseract languages: {exc}") from exc
+    available = {
+        line.strip()
+        for line in languages.stdout.splitlines()
+        if line.strip() and not line.startswith("List of")
+    }
+    if not {"eng", "hin"}.issubset(available):
+        raise RuntimeError(
+            "Tesseract requires both eng and hin traineddata for image text checks."
+        )
+    try:
+        result = subprocess.run(
+            [
+                executable, str(image_path), "stdout",
+                "-l", "eng+hin", "--psm", "11", "tsv",
+            ],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Image OCR failed: {exc}") from exc
+
+    detections = []
+    reader = csv.DictReader(result.stdout.splitlines(), delimiter="\\t")
+    for row in reader:
+        word = _clean(row.get("text"))
+        try:
+            confidence = float(row.get("conf", "-1"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            word
+            and len(word) >= 2
+            and confidence >= 60
+            and re.search(r"[A-Za-z0-9\\u0900-\\u097F]", word)
+        ):
+            detections.append({
+                "text": word[:80],
+                "confidence": round(confidence, 1),
+            })
+    return detections
 
 
 def _vision_check(
@@ -399,6 +457,24 @@ def validate_scene_image(
     if len(prompt) < 24:
         raise RuntimeError("Quality validation requires the complete scene prompt.")
     technical = _technical_checks(path, expected_size)
+    text_detections = detect_embedded_text(path)
+    if text_detections:
+        return {
+            "status": "rejected",
+            "accepted": False,
+            "vision_accepted": False,
+            "vision_degraded": False,
+            "technical": technical,
+            "vision": None,
+            "verification_warning": "OCR detected readable text inside the generated image.",
+            "semantic_story_match": "not_verified",
+            "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "text_detection": {
+                "status": "readable_text_detected",
+                "detections": text_detections[:20],
+            },
+            "verification_contract": "mandatory_technical_integrity+offline_ocr_zero_text_gate",
+        }
 
     model = _clean(model or "gemini-2.5-flash")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", model):
