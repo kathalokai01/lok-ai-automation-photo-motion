@@ -38,6 +38,23 @@ class VisualPromptLimitTests(unittest.TestCase):
         self.assertLessEqual(len(value), 1400)
         self.assertTrue(value.startswith("महत्वपूर्ण घटना"))
 
+    def test_visual_prompt_forbids_all_image_text_without_story_exception(self):
+        prompt = visuals.build_prompt(
+            {"CHARACTER_CONSISTENCY": False, "WORLD_CONSISTENCY": False},
+            {
+                "scene_id": "part_01_scene_01",
+                "role": "main",
+                "visual_prompt": "A complete cinematic scene with a server room and engineer.",
+                "narration": "The engineer enters the server room and finds a damaged system.",
+                "required_visible_text": "DISPLAY THIS TEXT",
+            },
+            {"characters": [], "scene_character_map": [], "scene_roles": [], "world": {}},
+            "short", 720, 1280, None,
+        )
+        assert "no exceptions" in prompt
+        assert "blank, unmarked surfaces" in prompt
+        assert "DISPLAY THIS TEXT" not in prompt
+
     def test_story_required_visible_text_is_never_truncated(self):
         exact_text = "कहानी में अनिवार्य लिखा हुआ संदेश " * 300
         value = visuals.scene_detail(
