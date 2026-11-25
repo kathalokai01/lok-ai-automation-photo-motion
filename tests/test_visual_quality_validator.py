@@ -344,7 +344,7 @@ class ImageGeneratorRegressionTests(unittest.TestCase):
             "role": "main",
         })
         self.assertIn("ABSOLUTE IMAGE RULE", prompt)
-        self.assertIn("no exceptions", prompt.casefold())
+        self.assertIn("absolute ban", prompt.casefold())
         self.assertIn("blank, unmarked surfaces", prompt.casefold())
         negative = image_generator.build_negative_prompt({
             "source_job": {},
