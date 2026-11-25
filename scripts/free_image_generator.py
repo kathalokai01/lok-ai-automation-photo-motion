@@ -1958,6 +1958,13 @@ def billable_provider_is_blocked(provider_key, billable, blocked_groups):
     return bool(group and group in set(blocked_groups or []))
 
 
+def provider_should_be_disabled_for_run(category):
+    """Avoid repeating a provider known to be unavailable for this run."""
+    return clean(category).casefold() in {
+        "model_unavailable", "authentication", "quota_or_billing", "rate_limit"
+    }
+
+
 def classify_provider_error(exc):
     """Return whether this failure is quota/billing/auth related."""
     status = None
@@ -2432,11 +2439,15 @@ def run_provider_attempts(
                         group,
                         "| other providers remain eligible.",
                     )
-                if category in {
-                    "model_unavailable", "authentication", "quota_or_billing"
-                }:
+                if provider_should_be_disabled_for_run(category):
                     disabled_models.add(provider_key)
                     MODEL_PROGRESS_STATE["disabled_models"] = sorted(disabled_models)
+                    if category == "rate_limit":
+                        log(
+                            "Run-local provider circuit breaker opened after HTTP 429:",
+                            provider_name,
+                            "| this provider will not be retried for later scenes in this run.",
+                        )
                 if category == "rate_limit":
                     delay = retry_after_seconds(
                         exc, round_number, default_base=12, maximum=120
