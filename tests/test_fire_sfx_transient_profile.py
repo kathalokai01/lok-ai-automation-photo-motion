@@ -19,6 +19,13 @@ def test_fire_sfx_uses_decaying_crackle_not_single_sample_impulses():
     assert rms > 0.05
 
 
+def test_all_sfx_gains_are_restrained_below_narration_priority():
+    assert max(generate_sound_design.SFX_GAINS.values()) <= 0.38
+    renderer = (ROOT / "scripts" / "render_video.py").read_text(encoding="utf-8")
+    assert "SFX_GAIN_MULTIPLIER = 0.55" in renderer
+    assert "mode=upward[sfx_gated]" in renderer
+
+
 def test_fire_normalization_profile_invalidates_only_old_fire_asset():
     source = (ROOT / "scripts" / "generate_sound_design.py").read_text(encoding="utf-8")
     assert '"normalization_profile"] = "fire-peak-safe-v4"' in source
