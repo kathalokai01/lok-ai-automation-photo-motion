@@ -35,8 +35,8 @@ JOBS_FILE = VISUALS_DIR / "visual_jobs.json"
 MANIFEST_FILE = VISUALS_DIR / "visual_jobs_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "visual_jobs_progress.json"
 
-VERSION = "photo-motion-visual-jobs-v19-architecture-object-continuity"
-PROMPT_VERSION = 19
+VERSION = "photo-motion-visual-jobs-v20-zero-text-image-policy"
+PROMPT_VERSION = 20
 
 ROLE_ORDER = {
     "hook": 0,
@@ -1265,9 +1265,10 @@ def build_prompt(
         (
             "TEXT CONTROL: The image must contain no added words, captions, subtitles, "
             "labels, title cards, speech bubbles, logos, watermarks, random letters, "
-            "numbers or pseudo-writing. Do not render the narration or prompt as text. "
-            "Only include readable text when the scene explicitly requires a specific "
-            "written object; if so, show only the exact text supplied in the scene data."
+            "numbers, pseudo-writing, signage, interface text or printed material. "
+            "Never render any story wording, dialogue, names, labels or exact text, "
+            "even when the scene mentions a sign, screen, document or written object. "
+            "Represent those objects visually with blank, unmarked surfaces."
         ),
         (
             "LOCKED SPOKEN NARRATION CONTEXT — DO NOT PRINT THESE WORDS IN THE IMAGE:"
@@ -1321,11 +1322,11 @@ def build_prompt(
             "video motion, motion blur or an illustrated slideshow."
         ),
         (
-            "FINAL TEXT RULE: Do not add any text, lettering, numbers, captions, "
-            "subtitles, labels, signs, title cards, speech bubbles, logos or watermarks. "
-            "Exception: render readable text only when required_visible_text explicitly "
-            "contains the exact story-required wording; reproduce that wording only, "
-            "without adding any other characters or decorative typography."
+            "FINAL TEXT RULE: Absolutely no readable text, lettering, numbers, "
+            "captions, subtitles, labels, signs, title cards, speech bubbles, logos, "
+            "watermarks, UI text or pseudo-writing anywhere. This prohibition has no "
+            "exceptions, including required_visible_text. Keep screens, signs, papers "
+            "and labels blank and unmarked."
         ),
     ]
 
@@ -1344,7 +1345,6 @@ def build_prompt(
         ("cause", "Story-established cause"),
         ("effect", "Story-established effect"),
         ("must_show", "Mandatory visible scene details"),
-        ("required_visible_text", "Exact readable text permitted only if story-required"),
         ("action", "Visible action"),
         ("objects", "Story-specific objects and props"),
         ("animals", "Exact story animals and their actions"),
