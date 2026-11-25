@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -1041,8 +1042,36 @@ def generate_fallback(item, destination):
 
 
 def main():
-    if not (ROOT / "Input" / "topic.txt").is_file():
+    input_path = ROOT / "Input" / "topic.txt"
+    if not input_path.is_file():
         raise RuntimeError("Input/topic.txt is missing.")
+
+    # Depth maps are an optional prerequisite only for depth-based parallax.
+    # Read the same validated config as Photo Motion before loading jobs/models.
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    from input_config import load_and_validate
+
+    config = load_and_validate(input_path)
+    raw_parallax = config.get("PHOTO_MOTION_PARALLAX", False)
+    parallax_enabled = (
+        raw_parallax if isinstance(raw_parallax, bool)
+        else str(raw_parallax).strip().lower()
+        in {"1", "true", "yes", "on", "enabled"}
+    )
+
+    if not parallax_enabled:
+        # Remove stale maps/checkpoints so this run cannot accidentally package
+        # or reuse depth assets left by an earlier parallax-enabled run.
+        if DEPTH_DIR.is_symlink():
+            raise RuntimeError("Refusing to clear a symlinked depth_maps directory.")
+        if DEPTH_DIR.exists():
+            if not DEPTH_DIR.is_dir():
+                raise RuntimeError("depth_maps exists but is not a directory.")
+            shutil.rmtree(DEPTH_DIR)
+        log("PHOTO_MOTION_PARALLAX=false; depth-map generation skipped.")
+        log("No depth model, image decoding, or depth inference was performed.")
+        return 0
 
     if not MODEL_ID:
         raise RuntimeError("DEPTH_MODEL cannot be empty.")
