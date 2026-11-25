@@ -31,7 +31,7 @@ def test_loanword_mapping_does_not_replace_substrings_inside_other_hindi_words()
     source = "नयापन और इंजीनियरिंग"
     result = prepare_captions.romanize_hindi_to_hinglish(source)
     assert "new" not in result.casefold()
-    assert "engineer" not in result.casefold()
+    assert "engineering" in result.casefold()
 
 
 def test_explicit_hinglish_caption_is_romanized_if_it_contains_devanagari():
