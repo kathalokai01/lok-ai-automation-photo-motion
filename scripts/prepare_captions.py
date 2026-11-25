@@ -323,12 +323,17 @@ def romanize_hindi_to_hinglish(value: str) -> str:
         return protect_value(match.group(0))
 
     source = re.sub(r"(?<![\w])[A-Za-z][A-Za-z0-9'’-]*(?![\w])", protect, value)
-    for hindi, english in HINGLISH_ENGLISH_WORDS.items():
+    # Match complete Devanagari words/phrases only, longest first. This avoids
+    # corrupting unrelated Hindi words that merely contain a loanword substring.
+    for hindi, english in sorted(
+        HINGLISH_ENGLISH_WORDS.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
         source = re.sub(
-            re.escape(hindi),
+            r"(?<![\\u0900-\\u097F])" + re.escape(hindi) + r"(?![\\u0900-\\u097F])",
             lambda _match, replacement=english: protect_value(replacement),
             source,
-            flags=re.IGNORECASE,
         )
 
     try:
@@ -350,6 +355,8 @@ def romanize_hindi_to_hinglish(value: str) -> str:
 def choose_caption(row: dict, mode: str) -> tuple[str, str, str]:
     text, field = first_text(row, LANGUAGE_FIELDS[mode])
     if text:
+        if mode == "hinglish" and re.search(r"[\\u0900-\\u097F]", text):
+            text = romanize_hindi_to_hinglish(text)
         return text, field, "explicit-language-field"
 
     for container_name in ("caption_texts", "translations", "captions"):
