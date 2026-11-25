@@ -40,7 +40,7 @@ VIDEO_DIR = OUT / "videos"
 RENDER_MANIFEST = RENDER_DIR / "render_manifest.json"
 CHECKPOINT_FILE = OUT / "checkpoints" / "render_video_progress.json"
 
-VERSION = "render-video-v74-strict-tts-photo-duration-pairing"
+VERSION = "render-video-v75-hard-sfx-narration-gate"
 SFX_VALIDATOR_VERSION = "sfx-validator-v17-allow-trimmed-cue-duration"
 AUDIO_RATE = 48000
 MIN_VIDEO_BYTES = 1000
@@ -54,7 +54,7 @@ MUSIC_GAIN = 0.50
 MUSIC_DUCKING_ENABLED = True
 MUSIC_DUCKING_DB = -10.0
 AMBIENT_GAIN = 0.08
-SFX_GAIN_MULTIPLIER = 1.90
+SFX_GAIN_MULTIPLIER = 0.55
 MASTER_LIMIT = 0.95
 
 ROLE_ORDER = {"hook": 0, "main": 1, "suspense": 2, "resolution": 3}
@@ -1096,6 +1096,7 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         )
     ]
     mix_labels = []
+    narration_gate_label = None
     input_index = 1
 
     if audio:
@@ -1140,7 +1141,8 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
             # FFmpeg filter outputs are single-consumer. Split narration so
             # one branch drives sidechain compression and the other remains
             # available to the final program mix.
-            filters.append("[narr]asplit=2[narr_mix][narr_sc]")
+            filters.append("[narr]asplit=3[narr_mix][narr_sc][narr_gate]")
+            narration_gate_label = "narr_gate"
             mix_labels.append("[narr_mix]")
             ratio = max(2.0, min(12.0, abs(MUSIC_DUCKING_DB) / 2.0))
             filters.append(
@@ -1177,7 +1179,30 @@ def build_audio_filter(photo, audio, sound_assets, timeline_offset, width, heigh
         sfx_labels.append(f"[{label}]")
         input_index += 1
 
-    mix_labels.extend(sfx_labels)
+    if sfx_labels and audio:
+        # Keep all effects silent while narration is active. The gate is driven
+        # by a dedicated narration branch, not by music/ambient audio.
+        if narration_gate_label is None:
+            filters.append("[narr]asplit=2[narr_mix][narr_gate]")
+            mix_labels = [
+                "[narr_mix]" if label == "[narr]" else label
+                for label in mix_labels
+            ]
+            narration_gate_label = "narr_gate"
+        filters.append(
+            "".join(sfx_labels)
+            + f"amix=inputs={len(sfx_labels)}:duration=longest:"
+            "dropout_transition=0:normalize=0[sfx_bus]"
+        )
+        filters.append(
+            "[sfx_bus][narr_gate]sidechaingate="
+            "threshold=0.008:ratio=20:attack=5:release=80:"
+            "range=0:makeup=1[sfx_gated]"
+        )
+        mix_labels.append("[sfx_gated]")
+    else:
+        mix_labels.extend(sfx_labels)
+
     inputs.extend([
         "-f", "lavfi", "-t", f"{duration:.4f}",
         "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo",
