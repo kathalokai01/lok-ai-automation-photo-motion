@@ -336,6 +336,25 @@ class VisionRetryTests(unittest.TestCase):
 
 
 class ImageGeneratorRegressionTests(unittest.TestCase):
+    def test_provider_prompt_bans_all_story_text_and_written_objects(self):
+        prompt = image_generator.make_prompt({
+            "source_job": {},
+            "prompt": "A cinematic engineer in a server room beside a computer.",
+            "narration": "The engineer sees a warning on the monitor.",
+            "role": "main",
+        })
+        self.assertIn("ABSOLUTE IMAGE RULE", prompt)
+        self.assertIn("no exceptions", prompt.casefold())
+        self.assertIn("blank, unmarked surfaces", prompt.casefold())
+        negative = image_generator.build_negative_prompt({
+            "source_job": {},
+            "prompt": "A cinematic engineer in a server room.",
+            "narration": "The engineer sees a warning.",
+            "role": "main",
+        })
+        self.assertIn("text", negative.casefold())
+
+
     def test_parse_size_accepts_requested_dimension_tuple(self):
         self.assertEqual(image_generator.parse_size((720, 1280)), (720, 1280))
         self.assertEqual(image_generator.parse_size([1280, 720]), (1280, 720))
