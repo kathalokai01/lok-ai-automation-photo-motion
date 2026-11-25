@@ -42,7 +42,7 @@ PROGRESS_FILE = CAPTION_DIR / "burn_progress.json"
 ALIGNMENT_CACHE = CAPTION_DIR / "word_alignment_cache.json"
 FINAL_SRT = CAPTION_DIR / "final_captions.srt"
 
-VERSION = "burn-captions-v66-low-position-vivid-colour-thin-outline"
+VERSION = "burn-captions-v67-reject-unconverted-hindi-in-hinglish"
 MIN_VIDEO_BYTES = 1000
 MIN_AUDIO_BYTES = 1000
 FPS_TOLERANCE = 0.03
@@ -446,6 +446,16 @@ def load_caption_map(part_numbers, scene_counts):
 
         if not text:
             raise RuntimeError(f"Empty caption for {(part, scene)}")
+
+        caption_language = clean_text(
+            row.get("caption_language") or data.get("mode") or "hindi"
+        ).casefold()
+        if caption_language in {"hinglish", "roman", "romanized"} and re.search(
+            r"[\\u0900-\\u097F]", text
+        ):
+            raise RuntimeError(
+                f"Hinglish caption still contains Devanagari characters: {(part, scene)}"
+            )
 
         key = (part, scene) if role == "main" else str(row.get("scene_id") or "").strip()
 
