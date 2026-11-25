@@ -43,6 +43,8 @@ class VisualPromptLimitTests(unittest.TestCase):
             {"CHARACTER_CONSISTENCY": False, "WORLD_CONSISTENCY": False},
             {
                 "scene_id": "part_01_scene_01",
+                "part": 1,
+                "scene": 1,
                 "role": "main",
                 "visual_prompt": "A complete cinematic scene with a server room and engineer.",
                 "narration": "The engineer enters the server room and finds a damaged system.",
