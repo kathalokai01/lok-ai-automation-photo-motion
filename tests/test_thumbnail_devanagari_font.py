@@ -30,6 +30,7 @@ def test_thumbnail_font_candidates_exclude_latin_only_fallbacks():
     candidates = " ".join(generate_thumbnail.FONT_CANDIDATES).casefold()
     assert "dejavusans" not in candidates
     assert "liberation" not in candidates
+    assert candidates.startswith(str(generate_thumbnail.ROOT / "output" / "fonts" / "selected_hindi_caption_font.ttf").casefold())
 
 def test_font_installer_requires_devanagari_coverage(tmp_path):
     font = tmp_path / "candidate.ttf"
