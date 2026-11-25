@@ -90,6 +90,7 @@ IMAGE_KEYS = (
 )
 
 FONT_CANDIDATES = (
+    str(ROOT / "output" / "fonts" / "selected_hindi_caption_font.ttf"),
     "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf",
     "/usr/share/fonts/truetype/mukta/Mukta-Bold.ttf",
