@@ -39,7 +39,7 @@ def test_write_json_keeps_rejecting_unhandled_object_types(tmp_path):
 
 def test_caption_burn_path_serialization_contract_is_present():
     source = (ROOT / "scripts" / "burn_captions.py").read_text(encoding="utf-8")
-    assert 'VERSION = "burn-captions-v66-low-position-vivid-colour-thin-outline"' in source
+    assert 'VERSION = "burn-captions-v67-reject-unconverted-hindi-in-hinglish"' in source
     assert "default=json_path_default" in source
     assert "def json_path_default(value):" in source
     assert "isinstance(value, os.PathLike)" in source
