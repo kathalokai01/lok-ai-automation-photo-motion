@@ -331,7 +331,7 @@ def romanize_hindi_to_hinglish(value: str) -> str:
         reverse=True,
     ):
         source = re.sub(
-            r"(?<![\\u0900-\\u097F])" + re.escape(hindi) + r"(?![\\u0900-\\u097F])",
+            r"(?<![\u0900-\u097F])" + re.escape(hindi) + r"(?![\u0900-\u097F])",
             lambda _match, replacement=english: protect_value(replacement),
             source,
         )
