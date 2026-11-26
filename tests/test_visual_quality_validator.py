@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import visual_quality_validator as validator
 import free_image_generator as image_generator
 
+# Unit tests must never call a configured production Vision API.
+os.environ["OPENAI_API_KEY"] = ""
+
 
 def response(status, payload=None):
     item = requests.Response()
@@ -141,6 +144,46 @@ class VisionRetryTests(unittest.TestCase):
             self.assertEqual(post.call_count, validator.VISION_HTTP_MAX_ATTEMPTS)
             self.assertEqual(sleep.call_count, validator.VISION_HTTP_MAX_ATTEMPTS - 1)
 
+    def test_openai_independent_verifier_is_used_after_gemini_quota_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            accepted = {
+                "prompt_match": True,
+                "character_consistency": True,
+                "quality_score": 9,
+                "issues": [],
+                "reason": "scene matches",
+                "vision_model": "gpt-4.1-mini",
+                "vision_provider": "openai",
+            }
+            with patch.dict(os.environ, {
+                "OPENAI_API_KEY": "independent-test-key",
+                "OPENAI_VISION_MODEL": "gpt-4.1-mini",
+                "GEMINI_VISION_MODEL_FALLBACKS": "",
+                "GEMINI_MODEL_FALLBACKS": "",
+            }), patch.object(
+                validator, "_vision_check",
+                side_effect=validator.VisionQuotaExhausted("Gemini project quota exhausted"),
+            ) as gemini, patch.object(
+                validator, "_openai_vision_check", return_value=accepted
+            ) as openai:
+                result = validator.validate_scene_image(
+                    image_path,
+                    "A sufficiently detailed complete scene prompt.",
+                    (256, 256),
+                    enabled=True,
+                    minimum_score=7,
+                    api_key="gemini-test-key",
+                    scene_id="part_01_scene_01",
+                )
+            self.assertTrue(result["accepted"])
+            self.assertTrue(result["vision_accepted"])
+            self.assertEqual(result["vision"]["vision_provider"], "openai")
+            gemini.assert_called_once()
+            openai.assert_called_once()
+            self.assertEqual(openai.call_args.args[3], "independent-test-key")
+
     def test_vision_rejection_fails_mandatory_semantic_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "candidate.png"
@@ -180,6 +223,27 @@ class VisionRetryTests(unittest.TestCase):
             self.assertEqual(result["text_detection"]["status"], "readable_text_detected")
             vision.assert_not_called()
 
+
+    def test_ocr_rejection_logs_detected_words_and_confidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            detections = [{"text": "Orion", "confidence": 91.0}]
+            with patch.object(
+                validator, "detect_embedded_text", return_value=detections
+            ), patch("builtins.print") as output:
+                result = validator.validate_scene_image(
+                    image_path,
+                    "A sufficiently detailed complete scene prompt.",
+                    (256, 256),
+                    enabled=True,
+                    api_key="test-key",
+                )
+            self.assertFalse(result["accepted"])
+            logged = " ".join(str(part) for call in output.call_args_list for part in call.args)
+            self.assertIn("OCR REJECTED IMAGE", logged)
+            self.assertIn("Orion", logged)
+            self.assertIn("91.0", logged)
 
     def test_embedded_text_issue_hard_rejects_candidate_even_if_model_says_match(self):
         with tempfile.TemporaryDirectory() as directory:

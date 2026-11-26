@@ -59,6 +59,7 @@ jobs:
 
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+      OPENAI_VISION_MODEL: ${{ vars.OPENAI_VISION_MODEL }}
 
       FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
       FISH_AUDIO_API_KEY: ${{ secrets.FISH_AUDIO_API_KEY }}

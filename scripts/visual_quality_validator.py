@@ -175,55 +175,7 @@ def _vision_check(
         + model
         + ":generateContent"
     )
-    instruction = (
-        "You are a careful visual quality inspector for a still-image photo-motion "
-        "story pipeline. Inspect the actual candidate pixels; do not judge from the "
-        "filename, metadata, provider, or assumptions. Compare the image with the "
-        "complete scene prompt below. The prompt is the authority for what must be "
-        "visible. Do not invent requirements that the prompt does not state.\\n\\n"
-        "A. EXACT STORY/SCENE MATCH (highest priority): identify the single scene "
-        "action and its key event from the prompt. Confirm that the candidate visibly "
-        "depicts that event, its named objects, location, time period and stated "
-        "cause/consequence where specified. A generic image that only shares the "
-        "story mood or topic is NOT a match. Mark prompt_match false only for a clear, "
-        "material contradiction, missing central event, wrong subject, wrong setting "
-        "or unrelated scene. Do not fail for harmless composition differences.\\n"
-        "B. REQUIRED DETAILS: check explicitly required visible subjects, objects, "
-        "animals, vehicles, clothing, actions and environmental details. Distinguish "
-        "required details from optional descriptive language. Do not demand tiny "
-        "background details that cannot be inspected at this image size.\\n"
-        "C. ZERO-TEXT POLICY (mandatory): this pipeline overlays its own separate "
-        "captions after image generation. Therefore the image itself must contain NO "
-        "readable words, letters, Hindi/Devanagari, English text, digits, subtitles, "
-        "captions, signs, labels, logos, watermarks, UI text or pseudo-writing. This "
-        "rule has no story-based exception. If any legible text is visible anywhere "
-        "in the candidate, add the issue 'unwanted_text_in_image' and set prompt_match "
-        "false. Blank screens, blank signboards and unmarked paper are acceptable.\\n"
-        "D. IMAGE DEFECTS: inspect for severe blur, pixelation, compression damage, "
-        "blank/near-blank output, extreme exposure, important subject cut-off, duplicate "
-        "persons, extra/fused limbs, malformed hands/fingers, distorted faces, broken "
-        "anatomy, impossible object geometry, inconsistent shadows, floating objects, "
-        "unwanted collage/split panels, borders and obvious AI artifacts. Report only "
-        "defects clearly visible in the candidate.\\n"
-        "E. CHARACTER CONTINUITY: if references are provided, compare identity-defining "
-        "traits (face, age appearance, skin tone, hair and stable features). Do not "
-        "require identical pose, expression, camera angle, lighting or clothing unless "
-        "the prompt locks that clothing. If no character is described, set "
-        "character_consistency true. If identity cannot reasonably be judged, do not "
-        "invent a mismatch; set it true and briefly mention uncertainty.\\n"
-        "F. FAIR SCORING: quality_score is an integer 1-10. Use 9-10 for clean, clear, "
-        "scene-accurate images; 7-8 for usable images with minor imperfections; 5-6 "
-        "for noticeable but non-fatal defects; 1-4 only for severe defects or major "
-        "scene mismatch. Do not lower the score for subjective style preference, minor "
-        "harmless variation or details the prompt never required. Do not give a perfect "
-        "score automatically.\\n"
-        "Return ONLY valid JSON with exactly these keys: prompt_match (boolean), "
-        "character_consistency (boolean), quality_score (integer 1-10), "
-        "issues (array of concise strings naming only visible problems), and reason "
-        "(short evidence-based explanation). If no visible defect exists, use an empty "
-        "issues array. Never reject based on speculation.\\n\\n"
-        "COMPLETE SCENE PROMPT:\\n" + prompt
-    )
+    instruction = _vision_instruction(prompt)
     parts = [{"text": instruction}]
     reference_count = 0
     for reference_path in reference_image_paths or []:
@@ -433,8 +385,200 @@ def _vision_check(
         "issues": [_clean(item)[:240] for item in issues if _clean(item)][:12],
         "reason": _clean(result.get("reason"))[:800],
         "vision_model": model,
+        "vision_provider": "gemini",
         "reference_images_used": reference_count,
     }
+
+
+
+def _openai_vision_check(
+    image_path: Path,
+    prompt: str,
+    model: str,
+    api_key: str,
+    timeout: int,
+    reference_image_paths: list[Path] | None = None,
+    scene_id: str = "",
+    max_attempts: int = 2,
+) -> dict:
+    """Independent OpenAI vision verifier with a separate API/quota."""
+    try:
+        image_bytes = image_path.read_bytes()
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+    except OSError as exc:
+        raise VisionVerificationUnavailable(
+            f"Cannot read image for OpenAI verification: {exc}"
+        ) from exc
+
+    image_sha = hashlib.sha256(image_bytes).hexdigest()
+    content = [{"type": "text", "text": _vision_instruction(prompt)}]
+    reference_count = 0
+    for reference_path in reference_image_paths or []:
+        try:
+            reference_bytes = Path(reference_path).read_bytes()
+        except OSError:
+            continue
+        if not reference_bytes or len(reference_bytes) > 80 * 1024 * 1024:
+            continue
+        reference_count += 1
+        content.append({
+            "type": "text",
+            "text": f"Earlier scene character reference image {reference_count}:",
+        })
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/png;base64," + base64.b64encode(reference_bytes).decode("ascii"),
+                "detail": "high",
+            },
+        })
+    content.append({"type": "text", "text": "Candidate image to accept or reject:"})
+    content.append({
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64," + encoded, "detail": "high"},
+    })
+
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "max_tokens": 700,
+    }
+    attempts = max(1, min(2, int(max_attempts or 2)))
+    for attempt in range(1, attempts + 1):
+        attempt_id = f"openai-vision:{scene_id or image_sha[:12]}:{image_sha[:12]}:{model}:{attempt}"
+        _record_vision_provider_attempt(
+            "openai_vision", model, "request_started", True,
+            scene_id=scene_id, attempt_id=attempt_id,
+        )
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=body,
+                timeout=max(10, min(45, int(timeout))),
+            )
+            status = int(response.status_code)
+            _record_vision_provider_attempt(
+                "openai_vision", model,
+                "response_received" if status < 400 else "request_failed",
+                True, scene_id=scene_id, attempt_id=attempt_id,
+                http_status=status,
+                error=str(response.text or "")[:500] if status >= 400 else None,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            choices = payload.get("choices") if isinstance(payload, dict) else None
+            message = choices[0].get("message") if isinstance(choices, list) and choices else None
+            raw = message.get("content") if isinstance(message, dict) else None
+            if isinstance(raw, list):
+                raw = " ".join(
+                    _clean(part.get("text"))
+                    for part in raw if isinstance(part, dict) and part.get("text")
+                )
+            result = json.loads(_clean(raw))
+            if not isinstance(result, dict):
+                raise ValueError("not a JSON object")
+            score = result.get("quality_score")
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not 1 <= float(score) <= 10
+                or not isinstance(result.get("prompt_match"), bool)
+                or not isinstance(result.get("character_consistency"), bool)
+            ):
+                raise ValueError("required vision fields missing or invalid")
+            issues = result.get("issues", [])
+            if not isinstance(issues, list):
+                issues = [_clean(issues)] if issues else []
+            _record_vision_provider_attempt(
+                "openai_vision", model, "accepted", True,
+                scene_id=scene_id, attempt_id=attempt_id,
+            )
+            return {
+                "prompt_match": result["prompt_match"],
+                "character_consistency": result["character_consistency"],
+                "quality_score": round(float(score), 2),
+                "issues": [_clean(item)[:240] for item in issues if _clean(item)][:12],
+                "reason": _clean(result.get("reason"))[:800],
+                "vision_model": model,
+                "vision_provider": "openai",
+                "reference_images_used": reference_count,
+            }
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            retryable = status in VISION_RETRYABLE_STATUSES or isinstance(
+                exc, (requests.Timeout, requests.ConnectionError)
+            )
+            if not retryable or attempt >= attempts:
+                detail = f"HTTP {status}" if status else type(exc).__name__
+                raise VisionVerificationUnavailable(
+                    f"Independent OpenAI vision verifier unavailable: {detail}."
+                ) from exc
+            time.sleep(min(4, attempt * 2))
+        except (ValueError, TypeError, KeyError, IndexError) as exc:
+            raise VisionVerificationUnavailable(
+                f"OpenAI vision response could not be validated: {type(exc).__name__}."
+            ) from exc
+
+    raise VisionVerificationUnavailable(
+        "Independent OpenAI vision verifier failed without a response."
+    )
+
+
+
+def _vision_instruction(prompt: str) -> str:
+    return (
+        "You are a careful visual quality inspector for a still-image photo-motion "
+        "story pipeline. Inspect the actual candidate pixels; do not judge from the "
+        "filename, metadata, provider, or assumptions. Compare the image with the "
+        "complete scene prompt below. The prompt is the authority for what must be "
+        "visible. Do not invent requirements that the prompt does not state.\\n\\n"
+        "A. EXACT STORY/SCENE MATCH (highest priority): identify the single scene "
+        "action and its key event from the prompt. Confirm that the candidate visibly "
+        "depicts that event, its named objects, location, time period and stated "
+        "cause/consequence where specified. A generic image that only shares the "
+        "story mood or topic is NOT a match. Mark prompt_match false only for a clear, "
+        "material contradiction, missing central event, wrong subject, wrong setting "
+        "or unrelated scene. Do not fail for harmless composition differences.\\n"
+        "B. REQUIRED DETAILS: check explicitly required visible subjects, objects, "
+        "animals, vehicles, clothing, actions and environmental details. Distinguish "
+        "required details from optional descriptive language. Do not demand tiny "
+        "background details that cannot be inspected at this image size.\\n"
+        "C. ZERO-TEXT POLICY (mandatory): this pipeline overlays its own separate "
+        "captions after image generation. Therefore the image itself must contain NO "
+        "readable words, letters, Hindi/Devanagari, English text, digits, subtitles, "
+        "captions, signs, labels, logos, watermarks, UI text or pseudo-writing. This "
+        "rule has no story-based exception. If any legible text is visible anywhere "
+        "in the candidate, add the issue 'unwanted_text_in_image' and set prompt_match "
+        "false. Blank screens, blank signboards and unmarked paper are acceptable.\\n"
+        "D. IMAGE DEFECTS: inspect for severe blur, pixelation, compression damage, "
+        "blank/near-blank output, extreme exposure, important subject cut-off, duplicate "
+        "persons, extra/fused limbs, malformed hands/fingers, distorted faces, broken "
+        "anatomy, impossible object geometry, inconsistent shadows, floating objects, "
+        "unwanted collage/split panels, borders and obvious AI artifacts. Report only "
+        "defects clearly visible in the candidate.\\n"
+        "E. CHARACTER CONTINUITY: if references are provided, compare identity-defining "
+        "traits (face, age appearance, skin tone, hair and stable features). Do not "
+        "require identical pose, expression, camera angle, lighting or clothing unless "
+        "the prompt locks that clothing. If no character is described, set "
+        "character_consistency true. If identity cannot reasonably be judged, do not "
+        "invent a mismatch; set it true and briefly mention uncertainty.\\n"
+        "F. FAIR SCORING: quality_score is an integer 1-10. Use 9-10 for clean, clear, "
+        "scene-accurate images; 7-8 for usable images with minor imperfections; 5-6 "
+        "for noticeable but non-fatal defects; 1-4 only for severe defects or major "
+        "scene mismatch. Do not lower the score for subjective style preference, minor "
+        "harmless variation or details the prompt never required. Do not give a perfect "
+        "score automatically.\\n"
+        "Return ONLY valid JSON with exactly these keys: prompt_match (boolean), "
+        "character_consistency (boolean), quality_score (integer 1-10), "
+        "issues (array of concise strings naming only visible problems), and reason "
+        "(short evidence-based explanation). If no visible defect exists, use an empty "
+        "issues array. Never reject based on speculation.\\n\\n"
+        "COMPLETE SCENE PROMPT:\\n" + prompt
+    )
+
 
 
 def validate_scene_image(
@@ -459,6 +603,15 @@ def validate_scene_image(
     technical = _technical_checks(path, expected_size)
     text_detections = detect_embedded_text(path)
     if text_detections:
+        print(
+            "OCR REJECTED IMAGE:",
+            path.name,
+            "| detection_count:",
+            len(text_detections),
+            "| samples:",
+            json.dumps(text_detections[:12], ensure_ascii=False),
+            flush=True,
+        )
         return {
             "status": "rejected",
             "accepted": False,
@@ -488,10 +641,6 @@ def validate_scene_image(
     vision_error = None
     if enabled:
         key = _clean(api_key or os.getenv("GEMINI_API_KEY"))
-        if not key:
-            raise VisionVerificationUnavailable(
-                "GEMINI_API_KEY is missing; image quality cannot be verified."
-            )
         reference_paths = [
             Path(value) for value in (reference_image_paths or [])[:2]
         ]
@@ -499,8 +648,12 @@ def validate_scene_image(
             os.getenv("GEMINI_VISION_MODEL_FALLBACKS", "").strip()
             or os.getenv("GEMINI_MODEL_FALLBACKS", "").strip()
         )
-        vision_models = [model]
-        for candidate in re.split(r"[,;\s]+", configured_fallbacks):
+        vision_models = [model] if key else []
+        if not key:
+            vision_errors = ["Gemini API key is missing; attempting independent verifier."]
+        else:
+            vision_errors = []
+        for candidate in (re.split(r"[,;\s]+", configured_fallbacks) if key else []):
             candidate = _clean(candidate)
             if (
                 candidate
@@ -511,7 +664,6 @@ def validate_scene_image(
             if len(vision_models) >= 4:
                 break
 
-        vision_errors = []
         for model_index, vision_model in enumerate(vision_models):
             try:
                 vision = _vision_check(
@@ -549,6 +701,33 @@ def validate_scene_image(
             except Exception as exc:
                 vision_errors.append(
                     f"{vision_model}: {type(exc).__name__}: {exc}"
+                )
+
+        if vision is None:
+            openai_key = _clean(os.getenv("OPENAI_API_KEY"))
+            if openai_key:
+                openai_model = _clean(os.getenv("OPENAI_VISION_MODEL") or "gpt-4.1-mini")
+                if not re.fullmatch(r"[A-Za-z0-9_.-]+", openai_model):
+                    raise ValueError("OPENAI_VISION_MODEL contains invalid characters.")
+                print(
+                    "Gemini Vision unavailable; trying independent OpenAI verifier:",
+                    openai_model, flush=True,
+                )
+                try:
+                    vision = _openai_vision_check(
+                        path, prompt, openai_model, openai_key,
+                        max(10, min(35, int(timeout))), reference_paths,
+                        scene_id=_clean(scene_id), max_attempts=2,
+                    )
+                    model = openai_model
+                except VisionVerificationUnavailable as exc:
+                    vision_errors.append(
+                        f"openai:{openai_model}: {type(exc).__name__}: {exc}"
+                    )
+            else:
+                print(
+                    "Independent OpenAI Vision fallback skipped: "
+                    "OPENAI_API_KEY is not configured.", flush=True,
                 )
 
         if vision is None:
