@@ -144,6 +144,24 @@ class VisionRetryTests(unittest.TestCase):
             self.assertEqual(post.call_count, validator.VISION_HTTP_MAX_ATTEMPTS)
             self.assertEqual(sleep.call_count, validator.VISION_HTTP_MAX_ATTEMPTS - 1)
 
+    def test_openai_429_quota_body_is_reported_as_hard_quota(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            Image.effect_noise((256, 256), 80).convert("RGB").save(image_path)
+            exhausted = response(429, {"error": {
+                "message": "You exceeded your current quota; check billing details.",
+                "type": "insufficient_quota",
+            }})
+            with patch.object(validator.requests, "post", return_value=exhausted) as post:
+                with self.assertRaises(validator.VisionQuotaExhausted) as caught:
+                    validator._openai_vision_check(
+                        image_path, "A sufficiently detailed complete scene prompt.",
+                        "gpt-4.1-mini", "test-key", 20,
+                    )
+            self.assertEqual(post.call_count, 1)
+            self.assertIn("insufficient_quota", str(caught.exception))
+            self.assertIn("billing details", str(caught.exception))
+
     def test_openai_independent_verifier_is_used_after_gemini_quota_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "candidate.png"
@@ -380,7 +398,7 @@ class VisionRetryTests(unittest.TestCase):
                 ],
             )
 
-    def test_offline_ocr_detects_readable_english_and_hindi_words(self):
+    def test_offline_ocr_detects_a_high_confidence_standalone_word(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "candidate.png"
             image_path.write_bytes(b"fake-image-for-mocked-ocr")
@@ -394,6 +412,41 @@ class VisionRetryTests(unittest.TestCase):
             ):
                 found = validator.detect_embedded_text(image_path)
             self.assertEqual(found[0]["text"], "Orion")
+
+    def test_offline_ocr_ignores_isolated_low_confidence_texture_fragments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            image_path.write_bytes(b"fake-image-for-mocked-ocr")
+            languages = type("Result", (), {"stdout": "List of available languages (2):\neng\nhin\n"})()
+            tsv = type("Result", (), {
+                "stdout": "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+                          "5\t1\t1\t1\t1\t1\t10\t10\t20\t10\t73.4\tes\n"
+                          "5\t1\t1\t1\t2\t1\t30\t10\t20\t10\t71.0\tolin\n"
+                          "5\t1\t1\t1\t3\t1\t50\t10\t20\t10\t72.5\tVe\n"
+            })()
+            with patch.object(validator.shutil, "which", return_value="tesseract"), patch.object(
+                validator.subprocess, "run", side_effect=[languages, tsv]
+            ):
+                found = validator.detect_embedded_text(image_path)
+            self.assertEqual(found, [])
+
+    def test_offline_ocr_groups_multiple_words_on_one_line_as_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "candidate.png"
+            image_path.write_bytes(b"fake-image-for-mocked-ocr")
+            languages = type("Result", (), {"stdout": "List of available languages (2):\neng\nhin\n"})()
+            tsv = type("Result", (), {
+                "stdout": "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+                          "5\t1\t1\t1\t1\t1\t10\t10\t30\t10\t96.0\tफोन\n"
+                          "5\t1\t1\t1\t1\t2\t45\t10\t25\t10\t95.0\tआया\n"
+                          "5\t1\t1\t1\t1\t3\t80\t10\t15\t10\t94.0\tकि\n"
+            })()
+            with patch.object(validator.shutil, "which", return_value="tesseract"), patch.object(
+                validator.subprocess, "run", side_effect=[languages, tsv]
+            ):
+                found = validator.detect_embedded_text(image_path)
+            self.assertEqual(len(found), 1)
+            self.assertIn("फोन आया कि", found[0]["text"])
             self.assertEqual(found[0]["confidence"], 91.2)
 
 

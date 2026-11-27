@@ -133,7 +133,11 @@ def detect_embedded_text(image_path: str | Path) -> list[dict]:
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError(f"Image OCR failed: {exc}") from exc
 
-    detections = []
+    # Tesseract often hallucinates short fragments in clouds, foliage and
+    # textured surfaces. Treat coherent text lines as evidence, not isolated
+    # low-confidence fragments. A single standalone word is retained only
+    # when it is long and exceptionally confident.
+    grouped = {}
     reader = csv.DictReader(result.stdout.splitlines(), delimiter="\t")
     for row in reader:
         word = _clean(row.get("text"))
@@ -142,14 +146,44 @@ def detect_embedded_text(image_path: str | Path) -> list[dict]:
         except (TypeError, ValueError):
             continue
         if (
-            word
-            and len(word) >= 2
-            and confidence >= 60
-            and re.search(r"[A-Za-z0-9\u0900-\u097F]", word)
+            not word
+            or confidence < 60
+            or not re.search(r"[A-Za-z0-9\u0900-\u097F]", word)
         ):
+            continue
+        line_key = (
+            row.get("page_num", "1"),
+            row.get("block_num", "0"),
+            row.get("par_num", "0"),
+            row.get("line_num", "0"),
+        )
+        grouped.setdefault(line_key, []).append({
+            "text": word[:80],
+            "confidence": round(confidence, 1),
+        })
+
+    detections = []
+    for words in grouped.values():
+        strong_words = [item for item in words if item["confidence"] >= 65]
+        joined = " ".join(item["text"] for item in strong_words)
+        meaningful_line = (
+            len(strong_words) >= 2
+            and sum(len(item["text"]) for item in strong_words) >= 6
+        )
+        standalone_word = (
+            len(strong_words) == 1
+            and len(strong_words[0]["text"]) >= 4
+            and strong_words[0]["confidence"] >= 90
+        )
+        if meaningful_line or standalone_word:
             detections.append({
-                "text": word[:80],
-                "confidence": round(confidence, 1),
+                "text": joined[:160],
+                "confidence": round(
+                    sum(item["confidence"] for item in strong_words)
+                    / len(strong_words),
+                    1,
+                ),
+                "word_count": len(strong_words),
             })
     return detections
 
@@ -507,12 +541,32 @@ def _openai_vision_check(
                 "reference_images_used": reference_count,
             }
         except requests.RequestException as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
+            error_response = getattr(exc, "response", None)
+            status = getattr(error_response, "status_code", None)
+            response_text = _clean(
+                getattr(error_response, "text", "")
+                or getattr(error_response, "content", "")
+            )
+            response_text = response_text[:600]
+            lowered = response_text.casefold()
+            hard_quota = status == 429 and any(marker in lowered for marker in (
+                "insufficient_quota", "exceeded your current quota",
+                "billing hard limit", "billing limit", "quota exceeded",
+                "monthly limit", "credit balance",
+            ))
+            if hard_quota:
+                raise VisionQuotaExhausted(
+                    "OpenAI Vision quota/billing limit exhausted; "
+                    f"HTTP 429 response: {response_text or 'no response body'}"
+                ) from exc
             retryable = status in VISION_RETRYABLE_STATUSES or isinstance(
                 exc, (requests.Timeout, requests.ConnectionError)
             )
             if not retryable or attempt >= attempts:
-                detail = f"HTTP {status}" if status else type(exc).__name__
+                detail = (
+                    f"HTTP {status}; response: {response_text}"
+                    if status else type(exc).__name__
+                )
                 raise VisionVerificationUnavailable(
                     f"Independent OpenAI vision verifier unavailable: {detail}."
                 ) from exc
